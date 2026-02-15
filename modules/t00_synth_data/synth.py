@@ -64,6 +64,29 @@ def _extract_longest_digits(name: str) -> int | None:
     return int(best.group(0))
 
 
+
+def _extract_patch_number(name: str) -> int | None:
+    '''Extract patch number from strip/trajectory basenames.
+
+    Prefer KITTI-style drive ids like "...drive_0000_sync..." to avoid accidentally
+    picking dates (2013/05/28) or other unrelated numbers.
+
+    Fallback: longest consecutive digit run.
+    '''
+
+    # Prefer drive_<id>_sync (more specific).
+    m = re.findall(r'(?:^|[^A-Za-z0-9])drive_(\d+)_sync', name)
+    if m:
+        return int(m[-1])
+
+    # Then drive_<id> anywhere.
+    m = re.findall(r'(?:^|[^A-Za-z0-9])drive_(\d+)', name)
+    if m:
+        return int(m[-1])
+
+    return _extract_longest_digits(name)
+
+
 def _to_patch_id(n: int) -> str:
     return f"{n:08d}"
 
@@ -95,8 +118,8 @@ def discover_strips(lidar_dir: Path, traj_dir: Path, num_patches: int) -> list[S
 
     Priority: lidar_dir subdirectories first; if insufficient, supplement from traj_dir files.
 
-    Strip number is extracted from the basename using the longest consecutive digit run,
-    then zero-padded to 8 digits to form patch_id.
+    Strip number is extracted from the basename (prefer KITTI-style drive ids like drive_0000_sync;
+    fallback is the longest consecutive digit run), then zero-padded to 8 digits to form patch_id.
 
     Returned list is stably sorted by patch_id numeric ascending, then basename.
     """
@@ -106,7 +129,7 @@ def discover_strips(lidar_dir: Path, traj_dir: Path, num_patches: int) -> list[S
     for child in sorted(lidar_dir.iterdir(), key=lambda p: p.name):
         if not child.is_dir():
             continue
-        n = _extract_longest_digits(child.name)
+        n = _extract_patch_number(child.name)
         if n is None:
             continue
         pid = _to_patch_id(n)
@@ -120,7 +143,7 @@ def discover_strips(lidar_dir: Path, traj_dir: Path, num_patches: int) -> list[S
     for child in sorted(traj_dir.iterdir(), key=lambda p: p.name):
         if not child.is_file():
             continue
-        n = _extract_longest_digits(child.name)
+        n = _extract_patch_number(child.name)
         if n is None:
             continue
         pid = _to_patch_id(n)

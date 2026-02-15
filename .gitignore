@@ -16,3 +16,4 @@ dist/
 
 # Generated data
 /data/synth/
+/data/synth_local/

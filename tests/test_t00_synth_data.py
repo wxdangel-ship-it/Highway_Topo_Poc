@@ -104,6 +104,32 @@ def test_t00_synth_manifest_schema_min(tmp_path: Path) -> None:
         assert all(_resolve(out_dir, r).is_file() for r in laz_list)
 
 
+
+def test_local_patch_id_prefers_drive_id_over_date(tmp_path: Path) -> None:
+    lidar_dir = tmp_path / "lidar_empty"
+    traj_dir = tmp_path / "traj"
+    lidar_dir.mkdir(parents=True)
+    traj_dir.mkdir(parents=True)
+
+    # KITTI-style name: must pick drive_0000, not 2013/05/28.
+    (traj_dir / "drive_2013_05_28_drive_0000_sync_frame_points_utm32.gpkg").write_bytes(b"stub")
+
+    out_dir = tmp_path / "out_local"
+    cfg = SynthConfig(
+        seed=0,
+        num_patches=1,
+        out_dir=out_dir,
+        lidar_dir=lidar_dir,
+        traj_dir=traj_dir,
+        source_mode="local",
+    )
+
+    manifest = run_synth(cfg)
+    patch_ids = [x.get("patch_id") for x in manifest.get("patches", [])]
+
+    assert patch_ids == ["00000000"]
+
+
 def test_synth_stdout_is_pasteable(tmp_path: Path, capsys) -> None:
     out_dir = tmp_path / "out"
 
