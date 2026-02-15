@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import struct
 from pathlib import Path
+
+import pytest
 
 from highway_topo_poc.cli import main
 from highway_topo_poc.protocol.text_lint import lint_text
@@ -194,6 +198,146 @@ def test_traj_copy_mode_copies_source_file(tmp_path: Path) -> None:
     assert isinstance(rel, str) and rel
     assert Path(rel).name == "source_traj.gpkg"
     assert _resolve(out_dir, rel).is_file()
+
+
+def test_pointcloud_merge_mode_writes_single_merged_laz(tmp_path: Path) -> None:
+    try:
+        import laspy  # type: ignore
+    except Exception:
+        pytest.skip("laspy not installed")
+
+    lidar_dir = tmp_path / "lidar"
+    traj_dir = tmp_path / "traj"
+    strip = lidar_dir / "strip_1"
+    strip.mkdir(parents=True)
+    traj_dir.mkdir(parents=True)
+
+    # Write two tiny LAZ parts.
+    hdr = laspy.LasHeader(point_format=3, version="1.2")
+    las1 = laspy.LasData(hdr)
+    las1.x = [0, 1]
+    las1.y = [0, 1]
+    las1.z = [0, 1]
+    las1.write(strip / "p1.laz")
+
+    las2 = laspy.LasData(hdr)
+    las2.x = [2, 3, 4]
+    las2.y = [2, 3, 4]
+    las2.z = [2, 3, 4]
+    las2.write(strip / "p2.laz")
+
+    out_dir = tmp_path / "out_pc_merge"
+    cfg = SynthConfig(
+        seed=0,
+        num_patches=1,
+        out_dir=out_dir,
+        lidar_dir=lidar_dir,
+        traj_dir=traj_dir,
+        source_mode="local",
+        pointcloud_mode="merge",
+        traj_mode="synthetic",
+    )
+
+    manifest = run_synth(cfg)
+    patch = manifest["patches"][0]
+
+    assert patch.get("pointcloud_stub") is False
+    assert patch.get("pointcloud_parts_count") == 2
+    pc_files = patch.get("pointcloud_files")
+    assert isinstance(pc_files, list) and len(pc_files) == 1
+    assert Path(pc_files[0]).name == "merged.laz"
+
+    merged = _resolve(out_dir, pc_files[0])
+    assert merged.is_file()
+
+    # Sanity: point count matches sum of parts.
+    with laspy.open(merged) as r:
+        assert r.header.point_count == 5
+
+
+def _make_minimal_gpkg_pointz(path: Path, *, srs_id: int = 32632) -> None:
+    # Minimal tables queried by our converter.
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE gpkg_contents (
+              table_name TEXT PRIMARY KEY,
+              data_type TEXT NOT NULL
+            );
+            CREATE TABLE gpkg_geometry_columns (
+              table_name TEXT NOT NULL,
+              column_name TEXT NOT NULL,
+              srs_id INTEGER NOT NULL,
+              PRIMARY KEY (table_name, column_name)
+            );
+            """
+        )
+
+        conn.execute("CREATE TABLE frame_points (id INTEGER PRIMARY KEY, frame_id INTEGER, geom BLOB)")
+
+        conn.execute(
+            "INSERT INTO gpkg_contents(table_name, data_type) VALUES (?, ?)",
+            ("frame_points", "features"),
+        )
+        conn.execute(
+            "INSERT INTO gpkg_geometry_columns(table_name, column_name, srs_id) VALUES (?, ?, ?)",
+            ("frame_points", "geom", int(srs_id)),
+        )
+
+        # GeoPackage geometry blob: header(8) + WKB(PointZ)
+        # - flags=1: little-endian, no envelope.
+        x, y, z = 1.0, 2.0, 3.0
+        header = b"GP" + bytes([0, 1]) + struct.pack("<i", int(srs_id))
+        wkb = bytes([1]) + struct.pack("<I", 1001) + struct.pack("<ddd", x, y, z)
+        geom = header + wkb
+
+        conn.execute("INSERT INTO frame_points(frame_id, geom) VALUES (?, ?)", (7, geom))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_traj_convert_mode_writes_geojson_with_crs(tmp_path: Path) -> None:
+    lidar_dir = tmp_path / "lidar"
+    traj_dir = tmp_path / "traj"
+    (lidar_dir / "strip_0").mkdir(parents=True)
+    traj_dir.mkdir(parents=True)
+
+    gpkg = traj_dir / "drive_2013_05_28_drive_0000_sync_frame_points_utm32.gpkg"
+    _make_minimal_gpkg_pointz(gpkg, srs_id=32632)
+
+    out_dir = tmp_path / "out_traj_convert"
+    cfg = SynthConfig(
+        seed=0,
+        num_patches=1,
+        out_dir=out_dir,
+        lidar_dir=lidar_dir,
+        traj_dir=traj_dir,
+        source_mode="local",
+        pointcloud_mode="stub",
+        traj_mode="convert",
+    )
+
+    manifest = run_synth(cfg)
+    patch = manifest["patches"][0]
+
+    # Sidecar copy exists and is referenced in manifest.
+    rel_src = patch.get("traj_source_file")
+    assert isinstance(rel_src, str) and Path(rel_src).name == "source_traj.gpkg"
+    assert _resolve(out_dir, rel_src).is_file()
+
+    raw = _resolve(out_dir, patch["paths"]["traj_raw_dat_pose"])
+    obj = json.loads(raw.read_text(encoding="utf-8"))
+    assert obj.get("type") == "FeatureCollection"
+    assert obj.get("crs", {}).get("properties", {}).get("name") == "EPSG:32632"
+
+    feats = obj.get("features", [])
+    assert isinstance(feats, list) and len(feats) >= 1
+    g0 = feats[0].get("geometry", {})
+    assert g0.get("type") == "Point"
+    coords = g0.get("coordinates")
+    assert isinstance(coords, list) and len(coords) == 3
 
 
 def test_synth_stdout_is_pasteable(tmp_path: Path, capsys) -> None:

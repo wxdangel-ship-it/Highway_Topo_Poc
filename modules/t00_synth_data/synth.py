@@ -4,8 +4,10 @@ import json
 import os
 import random
 import re
+import sqlite3
 import shutil
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -23,9 +25,9 @@ class SynthConfig:
     traj_dir: Path | None = None
     # auto|local|synthetic. Caller should resolve auto before calling run_synth.
     source_mode: str = "auto"
-    # stub|link|copy. link/copy are only meaningful in local mode.
+    # stub|link|copy|merge. link/copy/merge are only meaningful in local mode.
     pointcloud_mode: str = "stub"
-    # synthetic|copy. copy is only meaningful in local mode.
+    # synthetic|copy|convert. copy/convert are only meaningful in local mode.
     traj_mode: str = "synthetic"
 
 
@@ -120,15 +122,23 @@ def _safe_clear_out_dir(out_dir: Path) -> None:
 
 
 def _choose_best_traj_file(cands: list[Path]) -> Path:
-    def _ext_pri(p: Path) -> int:
+    def _score(p: Path) -> tuple[int, int, int, str]:
         ext = p.suffix.lower()
         if ext == ".gpkg":
-            return 0
-        if ext == ".geojson":
-            return 1
-        return 2
+            ext_pri = 0
+        elif ext == ".geojson":
+            ext_pri = 1
+        else:
+            ext_pri = 2
 
-    return sorted(cands, key=lambda p: (_ext_pri(p), p.name))[0]
+        name = p.name.lower()
+        # Prefer utm32 (local-real inputs); deprioritize buffer/100m derived files.
+        utm_pri = 0 if "utm32" in name else 1
+        bad_pri = 1 if ("buf" in name or "buffer" in name or re.search(r"(^|[^0-9])100([^0-9]|$)", name)) else 0
+
+        return (ext_pri, bad_pri, utm_pri, p.name)
+
+    return sorted(cands, key=_score)[0]
 
 
 def discover_strips(lidar_dir: Path, traj_dir: Path, num_patches: int) -> list[StripSpec]:
@@ -285,6 +295,279 @@ def _copy_file(dst: Path, src: Path) -> None:
     shutil.copy2(src, dst)
 
 
+def _require_laspy() -> Any:
+    try:
+        import laspy  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise ValueError("pointcloud_merge_requires_laspy_lazrs") from e
+    return laspy
+
+
+def _merge_laz_files(*, src_files: list[Path], dst_file: Path) -> tuple[int, int]:
+    """Merge multiple LAZ parts into a single LAZ file deterministically.
+
+    Returns: (parts_count, total_points)
+    """
+
+    laspy = _require_laspy()
+    if not src_files:
+        raise ValueError("no_laz_files")
+
+    # Determinism: stable order, and deterministic header fields.
+    src_files = sorted(src_files, key=lambda p: p.name)
+    chunk_size = 500_000
+
+    try:
+        with laspy.open(src_files[0]) as r0:
+            header = r0.header.copy()
+            # Avoid non-deterministic header fields (e.g., today's date).
+            header.creation_date = date(2000, 1, 1)
+            header.system_identifier = "Highway_Topo_Poc"
+            header.generating_software = "t00_synth_data"
+
+            with laspy.open(dst_file, mode="w", header=header) as w:
+                total_points = 0
+                for src in src_files:
+                    with laspy.open(src) as r:
+                        if r.header.point_format != header.point_format or r.header.version != header.version:
+                            raise ValueError("incompatible_laz_header")
+                        if tuple(r.header.scales) != tuple(header.scales) or tuple(r.header.offsets) != tuple(header.offsets):
+                            raise ValueError("incompatible_laz_scale_offset")
+
+                        for pts in r.chunk_iterator(chunk_size):
+                            w.write_points(pts)
+                            total_points += len(pts)
+
+        return (len(src_files), total_points)
+    except ValueError:
+        raise
+    except Exception as e:  # pragma: no cover
+        raise ValueError("pointcloud_merge_failed") from e
+
+
+def _gpkg_select_feature_table(conn: sqlite3.Connection) -> str:
+    rows = conn.execute(
+        "SELECT table_name FROM gpkg_contents WHERE data_type='features' ORDER BY table_name"
+    ).fetchall()
+    if not rows:
+        raise ValueError("gpkg_no_feature_tables")
+
+    tables = [r[0] for r in rows if isinstance(r[0], str)]
+    if not tables:
+        raise ValueError("gpkg_no_feature_tables")
+
+    def _score(name: str) -> tuple[int, str]:
+        n = name.lower()
+        if "frame_points" in n:
+            pri = 0
+        elif "pose" in n:
+            pri = 1
+        else:
+            pri = 2
+        return (pri, name)
+
+    return sorted(tables, key=_score)[0]
+
+
+def _gpkg_get_geom_col_and_srs(conn: sqlite3.Connection, table: str) -> tuple[str, int]:
+    row = conn.execute(
+        "SELECT column_name, srs_id FROM gpkg_geometry_columns WHERE table_name=?",
+        (table,),
+    ).fetchone()
+    if not row:
+        raise ValueError("gpkg_missing_geometry_columns")
+    geom_col = str(row[0])
+    srs_id = int(row[1])
+    return geom_col, srs_id
+
+
+def _gpkg_table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    return [str(c) for c in cols if c]
+
+
+def _gpkg_order_by(columns: list[str]) -> str:
+    for c in [
+        "frame_id",
+        "frame",
+        "idx",
+        "index",
+        "seq",
+        "sequence",
+        "t",
+        "time",
+        "timestamp",
+        "stamp",
+    ]:
+        if c in columns:
+            return f"ORDER BY {c}"
+    return "ORDER BY rowid"
+
+
+def _gpkg_pick_props(columns: list[str], geom_col: str) -> list[str]:
+    # Keep small, useful fields only; avoid dumping large attributes.
+    allow = {
+        "drive_id",
+        "frame_id",
+        "frame",
+        "frame_idx",
+        "idx",
+        "index",
+        "seq",
+        "sequence",
+        "t",
+        "time",
+        "timestamp",
+        "stamp",
+        "gps_time",
+    }
+    return [c for c in columns if c != geom_col and c in allow]
+
+
+def _parse_gpkg_point(blob: bytes) -> tuple[list[float], bool]:
+    """Parse a GeoPackage geometry blob containing a Point/PointZ.
+
+    Returns: (coords, has_z)
+    """
+
+    if len(blob) < 16 or blob[0:2] != b"GP":
+        raise ValueError("gpkg_geom_invalid_header")
+
+    flags = blob[3]
+
+    def _env_len(ind: int) -> int:
+        if ind == 0:
+            return 0
+        if ind == 1:
+            return 4 * 8
+        if ind == 2:
+            return 6 * 8
+        if ind == 3:
+            return 6 * 8
+        if ind == 4:
+            return 8 * 8
+        # Unknown indicator; fall back to 0 and let WKB probe below fail if needed.
+        return 0
+
+    # Try a few interpretations to locate the WKB start reliably.
+    cand_env_inds = [
+        (flags >> 1) & 0x07,
+        flags & 0x07,
+        (flags >> 4) & 0x07,
+    ]
+    wkb_offsets = [8 + _env_len(ind) for ind in cand_env_inds]
+
+    last_err: Exception | None = None
+    for off in wkb_offsets:
+        if off >= len(blob):
+            continue
+        bo = blob[off]
+        if bo not in (0, 1):
+            continue
+        endian = "<" if bo == 1 else ">"
+
+        try:
+            import struct
+
+            if off + 1 + 4 + 16 > len(blob):
+                raise ValueError("gpkg_wkb_too_short")
+            gtype = struct.unpack(endian + "I", blob[off + 1 : off + 5])[0]
+
+            # Support OGC WKB (1000 offset) and EWKB-style Z/M flags.
+            has_z = False
+            has_m = False
+            base = gtype
+            if gtype >= 1000 and gtype < 4000:
+                base = gtype % 1000
+                has_z = 1000 <= gtype < 2000 or 3000 <= gtype < 4000
+                has_m = 2000 <= gtype < 3000 or 3000 <= gtype < 4000
+            else:
+                # EWKB high-bit flags.
+                base = gtype & 0x1FFFFFFF
+                has_z = bool(gtype & 0x80000000)
+                has_m = bool(gtype & 0x40000000)
+
+            if base != 1:
+                raise ValueError("gpkg_not_point")
+
+            cur = off + 5
+            x = struct.unpack(endian + "d", blob[cur : cur + 8])[0]
+            y = struct.unpack(endian + "d", blob[cur + 8 : cur + 16])[0]
+            cur += 16
+            coords: list[float] = [float(x), float(y)]
+            if has_z:
+                if cur + 8 > len(blob):
+                    raise ValueError("gpkg_pointz_truncated")
+                z = struct.unpack(endian + "d", blob[cur : cur + 8])[0]
+                coords.append(float(z))
+                cur += 8
+            if has_m:
+                # Ignore M if present.
+                pass
+
+            return coords, has_z
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise ValueError("gpkg_geom_parse_failed") from last_err
+
+
+def _convert_gpkg_to_raw_dat_pose_geojson(*, gpkg_path: Path, out_geojson: Path) -> tuple[int, int]:
+    """Convert a *_utm32.gpkg trajectory file to raw_dat_pose.geojson (Point features).
+
+    Returns: (srs_id, feature_count)
+    """
+
+    conn = sqlite3.connect(str(gpkg_path))
+    try:
+        table = _gpkg_select_feature_table(conn)
+        geom_col, srs_id = _gpkg_get_geom_col_and_srs(conn, table)
+        cols = _gpkg_table_columns(conn, table)
+        props_cols = _gpkg_pick_props(cols, geom_col)
+        order_by = _gpkg_order_by(cols)
+
+        select_cols = [geom_col, *props_cols]
+        sql = f"SELECT {', '.join(select_cols)} FROM {table} {order_by}"
+        cur = conn.execute(sql)
+
+        features: list[dict[str, Any]] = []
+        for row in cur.fetchall():
+            geom = row[0]
+            if geom is None:
+                continue
+            if not isinstance(geom, (bytes, bytearray)):
+                continue
+
+            coords, has_z = _parse_gpkg_point(bytes(geom))
+
+            props: dict[str, Any] = {}
+            for i, col in enumerate(props_cols, start=1):
+                props[col] = row[i]
+
+            if not has_z:
+                # If geometry is 2D, keep coordinates 2D.
+                coords = coords[:2]
+
+            features.append(
+                {
+                    "type": "Feature",
+                    "properties": props,
+                    "geometry": {"type": "Point", "coordinates": coords},
+                }
+            )
+
+        obj: dict[str, Any] = {
+            "type": "FeatureCollection",
+            "crs": {"type": "name", "properties": {"name": f"EPSG:{srs_id}"}},
+            "features": features,
+        }
+        _write_geojson(out_geojson, obj)
+        return (srs_id, len(features))
+    finally:
+        conn.close()
+
+
 def write_patch(
     *,
     spec: StripSpec,
@@ -308,12 +591,26 @@ def write_patch(
     # PointCloud
     pointcloud_stub = True
     pointcloud_files: list[str] = []
+    pointcloud_parts_count: int | None = None
 
     if pointcloud_mode == "stub":
         laz_path = pc_dir / f"{spec.patch_id}.laz"
         laz_path.write_bytes(b"STUB_LAZ\n")
         pointcloud_files = [rel(laz_path)]
         pointcloud_stub = True
+    elif pointcloud_mode == "merge":
+        if spec.lidar_strip_dir is None:
+            raise ValueError("lidar_strip_missing")
+
+        src_laz = _gather_laz_files(spec.lidar_strip_dir)
+        if not src_laz:
+            raise ValueError("no_laz_files")
+
+        dst = pc_dir / "merged.laz"
+        parts_count, _total_points = _merge_laz_files(src_files=src_laz, dst_file=dst)
+        pointcloud_files = [rel(dst)]
+        pointcloud_stub = False
+        pointcloud_parts_count = int(parts_count)
     else:
         if spec.lidar_strip_dir is None:
             raise ValueError("lidar_strip_missing")
@@ -342,40 +639,49 @@ def write_patch(
     _write_geojson(lane_boundary, empty_fc)
     _write_geojson(gorearea, empty_fc)
 
-    # Trajectory (LineString)
-    coords = _deterministic_line_coords(seed=seed, patch_int=int(spec.patch_id))
     raw_pose = traj_dir / "raw_dat_pose.geojson"
-    raw_obj = {
-        "type": "FeatureCollection",
-        "features": [
-            {
-                "type": "Feature",
-                "properties": {
-                    "patch_id": spec.patch_id,
-                    "traj_id": spec.traj_id,
-                    "point_count": len(coords),
-                },
-                "geometry": {"type": "LineString", "coordinates": coords},
-            }
-        ],
-    }
-    _write_geojson(raw_pose, raw_obj)
 
     # Optional: copy a real trajectory sidecar file for local-real runs.
     traj_source_file: str | None = None
     traj_source_kind: str | None = None
-    if traj_mode == "copy":
+    if traj_mode in {"copy", "convert"}:
         if spec.traj_source_path is None:
             raise ValueError("traj_source_missing")
 
         ext = spec.traj_source_path.suffix.lower()
         kind = ext[1:] if ext.startswith(".") else (ext or "unknown")
 
+        if traj_mode == "convert" and ext != ".gpkg":
+            raise ValueError("traj_convert_requires_gpkg")
+
         dst = traj_dir / f"source_traj{ext}"
         _copy_file(dst=dst, src=spec.traj_source_path)
 
         traj_source_file = rel(dst)
         traj_source_kind = kind
+
+    # Trajectory raw_dat_pose.geojson
+    if traj_mode == "convert":
+        # Convert from the copied GPKG to a CRS-annotated GeoJSON (Point features).
+        _convert_gpkg_to_raw_dat_pose_geojson(gpkg_path=traj_dir / "source_traj.gpkg", out_geojson=raw_pose)
+    else:
+        # Synthetic fallback (LineString).
+        coords = _deterministic_line_coords(seed=seed, patch_int=int(spec.patch_id))
+        raw_obj = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "patch_id": spec.patch_id,
+                        "traj_id": spec.traj_id,
+                        "point_count": len(coords),
+                    },
+                    "geometry": {"type": "LineString", "coordinates": coords},
+                }
+            ],
+        }
+        _write_geojson(raw_pose, raw_obj)
 
     patch_entry: dict[str, Any] = {
         "patch_id": spec.patch_id,
@@ -394,6 +700,9 @@ def write_patch(
             "lidar_laz_count": spec.lidar_laz_count,
         },
     }
+
+    if pointcloud_parts_count is not None:
+        patch_entry["pointcloud_parts_count"] = pointcloud_parts_count
 
     if traj_source_file is not None:
         patch_entry["traj_source_file"] = traj_source_file
@@ -414,9 +723,9 @@ def run_synth(cfg: SynthConfig) -> dict[str, Any]:
     if cfg.num_patches <= 0:
         raise ValueError("num_patches_must_be_positive")
 
-    if cfg.pointcloud_mode not in {"stub", "link", "copy"}:
+    if cfg.pointcloud_mode not in {"stub", "link", "copy", "merge"}:
         raise ValueError("invalid_pointcloud_mode")
-    if cfg.traj_mode not in {"synthetic", "copy"}:
+    if cfg.traj_mode not in {"synthetic", "copy", "convert"}:
         raise ValueError("invalid_traj_mode")
 
     if cfg.source_mode != "local":

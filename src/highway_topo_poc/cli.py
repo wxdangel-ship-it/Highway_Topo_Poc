@@ -176,8 +176,8 @@ def main(argv: list[str] | None = None) -> int:
     p_synth.add_argument("--lidar-dir", help="Local lidar strip dir (optional).")
     p_synth.add_argument("--traj-dir", help="Local traj dir (optional).")
     p_synth.add_argument("--source-mode", choices=["auto", "local", "synthetic"], default="auto")
-    p_synth.add_argument("--pointcloud-mode", choices=["stub", "link", "copy"], default="stub")
-    p_synth.add_argument("--traj-mode", choices=["synthetic", "copy"], default="synthetic")
+    p_synth.add_argument("--pointcloud-mode", choices=["stub", "link", "copy", "merge"], default="stub")
+    p_synth.add_argument("--traj-mode", choices=["synthetic", "copy", "convert"], default="synthetic")
     p_synth.set_defaults(func=_cmd_synth)
 
     args = parser.parse_args(argv)
@@ -185,5 +185,8 @@ def main(argv: list[str] | None = None) -> int:
         return int(args.func(args))
     except Exception as e:
         # Avoid printing tracebacks that may include local paths.
-        print(f"ERROR: {type(e).__name__}", file=sys.stderr)
+        if isinstance(e, ValueError) and str(e):
+            print(f"ERROR: {e}", file=sys.stderr)
+        else:
+            print(f"ERROR: {type(e).__name__}", file=sys.stderr)
         return 1
