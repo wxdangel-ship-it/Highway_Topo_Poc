@@ -13,3 +13,6 @@ dist/
 
 # Pytest
 .pytest_cache/
+
+# Generated data
+/data/synth/
