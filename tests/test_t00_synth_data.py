@@ -130,6 +130,72 @@ def test_local_patch_id_prefers_drive_id_over_date(tmp_path: Path) -> None:
     assert patch_ids == ["00000000"]
 
 
+
+def test_pointcloud_copy_mode_creates_files(tmp_path: Path) -> None:
+    lidar_dir = tmp_path / "lidar"
+    traj_dir = tmp_path / "traj"
+    strip = lidar_dir / "strip_1"
+    strip.mkdir(parents=True)
+    traj_dir.mkdir(parents=True)
+
+    (strip / "a.laz").write_bytes(b"a")
+    (strip / "b.laz").write_bytes(b"b")
+
+    out_dir = tmp_path / "out_pc_copy"
+    cfg = SynthConfig(
+        seed=0,
+        num_patches=1,
+        out_dir=out_dir,
+        lidar_dir=lidar_dir,
+        traj_dir=traj_dir,
+        source_mode="local",
+        pointcloud_mode="copy",
+        traj_mode="synthetic",
+    )
+
+    manifest = run_synth(cfg)
+    patch = manifest["patches"][0]
+
+    assert patch.get("pointcloud_stub") is False
+    pc_files = patch.get("pointcloud_files")
+    assert isinstance(pc_files, list) and len(pc_files) == 2
+
+    names = {Path(r).name for r in pc_files}
+    assert names == {"a.laz", "b.laz"}
+    assert all(_resolve(out_dir, r).is_file() for r in pc_files)
+
+
+def test_traj_copy_mode_copies_source_file(tmp_path: Path) -> None:
+    lidar_dir = tmp_path / "lidar"
+    traj_dir = tmp_path / "traj"
+    (lidar_dir / "strip_0").mkdir(parents=True)
+    traj_dir.mkdir(parents=True)
+
+    # Prefer gpkg for KITTI-style names.
+    (traj_dir / "drive_2013_05_28_drive_0000_sync_frame_points_utm32.gpkg").write_bytes(b"stub")
+
+    out_dir = tmp_path / "out_traj_copy"
+    cfg = SynthConfig(
+        seed=0,
+        num_patches=1,
+        out_dir=out_dir,
+        lidar_dir=lidar_dir,
+        traj_dir=traj_dir,
+        source_mode="local",
+        pointcloud_mode="stub",
+        traj_mode="copy",
+    )
+
+    manifest = run_synth(cfg)
+    patch = manifest["patches"][0]
+
+    assert patch.get("traj_source_kind") == "gpkg"
+    rel = patch.get("traj_source_file")
+    assert isinstance(rel, str) and rel
+    assert Path(rel).name == "source_traj.gpkg"
+    assert _resolve(out_dir, rel).is_file()
+
+
 def test_synth_stdout_is_pasteable(tmp_path: Path, capsys) -> None:
     out_dir = tmp_path / "out"
 

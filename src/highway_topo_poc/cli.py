@@ -124,6 +124,12 @@ def _cmd_synth(args: argparse.Namespace) -> int:
             print("ERROR: local_inputs_missing", file=sys.stderr)
             return 2
 
+
+    if mode != "local":
+        if args.pointcloud_mode != "stub" or args.traj_mode != "synthetic":
+            print("ERROR: modes_require_local", file=sys.stderr)
+            return 2
+
     cfg = SynthConfig(
         seed=int(args.seed),
         num_patches=int(args.num_patches),
@@ -131,6 +137,8 @@ def _cmd_synth(args: argparse.Namespace) -> int:
         lidar_dir=lidar_dir,
         traj_dir=traj_dir,
         source_mode=mode,
+        pointcloud_mode=args.pointcloud_mode,
+        traj_mode=args.traj_mode,
     )
 
     manifest = run_synth(cfg)
@@ -168,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
     p_synth.add_argument("--lidar-dir", help="Local lidar strip dir (optional).")
     p_synth.add_argument("--traj-dir", help="Local traj dir (optional).")
     p_synth.add_argument("--source-mode", choices=["auto", "local", "synthetic"], default="auto")
+    p_synth.add_argument("--pointcloud-mode", choices=["stub", "link", "copy"], default="stub")
+    p_synth.add_argument("--traj-mode", choices=["synthetic", "copy"], default="synthetic")
     p_synth.set_defaults(func=_cmd_synth)
 
     args = parser.parse_args(argv)
