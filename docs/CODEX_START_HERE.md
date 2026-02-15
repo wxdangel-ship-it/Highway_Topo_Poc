@@ -21,5 +21,5 @@ SPEC.md > docs/ARTIFACT_PROTOCOL.md > docs/CODEX_GUARDRAILS.md > 其他文档
 
 ## 3. 本阶段禁止事项
 - 禁止自作主张冻结任何子模块 INTERFACE_CONTRACT（放到子 Agent 阶段）
-- 禁止输出/记录任何坐标、几何顶点数组、内网路径到外传文本
+- 外传文本只要求可粘贴传递：<=120 行 或 <=8KB；避免超长 raw dump，必要时 Top-K/摘要/截断
 - 遇到不清晰之处必须先问，不允许盲干

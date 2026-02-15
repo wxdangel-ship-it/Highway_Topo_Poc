@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from highway_topo_poc.cli import main
+from highway_topo_poc.protocol.text_lint import lint_text
 from modules.t00_synth_data.synth import SynthConfig, run_synth
 
 
-def _make_fake_local_sample(tmp_path):
+def _make_fake_local_sample(tmp_path: Path) -> tuple[Path, Path]:
     lidar_dir = tmp_path / "lidar"
     traj_dir = tmp_path / "traj"
     lidar_dir.mkdir(parents=True)
@@ -22,7 +24,12 @@ def _make_fake_local_sample(tmp_path):
     return lidar_dir, traj_dir
 
 
-def test_t00_synth_determinism(tmp_path) -> None:
+def _resolve(out_dir: Path, rel_or_abs: str) -> Path:
+    p = Path(str(rel_or_abs))
+    return p if p.is_absolute() else (out_dir / p)
+
+
+def test_t00_synth_determinism(tmp_path: Path) -> None:
     lidar_dir, traj_dir = _make_fake_local_sample(tmp_path)
 
     out1 = tmp_path / "out1"
@@ -54,7 +61,7 @@ def test_t00_synth_determinism(tmp_path) -> None:
     assert b1 == b2
 
 
-def test_t00_synth_manifest_schema_min(tmp_path) -> None:
+def test_t00_synth_manifest_schema_min(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
     cfg = SynthConfig(seed=0, num_patches=8, out_dir=out_dir, source_mode="synthetic")
 
@@ -86,35 +93,27 @@ def test_t00_synth_manifest_schema_min(tmp_path) -> None:
         ]:
             assert k in paths
 
-        # Must be relative paths (no absolute paths, no drive letters).
         lane = paths["vector_lane_boundary"]
         gore = paths["vector_gorearea"]
         traj = paths["traj_raw_dat_pose"]
         laz_list = paths["pointcloud_laz"]
 
-        for rel in [lane, gore, traj, *laz_list]:
-            assert not str(rel).startswith("/")
-            assert ":" not in str(rel)
-
-        assert (out_dir / lane).is_file()
-        assert (out_dir / gore).is_file()
-        assert (out_dir / traj).is_file()
-        assert all((out_dir / r).is_file() for r in laz_list)
+        assert _resolve(out_dir, lane).is_file()
+        assert _resolve(out_dir, gore).is_file()
+        assert _resolve(out_dir, traj).is_file()
+        assert all(_resolve(out_dir, r).is_file() for r in laz_list)
 
 
-def test_synth_stdout_no_abs_path(tmp_path, capsys) -> None:
-    out_dir = tmp_path / "abs_out"
+def test_synth_stdout_is_pasteable(tmp_path: Path, capsys) -> None:
+    out_dir = tmp_path / "out"
 
     rc = main(["synth", "--source-mode", "synthetic", "--out-dir", str(out_dir)])
     captured = capsys.readouterr()
 
     assert rc == 0
 
-    # stdout must not leak absolute paths.
-    assert "/mnt/" not in captured.out
-    assert "E:\\" not in captured.out
-    assert "\\Work\\" not in captured.out
-    assert str(out_dir) not in captured.out
+    ok, violations = lint_text(captured.out)
+    assert ok is True, violations
 
     # stderr should be clean on success.
     assert captured.err.strip() == ""

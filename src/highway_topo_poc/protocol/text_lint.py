@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
+
+from highway_topo_poc.utils.size_guard import MAX_BYTES, MAX_LINES, measure_text
 
 
 @dataclass(frozen=True)
@@ -13,50 +14,36 @@ class Violation:
         return self.code if not self.detail else f"{self.code}:{self.detail}"
 
 
-# Conservative patterns: prefer false positives over false negatives.
-_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    # Common coordinate / CRS keywords.
-    ("coord_keyword", re.compile(r"(?i)\b(lat|lon|latitude|longitude|epsg|utm|wgs84|srid|crs|easting|northing)\b")),
-    # Suspicious axis assignments (even without numbers).
-    ("coord_axis_assign", re.compile(r"(?i)\b(x|y|z)\s*[:=]")),
-    # Lat/lon pair (comma-separated decimals).
-    ("latlon_pair", re.compile(r"\b-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+\b")),
-    # GeoJSON/WKT geometry signatures.
-    ("geojson_coordinates", re.compile(r"(?i)\"coordinates\"\s*:\s*\[")),
-    ("geojson_geometry", re.compile(r"(?i)\"geometry\"\s*:\s*\{")),
-    ("wkt_geometry", re.compile(r"(?i)\b(POINT|LINESTRING|POLYGON|MULTI(?:POINT|LINESTRING|POLYGON)|GEOMETRYCOLLECTION)\s*\(")),
-    # Bracketed numeric pairs often indicate vertices.
-    ("bracketed_numeric_pair", re.compile(r"\[\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\]")),
-    # Paths (Windows / WSL / Unix absolute).
-    ("windows_path", re.compile(r"(?i)\b[a-z]:\\\\")),
-    ("windows_path_slash", re.compile(r"(?i)\b[a-z]:/")),
-    ("unc_path", re.compile(r"\\\\\\\\[A-Za-z0-9_.-]+\\")),
-    ("wsl_mount_path", re.compile(r"(?i)/mnt/[a-z]/")),
-    ("unix_abs_path", re.compile(r"(?i)\b/(home|data|var|etc|usr|opt|srv|root|tmp)/")),
-    # IP address.
-    ("ipv4", re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")),
-]
-
-
 def lint_text(text: str) -> tuple[bool, list[str]]:
-    violations: list[Violation] = []
+    """Check whether text is pasteable.
 
-    for code, pat in _PATTERNS:
-        if pat.search(text):
-            violations.append(Violation(code))
+    This is a *pasteability* guard (size/shape), not a sensitive-content filter.
 
-    # Heuristics for raw dumps / arrays.
+    Rules:
+    - Lines must be <= MAX_LINES (default 120)
+    - UTF-8 bytes must be <= MAX_BYTES (default 8192)
+    - Warn on very long single lines (may be hard to paste/read)
+
+    Returns:
+      (ok, violations)
+
+    ok is False only when hard limits are exceeded.
+    """
+
+    v: list[Violation] = []
+
+    s = measure_text(text)
+    if s.lines > MAX_LINES:
+        v.append(Violation("SIZE_LINES", f"lines={s.lines} max={MAX_LINES}"))
+    if s.bytes_utf8 > MAX_BYTES:
+        v.append(Violation("SIZE_BYTES", f"bytes={s.bytes_utf8} max={MAX_BYTES}"))
+
+    # Optional: warnings that do not block ok.
     for idx, line in enumerate(text.splitlines(), start=1):
-        if len(line) > 500:
-            violations.append(Violation("line_too_long", str(idx)))
+        if len(line) > 2000:
+            v.append(Violation("LONG_LINE", f"line={idx} len={len(line)}"))
 
-        # Many comma-separated numeric tokens on one line is suspicious.
-        if line.count(",") >= 30 and re.search(r"\d", line):
-            violations.append(Violation("suspicious_numeric_list", str(idx)))
+    hard = [x for x in v if x.code.startswith("SIZE_")]
+    ok = len(hard) == 0
 
-        # Dense JSON-like arrays.
-        if line.count("[") >= 3 and re.search(r"\d", line):
-            violations.append(Violation("suspicious_brackets", str(idx)))
-
-    ok = len(violations) == 0
-    return ok, [str(v) for v in violations]
+    return ok, [str(x) for x in v]

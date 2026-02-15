@@ -38,7 +38,7 @@ def normalize_input_path(p: str) -> Path:
 
     Supports Windows drive-letter paths like "E:\\Work\\X" by mapping to /mnt/e/Work/X.
 
-    IMPORTANT: This function must not print or log paths. It is internal-only.
+    Note: This is an internal helper; keep stdout/log output paste-friendly (avoid noisy path dumps).
     """
 
     s = p.strip()

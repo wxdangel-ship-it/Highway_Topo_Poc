@@ -14,7 +14,7 @@ Patch: <patch_uid_or_alias>  Provider: <file|synth>  Seed: <int_or_na>
 Module: <t01|t02|t03|t04|t05>  ModuleVersion: <semver_or_sha>
 
 Inputs: traj=<ok|missing>  pc=<ok|missing>  vectors=<ok|missing>  ground=<ok|missing>
-InputMeta: <type/resolution/field_availability_summary; NO PATH; NO COORD>
+InputMeta: <type/resolution/field_availability_summary>
 
 Params(TopN<=12): <k1=v1; k2=v2; ...>
 
@@ -208,7 +208,7 @@ def build_text_qc_bundle(payload: dict) -> str:
 
     Hard guarantees:
     - Enforces size budget (<=120 lines OR <=8KB) with a clear Truncated marker.
-    - Runs a conservative lint check and refuses to output forbidden info.
+    - Runs a pasteability lint check (size/shape) and refuses to output oversized text.
     """
 
     full = _render(payload, truncated=False, reason="na")
@@ -253,7 +253,7 @@ def build_text_qc_bundle(payload: dict) -> str:
 
 
 def build_demo_bundle() -> str:
-    # Stable demo identifiers; no paths, no coords, no geometry.
+    # Stable demo identifiers; used for format/size smoke tests.
     digest = hashlib.sha1(b"demo_config").hexdigest()[:10]
 
     # Many interval groups -> force size trimming demonstration.
@@ -282,7 +282,7 @@ def build_demo_bundle() -> str:
         "module": "t01",
         "module_version": "demo",
         "inputs": {"traj": "ok", "pc": "ok", "vectors": "ok", "ground": "missing"},
-        "input_meta": "demo_input; synthetic; fields=ok; no_coords",
+        "input_meta": "demo_input; synthetic; fields=ok",
         "params": {
             "binN": 1000,
             "z_diff_threshold": 0.20,
@@ -296,7 +296,7 @@ def build_demo_bundle() -> str:
         "intervals": intervals,
         "breakpoints": ["manual_review", "check_thresholds"],
         "errors": {"E_DEMO_WARN": 2, "E_DEMO_FAIL": 1},
-        "notes": ["demo bundle; safe; triggers truncation"],
+        "notes": ["demo bundle; triggers truncation"],
     }
 
     return build_text_qc_bundle(payload)

@@ -86,9 +86,12 @@ def _cmd_lint_text(args: argparse.Namespace) -> int:
     ok, violations = lint_text(text)
     if ok:
         print("OK")
+        for v in violations:
+            if v.startswith("LONG_LINE"):
+                print(f"- {v}")
         return 0
 
-    print("BLOCKED")
+    print("NOT_PASTEABLE")
     for v in violations:
         print(f"- {v}")
     return 2
@@ -117,7 +120,7 @@ def _cmd_synth(args: argparse.Namespace) -> int:
 
     if mode == "local":
         if not (lidar_dir and traj_dir and lidar_dir.exists() and traj_dir.exists()):
-            # Must be generic; do not print any paths.
+            # Keep errors generic and paste-friendly.
             print("ERROR: local_inputs_missing", file=sys.stderr)
             return 2
 
@@ -133,7 +136,7 @@ def _cmd_synth(args: argparse.Namespace) -> int:
     manifest = run_synth(cfg)
     patch_ids = [p["patch_id"] for p in manifest.get("patches", [])]
 
-    # stdout must not include any paths.
+    # Keep stdout paste-friendly (short, human-readable).
     print(f"OK patches={len(patch_ids)}")
     if patch_ids:
         print("PatchIDs: " + ",".join(patch_ids))
@@ -145,21 +148,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="highway_topo_poc")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_doctor = sub.add_parser("doctor", help="Check repo/docs/python environment (no path output).")
+    p_doctor = sub.add_parser("doctor", help="Check repo/docs/python environment.")
     p_doctor.set_defaults(func=_cmd_doctor)
 
     p_tpl = sub.add_parser("qc-template", help="Print TEXT_QC_BUNDLE v1 template.")
     p_tpl.set_defaults(func=_cmd_qc_template)
 
-    p_demo = sub.add_parser("qc-demo", help="Print a demo TEXT_QC_BUNDLE (must be safe + truncated).")
+    p_demo = sub.add_parser("qc-demo", help="Print a demo TEXT_QC_BUNDLE (pasteable + truncated).")
     p_demo.set_defaults(func=_cmd_qc_demo)
 
-    p_lint = sub.add_parser("lint-text", help="Lint pasted text for forbidden info (reads stdin by default).")
+    p_lint = sub.add_parser("lint-text", help="Check text pasteability (size/lines/long lines).")
     p_lint.add_argument("--text", help="Text to lint (if omitted, read stdin).")
     p_lint.set_defaults(func=_cmd_lint_text)
 
-    p_synth = sub.add_parser("synth", help="Generate deterministic synth/local patches + manifest (no path output).")
-    p_synth.add_argument("--out-dir", default="data/synth", help="Output directory (not printed).")
+    p_synth = sub.add_parser("synth", help="Generate deterministic synth/local patches + manifest.")
+    p_synth.add_argument("--out-dir", default="data/synth", help="Output directory.")
     p_synth.add_argument("--seed", type=int, default=0)
     p_synth.add_argument("--num-patches", type=int, default=8)
     p_synth.add_argument("--lidar-dir", help="Local lidar strip dir (optional).")

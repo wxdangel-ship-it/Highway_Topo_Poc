@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from highway_topo_poc.protocol.text_lint import lint_text
 from highway_topo_poc.protocol.text_qc_bundle import build_demo_bundle, build_text_qc_bundle
-from highway_topo_poc.utils.size_guard import MAX_BYTES, MAX_LINES, apply_size_limit
+from highway_topo_poc.utils.size_guard import MAX_BYTES, MAX_LINES, apply_size_limit, measure_text
 
 
 def test_qc_bundle_format() -> None:
@@ -16,7 +16,7 @@ def test_qc_bundle_format() -> None:
         "module": "t01",
         "module_version": "t",
         "inputs": {"traj": "ok", "pc": "missing", "vectors": "ok", "ground": "missing"},
-        "input_meta": "unit_test; no_paths; no_coords",
+        "input_meta": "unit_test; pasteable",
         "params": {"binN": 1000},
         "metrics": [
             {"name": "m1", "p50": 0.1, "p90": 0.2, "p99": 0.3, "threshold": 0.4, "unit": "na"},
@@ -67,27 +67,31 @@ def test_size_limit() -> None:
     assert "Truncated: true" in limited
 
 
-def test_lint_blocks_forbidden() -> None:
-    samples = [
-        "lat\n",
-        "lon\n",
-        "epsg\n",
-        "utm\n",
-        "x=\n",
-        "y=\n",
-        "/mnt/x/secret\n",
-        "C:\\\\Users\\\\name\\\\file.txt\n",
-    ]
+def test_lint_blocks_oversize_lines() -> None:
+    text = "\n".join(["x"] * (MAX_LINES + 1)) + "\n"
+    ok, violations = lint_text(text)
 
-    for s in samples:
-        ok, violations = lint_text(s)
-        assert ok is False
-        assert violations
+    assert ok is False
+    assert any(v.startswith("SIZE_LINES") for v in violations)
 
 
-def test_demo_bundle_is_clean() -> None:
+def test_lint_blocks_oversize_bytes() -> None:
+    text = ("x" * (MAX_BYTES + 1)) + "\n"
+    ok, violations = lint_text(text)
+
+    assert ok is False
+    assert any(v.startswith("SIZE_BYTES") for v in violations)
+
+
+def test_demo_bundle_is_pasteable() -> None:
     demo = build_demo_bundle()
-    ok, violations = lint_text(demo)
 
+    s = measure_text(demo)
+    assert s.lines <= MAX_LINES
+    assert s.bytes_utf8 <= MAX_BYTES
+
+    ok, violations = lint_text(demo)
     assert ok is True, violations
+    assert not any(v.startswith("SIZE_") for v in violations)
+
     assert "Truncated: true" in demo
