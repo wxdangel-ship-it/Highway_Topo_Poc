@@ -45,7 +45,7 @@
 
 本次 POC 聚焦 5 个关键技术点（t01–t05），并要求外网提供可回归的合成数据能力（t00）：
 - t01 点云标量融合质量（参差区间识别）
-- t02 地面点云分割质量（用轨迹 Z 验证；优先 POC 自研，后续可 skill 化复用）
+- t02 地面点云分割质量（POC 自研，后续可 skill 化复用；覆盖地面点分类 + Traj 纵向/横截 QC）
 - t03 标线实体化聚合（重点：导流带聚合）
 - t04 RC 路口与 SW 路口锚定识别（细节接口契约放子 Agent）
 - t05 RC 路口间拓扑生产（以横截面为单元；细节接口契约放子 Agent）
@@ -222,8 +222,27 @@ modules/
 ### 11.1 t01 参差区间识别
 - 回传必须包含：残差分位数（p50/p90/p99）、参差区间数量/长度占比、Top-K 区间（bin）、类型枚举（bias/drift/jump 等）
 
-### 11.2 t02 地面分割质量
-- 回传必须包含：z_diff 分位数（p50/p90/p99）、bias、异常区间 Top-K（bin）、地面分割输入类型与分辨率摘要
+### 11.2 t02 地面点云分割质量（POC 自研，后续可 skill 化复用）
+- 目标：在真实点云 + 轨迹上完成“地面点分类 + Traj 纵向（clearance）QC + Traj 横截（cross-track）QC”，并提供可解释质量门禁 `overall_pass`，支持自动自检（`auto_tune` 至 PASS）。
+- 输入：
+  - PointCloud（LAS/LAZ/NPZ/NPY/CSV 等，至少 XYZ；若 LAS/LAZ 可读取 classification）
+  - Trajectory（GeoJSON/CSV/NPY 等，至少 XYZ；可选 heading/时间/seq）
+- 核心产出：
+  - 地面点分类（ground / non-ground）：优先使用 LAS/LAZ classification==2；不足时回退到网格 DEM 低分位 + 带宽阈值的确定性规则。
+  - Traj 纵向（clearance）QC：`residual = traj_z - ground_z`，输出 p50/p90/p99、bias、outlier_ratio、coverage、异常区间 Top-K。
+  - Traj 横截（cross-track）QC：以轨迹切向为 forward、法向为 cross，对 ground points 做横截 profile/拟合残差统计，输出 xsec 指标与异常区间 Top-K。
+  - 质量门禁与自检：输出 `overall_pass`；若 FAIL 可选启用 `auto_tune`，记录 `chosen_config` 与 `tune_log`，保证可追溯/可复现。
+- 输出工件（高层）：
+  - `metrics.json`（含 ground/xsec/clearance 指标与 `overall_pass`）
+  - `intervals.json`（clearance 异常区间）
+  - `xsec_intervals.json`（横截异常区间）
+  - `ground_points.npy` + `ground_idx.npy`（地面点结果/索引）
+  - `summary.txt`（可文本粘贴摘要）
+  - `chosen_config.json` + `tune_log.jsonl`（启用 `auto_tune` 时）
+- 边界/非目标：
+  - t02 是质量检查与可解释输出，不是高精地图生产，也不替代模型训练/推理。
+  - t02 不修改其它模块接口，不引入跨模块耦合。
+  - t02 对外接口与详细键值以 `modules/t02_ground_seg_qc/INTERFACE_CONTRACT.md` 为准，主文档仅描述范围与产物摘要。
 
 ### 11.3 t03 标线实体化（导流带）
 - 回传必须包含：实体数量（按类型）、碎片率/断裂率摘要、gore tip 数量与异常计数

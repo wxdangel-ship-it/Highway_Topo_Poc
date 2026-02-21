@@ -7,7 +7,7 @@
 
 ## 2. POC 范围（t00–t05）
 - t01：点云标量融合质量（参差区间识别）
-- t02：地面点云分割质量（优先我们自己实现；后续可 skill 化复用内网能力）
+- t02：地面点云分割质量（地面点分类 + Traj 纵向(clearance)QC + Traj 横截(cross-track)QC，含 overall_pass 门禁与 auto_tune 自检；优先 POC 自研，后续可 skill 化复用）
 - t03：标线实体化聚合（重点：导流带）
 - t04：RC/SW 路口锚点识别（细节放子 Agent）
 - t05：RC 路口间拓扑生产（细节放子 Agent）
