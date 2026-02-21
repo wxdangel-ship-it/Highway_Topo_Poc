@@ -23,3 +23,10 @@ SPEC.md > docs/ARTIFACT_PROTOCOL.md > docs/CODEX_GUARDRAILS.md > 其他文档
 - 禁止自作主张冻结任何子模块 INTERFACE_CONTRACT（放到子 Agent 阶段）
 - 外传文本只要求可粘贴传递：<=120 行 或 <=8KB；避免超长 raw dump，必要时 Top-K/摘要/截断
 - 遇到不清晰之处必须先问，不允许盲干
+
+## 4. 目录与代码归属（必读）
+- 开工前先读：`SPEC.md`、`docs/AGENT_PLAYBOOK.md`、`docs/CODEX_GUARDRAILS.md`。
+- 进场三连必须执行：`cd "$(git rev-parse --show-toplevel)" ; pwd ; git status -sb`。
+- 模块文档与契约放在 `modules/<module_id>/`（如 `modules/t02_ground_seg_qc/`）。
+- 模块可执行实现代码放在 `src/highway_topo_poc/modules/<module_id>/`。
+- 运行产物统一放在 `outputs/_work/<module_id>/<run_id>/`，该目录只存放产物，不作为开发工作目录。

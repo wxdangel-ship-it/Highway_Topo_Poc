@@ -37,3 +37,17 @@
 ## 4. 内外网传递方式（全局硬约束）
 - 内网 -> 外网仅允许“文本粘贴”回传
 - 外传文本必须遵守 docs/ARTIFACT_PROTOCOL.md
+
+## 5. 代码承载与目录约定（方案A：文档与代码分层）
+- 每个模块的文档与契约仅放在 `modules/<module_id>/`。
+- `modules/<module_id>/` 承载 `AGENTS.md`、`SKILL.md`、`INTERFACE_CONTRACT.md` 及模块级说明文档，不承载运行时代码。
+- 例如：`modules/t02_ground_seg_qc/` 仅放文档；可执行实现放 `src/highway_topo_poc/modules/t02_ground_seg_qc/`。
+- 每个模块的可执行实现代码放在 `src/highway_topo_poc/modules/<module_id>/`。
+- 若需要模块入口（可选），放在 `src/highway_topo_poc/entrypoints/`。
+- pytest/CI/import 仅依赖 src-layout 可导入包，不依赖手动设置 `PYTHONPATH` 或 `sys.path`。
+- 每个模块测试放在 `tests/`，命名建议 `test_<module_id>_*.py`。
+- 并行开发时，模块测试只覆盖本模块逻辑，避免跨模块耦合测试。
+- 运行产物统一写到 `outputs/_work/<module_id>/<run_id>/`。
+- `outputs/` 只存放产物，不作为工作目录，禁止在该目录下改代码、跑 `pytest` 或跑 `git`。
+- 子 Agent/CodeX 进场必须执行三连：`cd "$(git rev-parse --show-toplevel)" ; pwd ; git status -sb`。
+- 所有运行、测试、git 操作一律在 repo root 执行；仅编辑模块文档时可短暂进入 `modules/<module_id>/`，完成后必须回 repo root。

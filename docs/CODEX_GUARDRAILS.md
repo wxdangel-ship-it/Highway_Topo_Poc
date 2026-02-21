@@ -25,6 +25,14 @@
 - 待确认问题（<=5条）
 - 最小落地计划（<=10步）
 等待用户确认后再执行
+
+## 5. 代码承载硬约束（modules vs src）
+- 明确禁止把可执行 Python 实现代码放进 `modules/<module_id>/`；该目录仅承载模块文档与接口契约。
+- 新增实现代码默认放在 `src/highway_topo_poc/modules/<module_id>/`。
+- 新增测试默认放在 `tests/`，建议命名 `test_<module_id>_*.py`。
+- pytest/CI/import 只能依赖 src-layout 可导入包，不允许依赖手动 `PYTHONPATH` 才能运行。
+- 并行开发时禁止在 `outputs/` 下作为工作目录。
+- 所有 `pytest` 与 `git` 命令必须在 repo root 执行。
 # Workspace Setup (WSL + Python)
 
 ## 1. 路径硬约束

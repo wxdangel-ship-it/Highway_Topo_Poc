@@ -199,6 +199,7 @@
 ## 10. 模块目录与代码组织要求
 - 每个技术点一个模块目录（t00–t05）
 - 子模块的接口契约（INTERFACE_CONTRACT.md）放在各自模块目录中，由子 Agent 阶段产出
+- 模块实现代码放在 `src/highway_topo_poc/modules/<module_id>/`，`modules/<module_id>/` 仅承载模块文档与接口契约
 - common/schemas/configs/scripts/tests 保持清晰分层
 - 所有阈值参数必须配置化
 
