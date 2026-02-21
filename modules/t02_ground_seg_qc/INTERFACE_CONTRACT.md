@@ -28,6 +28,25 @@ run_patch(
 - `tune_log`
 - `summary`
 
+### `run_batch(...)`（ground_cache）
+```python
+run_batch(
+    data_root: str | Path,
+    out_root: str | Path = "outputs/_work/t02_ground_seg_qc",
+    run_id: str = "auto",
+    resume: bool = True,
+    workers: int = 1,
+    chunk_points: int = 2_000_000,
+    export_classified_laz: bool = False,
+    grid_size_m: float = 1.0,
+    above_margin_m: float = 0.08,
+) -> dict
+```
+
+- 对 `data_root` 下可发现 patch 做全量地面标签缓存。
+- `chunk_points` 仅用于分块，不影响全点输出长度。
+- 缓存产物为后续模块可选输入，不改变其它模块输入输出契约。
+
 ## CLI
 
 ```bash
@@ -39,16 +58,38 @@ python -m highway_topo_poc.modules.t02_ground_seg_qc.run \
   --auto_tune true
 ```
 
+```bash
+python -m highway_topo_poc.modules.t02_ground_seg_qc.batch_ground_cache \
+  --data_root data/synth_local \
+  --out_root outputs/_work/t02_ground_seg_qc \
+  --run_id auto \
+  --resume true \
+  --workers 1 \
+  --chunk_points 2000000 \
+  --export_classified_laz false
+```
+
 参数：
 - `--data_root`
 - `--patch`
 - `--run_id`
 - `--out_root`
 - `--auto_tune` (`true/false`)
+- `--resume` (`true/false`)
+- `--workers`
+- `--chunk_points`
+- `--export_classified_laz` (`true/false`)
+- `--grid_size_m`
+- `--above_margin_m`
 
 退出码：
 - `0`：`overall_pass=True`
 - `2`：运行成功但 `overall_pass=False`
+- `1`：运行异常
+
+`batch_ground_cache` 退出码：
+- `0`：全部 patch `overall_pass=True`
+- `2`：批处理成功但存在 fail patch（仍会输出 best-effort 工件）
 - `1`：运行异常
 
 ## 输出目录结构
@@ -67,6 +108,32 @@ outputs/_work/t02_ground_seg_qc/<run_id>/<patch_id>/
   xsec_series.npz              # optional
   series.npz                   # optional
 ```
+
+```text
+outputs/_work/t02_ground_seg_qc/<run_id>/
+  ground_cache_manifest.jsonl  # required
+  ground_cache_summary.json    # required
+  failed_patches.txt           # optional (exists when fail_patches>0)
+  ground_cache/
+    <patch_key>/
+      ground_label.npy         # required, uint8, shape=(N,), full-size
+      ground_stats.json        # required
+      ground_idx.npy           # recommended
+      classified.laz/.las      # optional
+```
+
+## ground_cache_manifest.jsonl（每行字段）
+- `patch_key`
+- `points_path`
+- `label_path`
+- `stats_path`
+- `n_points`
+- `n_ground`
+- `ratio`
+- `pass_fail` (`pass`/`fail`)
+- `overall_pass`
+- `reason`
+- `output_dir`
 
 ## metrics.json（关键字段）
 - traj-clearance：`coverage`, `outlier_ratio`, `p50/p90/p99`
@@ -92,3 +159,4 @@ outputs/_work/t02_ground_seg_qc/<run_id>/<patch_id>/
 ## 兼容性说明
 - 仍保留 `intervals.json`（traj-clearance）以兼容旧消费者。
 - 新增 `xsec_intervals.json` 与 ground 工件为本阶段 required。
+- 新增 ground_cache 为旁路缓存能力（optional downstream input），不覆盖原始点云，不改其它模块契约。

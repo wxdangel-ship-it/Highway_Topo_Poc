@@ -1,18 +1,26 @@
 # t02_ground_seg_qc - SKILL
 
+## ground_cache（全量标签缓存）
+- 目的：为后续模块提供可复用地面标签缓存（可选输入），不改变其它模块契约。
+- 关键口径：`ground_label.npy` 必须是“全点”标签，禁止抽样、禁止截断、禁止 cap。
+- 分块策略：允许 `chunk_points` 做内存/IO 分块，但输出长度必须等于点云总点数。
+
 ## 地面分类路径（优先级）
-1. `LAS/LAZ classification`
-- 若存在 `classification` 字段，且 `class==2` 点数达到 `min_las_ground_points`，直接作为 ground。
+1. `las_classification`
+- 若 LAS/LAZ 存在 `classification` 且 `class==2` 非空，则直接按 `class==2` 生成全点标签。
 - 记录：`ground_source=las_classification`。
 
-2. `DEM band fallback`
-- 网格 DEM：cell 内 `z` 取 `dem_quantile_q`。
-- 每点 `dz = z - ground_z_cell`。
-- 保留条件：`-below_margin_m <= dz <= above_margin_m`。
-- 导出策略：
-  - 每 cell 最多 `max_points_per_cell_export`，按 `|dz|` + 索引稳定排序。
-  - 全局最多 `max_export_points`。
-- 记录：`ground_source=dem_band`。
+2. `grid_min_band`
+- 计算网格 `cell` 的 `min_z`（可两遍分块，不限制点数）。
+- 判定规则：`ground = (z <= min_z_cell + above_margin_m)`。
+- 记录：`ground_source=grid_min_band`。
+
+## 参数含义与建议范围（ground_cache）
+- `grid_size_m`：网格边长，默认 `1.0`，建议 `0.5 ~ 2.0`。
+- `above_margin_m`：离地容差，默认 `0.08`，建议 `0.03 ~ 0.20`。
+- `chunk_points`：单次分块点数，默认 `2_000_000`，仅影响内存/IO，不影响全量输出。
+- `workers`：默认 `1`（IO 稳定优先，可按机器能力增大）。
+- `export_classified_laz`：默认 `false`，开启后可导出带 classification 的副本。
 
 ## 横截（cross-track）QC
 - 轨迹切向：由 `i-1` 与 `i+1` 差分得 heading。
@@ -46,7 +54,7 @@
 
 ## 默认参数（关键）
 - `grid_size_m=1.0`
-- `dem_quantile_q=0.10`
+- `dem_quantile_q=0.10`（traj/xsec 主流程）
 - `above_margin_m=0.08`
 - `below_margin_m=0.20`
 - `threshold_m=0.25`

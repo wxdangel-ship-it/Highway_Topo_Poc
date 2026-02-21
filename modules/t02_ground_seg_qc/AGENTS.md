@@ -26,6 +26,24 @@
 - 必需：`chosen_config.json`, `tune_log.jsonl`
 - 可选：`xsec_series.npz`, `series.npz`
 
+## ground_cache 批处理（新增）
+- 支持对 `data/synth_local` 全量 patch 点云生成“全点地面标签缓存”，用于后续模块可选输入。
+- 批处理入口：
+  - `python -m highway_topo_poc.modules.t02_ground_seg_qc.batch_ground_cache`
+- 输出目录规范：
+  - `outputs/_work/t02_ground_seg_qc/<run_id>/ground_cache/<patch_key>/`
+  - 必需：`ground_label.npy`（`uint8`，shape=`(N,)`，全点输出，`1=ground`）
+  - 必需：`ground_stats.json`
+  - 建议：`ground_idx.npy`
+  - 可选：`classified.laz`/`classified.las`（默认关闭）
+- 全局清单：
+  - `outputs/_work/t02_ground_seg_qc/<run_id>/ground_cache_manifest.jsonl`
+  - `outputs/_work/t02_ground_seg_qc/<run_id>/ground_cache_summary.json`
+  - `outputs/_work/t02_ground_seg_qc/<run_id>/failed_patches.txt`（若存在失败）
+- 口径要求：
+  - 不抽样、不截断、不做 `max_export_points` 类上限；
+  - `chunk_points` 仅用于内存/IO 分块。
+
 ## 非目标
 - 不替代 t01 的融合质量评估职责。
 - 不追求完整语义分类体系（仅关心地面候选提取与 QC）。
