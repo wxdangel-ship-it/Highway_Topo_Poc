@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,18 +21,44 @@ class PatchCandidate:
     points_path: Path
 
 
-def discover_patch(data_root: Path | str, patch: str = "auto") -> PatchCandidate:
+@dataclass(frozen=True)
+class PointCloudData:
+    xyz: np.ndarray
+    original_indices: np.ndarray
+    total_points: int
+    classification: np.ndarray | None
+    sampled: bool
+
+
+def discover_patch(
+    data_root: Path | str,
+    patch: str = "auto",
+    *,
+    require_loadable: bool = False,
+    probe_max_points: int = 20_000,
+) -> PatchCandidate:
     root = Path(data_root)
     if not root.exists() or not root.is_dir():
         raise ValueError(f"data_root_not_found: {root}")
 
     if patch != "auto":
-        return _resolve_explicit_patch(root, patch)
+        candidate = _resolve_explicit_patch(root, patch)
+        if require_loadable and not _is_candidate_loadable(candidate, probe_max_points=probe_max_points):
+            raise ValueError(f"patch_not_loadable: {candidate.patch_dir}")
+        return candidate
 
     candidates = list_patch_candidates(root)
     if not candidates:
         raise ValueError(f"no_patch_candidate_found_under: {root}")
-    return sorted(candidates, key=lambda c: (c.patch_id, c.patch_dir.as_posix()))[0]
+
+    if not require_loadable:
+        return candidates[0]
+
+    for candidate in candidates:
+        if _is_candidate_loadable(candidate, probe_max_points=probe_max_points):
+            return candidate
+
+    raise ValueError(f"no_loadable_patch_candidate_found_under: {root}")
 
 
 def list_patch_candidates(data_root: Path | str) -> list[PatchCandidate]:
@@ -39,11 +66,22 @@ def list_patch_candidates(data_root: Path | str) -> list[PatchCandidate]:
     if not root.exists() or not root.is_dir():
         return []
 
+    dirs = [p for p in root.rglob("*") if p.is_dir()]
+
     out: list[PatchCandidate] = []
-    for patch_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        candidate = _candidate_from_dir(patch_dir)
-        if candidate is not None:
-            out.append(candidate)
+    seen: set[str] = set()
+    for d in dirs:
+        candidate = _candidate_from_dir(d)
+        if candidate is None:
+            continue
+        key = (candidate.patch_dir.resolve().as_posix(), candidate.traj_path.name, candidate.points_path.name)
+        dedup = "|".join(key)
+        if dedup in seen:
+            continue
+        seen.add(dedup)
+        out.append(candidate)
+
+    out.sort(key=lambda c: (_safe_size(c.points_path), c.patch_id, c.patch_dir.as_posix()))
     return out
 
 
@@ -51,6 +89,12 @@ def load_patch_arrays(candidate: PatchCandidate) -> tuple[np.ndarray, np.ndarray
     traj_xyz = load_traj_xyz(candidate.traj_path)
     points_xyz = load_point_cloud_xyz(candidate.points_path)
     return traj_xyz, points_xyz
+
+
+def load_patch_inputs(candidate: PatchCandidate, *, max_points: int | None = None) -> tuple[np.ndarray, PointCloudData]:
+    traj_xyz = load_traj_xyz(candidate.traj_path)
+    point_data = load_point_cloud_data(candidate.points_path, max_points=max_points)
+    return traj_xyz, point_data
 
 
 def load_traj_xyz(path: Path | str) -> np.ndarray:
@@ -74,44 +118,128 @@ def load_traj_xyz(path: Path | str) -> np.ndarray:
 
 
 def load_point_cloud_xyz(path: Path | str) -> np.ndarray:
+    return load_point_cloud_data(path).xyz
+
+
+def load_point_cloud_data(path: Path | str, *, max_points: int | None = None) -> PointCloudData:
     p = Path(path)
     suffix = p.suffix.lower()
 
     if suffix == ".npy":
-        arr = np.load(p)
-        return _coerce_xyz(arr, source=str(p))
+        arr = _coerce_xyz(np.load(p), source=str(p))
+        xyz, idx, sampled = _downsample_xyz(arr, max_points=max_points)
+        return PointCloudData(xyz=xyz, original_indices=idx, total_points=int(arr.shape[0]), classification=None, sampled=sampled)
+
     if suffix == ".npz":
         with np.load(p) as npz:
             arr = _select_npz_array(npz, priorities=("points", "pointcloud", "pc", "xyz", "arr_0"))
-        return _coerce_xyz(arr, source=str(p))
+        arr2 = _coerce_xyz(arr, source=str(p))
+        xyz, idx, sampled = _downsample_xyz(arr2, max_points=max_points)
+        return PointCloudData(xyz=xyz, original_indices=idx, total_points=int(arr2.shape[0]), classification=None, sampled=sampled)
+
     if suffix in {".csv", ".txt"}:
-        arr = _load_text_matrix(p)
-        return _coerce_xyz(arr, source=str(p))
+        arr = _coerce_xyz(_load_text_matrix(p), source=str(p))
+        xyz, idx, sampled = _downsample_xyz(arr, max_points=max_points)
+        return PointCloudData(xyz=xyz, original_indices=idx, total_points=int(arr.shape[0]), classification=None, sampled=sampled)
+
     if suffix == ".bin":
         raw = np.fromfile(p, dtype=np.float32)
         if raw.size == 0:
-            return np.empty((0, 3), dtype=np.float64)
+            return PointCloudData(
+                xyz=np.empty((0, 3), dtype=np.float64),
+                original_indices=np.empty((0,), dtype=np.int64),
+                total_points=0,
+                classification=None,
+                sampled=False,
+            )
         if raw.size % 4 == 0:
             arr = raw.reshape(-1, 4)[:, :3]
-            return _coerce_xyz(arr, source=str(p))
-        if raw.size % 3 == 0:
+        elif raw.size % 3 == 0:
             arr = raw.reshape(-1, 3)
-            return _coerce_xyz(arr, source=str(p))
-        raise ValueError(f"pointcloud_bin_shape_error: {p}")
-    if suffix in {".las", ".laz"}:
-        try:
-            import laspy  # type: ignore
-        except Exception as exc:  # pragma: no cover - depends on env
-            raise ValueError("laspy_required_for_las_laz") from exc
+        else:
+            raise ValueError(f"pointcloud_bin_shape_error: {p}")
+        arr2 = _coerce_xyz(arr, source=str(p))
+        xyz, idx, sampled = _downsample_xyz(arr2, max_points=max_points)
+        return PointCloudData(xyz=xyz, original_indices=idx, total_points=int(arr2.shape[0]), classification=None, sampled=sampled)
 
-        las = laspy.read(str(p))
-        arr = np.column_stack((las.x, las.y, las.z))
-        return _coerce_xyz(arr, source=str(p))
+    if suffix in {".las", ".laz"}:
+        return _load_las_laz_data(p, max_points=max_points)
 
     if suffix in {".ply", ".pcd"}:
         raise ValueError(f"unsupported_pointcloud_format_without_plugin: {p.suffix}")
 
     raise ValueError(f"unsupported_pointcloud_format: {p.suffix}")
+
+
+def _load_las_laz_data(path: Path, *, max_points: int | None = None) -> PointCloudData:
+    try:
+        import laspy  # type: ignore
+    except Exception as exc:  # pragma: no cover - depends on env
+        raise ValueError("laspy_required_for_las_laz") from exc
+
+    with laspy.open(str(path)) as reader:
+        total_points = int(reader.header.point_count)
+        if total_points == 0:
+            return PointCloudData(
+                xyz=np.empty((0, 3), dtype=np.float64),
+                original_indices=np.empty((0,), dtype=np.int64),
+                total_points=0,
+                classification=None,
+                sampled=False,
+            )
+
+        has_cls = "classification" in set(reader.header.point_format.dimension_names)
+
+        if max_points is None or total_points <= max_points:
+            las = reader.read()
+            xyz = np.column_stack((las.x, las.y, las.z)).astype(np.float64)
+            idx = np.arange(total_points, dtype=np.int64)
+            cls = np.asarray(las.classification, dtype=np.int16) if has_cls and hasattr(las, "classification") else None
+            return PointCloudData(
+                xyz=xyz,
+                original_indices=idx,
+                total_points=total_points,
+                classification=cls,
+                sampled=False,
+            )
+
+        step = max(1, int(math.ceil(total_points / float(max_points))))
+        xs: list[np.ndarray] = []
+        ys: list[np.ndarray] = []
+        zs: list[np.ndarray] = []
+        idxs: list[np.ndarray] = []
+        cls_chunks: list[np.ndarray] = []
+
+        start = 0
+        for chunk in reader.chunk_iterator(1_000_000):
+            n = len(chunk.x)
+            if n == 0:
+                continue
+
+            global_idx = np.arange(start, start + n, dtype=np.int64)
+            take = (global_idx % step) == 0
+            if np.any(take):
+                xs.append(np.asarray(chunk.x, dtype=np.float64)[take])
+                ys.append(np.asarray(chunk.y, dtype=np.float64)[take])
+                zs.append(np.asarray(chunk.z, dtype=np.float64)[take])
+                idxs.append(global_idx[take])
+
+                if has_cls and hasattr(chunk, "classification"):
+                    cls_chunks.append(np.asarray(chunk.classification, dtype=np.int16)[take])
+
+            start += n
+
+    xyz = np.column_stack((np.concatenate(xs), np.concatenate(ys), np.concatenate(zs))) if xs else np.empty((0, 3), dtype=np.float64)
+    idx = np.concatenate(idxs) if idxs else np.empty((0,), dtype=np.int64)
+    cls = np.concatenate(cls_chunks) if cls_chunks else None
+
+    return PointCloudData(
+        xyz=xyz,
+        original_indices=idx,
+        total_points=total_points,
+        classification=cls,
+        sampled=True,
+    )
 
 
 def _resolve_explicit_patch(root: Path, patch: str) -> PatchCandidate:
@@ -141,10 +269,9 @@ def _resolve_explicit_patch(root: Path, patch: str) -> PatchCandidate:
         if candidate is not None:
             return candidate
 
-    # Fallback: find by patch_id among auto-discovered candidates.
     matches = [c for c in list_patch_candidates(root) if c.patch_id == patch_name]
     if matches:
-        return sorted(matches, key=lambda c: c.patch_dir.as_posix())[0]
+        return matches[0]
 
     raise ValueError(f"patch_not_resolvable: {patch}")
 
@@ -170,6 +297,15 @@ def _candidate_from_dir(patch_dir: Path) -> PatchCandidate | None:
         traj_path=traj,
         points_path=points,
     )
+
+
+def _is_candidate_loadable(candidate: PatchCandidate, *, probe_max_points: int) -> bool:
+    try:
+        _ = load_traj_xyz(candidate.traj_path)
+        _ = load_point_cloud_data(candidate.points_path, max_points=probe_max_points)
+        return True
+    except Exception:
+        return False
 
 
 def _normalize_patch_id(name: str) -> str:
@@ -215,6 +351,13 @@ def _point_rank_key(path: Path) -> tuple[int, int, int, str]:
     )
 
 
+def _safe_size(path: Path) -> int:
+    try:
+        return int(path.stat().st_size)
+    except Exception:
+        return 2**63 - 1
+
+
 def _load_text_matrix(path: Path) -> np.ndarray:
     loaders = [
         lambda: np.loadtxt(path, delimiter=",", dtype=float, ndmin=2),
@@ -228,7 +371,6 @@ def _load_text_matrix(path: Path) -> np.ndarray:
         except Exception:
             continue
 
-    # With header names (x,y,z)
     arr = np.genfromtxt(path, delimiter=",", names=True, dtype=float)
     return np.asarray(arr)
 
@@ -272,6 +414,16 @@ def _coerce_xyz(arr: np.ndarray, *, source: str) -> np.ndarray:
         return a.astype(np.float64)
 
     raise ValueError(f"xyz_parse_error: {source}")
+
+
+def _downsample_xyz(arr: np.ndarray, *, max_points: int | None) -> tuple[np.ndarray, np.ndarray, bool]:
+    n = int(arr.shape[0])
+    if max_points is None or n <= max_points:
+        return arr.astype(np.float64), np.arange(n, dtype=np.int64), False
+
+    step = max(1, int(math.ceil(n / float(max_points))))
+    idx = np.arange(0, n, step, dtype=np.int64)
+    return arr[idx].astype(np.float64), idx, True
 
 
 def _load_geojson_xyz(path: Path) -> np.ndarray:
