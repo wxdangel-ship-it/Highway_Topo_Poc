@@ -152,6 +152,51 @@ def _cmd_synth(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_t01_fusion_qc(args: argparse.Namespace) -> int:
+    from highway_topo_poc.t01_fusion_qc import (
+        FusionQcConfig,
+        normalize_input_path,
+        run_fusion_qc,
+    )
+
+    patch_dir = normalize_input_path(args.patch)
+    out_dir = normalize_input_path(args.out)
+
+    cfg = FusionQcConfig(
+        patch_dir=patch_dir,
+        out_dir=out_dir,
+        sample_stride=int(args.sample_stride),
+        binN=int(args.binN),
+        radius=float(args.radius),
+        radius_max=float(args.radius_max),
+        min_neighbors=int(args.min_neighbors),
+        close_frac=float(args.close_frac),
+        min_close_points=int(args.min_close_points),
+        th=float(args.th),
+        min_interval_bins=int(args.min_interval_bins),
+        topk_intervals=int(args.topk_intervals),
+        pc_max_points=int(args.pc_max_points),
+        seed=int(args.seed),
+        max_lines=int(args.max_lines),
+        max_chars=int(args.max_chars),
+    )
+
+    result = run_fusion_qc(cfg)
+
+    print(
+        "OK "
+        f"samples={result.sample_count} "
+        f"valid={result.valid_residual_count} "
+        f"intervals={result.interval_count}"
+    )
+    print(f"Artifact: {result.text_artifact_path}")
+    print(f"IntervalsCSV: {result.intervals_csv_path}")
+    if result.errors:
+        errs = ",".join([f"{k}:{v}" for k, v in sorted(result.errors.items())])
+        print(f"Errors: {errs}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="highway_topo_poc")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -179,6 +224,25 @@ def main(argv: list[str] | None = None) -> int:
     p_synth.add_argument("--pointcloud-mode", choices=["stub", "link", "copy", "merge"], default="stub")
     p_synth.add_argument("--traj-mode", choices=["synthetic", "copy", "convert"], default="synthetic")
     p_synth.set_defaults(func=_cmd_synth)
+
+    p_t01 = sub.add_parser("t01-fusion-qc", help="t01 fusion QC: scalar residual + interval detection.")
+    p_t01.add_argument("--patch", required=True, help="Patch directory path.")
+    p_t01.add_argument("--out", required=True, help="Output directory path.")
+    p_t01.add_argument("--sample-stride", type=int, default=5)
+    p_t01.add_argument("--binN", type=int, default=1000)
+    p_t01.add_argument("--radius", type=float, default=1.0)
+    p_t01.add_argument("--radius-max", type=float, default=3.0)
+    p_t01.add_argument("--min-neighbors", type=int, default=30)
+    p_t01.add_argument("--close-frac", type=float, default=0.2)
+    p_t01.add_argument("--min-close-points", type=int, default=20)
+    p_t01.add_argument("--th", type=float, default=0.20)
+    p_t01.add_argument("--min-interval-bins", type=int, default=3)
+    p_t01.add_argument("--topk-intervals", type=int, default=20)
+    p_t01.add_argument("--pc-max-points", type=int, default=3_000_000)
+    p_t01.add_argument("--seed", type=int, default=0)
+    p_t01.add_argument("--max-lines", type=int, default=220)
+    p_t01.add_argument("--max-chars", type=int, default=20_000)
+    p_t01.set_defaults(func=_cmd_t01_fusion_qc)
 
     args = parser.parse_args(argv)
     try:
