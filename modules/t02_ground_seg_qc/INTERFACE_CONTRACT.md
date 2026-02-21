@@ -47,6 +47,26 @@ run_batch(
 - `chunk_points` 仅用于分块，不影响全点输出长度。
 - 缓存产物为后续模块可选输入，不改变其它模块输入输出契约。
 
+### `run_export(...)`（classified_cloud）
+```python
+run_export(
+    in_manifest: str | Path,
+    out_root: str | Path = "outputs/_work/t02_ground_seg_qc",
+    run_id: str = "auto",
+    resume: bool = True,
+    workers: int = 1,
+    chunk_points: int = 2_000_000,
+    ground_class: int = 2,
+    non_ground_class: int = 1,
+    out_format: str = "laz",
+    verify: bool = True,
+) -> dict
+```
+
+- 从 `ground_cache_manifest.jsonl` 读取 `points_path + label_path`，导出完整 classified 点云副本。
+- 仅改 `classification` 字段，其它字段保持不变。
+- `.laz` 写出失败时自动 fallback 到 `.las` 并记录原因。
+
 ## CLI
 
 ```bash
@@ -69,6 +89,20 @@ python -m highway_topo_poc.modules.t02_ground_seg_qc.batch_ground_cache \
   --export_classified_laz false
 ```
 
+```bash
+python -m highway_topo_poc.modules.t02_ground_seg_qc.export_classified_cloud \
+  --in_manifest outputs/_work/t02_ground_seg_qc/<run_id>/ground_cache_manifest.jsonl \
+  --out_root outputs/_work/t02_ground_seg_qc \
+  --run_id auto \
+  --resume true \
+  --workers 1 \
+  --chunk_points 2000000 \
+  --ground_class 2 \
+  --non_ground_class 1 \
+  --out_format laz \
+  --verify true
+```
+
 参数：
 - `--data_root`
 - `--patch`
@@ -81,6 +115,11 @@ python -m highway_topo_poc.modules.t02_ground_seg_qc.batch_ground_cache \
 - `--export_classified_laz` (`true/false`)
 - `--grid_size_m`
 - `--above_margin_m`
+- `--in_manifest`
+- `--ground_class`
+- `--non_ground_class`
+- `--out_format` (`laz/las`)
+- `--verify` (`true/false`)
 
 退出码：
 - `0`：`overall_pass=True`
@@ -90,6 +129,11 @@ python -m highway_topo_poc.modules.t02_ground_seg_qc.batch_ground_cache \
 `batch_ground_cache` 退出码：
 - `0`：全部 patch `overall_pass=True`
 - `2`：批处理成功但存在 fail patch（仍会输出 best-effort 工件）
+- `1`：运行异常
+
+`export_classified_cloud` 退出码：
+- `0`：全部 patch 导出与校验通过
+- `2`：导出流程完成但存在 fail patch
 - `1`：运行异常
 
 ## 输出目录结构
@@ -122,6 +166,17 @@ outputs/_work/t02_ground_seg_qc/<run_id>/
       classified.laz/.las      # optional
 ```
 
+```text
+outputs/_work/t02_ground_seg_qc/<run_id>/
+  classified_manifest.jsonl    # required
+  classified_summary.json      # required
+  failed_patches.txt           # optional (exists when fail_patches>0)
+  classified_cloud/
+    <patch_key>/
+      merged_classified.laz    # preferred
+      merged_classified.las    # fallback when laz backend unavailable
+```
+
 ## ground_cache_manifest.jsonl（每行字段）
 - `patch_key`
 - `points_path`
@@ -130,6 +185,22 @@ outputs/_work/t02_ground_seg_qc/<run_id>/
 - `n_points`
 - `n_ground`
 - `ratio`
+- `pass_fail` (`pass`/`fail`)
+- `overall_pass`
+- `reason`
+- `output_dir`
+
+## classified_manifest.jsonl（每行字段）
+- `patch_key`
+- `points_path`
+- `label_path`
+- `out_path`
+- `out_format`
+- `n_points`
+- `n_ground`
+- `output_n_points`
+- `output_n_ground`
+- `ground_class`
 - `pass_fail` (`pass`/`fail`)
 - `overall_pass`
 - `reason`
@@ -160,3 +231,4 @@ outputs/_work/t02_ground_seg_qc/<run_id>/
 - 仍保留 `intervals.json`（traj-clearance）以兼容旧消费者。
 - 新增 `xsec_intervals.json` 与 ground 工件为本阶段 required。
 - 新增 ground_cache 为旁路缓存能力（optional downstream input），不覆盖原始点云，不改其它模块契约。
+- 新增 classified_cloud 为旁路导出能力（optional downstream artifact），不覆盖原始输入点云。

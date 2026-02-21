@@ -44,6 +44,21 @@
   - 不抽样、不截断、不做 `max_export_points` 类上限；
   - `chunk_points` 仅用于内存/IO 分块。
 
+## classified_cloud 导出（新增）
+- 支持基于 `ground_cache_manifest.jsonl` + `ground_label.npy` 导出完整 classified 点云副本。
+- 导出入口：
+  - `python -m highway_topo_poc.modules.t02_ground_seg_qc.export_classified_cloud`
+- 输出目录规范：
+  - `outputs/_work/t02_ground_seg_qc/<run_id>/classified_cloud/<patch_key>/merged_classified.<laz|las>`
+- 写入规则：
+  - 仅写 `classification` 字段：`ground=2`、`non-ground=1`
+  - 除 `classification` 外其余点字段保持不变
+  - 严禁覆盖 `data/synth_local` 原始点云
+- 大数据口径：
+  - 必须 chunk 流式读写；
+  - `ground_label.npy` 用 `mmap_mode=\"r\"` 读取；
+  - 若 `.laz` 压缩 backend 不可用，自动 fallback 输出 `.las` 并在 manifest 记录原因。
+
 ## 非目标
 - 不替代 t01 的融合质量评估职责。
 - 不追求完整语义分类体系（仅关心地面候选提取与 QC）。

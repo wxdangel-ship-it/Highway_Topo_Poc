@@ -5,6 +5,19 @@
 - 关键口径：`ground_label.npy` 必须是“全点”标签，禁止抽样、禁止截断、禁止 cap。
 - 分块策略：允许 `chunk_points` 做内存/IO 分块，但输出长度必须等于点云总点数。
 
+## classified_cloud（完整点云导出）
+- 输入：`ground_cache_manifest.jsonl`（复用已生成 `ground_label.npy`，不重复分类）。
+- 输出：完整复制点云 `merged_classified.<laz|las>`，仅改 `classification` 字段。
+- 分类映射（固定）：
+  - `ground_class=2`（LAS Ground）
+  - `non_ground_class=1`（LAS Unclassified）
+- 校验口径（verify）：
+  - 输出点数必须等于输入点数；
+  - 输出 `class==2` 点数必须等于 `n_ground`。
+- LAZ fallback：
+  - 若 `.laz` 写出因压缩 backend 失败，自动回退 `.las`；
+  - 在 `classified_manifest.jsonl` 与 `classified_summary.json` 记录 fallback 原因与计数。
+
 ## 地面分类路径（优先级）
 1. `las_classification`
 - 若 LAS/LAZ 存在 `classification` 且 `class==2` 非空，则直接按 `class==2` 生成全点标签。
