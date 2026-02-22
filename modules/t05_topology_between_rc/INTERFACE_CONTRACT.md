@@ -1,27 +1,76 @@
-# t05_topology_between_rc INTERFACE_CONTRACT
+# t05_topology_between_rc - INTERFACE_CONTRACT
 
-## 1. Scope
-- Module id: `t05_topology_between_rc`
-- Purpose: Build directed road centerlines between RC intersections (`intersection_l`) per patch.
-- Output geometry: `LineString` (directed `src_nodeid -> dst_nodeid`).
+## 1. 目标与范围
+- 模块 ID：`t05_topology_between_rc`
+- 目标：基于 `intersection_l`、轨迹、点云与 `LaneBoundary`，生成 RC 路口间有向 `Road` 中心线。
+- 产物几何：`LineString`（方向为 `src_nodeid -> dst_nodeid`）。
 
-## 2. Inputs
-Patch root (default under `data/synth_local/<patch_id>/`):
-- MUST: `Vector/intersection_l.geojson`
-  - feature geometry: `LineString`
-  - property: `nodeid:int64`
-- MUST: `Traj/*/raw_dat_pose.geojson`
-  - feature geometry: `Point`
-  - sequence key preference: `seq` > `frame_id` > parsed `timestamp` > index
-- MUST: `PointCloud/*.las|*.laz`
-  - xyz required
-  - classification preferred
-- MUST: `Vector/LaneBoundary.geojson`
-- SHOULD: `Vector/Node.geojson`
-  - property `Kind` bit3/bit4 used for merge/diverge
-- SHOULD: `Vector/DivStripZone.geojson` (diagnostic only)
+## 2. 输入（Input）
+Patch 根目录默认位于 `data/synth_local/<patch_id>/`。
 
-## 3. Params (deterministic defaults)
+必需输入：
+- `Vector/intersection_l.geojson`
+  - 几何：`LineString`
+  - 属性：`nodeid:int64`
+- `Traj/*/raw_dat_pose.geojson`
+  - 几何：`Point`
+  - 序列键优先级：`seq > frame_id > timestamp > index`
+- `PointCloud/*.las|*.laz`
+  - 必须可读取 `xyz`
+  - `classification` 可选但推荐
+- `Vector/LaneBoundary.geojson`
+
+推荐输入：
+- `Vector/Node.geojson`（`Kind` bit3/bit4 用于 merge/diverge）
+- `Vector/DivStripZone.geojson`（诊断用途）
+
+## 3. 输出（Output）
+单 patch 输出目录：
+- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/Road.geojson`
+- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/metrics.json`
+- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/intervals.json`
+- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/summary.txt`
+- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/gate.json`
+
+关键字段约束：
+- `Road.geojson`
+  - 几何：`LineString`
+  - 必需属性：
+    - `road_id:string`
+    - `src_nodeid:int64`
+    - `dst_nodeid:int64`
+    - `direction:string`（`src->dst`）
+    - `length_m:float`
+    - `support_traj_count:int`
+    - `conf:float`（0..1）
+    - `hard_anomaly:bool`
+    - `soft_issue_flags:string[]`
+- `metrics.json` 必需键：
+  - `patch_id`, `road_count`, `unique_pair_count`
+  - `hard_anomaly_count`, `soft_issue_count`, `low_support_road_count`
+  - `avg_conf`, `p10_conf`, `p50_conf`, `center_coverage_avg`
+- `intervals.json`
+  - `topk[]`：`road_id, reason, severity, hint`（可附加轨迹/区间字段）
+- `gate.json`
+  - `overall_pass:bool`
+  - `hard_breakpoints:[]`
+  - `soft_breakpoints:[]`
+  - `params_digest:string`
+  - `version:string`
+
+## 4. 入口（Entrypoint / CLI）
+- `python -m highway_topo_poc.modules.t05_topology_between_rc.run`
+
+## 5. 参数（Parameters）
+CLI 关键参数：
+- `--data_root`：patch 数据根目录
+- `--patch_id`：可选，指定单 patch
+- `--run_id`：运行标识，`auto` 自动生成
+- `--out_root`：输出目录根（必须写入 `outputs/_work/...`）
+- `--xsec_min_points`：横截最小点数阈值
+- `--min_support_traj`：最小轨迹支持数阈值
+
+确定性默认参数（实现内冻结）：
 - `TRAJ_XSEC_HIT_BUFFER_M = 0.5`
 - `TRAJ_XSEC_DEDUP_GAP_M = 2.0`
 - `MIN_SUPPORT_TRAJ = 2`
@@ -43,119 +92,28 @@ Patch root (default under `data/synth_local/<patch_id>/`):
 - `CONF_W3_SMOOTH = 0.2`
 - `ROAD_MAX_VERTICES = 2000`
 
-## 4. Outputs
-Per patch output dir:
-- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/Road.geojson`
-- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/metrics.json`
-- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/intervals.json`
-- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/summary.txt`
-- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/gate.json`
+## 6. 门禁与评分规则
+Hard gate（任一命中即 `overall_pass=false`）：
+- `CENTER_ESTIMATE_EMPTY`
+- `NON_RC_IN_BETWEEN`
+- `MULTI_ROAD_SAME_PAIR`
+- `ENDPOINT_NOT_ON_XSEC`
+- 任一 road 出现 `src_nodeid == dst_nodeid`
 
-### 4.1 Road.geojson
-- Feature geometry: `LineString`
-- MUST properties:
-  - `road_id:string`
-  - `src_nodeid:int64`
-  - `dst_nodeid:int64`
-  - `direction:string` (`"src->dst"`)
-  - `length_m:float`
-  - `support_traj_count:int`
-  - `conf:float` (0..1)
-  - `hard_anomaly:bool`
-  - `soft_issue_flags:string[]`
-- SHOULD properties:
-  - `src_type:string` (`diverge|merge|unknown|non_rc`)
-  - `dst_type:string`
-  - `stable_offset_m_src:float|null`
-  - `stable_offset_m_dst:float|null`
-  - `center_sample_coverage:float`
-  - `width_med_m:float|null`
-  - `width_p90_m:float|null`
-  - `max_turn_deg_per_10m:float|null`
-  - `repr_traj_ids:string[]` (TopN=5)
-
-### 4.2 metrics.json
-MUST keys:
-- `patch_id`
-- `road_count`
-- `unique_pair_count`
-- `hard_anomaly_count`
-- `soft_issue_count`
-- `low_support_road_count`
-- `avg_conf`
-- `p10_conf`
-- `p50_conf`
-- `center_coverage_avg`
-
-### 4.3 intervals.json
-- `topk: []`
-  - item keys: `road_id, traj_id?, seq_range?, station_range_m?, reason, severity, hint`
-- reason enums:
-  - hard: `MULTI_ROAD_SAME_PAIR`, `NON_RC_IN_BETWEEN`, `CENTER_ESTIMATE_EMPTY`, `ENDPOINT_NOT_ON_XSEC`
-  - soft/info: `LOW_SUPPORT`, `SPARSE_SURFACE_POINTS`, `NO_LB_CONTINUOUS`, `WIGGLY_CENTERLINE`, `OPEN_END`
-
-### 4.4 summary.txt
-MUST include:
-- `overall_pass: true|false`
-- Road 总数 / hard 数 / soft 数
-- hard Top-K
-- soft Top-K
-- params digest + run_id + git sha
-- size-guard tail line: `Truncated: <true|false> (reason=<...>)`
-
-### 4.5 gate.json
-- `overall_pass:bool`
-- `hard_breakpoints:[]`
-- `soft_breakpoints:[]`
-- `params_digest:string`
-- `version:string`
-
-## 5. Hard/Soft Gate Rules
-### 5.1 Hard gate (any hit => `overall_pass=false`)
-- Invalid or empty centerline for a candidate pair: `CENTER_ESTIMATE_EMPTY`
-- Non-RC node used as RC pair endpoint / between candidate transitions: `NON_RC_IN_BETWEEN`
-- Multiple channels detected for same pair: `MULTI_ROAD_SAME_PAIR`
-- Endpoint not on target cross-section within tolerance: `ENDPOINT_NOT_ON_XSEC`
-- Any road with `src_nodeid == dst_nodeid`
-
-### 5.2 Soft gate (non-failing, must be reported)
+Soft gate（不直接失败，但必须报告）：
 - `LOW_SUPPORT`
 - `SPARSE_SURFACE_POINTS`
 - `NO_LB_CONTINUOUS`
 - `WIGGLY_CENTERLINE`
 - `OPEN_END`
 
-## 6. Deterministic Confidence
-For each road:
+置信度：
 - `f_support = 1 - exp(-support_traj_count / 2)`
 - `f_coverage = center_sample_coverage`
 - `f_smooth = clamp01(1 - max_turn_deg_per_10m / TURN_LIMIT_DEG_PER_10M)`
 - `conf = clamp01(CONF_W1_SUPPORT*f_support + CONF_W2_COVERAGE*f_coverage + CONF_W3_SMOOTH*f_smooth)`
 
-Hard anomaly roads still compute `conf`, but gate fails the patch.
-
-## 7. CLI Contract
-- Module CLI: `python3 -m highway_topo_poc.modules.t05_topology_between_rc.run`
-- Key args:
-  - `--data_root`
-  - `--patch_id`
-  - `--run_id`
-  - `--out_root`
-  - `--xsec_min_points`
-  - `--min_support_traj`
-
-## 8. 入口（Entrypoint）
-- `python -m highway_topo_poc.modules.t05_topology_between_rc.run`
-
-## 9. 参数（Parameters）
-- `--data_root`：patch 数据根目录
-- `--patch_id`：可选，指定单 patch
-- `--run_id`：运行标识，`auto` 自动生成
-- `--out_root`：输出目录根，必须写入 `outputs/_work/...`
-- `--xsec_min_points`：横断面最小点数阈值
-- `--min_support_traj`：最小轨迹支持数阈值
-
-## 10. 示例（Example）
+## 7. 示例（Example）
 在 repo root 执行：
 
 ```bash
@@ -169,7 +127,13 @@ python -m highway_topo_poc.modules.t05_topology_between_rc.run \
   --min_support_traj 1
 ```
 
-## 11. 验收（Accept）
+## 8. 验收（Accept）
 - 命令退出码为 `0`
-- `${OUT_ROOT}/smoke_min/patches/<patch_id>/` 下存在 `Road.geojson`、`metrics.json`、`intervals.json`、`summary.txt`、`gate.json`
-- `gate.json` 必须包含 `overall_pass` 字段，且 `Road.geojson` 为合法 GeoJSON
+- `${OUT_ROOT}/smoke_min/patches/<patch_id>/` 下存在：
+  - `Road.geojson`
+  - `metrics.json`
+  - `intervals.json`
+  - `summary.txt`
+  - `gate.json`
+- `gate.json` 必须包含 `overall_pass`
+- `Road.geojson` 必须是合法 GeoJSON
