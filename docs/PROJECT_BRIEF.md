@@ -13,6 +13,17 @@
 - t05：RC 路口间拓扑生产（细节放子 Agent）
 - t00：合成/模拟测试数据生成（modules/t00_synth_data/；用于外网回归与 CI）
 
+## 2.1 Patch Vector 标准（摘要）
+- `LaneBoundary.geojson`
+- `DivStripZone.geojson`（替代 `gorearea.geojson`）
+- `Node.geojson`（Point FeatureCollection）
+  - `properties.Kind`: int32（bit0=无属性，bit2=交叉路口，bit3=合流路口，bit4=分歧路口）
+  - `properties.mainid`: int64
+  - `properties.id`: int64
+- `intersection_l.geojson`（LineString FeatureCollection）
+  - `properties.nodeid`: int64
+- 主文档只维护标准与产物摘要；模块级接口细节以 `modules/<module>/INTERFACE_CONTRACT.md` 为准。
+
 ## 3. 关键业务背景（全局认知）
 - RC/SW 是两套不同数据：
   - 高精度矢量：精度高但资料缺失

@@ -164,7 +164,9 @@
     *.laz
   Vector/
     LaneBoundary.geojson
-    gorearea.geojson
+    DivStripZone.geojson
+    Node.geojson
+    intersection_l.geojson
   Traj/
     <TrajID>/
       raw_dat_pose.geojson
@@ -175,6 +177,17 @@
   - 轨迹：至少包含顺序信息（t 或 seq）与 Z 可用（用于 t01/t02）
   - 点云：至少 Z 可用；若缺标量轴，允许派生（必须在报告记录派生策略）
   - 矢量：可读取为要素集合（不要求原始即实体化）
+
+### 8.3 Patch Vector 标准产物摘要（v2）
+- `LaneBoundary.geojson`：车道边界（LineString FeatureCollection）
+- `DivStripZone.geojson`：导流带信息（替代旧 `gorearea.geojson`）
+- `Node.geojson`：路口 Node 点信息（Point FeatureCollection）
+  - `properties.Kind`：`int32`（bit0=无属性，bit2=交叉路口，bit3=合流路口，bit4=分歧路口）
+  - `properties.mainid`：`int64`（路口主 nodeid，同值为一组）
+  - `properties.id`：`int64`（当前 node 的 id）
+- `intersection_l.geojson`：分歧/合流路口横截线（LineString FeatureCollection）
+  - `properties.nodeid`：`int64`（对应主 node 的 id）
+- 说明：主文档仅维护标准与产物摘要；模块实现细节与字段严格约束以 `modules/<module>/INTERFACE_CONTRACT.md` 为准。
 
 ---
 
@@ -283,7 +296,7 @@ modules/
 ## 15. 风险、依赖与待澄清项（TBD） 风险、依赖与待澄清项（TBD）
 - RC/SW 的业务定义细化与牵引清单（子 Agent 冻结）
 - 普通矢量与真实分歧点的偏差修正策略（子 Agent 冻结）
-- LaneBoundary / gorearea 字段体系细化（子 Agent 冻结）
+- LaneBoundary / DivStripZone / Node / intersection_l 字段体系细化（子 Agent 冻结）
 - 内网地面分割成熟能力复用方式（后续 skill 化）
 
 ---

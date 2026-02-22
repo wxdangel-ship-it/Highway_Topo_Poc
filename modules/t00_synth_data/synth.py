@@ -13,7 +13,7 @@ from typing import Any
 
 
 MANIFEST_FILENAME = "patch_manifest.json"
-SCHEMA_VERSION = "t00_synth_patch_manifest_v1"
+SCHEMA_VERSION = "t00_synth_patch_manifest_v2"
 
 
 @dataclass(frozen=True)
@@ -237,6 +237,21 @@ def discover_strips(lidar_dir: Path, traj_dir: Path, num_patches: int) -> list[S
 def _write_geojson(path: Path, obj: dict[str, Any]) -> None:
     payload = json.dumps(obj, sort_keys=True, indent=2, ensure_ascii=True) + "\n"
     path.write_text(payload, encoding="utf-8")
+
+
+def write_empty_fc(
+    path: Path,
+    geom_type: str | None = None,
+    properties_schema_hint: dict[str, str] | None = None,
+) -> None:
+    """Write a minimal valid GeoJSON FeatureCollection.
+
+    geom_type/properties_schema_hint are hints for call-site readability and
+    future schema extensions; current file payload intentionally stays minimal.
+    """
+
+    _ = (geom_type, properties_schema_hint)
+    _write_geojson(path, {"type": "FeatureCollection", "features": []})
 
 
 def _deterministic_line_coords(seed: int, patch_int: int, n_points: int = 20) -> list[list[float]]:
@@ -632,12 +647,19 @@ def write_patch(
 
         pointcloud_stub = False
 
-    # Empty vectors
-    empty_fc = {"type": "FeatureCollection", "features": []}
+    # Vector schema v2 skeletons (can be empty but must be valid FeatureCollection files).
     lane_boundary = vec_dir / "LaneBoundary.geojson"
-    gorearea = vec_dir / "gorearea.geojson"
-    _write_geojson(lane_boundary, empty_fc)
-    _write_geojson(gorearea, empty_fc)
+    div_strip_zone = vec_dir / "DivStripZone.geojson"
+    node_geojson = vec_dir / "Node.geojson"
+    intersection_l = vec_dir / "intersection_l.geojson"
+    write_empty_fc(lane_boundary, "LineString")
+    write_empty_fc(div_strip_zone)
+    write_empty_fc(
+        node_geojson,
+        "Point",
+        {"Kind": "int32", "mainid": "int64", "id": "int64"},
+    )
+    write_empty_fc(intersection_l, "LineString", {"nodeid": "int64"})
 
     raw_pose = traj_dir / "raw_dat_pose.geojson"
 
@@ -691,7 +713,9 @@ def write_patch(
         "paths": {
             "pointcloud_laz": pointcloud_files,
             "vector_lane_boundary": rel(lane_boundary),
-            "vector_gorearea": rel(gorearea),
+            "vector_div_strip_zone": rel(div_strip_zone),
+            "vector_node": rel(node_geojson),
+            "vector_intersection_l": rel(intersection_l),
             "traj_raw_dat_pose": rel(raw_pose),
         },
         "source": {

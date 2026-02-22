@@ -92,21 +92,55 @@ def test_t00_synth_manifest_schema_min(tmp_path: Path) -> None:
         for k in [
             "pointcloud_laz",
             "vector_lane_boundary",
-            "vector_gorearea",
+            "vector_div_strip_zone",
+            "vector_node",
+            "vector_intersection_l",
             "traj_raw_dat_pose",
         ]:
             assert k in paths
 
         lane = paths["vector_lane_boundary"]
-        gore = paths["vector_gorearea"]
+        div_strip_zone = paths["vector_div_strip_zone"]
+        node = paths["vector_node"]
+        intersection_l = paths["vector_intersection_l"]
         traj = paths["traj_raw_dat_pose"]
         laz_list = paths["pointcloud_laz"]
 
         assert _resolve(out_dir, lane).is_file()
-        assert _resolve(out_dir, gore).is_file()
+        assert _resolve(out_dir, div_strip_zone).is_file()
+        assert _resolve(out_dir, node).is_file()
+        assert _resolve(out_dir, intersection_l).is_file()
         assert _resolve(out_dir, traj).is_file()
         assert all(_resolve(out_dir, r).is_file() for r in laz_list)
 
+
+
+def test_t00_vector_schema_v2(tmp_path: Path) -> None:
+    out_dir = tmp_path / "out_v2"
+    cfg = SynthConfig(seed=0, num_patches=1, out_dir=out_dir, source_mode="synthetic")
+    manifest = run_synth(cfg)
+
+    patch = manifest["patches"][0]
+    paths = patch["paths"]
+
+    div_strip_zone = _resolve(out_dir, paths["vector_div_strip_zone"])
+    node = _resolve(out_dir, paths["vector_node"])
+    intersection_l = _resolve(out_dir, paths["vector_intersection_l"])
+
+    assert div_strip_zone.is_file()
+    assert node.is_file()
+    assert intersection_l.is_file()
+
+    # New schema output must not include the removed gorearea file.
+    assert not (div_strip_zone.parent / "gorearea.geojson").exists()
+
+    node_obj = json.loads(node.read_text(encoding="utf-8"))
+    assert node_obj.get("type") == "FeatureCollection"
+    assert isinstance(node_obj.get("features"), list)
+
+    xsec_obj = json.loads(intersection_l.read_text(encoding="utf-8"))
+    assert xsec_obj.get("type") == "FeatureCollection"
+    assert isinstance(xsec_obj.get("features"), list)
 
 
 def test_local_patch_id_prefers_drive_id_over_date(tmp_path: Path) -> None:

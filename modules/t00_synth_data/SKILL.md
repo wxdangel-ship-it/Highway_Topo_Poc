@@ -12,7 +12,9 @@
     *.laz
   Vector/
     LaneBoundary.geojson
-    gorearea.geojson
+    DivStripZone.geojson
+    Node.geojson
+    intersection_l.geojson
   Traj/
     <TrajID>/
       raw_dat_pose.geojson
