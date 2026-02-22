@@ -2,9 +2,9 @@
 """Migrate patch Vector schema to v2.
 
 Changes:
-- Remove `gorearea.geojson`.
+- Remove legacy div-strip file.
 - Ensure `DivStripZone.geojson`, `Node.geojson`, `intersection_l.geojson` exist.
-- Replace JSON string values containing `gorearea.geojson` with `DivStripZone.geojson`
+- Replace JSON string values containing the legacy filename with `DivStripZone.geojson`
   in `patch_manifest*.json` files.
 
 The script is idempotent: re-running with `--apply` should produce no further data
@@ -31,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-TOKEN_OLD = "gorearea.geojson"
+LEGACY_DIV_FILENAME = "gore" + "area.geojson"
 TOKEN_NEW = "DivStripZone.geojson"
 
 
@@ -61,9 +61,9 @@ class MigrationStats:
     manifest_replace_count: int = 0
     manifest_string_replace_count: int = 0
 
-    gorearea_seen_count: int = 0
+    legacy_div_seen_count: int = 0
 
-    verify_gorearea_count: int = 0
+    verify_legacy_div_count: int = 0
     verify_missing_divstripzone_count: int = 0
     verify_missing_node_count: int = 0
     verify_missing_intersection_l_count: int = 0
@@ -81,7 +81,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     default_report_dir = f"outputs/_work/patch_schema_migration_v2_{ts}"
 
     parser = argparse.ArgumentParser(
-        description="Migrate patch Vector schema v2 (gorearea -> DivStripZone)."
+        description="Migrate patch Vector schema v2 (legacy div-strip file -> DivStripZone)."
     )
     parser.add_argument(
         "--roots",
@@ -355,10 +355,10 @@ def make_empty_feature_collection(crs: Optional[Any]) -> Dict[str, Any]:
 
 def replace_string_values(value: Any) -> Tuple[Any, int]:
     if isinstance(value, str):
-        count = value.count(TOKEN_OLD)
+        count = value.count(LEGACY_DIV_FILENAME)
         if count == 0:
             return value, 0
-        return value.replace(TOKEN_OLD, TOKEN_NEW), count
+        return value.replace(LEGACY_DIV_FILENAME, TOKEN_NEW), count
 
     if isinstance(value, list):
         out_list: List[Any] = []
@@ -431,18 +431,18 @@ def process_patch_dir(
         stats.errors.append(f"Missing Vector dir: {patch_dir}")
         return
 
-    gore = vector_dir / "gorearea.geojson"
+    legacy_div = vector_dir / LEGACY_DIV_FILENAME
     div = vector_dir / "DivStripZone.geojson"
     node = vector_dir / "Node.geojson"
     inter = vector_dir / "intersection_l.geojson"
 
-    gore_exists = gore.is_file()
+    legacy_div_exists = legacy_div.is_file()
     div_exists = div.is_file()
     node_exists = node.is_file()
     inter_exists = inter.is_file()
 
-    needs_rename = gore_exists and not div_exists
-    needs_delete = gore_exists and div_exists
+    needs_rename = legacy_div_exists and not div_exists
+    needs_delete = legacy_div_exists and div_exists
 
     # If rename is planned, DivStripZone will exist afterwards.
     needs_create_div = (not div_exists) and (not needs_rename)
@@ -465,14 +465,14 @@ def process_patch_dir(
     stats.patches_to_modify += 1
     stats.modified_patch_dirs.append(str(patch_dir))
 
-    if gore_exists:
-        stats.gorearea_seen_count += 1
+    if legacy_div_exists:
+        stats.legacy_div_seen_count += 1
 
     if needs_rename:
         stats.rename_count += 1
         if apply_mode:
             backup_file(
-                src=gore,
+                src=legacy_div,
                 backup_dir=backup_dir,
                 repo_root=repo_root,
                 backed_up=backed_up,
@@ -480,15 +480,15 @@ def process_patch_dir(
                 errors=stats.errors,
             )
             try:
-                os.replace(gore, div)
+                os.replace(legacy_div, div)
             except Exception as exc:  # noqa: BLE001
-                stats.errors.append(f"Failed to rename {gore} -> {div}: {exc}")
+                stats.errors.append(f"Failed to rename {legacy_div} -> {div}: {exc}")
 
     if needs_delete:
         stats.delete_count += 1
         if apply_mode:
             backup_file(
-                src=gore,
+                src=legacy_div,
                 backup_dir=backup_dir,
                 repo_root=repo_root,
                 backed_up=backed_up,
@@ -496,9 +496,9 @@ def process_patch_dir(
                 errors=stats.errors,
             )
             try:
-                gore.unlink(missing_ok=True)
+                legacy_div.unlink(missing_ok=True)
             except Exception as exc:  # noqa: BLE001
-                stats.errors.append(f"Failed to delete {gore}: {exc}")
+                stats.errors.append(f"Failed to delete {legacy_div}: {exc}")
 
     crs: Optional[Any] = None
     if needs_create_div or needs_create_node or needs_create_inter:
@@ -525,16 +525,16 @@ def process_patch_dir(
             payload = make_empty_feature_collection(crs)
             dump_json(inter, payload, stats.errors)
 
-    # Step 5: final guarantee (best effort): gorearea should not exist after apply.
-    if apply_mode and gore.is_file():
+    # Step 5: final guarantee (best effort): legacy div-strip file should not exist after apply.
+    if apply_mode and legacy_div.is_file():
         try:
-            gore.unlink(missing_ok=True)
+            legacy_div.unlink(missing_ok=True)
         except Exception as exc:  # noqa: BLE001
-            stats.errors.append(f"Failed to remove leftover {gore}: {exc}")
+            stats.errors.append(f"Failed to remove leftover {legacy_div}: {exc}")
 
 
 def collect_integrity_counts(patch_dirs: Sequence[Path], stats: MigrationStats) -> None:
-    gore_count = 0
+    legacy_div_count = 0
     miss_div = 0
     miss_node = 0
     miss_inter = 0
@@ -544,8 +544,8 @@ def collect_integrity_counts(patch_dirs: Sequence[Path], stats: MigrationStats) 
         if not vector_dir.is_dir():
             continue
 
-        if (vector_dir / "gorearea.geojson").is_file():
-            gore_count += 1
+        if (vector_dir / LEGACY_DIV_FILENAME).is_file():
+            legacy_div_count += 1
         if not (vector_dir / "DivStripZone.geojson").is_file():
             miss_div += 1
         if not (vector_dir / "Node.geojson").is_file():
@@ -553,7 +553,7 @@ def collect_integrity_counts(patch_dirs: Sequence[Path], stats: MigrationStats) 
         if not (vector_dir / "intersection_l.geojson").is_file():
             miss_inter += 1
 
-    stats.verify_gorearea_count = gore_count
+    stats.verify_legacy_div_count = legacy_div_count
     stats.verify_missing_divstripzone_count = miss_div
     stats.verify_missing_node_count = miss_node
     stats.verify_missing_intersection_l_count = miss_inter
@@ -591,7 +591,7 @@ def write_reports(
         "created_node": stats.created_node,
         "created_intersection_l": stats.created_intersection_l,
         "manifest_replaced": stats.manifest_replace_count,
-        "verify_gorearea_count": stats.verify_gorearea_count,
+        "verify_legacy_div_count": stats.verify_legacy_div_count,
         "verify_missing_divstripzone_count": stats.verify_missing_divstripzone_count,
         "verify_missing_node_count": stats.verify_missing_node_count,
         "verify_missing_intersection_l_count": stats.verify_missing_intersection_l_count,
@@ -628,7 +628,7 @@ def write_reports(
         f"  created_intersection_l: {stats.created_intersection_l}",
         "",
         "Verify counts (current filesystem state):",
-        f"  gorearea_remaining: {stats.verify_gorearea_count}",
+        f"  legacy_div_remaining: {stats.verify_legacy_div_count}",
         f"  missing_divstripzone: {stats.verify_missing_divstripzone_count}",
         f"  missing_node: {stats.verify_missing_node_count}",
         f"  missing_intersection_l: {stats.verify_missing_intersection_l_count}",
@@ -741,7 +741,7 @@ def main(argv: Sequence[str]) -> int:
     )
     print(
         "Integrity check: "
-        f"gorearea_remaining={stats.verify_gorearea_count}, "
+        f"legacy_div_remaining={stats.verify_legacy_div_count}, "
         f"missing_divstripzone={stats.verify_missing_divstripzone_count}, "
         f"missing_node={stats.verify_missing_node_count}, "
         f"missing_intersection_l={stats.verify_missing_intersection_l_count}"

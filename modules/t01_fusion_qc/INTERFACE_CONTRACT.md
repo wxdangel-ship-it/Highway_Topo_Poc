@@ -61,3 +61,20 @@
 - bin 区间字段解释：
   - start_bin 包含
   - end_bin 不包含
+
+## 5. 示例（Example）
+在 repo root 执行：
+
+```bash
+RUN_ID="$(date +%Y%m%d_%H%M%S)"
+OUT_DIR="outputs/_work/t01_fusion_qc/${RUN_ID}"
+python -m highway_topo_poc.modules.t01_fusion_qc.cli \
+  --data_root data/synth_local \
+  --out_dir "${OUT_DIR}" \
+  --max_patches 1
+```
+
+## 6. 验收（Accept）
+- 命令退出码为 `0`
+- `${OUT_DIR}` 下产物齐全：`metrics.json`、`intervals.json`、`summary.txt`
+- `metrics.json` 中 `module == "t01_fusion_qc"` 且 `results` 非空

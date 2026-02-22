@@ -143,3 +143,33 @@ Hard anomaly roads still compute `conf`, but gate fails the patch.
   - `--out_root`
   - `--xsec_min_points`
   - `--min_support_traj`
+
+## 8. 入口（Entrypoint）
+- `python -m highway_topo_poc.modules.t05_topology_between_rc.run`
+
+## 9. 参数（Parameters）
+- `--data_root`：patch 数据根目录
+- `--patch_id`：可选，指定单 patch
+- `--run_id`：运行标识，`auto` 自动生成
+- `--out_root`：输出目录根，必须写入 `outputs/_work/...`
+- `--xsec_min_points`：横断面最小点数阈值
+- `--min_support_traj`：最小轨迹支持数阈值
+
+## 10. 示例（Example）
+在 repo root 执行：
+
+```bash
+RUN_ID="$(date +%Y%m%d_%H%M%S)"
+OUT_ROOT="outputs/_work/t05_topology_between_rc/${RUN_ID}"
+python -m highway_topo_poc.modules.t05_topology_between_rc.run \
+  --data_root data/synth_local \
+  --run_id smoke_min \
+  --out_root "${OUT_ROOT}" \
+  --xsec_min_points 50 \
+  --min_support_traj 1
+```
+
+## 11. 验收（Accept）
+- 命令退出码为 `0`
+- `${OUT_ROOT}/smoke_min/patches/<patch_id>/` 下存在 `Road.geojson`、`metrics.json`、`intervals.json`、`summary.txt`、`gate.json`
+- `gate.json` 必须包含 `overall_pass` 字段，且 `Road.geojson` 为合法 GeoJSON

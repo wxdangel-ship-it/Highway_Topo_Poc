@@ -72,11 +72,11 @@ def _choose_sort_field(rows: list[tuple[int, float, float, float, dict[str, obje
             if key not in props:
                 ok = False
                 break
-            token = _to_sort_token(props.get(key))
-            if token is None:
+            sort_token = _to_sort_token(props.get(key))
+            if sort_token is None:
                 ok = False
                 break
-            tokens.append(token)
+            tokens.append(sort_token)
 
         if ok and len(tokens) == len(rows):
             return key

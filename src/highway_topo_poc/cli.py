@@ -101,7 +101,11 @@ def _cmd_synth(args: argparse.Namespace) -> int:
     # Import locally to keep core CLI lightweight.
     import os
 
-    from modules.t00_synth_data.synth import SynthConfig, normalize_input_path, run_synth
+    from highway_topo_poc.modules.t00_synth_data.synth import (
+        SynthConfig,
+        normalize_input_path,
+        run_synth,
+    )
 
     out_dir = normalize_input_path(args.out_dir)
 

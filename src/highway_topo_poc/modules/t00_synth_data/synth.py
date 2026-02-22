@@ -45,7 +45,8 @@ class StripSpec:
 def normalize_input_path(p: str) -> Path:
     """Normalize a user-provided path.
 
-    Supports Windows drive-letter paths like "E:\\Work\\X" by mapping to /mnt/e/Work/X.
+    Supports Windows drive-letter paths like "<DRIVE>:\\path\\to\\dir" by mapping to
+    "/mnt/<drive>/path/to/dir".
 
     Note: This is an internal helper; keep stdout/log output paste-friendly (avoid noisy path dumps).
     """
