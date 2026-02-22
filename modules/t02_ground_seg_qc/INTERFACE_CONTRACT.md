@@ -67,6 +67,34 @@ run_export(
 - 仅改 `classification` 字段，其它字段保持不变。
 - `.laz` 写出失败时自动 fallback 到 `.las` 并记录原因。
 
+### `run_batch(...)`（multilayer_clean_and_classify）
+```python
+run_batch(
+    data_root: str | Path,
+    out_root: str | Path = "outputs/_work/t02_ground_seg_qc",
+    run_id: str = "auto",
+    resume: bool = True,
+    workers: int = 1,
+    chunk_points: int = 2_000_000,
+    ref_grid_m: float = 5.0,
+    ground_grid_m: float = 1.0,
+    ground_above_margin_m: float = 0.08,
+    layer_band_m: float = 2.0,
+    suspect_far_ratio_gate: float = 0.03,
+    suspect_min_far_points: int = 2000,
+    min_total_points_per_cell: int = 5000,
+    min_cluster_cells: int = 200,
+    out_format: str = "laz",
+    write_full_tagged: bool = True,
+    verify: bool = True,
+) -> dict
+```
+
+- 入口模块：`highway_topo_poc.modules.t02_ground_seg_qc.batch_multilayer_clean_and_classify`。
+- 参考面由同 patch 全部 Traj 合并构建，Traj 未覆盖 cell 默认不删。
+- 删除仅在“异层密集连通簇”内触发，且必须落在异层面带宽 `layer_band_m` 内。
+- 输出两份点云：`cleaned_classified`（删点后）与 `full_tagged`（全点审计，removed=`class 12`）。
+
 ## CLI
 
 ```bash
@@ -103,6 +131,27 @@ python -m highway_topo_poc.modules.t02_ground_seg_qc.export_classified_cloud \
   --verify true
 ```
 
+```bash
+python -m highway_topo_poc.modules.t02_ground_seg_qc.batch_multilayer_clean_and_classify \
+  --data_root data/synth_local \
+  --out_root outputs/_work/t02_ground_seg_qc \
+  --run_id auto \
+  --resume true \
+  --workers 1 \
+  --chunk_points 2000000 \
+  --ref_grid_m 5.0 \
+  --ground_grid_m 1.0 \
+  --ground_above_margin_m 0.08 \
+  --layer_band_m 2.0 \
+  --suspect_far_ratio_gate 0.03 \
+  --suspect_min_far_points 2000 \
+  --min_total_points_per_cell 5000 \
+  --min_cluster_cells 200 \
+  --out_format laz \
+  --write_full_tagged true \
+  --verify true
+```
+
 参数：
 - `--data_root`
 - `--patch`
@@ -120,6 +169,15 @@ python -m highway_topo_poc.modules.t02_ground_seg_qc.export_classified_cloud \
 - `--non_ground_class`
 - `--out_format` (`laz/las`)
 - `--verify` (`true/false`)
+- `--ref_grid_m`
+- `--ground_grid_m`
+- `--ground_above_margin_m`
+- `--layer_band_m`
+- `--suspect_far_ratio_gate`
+- `--suspect_min_far_points`
+- `--min_total_points_per_cell`
+- `--min_cluster_cells`
+- `--write_full_tagged` (`true/false`)
 
 退出码：
 - `0`：`overall_pass=True`
@@ -134,6 +192,11 @@ python -m highway_topo_poc.modules.t02_ground_seg_qc.export_classified_cloud \
 `export_classified_cloud` 退出码：
 - `0`：全部 patch 导出与校验通过
 - `2`：导出流程完成但存在 fail patch
+- `1`：运行异常
+
+`batch_multilayer_clean_and_classify` 退出码：
+- `0`：全部 patch 清理/分类/校验通过
+- `2`：批处理完成但存在 fail patch
 - `1`：运行异常
 
 ## 输出目录结构
@@ -177,6 +240,20 @@ outputs/_work/t02_ground_seg_qc/<run_id>/
       merged_classified.las    # fallback when laz backend unavailable
 ```
 
+```text
+outputs/_work/t02_ground_seg_qc/<run_id>/
+  multilayer_manifest.jsonl    # required
+  multilayer_summary.json      # required
+  multilayer_clean/
+    <patch_key>/
+      merged_cleaned_classified.laz/.las  # required
+      merged_full_tagged.laz/.las         # optional (write_full_tagged=true)
+      patch_stats.json                    # required
+      ref_surface_stats.json              # required
+      overlap_cells_report.json           # required
+      clean_pass2_stats.json              # required
+```
+
 ## ground_cache_manifest.jsonl（每行字段）
 - `patch_key`
 - `points_path`
@@ -205,6 +282,28 @@ outputs/_work/t02_ground_seg_qc/<run_id>/
 - `overall_pass`
 - `reason`
 - `output_dir`
+
+## multilayer_manifest.jsonl（每行字段）
+- `patch_key`
+- `patch_dir`
+- `points_path`
+- `traj_count`
+- `out_cleaned_path`
+- `out_full_tagged_path`
+- `out_format`
+- `n_in`
+- `n_kept`
+- `n_removed`
+- `removed_ratio`
+- `pass_fail` (`pass`/`fail`)
+- `overall_pass`
+- `reason`
+- `output_dir`
+
+## classification 约定（multilayer）
+- `2`: ground
+- `1`: non-ground
+- `12`: overlap_removed（仅 `full_tagged`，`cleaned` 中不会出现 `12`，因为 removed 点已剔除）
 
 ## metrics.json（关键字段）
 - traj-clearance：`coverage`, `outlier_ratio`, `p50/p90/p99`

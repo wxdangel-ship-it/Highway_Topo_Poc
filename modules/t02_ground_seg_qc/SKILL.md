@@ -18,6 +18,31 @@
   - 若 `.laz` 写出因压缩 backend 失败，自动回退 `.las`；
   - 在 `classified_manifest.jsonl` 与 `classified_summary.json` 记录 fallback 原因与计数。
 
+## multilayer_clean_and_classify（Traj 合并参考面 + 多层簇护栏）
+- 输入：patch 点云 `merged.laz/las` + 同 patch 所有 Traj（优先 `Traj/*/raw_dat_pose.geojson`）。
+- 参考面构建：
+  - 以点云 header `minX/minY` 为网格原点；
+  - `ref_grid_m` cell 内 `ref_z = median(traj_z)`；
+  - `spread = robust_sigma = 1.4826*MAD`（样本过少时 `spread=0.1`）。
+- 自适应非对称阈值（每 cell）：
+  - `dz_up_keep = clamp(2.0 + 3.0*spread, 2.0, 8.0)`；
+  - `dz_down_keep = clamp(0.8 + 2.0*spread, 0.3, 1.0)`。
+- 检测阈值（Pass1，较强远离判定）：
+  - `dz_up_detect = max(6.0, dz_up_keep + 3.0)`；
+  - `dz_down_detect = max(4.0, dz_down_keep + 2.0)`。
+- 删除护栏（必须同时满足）：
+  - cell 属于“远离 ref_z 的密集候选”且在 8 邻域大连通簇内；
+  - 点落在异层面带宽内（`layer_band_m`）；
+  - 高层：`dz > dz_up_keep && abs(dz - mean_dz_high)<=layer_band_m`
+  - 低层：`dz < -dz_down_keep && abs(dz - mean_dz_low)<=layer_band_m`
+- 保留口径：
+  - Traj 未覆盖 cell 默认 `keep`（不删）；
+  - 稀疏路侧高物体通常不会形成密集簇，且若不贴近异层面也不会删。
+- 输出：
+  - `merged_cleaned_classified.<laz|las>`：仅 kept 点，`class=2/1`
+  - `merged_full_tagged.<laz|las>`：全点，removed 点 `class=12`
+  - 伴随统计：`patch_stats.json`、`ref_surface_stats.json`、`overlap_cells_report.json`、`clean_pass2_stats.json`
+
 ## 地面分类路径（优先级）
 1. `las_classification`
 - 若 LAS/LAZ 存在 `classification` 且 `class==2` 非空，则直接按 `class==2` 生成全点标签。
