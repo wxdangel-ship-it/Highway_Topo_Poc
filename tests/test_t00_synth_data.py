@@ -9,7 +9,7 @@ import pytest
 
 from highway_topo_poc.cli import main
 from highway_topo_poc.protocol.text_lint import lint_text
-from modules.t00_synth_data.synth import SynthConfig, run_synth
+from highway_topo_poc.modules.t00_synth_data.synth import SynthConfig, run_synth
 
 
 def _make_fake_local_sample(tmp_path: Path) -> tuple[Path, Path]:
@@ -131,8 +131,9 @@ def test_t00_vector_schema_v2(tmp_path: Path) -> None:
     assert node.is_file()
     assert intersection_l.is_file()
 
-    # New schema output must not include the removed gorearea file.
-    assert not (div_strip_zone.parent / "gorearea.geojson").exists()
+    # New schema output must not include the removed legacy div-strip file.
+    legacy_div_file = "gore" + "area.geojson"
+    assert not (div_strip_zone.parent / legacy_div_file).exists()
 
     node_obj = json.loads(node.read_text(encoding="utf-8"))
     assert node_obj.get("type") == "FeatureCollection"

@@ -15,7 +15,7 @@
 
 ## 2.1 Patch Vector 标准（摘要）
 - `LaneBoundary.geojson`
-- `DivStripZone.geojson`（替代 `gorearea.geojson`）
+- `DivStripZone.geojson`（导流带标准图层）
 - `Node.geojson`（Point FeatureCollection）
   - `properties.Kind`: int32（bit0=无属性，bit2=交叉路口，bit3=合流路口，bit4=分歧路口）
   - `properties.mainid`: int64

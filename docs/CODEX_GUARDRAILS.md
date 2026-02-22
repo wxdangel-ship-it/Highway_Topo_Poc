@@ -37,9 +37,9 @@
 
 ## 1. 路径硬约束
 - 本项目必须放在 Windows 的 E: 盘下
-- WSL 下对应路径通常为：/mnt/e/...
+- WSL 下对应路径通常为：`/mnt/<drive>/...`
 - 推荐项目根目录：
-  /mnt/e/Highway_Topo_Poc/
+  ${REPO_ROOT}
 
 ## 2. 路径相关注意事项
 - 代码与配置尽量使用相对路径

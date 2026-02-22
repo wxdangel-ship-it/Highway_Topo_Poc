@@ -14,7 +14,7 @@
 2) 明确：外传文本允许 **分位数/误差数值（方案A：p50/p90/p99）**，但尽量只保留摘要。
 3) 明确：允许用 **索引化位置（bin 区间）**做问题定位（便于压缩与对比）；文本回传只要求可粘贴（体积可控、结构清晰）。
 4) 明确：子模块接口契约（INTERFACE_CONTRACT）放到子 Agent / 子目录内，不在本 SPEC 全局冻结细节字段。
-5) 新增：工作目录约束 —— 项目需放在 Windows E: 盘（WSL 下通常为 /mnt/e/...）。
+5) 新增：工作目录约束 —— 项目需放在 Windows E: 盘（WSL 下通常为 `/mnt/<drive>/...`）。
 
 ---
 
@@ -180,7 +180,7 @@
 
 ### 8.3 Patch Vector 标准产物摘要（v2）
 - `LaneBoundary.geojson`：车道边界（LineString FeatureCollection）
-- `DivStripZone.geojson`：导流带信息（替代旧 `gorearea.geojson`）
+- `DivStripZone.geojson`：导流带信息（v2 标准命名）
 - `Node.geojson`：路口 Node 点信息（Point FeatureCollection）
   - `properties.Kind`：`int32`（bit0=无属性，bit2=交叉路口，bit3=合流路口，bit4=分歧路口）
   - `properties.mainid`：`int64`（路口主 nodeid，同值为一组）
@@ -273,7 +273,7 @@ modules/
 - 记录：module_version、schema_version、配置摘要（digest）、随机种子（如涉及随机）
 - 支持：按模块运行、按 patch 列表批量运行、失败不中断（可配置）
 - 运行环境：WSL + Python
-- 工作区约束：项目必须放在 Windows E: 盘（WSL 下通常 /mnt/e/...）；外传文本只要求可粘贴（体积可控）
+- 工作区约束：项目必须放在 Windows E: 盘（WSL 下通常 `/mnt/<drive>/...`）；外传文本只要求可粘贴（体积可控）
 
 ---
 
@@ -311,7 +311,7 @@ run:
 
 provider:
   type: "file_patch"
-  data_root: "/mnt/e/..."        # 内网本地路径示意；外传文本如引用路径请注意体积与噪声
+  data_root: "${DATA_ROOT}"      # 由运行环境注入；外传文本建议使用变量化路径
   patch_manifest: "configs/patch_list.json"
 
 modules:

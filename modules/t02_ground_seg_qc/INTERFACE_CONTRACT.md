@@ -331,3 +331,22 @@ outputs/_work/t02_ground_seg_qc/<run_id>/
 - 新增 `xsec_intervals.json` 与 ground 工件为本阶段 required。
 - 新增 ground_cache 为旁路缓存能力（optional downstream input），不覆盖原始点云，不改其它模块契约。
 - 新增 classified_cloud 为旁路导出能力（optional downstream artifact），不覆盖原始输入点云。
+
+## 示例（Example）
+在 repo root 执行：
+
+```bash
+RUN_ID="$(date +%Y%m%d_%H%M%S)"
+OUT_ROOT="outputs/_work/t02_ground_seg_qc/${RUN_ID}"
+python -m highway_topo_poc.modules.t02_ground_seg_qc.run \
+  --data_root data/synth_local \
+  --patch auto \
+  --run_id smoke_min \
+  --out_root "${OUT_ROOT}" \
+  --auto_tune true
+```
+
+## 验收（Accept）
+- 命令退出码为 `0` 或 `2`（`2` 表示流程完成但 `overall_pass=False`）
+- `${OUT_ROOT}/smoke_min/` 下存在 patch 输出目录，且含 `metrics.json` 与 `summary.txt`
+- 若输出 `xsec_intervals.json`，文件需可解析且包含 `intervals` 字段
