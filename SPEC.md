@@ -198,7 +198,7 @@
     - `3`：逆行
   - `properties.snodeid`：`int64`（起点 `nodeid`）
   - `properties.enodeid`：`int64`（终点 `nodeid`）
-- 仍保留：`LaneBoundary/DivStripZone/Node/intersection_l`；不允许回退到 legacy `gorearea` 命名。
+- 仍保留：`LaneBoundary/DivStripZone/Node/intersection_l`；不允许回退到旧版导流带命名。
 - `Tiles/`：卫星瓦片输入目录（XYZ tiles）
   - 结构：`Tiles/<z>/<x>/<y>.<ext>`，`ext` 推荐 `png/jpg/webp`，实现需兼容常见后缀。
   - 当前阶段目录可为空，但 `Tiles/` 目录必须存在。
