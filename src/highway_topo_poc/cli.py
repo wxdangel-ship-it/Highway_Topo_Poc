@@ -143,6 +143,7 @@ def _cmd_synth(args: argparse.Namespace) -> int:
         source_mode=mode,
         pointcloud_mode=args.pointcloud_mode,
         traj_mode=args.traj_mode,
+        tiles_mode=args.tiles_mode,
     )
 
     manifest = run_synth(cfg)
@@ -182,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     p_synth.add_argument("--source-mode", choices=["auto", "local", "synthetic"], default="auto")
     p_synth.add_argument("--pointcloud-mode", choices=["stub", "link", "copy", "merge"], default="stub")
     p_synth.add_argument("--traj-mode", choices=["synthetic", "copy", "convert"], default="synthetic")
+    p_synth.add_argument("--tiles-mode", choices=["mkdir_empty", "copy_if_exists"], default="mkdir_empty")
     p_synth.set_defaults(func=_cmd_synth)
 
     args = parser.parse_args(argv)

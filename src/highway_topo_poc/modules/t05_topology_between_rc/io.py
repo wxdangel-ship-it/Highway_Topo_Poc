@@ -51,6 +51,9 @@ class PatchInputs:
     node_kind_map: dict[int, int]
     trajectories: list[TrajectoryData]
     point_cloud_path: Path | None
+    road_prior_path: Path | None
+    tiles_dir: Path | None
+    input_summary: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,8 @@ class PatchProbe:
     has_intersection_file: bool
     has_laneboundary_file: bool
     has_node_file: bool
+    has_road_file: bool
+    has_tiles_dir: bool
     intersection_feature_count: int
     laneboundary_feature_count: int
     trajectory_count: int
@@ -135,6 +140,8 @@ def probe_patch(patch_dir: Path) -> PatchProbe:
     intersection_path = vector_dir / "intersection_l.geojson"
     laneboundary_path = vector_dir / "LaneBoundary.geojson"
     node_path = vector_dir / "Node.geojson"
+    road_path = vector_dir / "Road.geojson"
+    tiles_dir = patch_dir / "Tiles"
 
     intersection_features = _safe_geojson_feature_count(intersection_path)
     laneboundary_features = _safe_geojson_feature_count(laneboundary_path)
@@ -158,6 +165,8 @@ def probe_patch(patch_dir: Path) -> PatchProbe:
         has_intersection_file=intersection_path.is_file(),
         has_laneboundary_file=laneboundary_path.is_file(),
         has_node_file=node_path.is_file(),
+        has_road_file=road_path.is_file(),
+        has_tiles_dir=tiles_dir.is_dir(),
         intersection_feature_count=intersection_features,
         laneboundary_feature_count=laneboundary_features,
         trajectory_count=traj_count,
@@ -179,6 +188,8 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
     intersection_path = vector_dir / "intersection_l.geojson"
     laneboundary_path = vector_dir / "LaneBoundary.geojson"
     node_path = vector_dir / "Node.geojson"
+    road_path = vector_dir / "Road.geojson"
+    tiles_dir = patch_dir / "Tiles"
 
     if not intersection_path.is_file():
         raise InputDataError(f"intersection_l_missing: {intersection_path}")
@@ -208,6 +219,14 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
         node_kind_map=node_kind,
         trajectories=projected_traj,
         point_cloud_path=point_cloud_path,
+        road_prior_path=road_path if road_path.is_file() else None,
+        tiles_dir=tiles_dir if tiles_dir.is_dir() else None,
+        input_summary={
+            "has_road_prior": road_path.is_file(),
+            "has_tiles_dir": tiles_dir.is_dir(),
+            "road_prior_name": "Road.geojson" if road_path.is_file() else None,
+            "tiles_layout": "xyz" if tiles_dir.is_dir() else None,
+        },
     )
 
 
