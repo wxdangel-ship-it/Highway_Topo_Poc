@@ -13,7 +13,9 @@ from typing import Any
 
 
 MANIFEST_FILENAME = "patch_manifest.json"
-SCHEMA_VERSION = "t00_synth_patch_manifest_v2"
+SCHEMA_VERSION = "t00_synth_patch_manifest_v3"
+ROAD_FILENAME = "Road.geojson"
+TILES_DIRNAME = "Tiles"
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,8 @@ class SynthConfig:
     pointcloud_mode: str = "stub"
     # synthetic|copy|convert. copy/convert are only meaningful in local mode.
     traj_mode: str = "synthetic"
+    # mkdir_empty|copy_if_exists. default avoids copying large raster data.
+    tiles_mode: str = "mkdir_empty"
 
 
 @dataclass(frozen=True)
@@ -311,6 +315,77 @@ def _copy_file(dst: Path, src: Path) -> None:
     shutil.copy2(src, dst)
 
 
+def _candidate_source_patch_dirs(spec: StripSpec) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(p: Path | None) -> None:
+        if p is None:
+            return
+        key = str(p.resolve()) if p.exists() else str(p)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(p)
+
+    _add(spec.lidar_strip_dir)
+    _add(spec.lidar_strip_dir.parent if spec.lidar_strip_dir is not None else None)
+    if spec.lidar_strip_dir is not None:
+        _add(spec.lidar_strip_dir.parent / spec.patch_id)
+        _add(spec.lidar_strip_dir.parent / "patches" / spec.patch_id)
+
+    if spec.traj_source_path is not None:
+        _add(spec.traj_source_path.parent)
+        _add(spec.traj_source_path.parent.parent)
+        _add(spec.traj_source_path.parent.parent.parent)
+        _add(spec.traj_source_path.parent.parent / spec.patch_id)
+        _add(spec.traj_source_path.parent.parent / "patches" / spec.patch_id)
+
+    valid: list[Path] = []
+    for p in candidates:
+        if not p.exists() or not p.is_dir():
+            continue
+        has_vector = (p / "Vector").is_dir()
+        has_traj = (p / "Traj").is_dir()
+        has_pc = (p / "PointCloud").is_dir()
+        if has_vector and (has_traj or has_pc):
+            valid.append(p)
+    return valid
+
+
+def _find_source_road_geojson(spec: StripSpec) -> Path | None:
+    for patch_dir in _candidate_source_patch_dirs(spec):
+        cand = patch_dir / "Vector" / ROAD_FILENAME
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _find_source_tiles_dir(spec: StripSpec) -> Path | None:
+    for patch_dir in _candidate_source_patch_dirs(spec):
+        cand = patch_dir / TILES_DIRNAME
+        if cand.is_dir():
+            return cand
+    return None
+
+
+def _copy_tree_contents(src_dir: Path, dst_dir: Path) -> int:
+    """Copy a directory tree and return copied regular-file count."""
+    copied_files = 0
+    for item in sorted(src_dir.rglob("*")):
+        rel = item.relative_to(src_dir)
+        dst = dst_dir / rel
+        if item.is_dir():
+            dst.mkdir(parents=True, exist_ok=True)
+            continue
+        if not item.is_file():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(item, dst)
+        copied_files += 1
+    return copied_files
+
+
 def _require_laspy() -> Any:
     try:
         import laspy  # type: ignore
@@ -591,15 +666,18 @@ def write_patch(
     seed: int,
     pointcloud_mode: str,
     traj_mode: str,
+    tiles_mode: str,
 ) -> dict[str, Any]:
     patch_dir = out_dir / spec.patch_id
 
     pc_dir = patch_dir / "PointCloud"
     vec_dir = patch_dir / "Vector"
+    tiles_dir = patch_dir / TILES_DIRNAME
     traj_dir = patch_dir / "Traj" / spec.traj_id
 
     pc_dir.mkdir(parents=True, exist_ok=True)
     vec_dir.mkdir(parents=True, exist_ok=True)
+    tiles_dir.mkdir(parents=True, exist_ok=True)
     traj_dir.mkdir(parents=True, exist_ok=True)
 
     rel = lambda p: p.relative_to(out_dir).as_posix()
@@ -648,11 +726,12 @@ def write_patch(
 
         pointcloud_stub = False
 
-    # Vector schema v2 skeletons (can be empty but must be valid FeatureCollection files).
+    # Vector schema v3 skeletons (can be empty but must be valid FeatureCollection files).
     lane_boundary = vec_dir / "LaneBoundary.geojson"
     div_strip_zone = vec_dir / "DivStripZone.geojson"
     node_geojson = vec_dir / "Node.geojson"
     intersection_l = vec_dir / "intersection_l.geojson"
+    road_geojson = vec_dir / ROAD_FILENAME
     write_empty_fc(lane_boundary, "LineString")
     write_empty_fc(div_strip_zone)
     write_empty_fc(
@@ -661,6 +740,26 @@ def write_patch(
         {"Kind": "int32", "mainid": "int64", "id": "int64"},
     )
     write_empty_fc(intersection_l, "LineString", {"nodeid": "int64"})
+
+    road_source_file: str | None = None
+    src_road = _find_source_road_geojson(spec)
+    if src_road is not None:
+        _copy_file(dst=road_geojson, src=src_road)
+        road_source_file = str(src_road)
+    else:
+        write_empty_fc(
+            road_geojson,
+            "LineString",
+            {"direction": "int8", "snodeid": "int64", "enodeid": "int64"},
+        )
+
+    copied_tiles_files = 0
+    tiles_source_dir: str | None = None
+    if tiles_mode == "copy_if_exists":
+        src_tiles = _find_source_tiles_dir(spec)
+        if src_tiles is not None:
+            copied_tiles_files = _copy_tree_contents(src_tiles, tiles_dir)
+            tiles_source_dir = str(src_tiles)
 
     raw_pose = traj_dir / "raw_dat_pose.geojson"
 
@@ -717,12 +816,16 @@ def write_patch(
             "vector_div_strip_zone": rel(div_strip_zone),
             "vector_node": rel(node_geojson),
             "vector_intersection_l": rel(intersection_l),
+            "vector_road": rel(road_geojson),
+            "tiles_dir": rel(tiles_dir),
             "traj_raw_dat_pose": rel(raw_pose),
         },
         "source": {
             "lidar_strip_basename": spec.lidar_strip_basename,
             "traj_file_basename": spec.traj_file_basename,
             "lidar_laz_count": spec.lidar_laz_count,
+            "road_source_file": road_source_file,
+            "tiles_source_dir": tiles_source_dir,
         },
     }
 
@@ -732,6 +835,9 @@ def write_patch(
     if traj_source_file is not None:
         patch_entry["traj_source_file"] = traj_source_file
         patch_entry["traj_source_kind"] = traj_source_kind
+
+    if copied_tiles_files > 0:
+        patch_entry["copied_tiles_files"] = int(copied_tiles_files)
 
     return patch_entry
 
@@ -752,6 +858,8 @@ def run_synth(cfg: SynthConfig) -> dict[str, Any]:
         raise ValueError("invalid_pointcloud_mode")
     if cfg.traj_mode not in {"synthetic", "copy", "convert"}:
         raise ValueError("invalid_traj_mode")
+    if cfg.tiles_mode not in {"mkdir_empty", "copy_if_exists"}:
+        raise ValueError("invalid_tiles_mode")
 
     if cfg.source_mode != "local":
         if cfg.pointcloud_mode != "stub":
@@ -788,6 +896,7 @@ def run_synth(cfg: SynthConfig) -> dict[str, Any]:
                 seed=cfg.seed,
                 pointcloud_mode=cfg.pointcloud_mode,
                 traj_mode=cfg.traj_mode,
+                tiles_mode=cfg.tiles_mode,
             )
         )
 
@@ -800,6 +909,7 @@ def run_synth(cfg: SynthConfig) -> dict[str, Any]:
         "source_mode": cfg.source_mode,
         "pointcloud_mode": cfg.pointcloud_mode,
         "traj_mode": cfg.traj_mode,
+        "tiles_mode": cfg.tiles_mode,
         "patches": patches,
     }
 

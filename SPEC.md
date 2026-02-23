@@ -167,6 +167,9 @@
     DivStripZone.geojson
     Node.geojson
     intersection_l.geojson
+    Road.geojson
+  Tiles/
+    <z>/<x>/<y>.<ext>
   Traj/
     <TrajID>/
       raw_dat_pose.geojson
@@ -178,7 +181,7 @@
   - 点云：至少 Z 可用；若缺标量轴，允许派生（必须在报告记录派生策略）
   - 矢量：可读取为要素集合（不要求原始即实体化）
 
-### 8.3 Patch Vector 标准产物摘要（v2）
+### 8.3 Patch Vector 标准产物摘要（v3）
 - `LaneBoundary.geojson`：车道边界（LineString FeatureCollection）
 - `DivStripZone.geojson`：导流带信息（v2 标准命名）
 - `Node.geojson`：路口 Node 点信息（Point FeatureCollection）
@@ -187,6 +190,18 @@
   - `properties.id`：`int64`（当前 node 的 id）
 - `intersection_l.geojson`：分歧/合流路口横截线（LineString FeatureCollection）
   - `properties.nodeid`：`int64`（对应主 node 的 id）
+- `Road.geojson`：历史路网先验矢量（LineString FeatureCollection，可为空）
+  - `properties.direction`：`int8`
+    - `0`：未调查（默认按双方向处理）
+    - `1`：双向
+    - `2`：顺行
+    - `3`：逆行
+  - `properties.snodeid`：`int64`（起点 `nodeid`）
+  - `properties.enodeid`：`int64`（终点 `nodeid`）
+- 仍保留：`LaneBoundary/DivStripZone/Node/intersection_l`；不允许回退到旧版导流带命名。
+- `Tiles/`：卫星瓦片输入目录（XYZ tiles）
+  - 结构：`Tiles/<z>/<x>/<y>.<ext>`，`ext` 推荐 `png/jpg/webp`，实现需兼容常见后缀。
+  - 当前阶段目录可为空，但 `Tiles/` 目录必须存在。
 - 说明：主文档仅维护标准与产物摘要；模块实现细节与字段严格约束以 `modules/<module>/INTERFACE_CONTRACT.md` 为准。
 
 ---

@@ -95,6 +95,8 @@ def test_t00_synth_manifest_schema_min(tmp_path: Path) -> None:
             "vector_div_strip_zone",
             "vector_node",
             "vector_intersection_l",
+            "vector_road",
+            "tiles_dir",
             "traj_raw_dat_pose",
         ]:
             assert k in paths
@@ -103,6 +105,8 @@ def test_t00_synth_manifest_schema_min(tmp_path: Path) -> None:
         div_strip_zone = paths["vector_div_strip_zone"]
         node = paths["vector_node"]
         intersection_l = paths["vector_intersection_l"]
+        road = paths["vector_road"]
+        tiles_dir = paths["tiles_dir"]
         traj = paths["traj_raw_dat_pose"]
         laz_list = paths["pointcloud_laz"]
 
@@ -110,13 +114,15 @@ def test_t00_synth_manifest_schema_min(tmp_path: Path) -> None:
         assert _resolve(out_dir, div_strip_zone).is_file()
         assert _resolve(out_dir, node).is_file()
         assert _resolve(out_dir, intersection_l).is_file()
+        assert _resolve(out_dir, road).is_file()
+        assert _resolve(out_dir, tiles_dir).is_dir()
         assert _resolve(out_dir, traj).is_file()
         assert all(_resolve(out_dir, r).is_file() for r in laz_list)
 
 
 
-def test_t00_vector_schema_v2(tmp_path: Path) -> None:
-    out_dir = tmp_path / "out_v2"
+def test_t00_vector_schema_v3(tmp_path: Path) -> None:
+    out_dir = tmp_path / "out_v3"
     cfg = SynthConfig(seed=0, num_patches=1, out_dir=out_dir, source_mode="synthetic")
     manifest = run_synth(cfg)
 
@@ -126,10 +132,14 @@ def test_t00_vector_schema_v2(tmp_path: Path) -> None:
     div_strip_zone = _resolve(out_dir, paths["vector_div_strip_zone"])
     node = _resolve(out_dir, paths["vector_node"])
     intersection_l = _resolve(out_dir, paths["vector_intersection_l"])
+    road = _resolve(out_dir, paths["vector_road"])
+    tiles_dir = _resolve(out_dir, paths["tiles_dir"])
 
     assert div_strip_zone.is_file()
     assert node.is_file()
     assert intersection_l.is_file()
+    assert road.is_file()
+    assert tiles_dir.is_dir()
 
     # New schema output must not include the removed legacy div-strip file.
     legacy_div_file = "gore" + "area.geojson"
@@ -142,6 +152,10 @@ def test_t00_vector_schema_v2(tmp_path: Path) -> None:
     xsec_obj = json.loads(intersection_l.read_text(encoding="utf-8"))
     assert xsec_obj.get("type") == "FeatureCollection"
     assert isinstance(xsec_obj.get("features"), list)
+
+    road_obj = json.loads(road.read_text(encoding="utf-8"))
+    assert road_obj.get("type") == "FeatureCollection"
+    assert isinstance(road_obj.get("features"), list)
 
 
 def test_local_patch_id_prefers_drive_id_over_date(tmp_path: Path) -> None:
