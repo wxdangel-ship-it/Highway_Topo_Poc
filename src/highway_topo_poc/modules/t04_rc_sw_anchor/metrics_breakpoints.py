@@ -7,6 +7,7 @@ import numpy as np
 
 
 BP_FOCUS_NODE_NOT_FOUND = "FOCUS_NODE_NOT_FOUND"
+BP_CRS_UNKNOWN = "CRS_UNKNOWN"
 BP_MISSING_KIND_FIELD = "MISSING_KIND_FIELD"
 BP_UNSUPPORTED_KIND = "UNSUPPORTED_KIND"
 BP_AMBIGUOUS_KIND = "AMBIGUOUS_KIND"
@@ -19,6 +20,7 @@ BP_TRAJ_MISSING = "TRAJ_MISSING"
 BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION = "NO_TRIGGER_BEFORE_NEXT_INTERSECTION"
 BP_SCAN_EXCEED_200M = "SCAN_EXCEED_200M"
 BP_DIVSTRIP_TOLERANCE_VIOLATION = "DIVSTRIP_TOLERANCE_VIOLATION"
+BP_DIVSTRIP_NEVER_HIT = "DIVSTRIP_NEVER_HIT"
 
 
 def make_breakpoint(
@@ -71,7 +73,7 @@ def compute_confidence(*, trigger: str, scan_dist_m: float | None) -> float:
     val = 0.35
     if trigger == "divstrip+pc":
         val += 0.45
-    elif trigger == "pc_only":
+    elif trigger in {"pc_only", "pc_only_no_divstrip_hit", "pc_only_after_divstrip_miss"}:
         val += 0.30
     elif trigger == "divstrip_only_degraded":
         val += 0.15
@@ -167,6 +169,7 @@ def build_summary_text(
     metrics: dict[str, Any],
     breakpoints_summary: dict[str, Any],
     seed_results: Sequence[dict[str, Any]],
+    crs_diag: dict[str, Any] | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append("=== t04_rc_sw_anchor summary ===")
@@ -174,6 +177,27 @@ def build_summary_text(
     lines.append(f"patch_id: {patch_id}")
     lines.append(f"mode: {mode}")
     lines.append(f"overall_pass: {str(bool(metrics.get('overall_pass', False))).lower()}")
+
+    if isinstance(crs_diag, dict):
+        lines.append(f"dst_crs: {crs_diag.get('dst_crs')}")
+        layer_crs = crs_diag.get("layer_crs")
+        if isinstance(layer_crs, dict):
+            lines.append("layer_crs:")
+            for key in ["node", "road", "divstrip", "traj", "pointcloud"]:
+                row = layer_crs.get(key)
+                if not isinstance(row, dict):
+                    continue
+                lines.append(
+                    "- {name}: src_detected={src_detected} src_used={src_used} dst={dst} bbox_src={bbox_src} bbox_dst={bbox_dst}".format(
+                        name=key,
+                        src_detected=row.get("src_crs_detected"),
+                        src_used=row.get("src_crs_used"),
+                        dst=row.get("dst_crs"),
+                        bbox_src=row.get("bbox_src"),
+                        bbox_dst=row.get("bbox_dst"),
+                    )
+                )
+
     lines.append("")
     lines.append(
         "seed_total={seed_total} found={found} missing={missing} ratio={ratio:.3f}".format(
@@ -197,7 +221,7 @@ def build_summary_text(
         else:
             focus_text = "na"
         lines.append(
-            "- nodeid={nodeid} kind={kind} kind_bits(merge={is_merge},diverge={is_diverge}) anchor_type={anchor_type} status={status} scan_dist_m={scan_dist} trigger={trigger} stop_dist_m={stop} focus_resolve={focus_resolve}".format(
+            "- nodeid={nodeid} kind={kind} kind_bits(merge={is_merge},diverge={is_diverge}) anchor_type={anchor_type} status={status} scan_dist_m={scan_dist} trigger={trigger} stop_dist_m={stop} stop_reason={stop_reason} dist_line_to_divstrip_m={dist_line_to_divstrip} first_divstrip_hit={first_div_hit} best_divstrip_pc={best_div_pc} first_pc_only={first_pc} focus_resolve={focus_resolve}".format(
                 nodeid=item.get("nodeid"),
                 kind=item.get("kind"),
                 is_merge=item.get("is_merge_kind"),
@@ -207,6 +231,11 @@ def build_summary_text(
                 scan_dist=item.get("scan_dist_m"),
                 trigger=item.get("trigger"),
                 stop=item.get("stop_dist_m"),
+                stop_reason=item.get("stop_reason"),
+                dist_line_to_divstrip=item.get("dist_line_to_divstrip_m"),
+                first_div_hit=item.get("first_divstrip_hit_dist_m"),
+                best_div_pc=item.get("best_divstrip_pc_dist_m"),
+                first_pc=item.get("first_pc_only_dist_m"),
                 focus_resolve=focus_text,
             )
         )
@@ -232,6 +261,8 @@ def build_summary_text(
 
 __all__ = [
     "BP_AMBIGUOUS_KIND",
+    "BP_CRS_UNKNOWN",
+    "BP_DIVSTRIP_NEVER_HIT",
     "BP_DIVSTRIPZONE_MISSING",
     "BP_DIVSTRIP_TOLERANCE_VIOLATION",
     "BP_FOCUS_NODE_NOT_FOUND",

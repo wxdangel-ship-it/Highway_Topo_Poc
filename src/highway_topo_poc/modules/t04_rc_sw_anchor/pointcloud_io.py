@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from .crs_norm import guess_crs_from_bbox, normalize_epsg_name, parse_geojson_crs, transform_xy_arrays
 from .io_geojson import infer_lonlat_like_bbox
 
 
@@ -20,14 +21,18 @@ class PointCloudData:
     usable: bool
     reason: str | None
     class_counts: dict[str, int]
-    bbox: tuple[float, float, float, float] | None
+    bbox_src: tuple[float, float, float, float] | None
+    bbox_dst: tuple[float, float, float, float] | None
     lonlat_like: bool
+    src_crs_detected: str | None
+    src_crs_used: str | None
+    dst_crs: str
 
 
 _EMPTY_XY = np.zeros((0, 2), dtype=np.float64)
 
 
-def _empty_pc(path: Path, kind: str, reason: str) -> PointCloudData:
+def _empty_pc(path: Path, kind: str, reason: str, *, dst_crs: str) -> PointCloudData:
     return PointCloudData(
         xy=_EMPTY_XY,
         classification=None,
@@ -36,8 +41,12 @@ def _empty_pc(path: Path, kind: str, reason: str) -> PointCloudData:
         usable=False,
         reason=reason,
         class_counts={},
-        bbox=None,
+        bbox_src=None,
+        bbox_dst=None,
         lonlat_like=False,
+        src_crs_detected=None,
+        src_crs_used=None,
+        dst_crs=str(dst_crs),
     )
 
 
@@ -131,23 +140,85 @@ def pointcloud_bbox(path: Path) -> tuple[float, float, float, float] | None:
     return None
 
 
-def _load_las_like(path: Path, *, use_classification: bool) -> PointCloudData:
+def _resolve_pc_src_crs(
+    *,
+    path: Path,
+    hint: str,
+    bbox_src: tuple[float, float, float, float] | None,
+    geojson_payload: dict[str, Any] | None,
+    dst_crs: str,
+) -> tuple[str | None, str | None, str]:
+    explicit = str(hint).strip() if hint is not None else "auto"
+    explicit_norm = normalize_epsg_name(explicit) if explicit and explicit.lower() != "auto" else None
+    if explicit_norm is not None:
+        return explicit_norm, explicit_norm, "cli_hint"
+
+    detected: str | None = None
+    if geojson_payload is not None:
+        detected = parse_geojson_crs(geojson_payload)
+    if detected is None:
+        guessed = guess_crs_from_bbox(bbox_src)
+        detected = guessed
+
+    if detected is not None:
+        return detected, detected, "detected"
+
+    name = path.name.lower()
+    if "3857" in name:
+        return None, "EPSG:3857", "filename_hint"
+    if "4326" in name:
+        return None, "EPSG:4326", "filename_hint"
+
+    dst_norm = normalize_epsg_name(dst_crs)
+    return None, dst_norm, "fallback_dst"
+
+
+def _project_xy_to_dst(xy: np.ndarray, *, src_crs: str | None, dst_crs: str) -> np.ndarray:
+    if xy.size == 0:
+        return xy
+    dst = normalize_epsg_name(dst_crs)
+    if dst is None:
+        raise ValueError(f"invalid_dst_crs:{dst_crs}")
+    src = normalize_epsg_name(src_crs) if src_crs is not None else dst
+    if src is None:
+        raise ValueError(f"invalid_src_crs:{src_crs}")
+    if src == dst:
+        return xy
+    x2, y2 = transform_xy_arrays(xy[:, 0], xy[:, 1], src_epsg=src, dst_epsg=dst)
+    return np.column_stack([x2, y2]).astype(np.float64)
+
+
+def _load_las_like(path: Path, *, use_classification: bool, src_crs_hint: str, dst_crs: str) -> PointCloudData:
     try:
         import laspy  # type: ignore
     except Exception:
-        return _empty_pc(path, "las", "laspy_missing")
+        return _empty_pc(path, "las", "laspy_missing", dst_crs=dst_crs)
 
     try:
         las = laspy.read(str(path))
     except Exception as exc:  # noqa: BLE001
-        return _empty_pc(path, "las", f"las_read_failed:{type(exc).__name__}")
+        return _empty_pc(path, "las", f"las_read_failed:{type(exc).__name__}", dst_crs=dst_crs)
 
     x = np.asarray(las.x, dtype=np.float64)
     y = np.asarray(las.y, dtype=np.float64)
     if x.size == 0:
-        return _empty_pc(path, "las", "pointcloud_empty")
+        return _empty_pc(path, "las", "pointcloud_empty", dst_crs=dst_crs)
 
-    xy = np.column_stack([x, y])
+    xy_src = np.column_stack([x, y])
+    bbox_src = _bbox_from_xy(xy_src)
+    lonlat_like = bool(bbox_src is not None and infer_lonlat_like_bbox(*bbox_src))
+    src_detected, src_used, _reason = _resolve_pc_src_crs(
+        path=path,
+        hint=src_crs_hint,
+        bbox_src=bbox_src,
+        geojson_payload=None,
+        dst_crs=dst_crs,
+    )
+
+    try:
+        xy_dst = _project_xy_to_dst(xy_src, src_crs=src_used, dst_crs=dst_crs)
+    except Exception as exc:  # noqa: BLE001
+        return _empty_pc(path, "las", f"pointcloud_crs_transform_failed:{type(exc).__name__}", dst_crs=dst_crs)
 
     cls: np.ndarray | None = None
     try:
@@ -159,47 +230,50 @@ def _load_las_like(path: Path, *, use_classification: bool) -> PointCloudData:
 
     if use_classification and cls is None:
         return PointCloudData(
-            xy=xy,
+            xy=xy_dst,
             classification=None,
             source_path=path,
             source_kind="las",
             usable=False,
             reason="classification_missing",
             class_counts={},
-            bbox=_bbox_from_xy(xy),
-            lonlat_like=False,
+            bbox_src=bbox_src,
+            bbox_dst=_bbox_from_xy(xy_dst),
+            lonlat_like=lonlat_like,
+            src_crs_detected=src_detected,
+            src_crs_used=src_used,
+            dst_crs=str(dst_crs),
         )
 
-    bbox = _bbox_from_xy(xy)
-    lonlat_like = False
-    if bbox is not None:
-        lonlat_like = infer_lonlat_like_bbox(*bbox)
-
     return PointCloudData(
-        xy=xy,
+        xy=xy_dst,
         classification=cls,
         source_path=path,
         source_kind="las",
         usable=True,
         reason=None,
         class_counts=_class_counts(cls),
-        bbox=bbox,
+        bbox_src=bbox_src,
+        bbox_dst=_bbox_from_xy(xy_dst),
         lonlat_like=lonlat_like,
+        src_crs_detected=src_detected,
+        src_crs_used=src_used,
+        dst_crs=str(dst_crs),
     )
 
 
-def _load_geojson_fallback(path: Path, *, use_classification: bool) -> PointCloudData:
+def _load_geojson_fallback(path: Path, *, use_classification: bool, src_crs_hint: str, dst_crs: str) -> PointCloudData:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
-        return _empty_pc(path, "geojson", f"geojson_parse_failed:{type(exc).__name__}")
+        return _empty_pc(path, "geojson", f"geojson_parse_failed:{type(exc).__name__}", dst_crs=dst_crs)
 
     if not isinstance(payload, dict) or payload.get("type") != "FeatureCollection":
-        return _empty_pc(path, "geojson", "geojson_not_feature_collection")
+        return _empty_pc(path, "geojson", "geojson_not_feature_collection", dst_crs=dst_crs)
 
     feats = payload.get("features")
     if not isinstance(feats, list):
-        return _empty_pc(path, "geojson", "geojson_features_not_list")
+        return _empty_pc(path, "geojson", "geojson_features_not_list", dst_crs=dst_crs)
 
     xy_list: list[tuple[float, float]] = []
     cls_list: list[int] = []
@@ -239,49 +313,77 @@ def _load_geojson_fallback(path: Path, *, use_classification: bool) -> PointClou
         xy_list.append((x, y))
 
     if not xy_list:
-        return _empty_pc(path, "geojson", "pointcloud_empty")
+        return _empty_pc(path, "geojson", "pointcloud_empty", dst_crs=dst_crs)
 
-    xy = np.asarray(xy_list, dtype=np.float64)
+    xy_src = np.asarray(xy_list, dtype=np.float64)
+    bbox_src = _bbox_from_xy(xy_src)
+    lonlat_like = bool(bbox_src is not None and infer_lonlat_like_bbox(*bbox_src))
+    src_detected, src_used, _reason = _resolve_pc_src_crs(
+        path=path,
+        hint=src_crs_hint,
+        bbox_src=bbox_src,
+        geojson_payload=payload,
+        dst_crs=dst_crs,
+    )
+
+    try:
+        xy_dst = _project_xy_to_dst(xy_src, src_crs=src_used, dst_crs=dst_crs)
+    except Exception as exc:  # noqa: BLE001
+        return _empty_pc(path, "geojson", f"pointcloud_crs_transform_failed:{type(exc).__name__}", dst_crs=dst_crs)
+
     cls = np.asarray(cls_list, dtype=np.int32) if cls_present else None
-
     if use_classification and cls is None:
         return PointCloudData(
-            xy=xy,
+            xy=xy_dst,
             classification=None,
             source_path=path,
             source_kind="geojson",
             usable=False,
             reason="classification_missing",
             class_counts={},
-            bbox=_bbox_from_xy(xy),
-            lonlat_like=False,
+            bbox_src=bbox_src,
+            bbox_dst=_bbox_from_xy(xy_dst),
+            lonlat_like=lonlat_like,
+            src_crs_detected=src_detected,
+            src_crs_used=src_used,
+            dst_crs=str(dst_crs),
         )
 
-    bbox = _bbox_from_xy(xy)
-    lonlat_like = False
-    if bbox is not None:
-        lonlat_like = infer_lonlat_like_bbox(*bbox)
-
     return PointCloudData(
-        xy=xy,
+        xy=xy_dst,
         classification=cls,
         source_path=path,
         source_kind="geojson",
         usable=True,
         reason=None,
         class_counts=_class_counts(cls),
-        bbox=bbox,
+        bbox_src=bbox_src,
+        bbox_dst=_bbox_from_xy(xy_dst),
         lonlat_like=lonlat_like,
+        src_crs_detected=src_detected,
+        src_crs_used=src_used,
+        dst_crs=str(dst_crs),
     )
 
 
-def load_pointcloud(*, path: Path, use_classification: bool) -> PointCloudData:
+def load_pointcloud(
+    *,
+    path: Path,
+    use_classification: bool,
+    src_crs_hint: str = "auto",
+    dst_crs: str = "EPSG:3857",
+) -> PointCloudData:
     suffix = path.suffix.lower()
     if suffix in {".laz", ".las"}:
-        return _load_las_like(path, use_classification=use_classification)
+        return _load_las_like(path, use_classification=use_classification, src_crs_hint=src_crs_hint, dst_crs=dst_crs)
     if suffix == ".geojson":
-        return _load_geojson_fallback(path, use_classification=use_classification)
-    return _empty_pc(path, "unknown", "unsupported_pointcloud_suffix")
+        return _load_geojson_fallback(
+            path,
+            use_classification=use_classification,
+            src_crs_hint=src_crs_hint,
+            dst_crs=dst_crs,
+        )
+    return _empty_pc(path, "unknown", "unsupported_pointcloud_suffix", dst_crs=dst_crs)
 
 
 def pick_non_ground_candidates(

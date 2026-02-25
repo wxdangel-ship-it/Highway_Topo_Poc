@@ -7,9 +7,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from pyproj import Transformer
 
-from .io_geojson import read_geojson, resolve_source_crs
+from .crs_norm import load_geojson_and_reproject
 
 
 @dataclass(frozen=True)
@@ -18,6 +17,7 @@ class TrajLoadResult:
     paths: list[str]
     total_points: int
     src_crs_list: list[str]
+    per_file_meta: list[dict[str, Any]]
 
 
 @dataclass
@@ -34,8 +34,7 @@ def discover_traj_paths(*, patch_dir: Path, traj_glob: str | None = None) -> lis
     if traj_glob and str(traj_glob).strip():
         matches = sorted(glob.glob(str(traj_glob), recursive=True))
         return [Path(p) for p in matches if Path(p).is_file()]
-
-    return sorted([p for p in (patch_dir).glob(_TRAJ_DEFAULT_GLOB) if p.is_file()])
+    return sorted([p for p in patch_dir.glob(_TRAJ_DEFAULT_GLOB) if p.is_file()])
 
 
 def _iter_traj_xy(payload: dict[str, Any]) -> list[tuple[float, float]]:
@@ -75,22 +74,19 @@ def load_traj_points(
     arrays: list[np.ndarray] = []
     src_list: list[str] = []
     used_paths: list[str] = []
+    per_file_meta: list[dict[str, Any]] = []
 
     for path in paths:
-        payload = read_geojson(path)
-        src_crs = resolve_source_crs(payload, src_crs_override=src_crs_override)
-        src_list.append(src_crs)
+        payload, meta = load_geojson_and_reproject(path=path, src_crs_hint=src_crs_override, dst_crs=dst_crs)
         used_paths.append(str(path))
+        src_list.append(str(meta.get("src_crs_used")))
+        per_file_meta.append(meta)
 
         xy = _iter_traj_xy(payload)
         if not xy:
             continue
 
         arr = np.asarray(xy, dtype=np.float64)
-        if src_crs != dst_crs:
-            tf = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
-            x2, y2 = tf.transform(arr[:, 0], arr[:, 1])
-            arr = np.column_stack([x2, y2]).astype(np.float64)
         arrays.append(arr)
 
     if not arrays:
@@ -103,6 +99,7 @@ def load_traj_points(
         paths=used_paths,
         total_points=int(out.shape[0]),
         src_crs_list=src_list,
+        per_file_meta=per_file_meta,
     )
 
 

@@ -13,7 +13,14 @@
   ],
   "src_crs": "auto",
   "dst_crs": "EPSG:3857",
+  "node_src_crs": "auto",
+  "road_src_crs": "auto",
+  "divstrip_src_crs": "auto",
+  "traj_src_crs": "auto",
+  "pointcloud_crs": "auto",
   "params": {
-    "traj_buffer_m": 1.5
+    "traj_buffer_m": 1.5,
+    "pc_only_min_scan_dist_m": 10.0,
+    "pc_only_after_divstrip_min_m": 5.0
   }
 }

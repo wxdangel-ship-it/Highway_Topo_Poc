@@ -27,6 +27,11 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
 
     p.add_argument("--src_crs", default=None)
     p.add_argument("--dst_crs", default=None)
+    p.add_argument("--node_src_crs", default=None)
+    p.add_argument("--road_src_crs", default=None)
+    p.add_argument("--divstrip_src_crs", default=None)
+    p.add_argument("--traj_src_crs", default=None)
+    p.add_argument("--pointcloud_crs", default=None)
 
     p.add_argument("--config_json", default=None)
     p.add_argument("--set", dest="set_items", action="append", default=[])
@@ -52,6 +57,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             "focus_node_ids_file": args.focus_node_ids_file,
             "src_crs": args.src_crs,
             "dst_crs": args.dst_crs,
+            "node_src_crs": args.node_src_crs,
+            "road_src_crs": args.road_src_crs,
+            "divstrip_src_crs": args.divstrip_src_crs,
+            "traj_src_crs": args.traj_src_crs,
+            "pointcloud_crs": args.pointcloud_crs,
         }
         runtime = resolve_runtime_config(
             config_json=config_json,

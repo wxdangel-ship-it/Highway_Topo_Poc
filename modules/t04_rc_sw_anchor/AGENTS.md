@@ -1,8 +1,9 @@
 # t04_rc_sw_anchor - AGENTS
 
 ## 职责
-- 处理 merge/diverge 路口锚点与最终横截线。
+- 处理 merge/diverge 锚点与最终横截线。
 - 支持 `global_focus`（全局 Node/Road + patch 级 DivStrip/PointCloud/Traj）。
+- CRS 全链路归一化到 `dst_crs`（默认 `EPSG:3857`）。
 
 ## 代码与文档边界
 - 文档契约：`modules/t04_rc_sw_anchor/`
@@ -12,13 +13,17 @@
 
 ## 输入口径
 - `patch_id` 仅来自 `patch_dir` basename
-- `focus_node_ids` 仅来自 CLI/file/config（禁止代码写死）
+- `focus_node_ids` 仅来自 CLI/file/config（禁止写死）
 - `global_focus` 下必须提供 `global_node_path` 与 `global_road_path`
+- 图层 CRS 通过 `*_src_crs` + auto 检测统一到 `dst_crs`
 
 ## 输出口径
 固定目录：`outputs/_work/t04_rc_sw_anchor/<run_id>/`
-- `anchors.geojson`
-- `intersection_l_opt.geojson`
+- `anchors_3857.geojson`
+- `intersection_l_opt_3857.geojson`
+- `anchors_wgs84.geojson`
+- `intersection_l_opt_wgs84.geojson`
+- `anchors.geojson` / `intersection_l_opt.geojson`（兼容）
 - `anchors.json`
 - `metrics.json`
 - `breakpoints.json`

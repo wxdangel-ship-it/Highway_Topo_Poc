@@ -13,23 +13,35 @@ def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _run_case(tmp_path: Path, *, kind_key: str, id_mode: str) -> tuple[dict, Path]:
-    data = create_synth_patch(tmp_path, kind_key=kind_key, id_mode=id_mode)
+def _run_case(
+    tmp_path: Path,
+    *,
+    kind_key: str,
+    id_mode: str,
+    crs_mode: str,
+    pointcloud_crs_override: str | None = None,
+) -> tuple[dict, Path]:
+    data = create_synth_patch(tmp_path, kind_key=kind_key, id_mode=id_mode, crs_mode=crs_mode)
 
     out_root = tmp_path / "outputs" / "_work" / "t04_rc_sw_anchor"
     runtime = {
         "mode": "global_focus",
         "patch_dir": str(data["patch_dir"]),
         "out_root": str(out_root),
-        "run_id": f"smoke_t04_{kind_key}_{id_mode}",
+        "run_id": f"smoke_t04_{kind_key}_{id_mode}_{crs_mode}",
         "global_node_path": str(data["global_node_path"]),
         "global_road_path": str(data["global_road_path"]),
         "divstrip_path": str(data["divstrip_path"]),
         "pointcloud_path": str(data["pointcloud_path"]),
         "traj_glob": str(data["traj_glob"]),
         "focus_node_ids": list(data["focus_node_ids"]),
-        "src_crs": "EPSG:3857",
+        "src_crs": "auto",
         "dst_crs": "EPSG:3857",
+        "node_src_crs": "auto",
+        "road_src_crs": "auto",
+        "divstrip_src_crs": "auto",
+        "traj_src_crs": "auto",
+        "pointcloud_crs": pointcloud_crs_override or str(data["pointcloud_crs"]),
         "params": dict(DEFAULT_PARAMS),
     }
 
@@ -40,11 +52,15 @@ def _run_case(tmp_path: Path, *, kind_key: str, id_mode: str) -> tuple[dict, Pat
 def _assert_common_outputs(out_dir: Path) -> None:
     for name in [
         "anchors.geojson",
+        "anchors_3857.geojson",
+        "anchors_wgs84.geojson",
         "anchors.json",
         "metrics.json",
         "breakpoints.json",
         "summary.txt",
         "intersection_l_opt.geojson",
+        "intersection_l_opt_3857.geojson",
+        "intersection_l_opt_wgs84.geojson",
         "chosen_config.json",
     ]:
         assert (out_dir / name).is_file(), name
@@ -69,9 +85,16 @@ def _assert_anchor_quality(out_dir: Path, expected_matched_field: str) -> None:
         assert int(record.get("kind")) in {8, 16}
         scan_dist = float(record.get("scan_dist_m"))
         assert scan_dist <= 20.0
-        dist_to_divstrip = record.get("dist_to_divstrip_m")
-        assert dist_to_divstrip is not None
-        assert float(dist_to_divstrip) <= 1.0
+        dist_line = record.get("dist_line_to_divstrip_m")
+        assert dist_line is not None
+        assert float(dist_line) <= 1.0
+        assert str(record.get("trigger")) in {
+            "divstrip+pc",
+            "pc_only",
+            "pc_only_no_divstrip_hit",
+            "pc_only_after_divstrip_miss",
+            "divstrip_only_degraded",
+        }
 
         resolved = record.get("resolved_from")
         assert isinstance(resolved, dict)
@@ -79,12 +102,58 @@ def _assert_anchor_quality(out_dir: Path, expected_matched_field: str) -> None:
 
 
 def test_t04_rc_sw_anchor_kind_lower_id_alias(tmp_path: Path) -> None:
-    data, out_dir = _run_case(tmp_path, kind_key="kind", id_mode="id")
+    data, out_dir = _run_case(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
     _assert_common_outputs(out_dir)
     _assert_anchor_quality(out_dir, expected_matched_field=str(data["expected_matched_field"]))
 
 
 def test_t04_rc_sw_anchor_mainnodeid_alias(tmp_path: Path) -> None:
-    data, out_dir = _run_case(tmp_path, kind_key="kind", id_mode="mainnodeid")
+    data, out_dir = _run_case(tmp_path, kind_key="kind", id_mode="mainnodeid", crs_mode="3857")
     _assert_common_outputs(out_dir)
     _assert_anchor_quality(out_dir, expected_matched_field=str(data["expected_matched_field"]))
+
+
+def test_t04_rc_sw_anchor_crs_4326_to_3857(tmp_path: Path) -> None:
+    _data, out_dir = _run_case(
+        tmp_path,
+        kind_key="kind",
+        id_mode="id",
+        crs_mode="4326",
+        pointcloud_crs_override="EPSG:4326",
+    )
+    _assert_common_outputs(out_dir)
+
+    anchors_3857 = _read_json(out_dir / "anchors_3857.geojson")
+    feats = anchors_3857.get("features", [])
+    assert isinstance(feats, list) and len(feats) > 0
+    x0 = float(feats[0]["geometry"]["coordinates"][0])
+    y0 = float(feats[0]["geometry"]["coordinates"][1])
+    assert abs(x0) > 1.0e6
+    assert abs(y0) > 1.0e6
+
+    anchors = _read_json(out_dir / "anchors.json")
+    for item in anchors.get("items", []):
+        assert float(item.get("dist_line_to_divstrip_m")) <= 1.0
+
+
+def test_t04_rc_sw_anchor_crs_mixed_inputs(tmp_path: Path) -> None:
+    _data, out_dir = _run_case(
+        tmp_path,
+        kind_key="kind",
+        id_mode="id",
+        crs_mode="mixed",
+        pointcloud_crs_override="EPSG:4326",
+    )
+    _assert_common_outputs(out_dir)
+
+    summary = (out_dir / "summary.txt").read_text(encoding="utf-8")
+    assert "layer_crs:" in summary
+    assert "node: src_detected=" in summary
+    assert "road: src_detected=" in summary
+    assert "divstrip: src_detected=" in summary
+
+    anchors = _read_json(out_dir / "anchors.json")
+    for item in anchors.get("items", []):
+        dist_line = item.get("dist_line_to_divstrip_m")
+        assert dist_line is not None
+        assert float(dist_line) <= 1.0

@@ -9,22 +9,17 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from pyproj import Transformer
 from shapely.geometry import Point, box
 from shapely.geometry.base import BaseGeometry
 
+from .crs_norm import guess_crs_from_bbox, normalize_epsg_name, transform_xy_arrays
 from .divstrip_ops import anchor_point_from_crossline, is_divstrip_hit
-from .io_geojson import (
-    NodeRecord,
-    RoadRecord,
-    infer_lonlat_like_bbox,
-    load_divstrip_union,
-    load_nodes,
-    load_roads,
-)
+from .io_geojson import NodeRecord, RoadRecord, load_divstrip_union, load_nodes, load_roads
 from .local_frame import LocalFrame
 from .metrics_breakpoints import (
     BP_AMBIGUOUS_KIND,
+    BP_CRS_UNKNOWN,
+    BP_DIVSTRIP_NEVER_HIT,
     BP_DIVSTRIPZONE_MISSING,
     BP_DIVSTRIP_TOLERANCE_VIOLATION,
     BP_FOCUS_NODE_NOT_FOUND,
@@ -45,7 +40,7 @@ from .metrics_breakpoints import (
 )
 from .pointcloud_io import PointCloudData, default_pointcloud_path, load_pointcloud, pick_non_ground_candidates, pointcloud_bbox
 from .road_graph import RoadGraph
-from .traj_io import build_traj_grid_index, discover_traj_paths, load_traj_points, mark_points_near_traj
+from .traj_io import TrajLoadResult, build_traj_grid_index, discover_traj_paths, load_traj_points, mark_points_near_traj
 from .writers import write_anchor_geojson, write_intersection_opt_geojson, write_json, write_text
 
 
@@ -102,14 +97,42 @@ def _resolve_vector_file(vector_dir: Path, primary: str, fallback: str | None = 
     return p
 
 
-def _bbox_to_geom(bbox_xy: tuple[float, float, float, float], *, margin_m: float, dst_crs: str) -> BaseGeometry:
-    min_x, min_y, max_x, max_y = bbox_xy
+def _resolve_src_hint(*, hint: Any, global_hint: str) -> str:
+    if hint is None:
+        return str(global_hint)
+    s = str(hint).strip()
+    if not s:
+        return str(global_hint)
+    return s
 
-    if dst_crs == "EPSG:3857" and infer_lonlat_like_bbox(min_x, min_y, max_x, max_y):
-        tf = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-        xs, ys = tf.transform([min_x, max_x], [min_y, max_y])
-        min_x, max_x = float(min(xs)), float(max(xs))
-        min_y, max_y = float(min(ys)), float(max(ys))
+
+def _bbox_to_geom(
+    bbox_xy: tuple[float, float, float, float],
+    *,
+    margin_m: float,
+    bbox_src_crs_hint: str,
+    dst_crs: str,
+) -> BaseGeometry:
+    min_x, min_y, max_x, max_y = bbox_xy
+    dst = normalize_epsg_name(dst_crs) or str(dst_crs)
+    src_hint = str(bbox_src_crs_hint).strip() if bbox_src_crs_hint is not None else "auto"
+    src: str | None
+    if src_hint and src_hint.lower() != "auto":
+        src = normalize_epsg_name(src_hint)
+    else:
+        src = guess_crs_from_bbox(bbox_xy)
+    if src is None:
+        src = dst
+
+    if src != dst:
+        xx, yy = transform_xy_arrays(
+            np.asarray([min_x, max_x], dtype=np.float64),
+            np.asarray([min_y, max_y], dtype=np.float64),
+            src_epsg=src,
+            dst_epsg=dst,
+        )
+        min_x, max_x = float(np.min(xx)), float(np.max(xx))
+        min_y, max_y = float(np.min(yy)), float(np.max(yy))
 
     return box(min_x - margin_m, min_y - margin_m, max_x + margin_m, max_y + margin_m)
 
@@ -117,13 +140,14 @@ def _bbox_to_geom(bbox_xy: tuple[float, float, float, float], *, margin_m: float
 def _build_aoi(
     *,
     pointcloud_path: Path | None,
+    pointcloud_crs_hint: str,
     traj_points_xy: np.ndarray,
     dst_crs: str,
 ) -> BaseGeometry | None:
     if pointcloud_path is not None and pointcloud_path.is_file():
         bb = pointcloud_bbox(pointcloud_path)
         if bb is not None:
-            return _bbox_to_geom(bb, margin_m=250.0, dst_crs=dst_crs)
+            return _bbox_to_geom(bb, margin_m=250.0, bbox_src_crs_hint=pointcloud_crs_hint, dst_crs=dst_crs)
 
     if traj_points_xy.size > 0:
         min_x = float(np.min(traj_points_xy[:, 0]))
@@ -154,7 +178,6 @@ def _resolve_nodes_aliases(
         if not id_fields:
             id_fields = [("nodeid", int(node.nodeid))]
 
-        # Prefer IDs that align with road endpoints; then fallback to field order.
         canonical_id: int | None = None
         canonical_field: str | None = None
         for field in ["mainid", "mainnodeid", "id", "nodeid"]:
@@ -181,18 +204,18 @@ def _resolve_nodes_aliases(
             canonical_field = "nodeid"
 
         if canonical_id in used_canonical:
-            # Keep first canonical record to avoid duplicate seeds.
             continue
         used_canonical.add(canonical_id)
 
-        resolved = NodeRecord(
-            nodeid=int(canonical_id),
-            kind=node.kind,
-            point=node.point,
-            id_fields=tuple(id_fields),
-            kind_raw=node.kind_raw,
+        resolved_nodes.append(
+            NodeRecord(
+                nodeid=int(canonical_id),
+                kind=node.kind,
+                point=node.point,
+                id_fields=tuple(id_fields),
+                kind_raw=node.kind_raw,
+            )
         )
-        resolved_nodes.append(resolved)
 
         for f, v in id_fields:
             if int(v) not in alias_to_canonical:
@@ -303,9 +326,11 @@ def _empty_fail_result(
     scan_dir: str,
     line: Any,
     divstrip_union: BaseGeometry | None,
+    stop_reason: str,
     resolved_from: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     pt, dist = anchor_point_from_crossline(line=line, divstrip_union=divstrip_union)
+    dist_line = None if divstrip_union is None else float(line.distance(divstrip_union))
     is_merge = bool(kind is not None and (int(kind) & (1 << 3)) != 0)
     is_diverge = bool(kind is not None and (int(kind) & (1 << 4)) != 0)
     return {
@@ -320,14 +345,17 @@ def _empty_fail_result(
         "scan_dir": str(scan_dir),
         "scan_dist_m": None,
         "stop_dist_m": 0.0,
+        "stop_reason": str(stop_reason),
         "next_intersection_dist_m": None,
         "dist_to_divstrip_m": dist,
+        "dist_line_to_divstrip_m": dist_line,
         "confidence": 0.0,
         "flags": [],
         "anchor_point": pt,
         "crossline_opt": line,
-        "first_hit_divstrip_m": None,
-        "first_hit_non_ground_m": None,
+        "first_divstrip_hit_dist_m": None,
+        "best_divstrip_pc_dist_m": None,
+        "first_pc_only_dist_m": None,
         "ng_candidates_before_suppress": 0,
         "ng_candidates_after_suppress": 0,
         "resolved_from": resolved_from,
@@ -372,6 +400,7 @@ def _evaluate_node(
             scan_dir="na",
             line=dummy_line,
             divstrip_union=divstrip_union,
+            stop_reason="kind_missing",
             resolved_from=resolved_from,
         )
 
@@ -391,6 +420,7 @@ def _evaluate_node(
             scan_dir="na",
             line=dummy_line,
             divstrip_union=divstrip_union,
+            stop_reason="ambiguous_kind",
             resolved_from=resolved_from,
         )
 
@@ -411,6 +441,7 @@ def _evaluate_node(
             scan_dir="na",
             line=dummy_line,
             divstrip_union=divstrip_union,
+            stop_reason="unsupported_kind",
             resolved_from=resolved_from,
         )
 
@@ -439,12 +470,12 @@ def _evaluate_node(
             scan_dir=scan_dir_label,
             line=dummy_line,
             divstrip_union=divstrip_union,
+            stop_reason="road_link_missing",
             resolved_from=resolved_from,
         )
 
     tangent = pick.tangent_at_node
     scan_vec = tangent if is_diverge else (-float(tangent[0]), -float(tangent[1]))
-
     frame = LocalFrame.from_tangent(origin_xy=(float(node.point.x), float(node.point.y)), tangent_xy=scan_vec)
 
     next_inter = road_graph.find_next_intersection_distance(
@@ -455,9 +486,12 @@ def _evaluate_node(
 
     scan_max = float(params["scan_max_limit_m"])
     stop_dist = float(scan_max)
+    stop_reason = "max_200"
     if bool(params.get("stop_at_next_intersection", True)) and next_inter is not None and next_inter > 0:
         stop_dist = min(stop_dist, float(next_inter))
+        stop_reason = "next_intersection"
     else:
+        stop_reason = "graph_weak"
         breakpoints.append(
             make_breakpoint(
                 code=BP_ROAD_GRAPH_WEAK_STOP,
@@ -468,16 +502,16 @@ def _evaluate_node(
         )
 
     stop_dist = max(0.0, float(stop_dist))
-
     step = max(0.25, float(params["scan_step_m"]))
     n_steps = max(1, int(math.floor(stop_dist / step)) + 1)
 
     window_steps = max(1, int(math.ceil(float(params["divstrip_trigger_window_m"]) / step)))
     div_tol = float(params["divstrip_hit_tol_m"])
-
     half_len = float(params["cross_half_len_m"])
     half_eff = max(0.0, half_len - float(params["ignore_end_margin_m"]))
     line_buf = float(params["pc_line_buffer_m"])
+    pc_only_min_scan = float(params.get("pc_only_min_scan_dist_m", 10.0))
+    pc_only_after_div_min = float(params.get("pc_only_after_divstrip_min_m", 5.0))
 
     if ng_points_xy.size > 0:
         u, v = frame.project_xy(ng_points_xy)
@@ -498,7 +532,8 @@ def _evaluate_node(
     scan_values: list[float] = []
 
     first_divstrip_s: float | None = None
-    first_ng_s: float | None = None
+    best_divstrip_pc_s: float | None = None
+    first_pc_only_s: float | None = None
 
     for i in range(n_steps):
         s = float(i) * step
@@ -512,42 +547,78 @@ def _evaluate_node(
         hit_divstrip.append(div_hit)
 
         ng_ok, _ng_count = ng_hit_at(s)
-        if ng_ok and first_ng_s is None:
-            first_ng_s = s
         hit_ng.append(ng_ok)
+
+    # Phase-1: locate earliest divstrip+pc candidate.
+    if pointcloud_usable:
+        for i in range(n_steps):
+            if not hit_divstrip[i]:
+                continue
+            lo = i
+            hi = min(n_steps - 1, i + window_steps)
+            if any(hit_ng[j] for j in range(lo, hi + 1)):
+                best_divstrip_pc_s = float(scan_values[i])
+                break
+
+    # Phase-1: locate earliest pc-only candidate gated by min scan distance and initial side suppression.
+    if pointcloud_usable:
+        for i in range(n_steps):
+            if not hit_ng[i]:
+                continue
+            if bool(params.get("ignore_initial_side_ng", True)) and i == 0:
+                continue
+            s = float(scan_values[i])
+            if s < pc_only_min_scan:
+                continue
+            first_pc_only_s = s
+            break
 
     found_idx: int | None = None
     trigger = "none"
+    status = "ok"
+    flags: list[str] = []
 
     allow_pc_only_no_div = bool(params.get("allow_pc_only_when_no_divstrip", True))
     allow_divstrip_only = bool(params.get("allow_divstrip_only_when_no_pointcloud", True))
 
-    for i in range(n_steps):
-        if hit_divstrip[i] and pointcloud_usable:
-            lo = i
-            hi = min(n_steps - 1, i + window_steps)
-            if any(hit_ng[j] for j in range(lo, hi + 1)):
-                found_idx = i
-                trigger = "divstrip+pc"
-                break
-
-        if pointcloud_usable and hit_ng[i]:
-            if divstrip_union is None and (not allow_pc_only_no_div):
-                pass
-            else:
-                if (not bool(params.get("ignore_initial_side_ng", True))) or i > 0:
-                    found_idx = i
-                    trigger = "pc_only"
-                    break
-
-        if (not pointcloud_usable) and allow_divstrip_only and hit_divstrip[i]:
-            found_idx = i
-            trigger = "divstrip_only_degraded"
-            break
+    if divstrip_union is not None and best_divstrip_pc_s is not None:
+        found_idx = int(round(best_divstrip_pc_s / step))
+        trigger = "divstrip+pc"
+    elif divstrip_union is not None and (not pointcloud_usable) and allow_divstrip_only and first_divstrip_s is not None:
+        found_idx = int(round(first_divstrip_s / step))
+        trigger = "divstrip_only_degraded"
+        status = "suspect"
+        flags.append("degraded_divstrip_only")
+    elif pointcloud_usable and first_pc_only_s is not None:
+        if divstrip_union is None:
+            if allow_pc_only_no_div:
+                found_idx = int(round(first_pc_only_s / step))
+                trigger = "pc_only"
+        elif first_divstrip_s is None:
+            if allow_pc_only_no_div:
+                found_idx = int(round(first_pc_only_s / step))
+                trigger = "pc_only_no_divstrip_hit"
+                status = "suspect"
+                flags.append("divstrip_present_but_never_hit")
+                breakpoints.append(
+                    make_breakpoint(
+                        code=BP_DIVSTRIP_NEVER_HIT,
+                        severity="soft",
+                        nodeid=nodeid,
+                        message="divstrip_exists_but_never_hit_fallback_pc_only",
+                        extra={"first_pc_only_dist_m": float(first_pc_only_s)},
+                    )
+                )
+        elif first_pc_only_s >= float(first_divstrip_s + pc_only_after_div_min):
+            found_idx = int(round(first_pc_only_s / step))
+            trigger = "pc_only_after_divstrip_miss"
+            status = "suspect"
+            flags.append("pc_only_after_divstrip_miss")
 
     if found_idx is None:
         final_line = lines[-1] if lines else dummy_line
         anchor_pt, dist_to_div = anchor_point_from_crossline(line=final_line, divstrip_union=divstrip_union)
+        dist_line_to_div = None if divstrip_union is None else float(final_line.distance(divstrip_union))
         breakpoints.append(
             make_breakpoint(
                 code=BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION,
@@ -557,6 +628,15 @@ def _evaluate_node(
                 extra={"stop_dist_m": float(stop_dist)},
             )
         )
+        if divstrip_union is not None and first_divstrip_s is None:
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_DIVSTRIP_NEVER_HIT,
+                    severity="soft",
+                    nodeid=nodeid,
+                    message="divstrip_exists_but_never_hit_no_trigger",
+                )
+            )
         if stop_dist >= min(200.0, scan_max):
             breakpoints.append(
                 make_breakpoint(
@@ -579,28 +659,28 @@ def _evaluate_node(
             "scan_dir": scan_dir_label,
             "scan_dist_m": None,
             "stop_dist_m": float(stop_dist),
+            "stop_reason": str(stop_reason),
             "next_intersection_dist_m": None if next_inter is None else float(next_inter),
             "dist_to_divstrip_m": dist_to_div,
+            "dist_line_to_divstrip_m": dist_line_to_div,
             "confidence": 0.0,
             "flags": [],
             "anchor_point": anchor_pt,
             "crossline_opt": final_line,
-            "first_hit_divstrip_m": first_divstrip_s,
-            "first_hit_non_ground_m": first_ng_s,
+            "first_divstrip_hit_dist_m": first_divstrip_s,
+            "best_divstrip_pc_dist_m": best_divstrip_pc_s,
+            "first_pc_only_dist_m": first_pc_only_s,
             "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
             "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
             "resolved_from": resolved_from,
         }
 
+    found_idx = max(0, min(found_idx, len(lines) - 1))
     final_line = lines[found_idx]
     scan_dist = float(scan_values[found_idx])
     anchor_pt, dist_to_div = anchor_point_from_crossline(line=final_line, divstrip_union=divstrip_union)
+    dist_line_to_div = None if divstrip_union is None else float(final_line.distance(divstrip_union))
 
-    flags: list[str] = []
-    status = "ok"
-    if trigger == "divstrip_only_degraded":
-        status = "suspect"
-        flags.append("degraded_divstrip_only")
     if scan_dist > float(params.get("scan_near_limit_m", 20.0)):
         status = "suspect"
         flags.append("scan_dist_gt_near_limit")
@@ -616,19 +696,18 @@ def _evaluate_node(
             )
         )
 
-    if trigger in {"divstrip+pc", "divstrip_only_degraded"} and dist_to_div is not None and dist_to_div > div_tol:
+    if trigger in {"divstrip+pc", "divstrip_only_degraded"} and dist_line_to_div is not None and dist_line_to_div > div_tol:
         breakpoints.append(
             make_breakpoint(
                 code=BP_DIVSTRIP_TOLERANCE_VIOLATION,
                 severity="hard",
                 nodeid=nodeid,
-                message="dist_to_divstrip_exceeds_tol",
-                extra={"dist_to_divstrip_m": float(dist_to_div), "tol_m": float(div_tol)},
+                message="dist_line_to_divstrip_exceeds_tol",
+                extra={"dist_line_to_divstrip_m": float(dist_line_to_div), "tol_m": float(div_tol)},
             )
         )
 
     conf = compute_confidence(trigger=trigger, scan_dist_m=scan_dist)
-
     return {
         "nodeid": int(nodeid),
         "kind": None if kind is None else int(kind),
@@ -641,14 +720,17 @@ def _evaluate_node(
         "scan_dir": scan_dir_label,
         "scan_dist_m": float(scan_dist),
         "stop_dist_m": float(stop_dist),
+        "stop_reason": str(stop_reason),
         "next_intersection_dist_m": None if next_inter is None else float(next_inter),
         "dist_to_divstrip_m": dist_to_div,
+        "dist_line_to_divstrip_m": dist_line_to_div,
         "confidence": float(conf),
         "flags": flags,
         "anchor_point": anchor_pt,
         "crossline_opt": final_line,
-        "first_hit_divstrip_m": first_divstrip_s,
-        "first_hit_non_ground_m": first_ng_s,
+        "first_divstrip_hit_dist_m": first_divstrip_s,
+        "best_divstrip_pc_dist_m": best_divstrip_pc_s,
+        "first_pc_only_dist_m": first_pc_only_s,
         "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
         "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
         "resolved_from": resolved_from,
@@ -662,6 +744,16 @@ def _serialize_seed_result(item: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _empty_traj_result() -> TrajLoadResult:
+    return TrajLoadResult(
+        points_xy=np.zeros((0, 2), dtype=np.float64),
+        paths=[],
+        total_points=0,
+        src_crs_list=[],
+        per_file_meta=[],
+    )
+
+
 def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
     patch_dir = _normalize_user_path(runtime.get("patch_dir"))
     if patch_dir is None or (not patch_dir.is_dir()):
@@ -669,7 +761,6 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
 
     patch_id = patch_dir.name
     mode = str(runtime.get("mode", "global_focus"))
-
     out_root = _normalize_user_path(runtime.get("out_root")) or Path("outputs/_work/t04_rc_sw_anchor")
     if not out_root.is_absolute():
         out_root = (Path.cwd() / out_root).resolve()
@@ -681,12 +772,16 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
     out_dir = (out_root / run_id).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    src_crs = str(runtime.get("src_crs", "auto"))
+    src_crs_global = str(runtime.get("src_crs", "auto"))
     dst_crs = str(runtime.get("dst_crs", "EPSG:3857"))
+    node_src_crs = _resolve_src_hint(hint=runtime.get("node_src_crs"), global_hint=src_crs_global)
+    road_src_crs = _resolve_src_hint(hint=runtime.get("road_src_crs"), global_hint=src_crs_global)
+    divstrip_src_crs = _resolve_src_hint(hint=runtime.get("divstrip_src_crs"), global_hint=src_crs_global)
+    traj_src_crs = _resolve_src_hint(hint=runtime.get("traj_src_crs"), global_hint=src_crs_global)
+    pointcloud_crs = _resolve_src_hint(hint=runtime.get("pointcloud_crs"), global_hint=src_crs_global)
     params = dict(runtime.get("params", {}))
 
     vector_dir = patch_dir / "Vector"
-
     if mode == "global_focus":
         node_path = _normalize_user_path(runtime.get("global_node_path"))
         road_path = _normalize_user_path(runtime.get("global_road_path"))
@@ -707,11 +802,35 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
     if pointcloud_path is None:
         pointcloud_path = default_pointcloud_path(patch_dir)
 
+    breakpoints: list[dict[str, Any]] = []
+
     traj_glob = _normalize_user_glob(runtime.get("traj_glob"))
     traj_paths = discover_traj_paths(patch_dir=patch_dir, traj_glob=traj_glob)
-    traj = load_traj_points(paths=traj_paths, src_crs_override=src_crs, dst_crs=dst_crs)
+    traj = _empty_traj_result()
+    try:
+        traj = load_traj_points(paths=traj_paths, src_crs_override=traj_src_crs, dst_crs=dst_crs)
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if "crs_unknown:" in msg:
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_CRS_UNKNOWN,
+                    severity="hard",
+                    nodeid=None,
+                    message="traj_crs_unknown",
+                    extra={"detail": msg},
+                )
+            )
+        else:
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_TRAJ_MISSING,
+                    severity="soft",
+                    nodeid=None,
+                    message=f"traj_load_failed:{type(exc).__name__}",
+                )
+            )
 
-    breakpoints: list[dict[str, Any]] = []
     if traj.total_points <= 0:
         breakpoints.append(
             make_breakpoint(
@@ -722,10 +841,80 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             )
         )
 
-    aoi = _build_aoi(pointcloud_path=pointcloud_path, traj_points_xy=traj.points_xy, dst_crs=dst_crs)
+    aoi = _build_aoi(
+        pointcloud_path=pointcloud_path,
+        pointcloud_crs_hint=pointcloud_crs,
+        traj_points_xy=traj.points_xy,
+        dst_crs=dst_crs,
+    )
 
-    nodes_raw, node_meta, node_errors = load_nodes(path=node_path, src_crs_override=src_crs, dst_crs=dst_crs, aoi=aoi)
-    roads, road_meta, road_errors = load_roads(path=road_path, src_crs_override=src_crs, dst_crs=dst_crs, aoi=aoi)
+    # Focus matching must not depend on geometry coverage; keep node load out of AOI clipping in global_focus mode.
+    node_aoi = None if mode == "global_focus" else aoi
+
+    nodes_raw: list[NodeRecord] = []
+    roads: list[RoadRecord] = []
+    node_errors: list[str] = []
+    road_errors: list[str] = []
+    node_meta: dict[str, Any] = {"path": str(node_path), "src_crs_used": None, "dst_crs": dst_crs}
+    road_meta: dict[str, Any] = {"path": str(road_path), "src_crs_used": None, "dst_crs": dst_crs}
+
+    try:
+        nodes_raw, _meta, node_errors = load_nodes(path=node_path, src_crs_override=node_src_crs, dst_crs=dst_crs, aoi=node_aoi)
+        node_meta = {
+            "path": _meta.path,
+            "src_crs_detected": _meta.src_crs_detected,
+            "src_crs_used": _meta.src_crs,
+            "dst_crs": _meta.dst_crs,
+            "bbox_src": _meta.bbox_src,
+            "bbox_dst": _meta.bbox_dst,
+            "guess_source": _meta.guess_source,
+            "total_features": _meta.total_features,
+            "kept_features": _meta.kept_features,
+            "errors": node_errors,
+        }
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if "crs_unknown:" in msg:
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_CRS_UNKNOWN,
+                    severity="hard",
+                    nodeid=None,
+                    message="node_crs_unknown",
+                    extra={"detail": msg},
+                )
+            )
+        else:
+            raise
+
+    try:
+        roads, _meta, road_errors = load_roads(path=road_path, src_crs_override=road_src_crs, dst_crs=dst_crs, aoi=aoi)
+        road_meta = {
+            "path": _meta.path,
+            "src_crs_detected": _meta.src_crs_detected,
+            "src_crs_used": _meta.src_crs,
+            "dst_crs": _meta.dst_crs,
+            "bbox_src": _meta.bbox_src,
+            "bbox_dst": _meta.bbox_dst,
+            "guess_source": _meta.guess_source,
+            "total_features": _meta.total_features,
+            "kept_features": _meta.kept_features,
+            "errors": road_errors,
+        }
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if "crs_unknown:" in msg:
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_CRS_UNKNOWN,
+                    severity="hard",
+                    nodeid=None,
+                    message="road_crs_unknown",
+                    extra={"detail": msg},
+                )
+            )
+        else:
+            raise
 
     for err in road_errors:
         if str(err).startswith("road_field_missing:"):
@@ -739,8 +928,6 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             )
 
     nodes, alias_to_canonical = _resolve_nodes_aliases(nodes=nodes_raw, roads=roads)
-
-    # Parse warnings are kept in chosen_config; avoid stdout/raw dumps.
     focus_ids = [str(x) for x in runtime.get("focus_node_ids", [])]
     seeds, resolved_from_map = _pick_seed_nodes(
         mode=mode,
@@ -752,24 +939,53 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
 
     node_points = {int(n.nodeid): Point(float(n.point.x), float(n.point.y)) for n in nodes}
     node_kinds = {int(n.nodeid): int(n.kind) if n.kind is not None else 0 for n in nodes}
-
     road_graph = RoadGraph(roads=roads, node_points=node_points, node_kinds=node_kinds)
 
     divstrip_union = None
-    divstrip_meta: dict[str, Any] = {"path": str(divstrip_path), "exists": bool(divstrip_path and divstrip_path.is_file())}
+    divstrip_meta: dict[str, Any] = {
+        "path": str(divstrip_path),
+        "exists": bool(divstrip_path and divstrip_path.is_file()),
+        "src_crs_detected": None,
+        "src_crs_used": None,
+        "dst_crs": dst_crs,
+        "bbox_src": None,
+        "bbox_dst": None,
+    }
     if divstrip_path is not None and divstrip_path.is_file():
-        divstrip_union, meta, div_errors = load_divstrip_union(
-            path=divstrip_path,
-            src_crs_override=src_crs,
-            dst_crs=dst_crs,
-            aoi=aoi,
-        )
-        divstrip_meta.update({
-            "src_crs": meta.src_crs,
-            "total_features": meta.total_features,
-            "kept_features": meta.kept_features,
-            "errors": div_errors,
-        })
+        try:
+            divstrip_union, meta, div_errors = load_divstrip_union(
+                path=divstrip_path,
+                src_crs_override=divstrip_src_crs,
+                dst_crs=dst_crs,
+                aoi=aoi,
+            )
+            divstrip_meta.update(
+                {
+                    "src_crs_detected": meta.src_crs_detected,
+                    "src_crs_used": meta.src_crs,
+                    "dst_crs": meta.dst_crs,
+                    "bbox_src": meta.bbox_src,
+                    "bbox_dst": meta.bbox_dst,
+                    "guess_source": meta.guess_source,
+                    "total_features": meta.total_features,
+                    "kept_features": meta.kept_features,
+                    "errors": div_errors,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            if "crs_unknown:" in msg:
+                breakpoints.append(
+                    make_breakpoint(
+                        code=BP_CRS_UNKNOWN,
+                        severity="hard",
+                        nodeid=None,
+                        message="divstrip_crs_unknown",
+                        extra={"detail": msg},
+                    )
+                )
+            else:
+                raise
     else:
         breakpoints.append(
             make_breakpoint(
@@ -798,23 +1014,12 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             )
         )
     else:
-        pointcloud = load_pointcloud(path=pointcloud_path, use_classification=bool(params["pc_use_classification"]))
-
-        if pointcloud.lonlat_like and dst_crs == "EPSG:3857":
-            tf = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-            xx, yy = tf.transform(pointcloud.xy[:, 0], pointcloud.xy[:, 1])
-            pointcloud = PointCloudData(
-                xy=np.column_stack([xx, yy]).astype(np.float64),
-                classification=pointcloud.classification,
-                source_path=pointcloud.source_path,
-                source_kind=pointcloud.source_kind,
-                usable=pointcloud.usable,
-                reason=pointcloud.reason,
-                class_counts=pointcloud.class_counts,
-                bbox=(float(min(xx)), float(min(yy)), float(max(xx)), float(max(yy))),
-                lonlat_like=False,
-            )
-
+        pointcloud = load_pointcloud(
+            path=pointcloud_path,
+            use_classification=bool(params["pc_use_classification"]),
+            src_crs_hint=pointcloud_crs,
+            dst_crs=dst_crs,
+        )
         pointcloud_usable = bool(pointcloud.usable)
         if not pointcloud_usable:
             breakpoints.append(
@@ -848,6 +1053,11 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
                 "usable": bool(pointcloud.usable),
                 "reason": pointcloud.reason,
                 "class_counts": pointcloud.class_counts,
+                "bbox_src": pointcloud.bbox_src,
+                "bbox_dst": pointcloud.bbox_dst,
+                "src_crs_detected": pointcloud.src_crs_detected,
+                "src_crs_used": pointcloud.src_crs_used,
+                "dst_crs": pointcloud.dst_crs,
                 "ng_candidates_before_suppress": int(ng_before_suppress),
                 "ng_candidates_after_suppress": int(ng_after_suppress),
                 "traj_suppressed_count": int(traj_suppressed_count),
@@ -870,6 +1080,11 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
         res["ng_candidates_after_suppress"] = int(ng_after_suppress)
         seed_results.append(res)
 
+    dst_tag = "3857" if str(dst_crs).upper() == "EPSG:3857" else str(dst_crs).split(":")[-1].lower()
+    anchors_dst_path = out_dir / f"anchors_{dst_tag}.geojson"
+    inter_opt_dst_path = out_dir / f"intersection_l_opt_{dst_tag}.geojson"
+    anchors_wgs84_path = out_dir / "anchors_wgs84.geojson"
+    inter_opt_wgs84_path = out_dir / "intersection_l_opt_wgs84.geojson"
     anchors_geojson_path = out_dir / "anchors.geojson"
     inter_opt_path = out_dir / "intersection_l_opt.geojson"
     anchors_json_path = out_dir / "anchors.json"
@@ -878,8 +1093,12 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
     summary_path = out_dir / "summary.txt"
     chosen_config_path = out_dir / "chosen_config.json"
 
-    write_anchor_geojson(path=anchors_geojson_path, seed_results=seed_results, crs_name=dst_crs)
-    write_intersection_opt_geojson(path=inter_opt_path, seed_results=seed_results, crs_name=dst_crs)
+    write_anchor_geojson(path=anchors_dst_path, seed_results=seed_results, src_crs_name=dst_crs, dst_crs_name=dst_crs)
+    write_intersection_opt_geojson(path=inter_opt_dst_path, seed_results=seed_results, src_crs_name=dst_crs, dst_crs_name=dst_crs)
+    write_anchor_geojson(path=anchors_wgs84_path, seed_results=seed_results, src_crs_name=dst_crs, dst_crs_name="EPSG:4326")
+    write_intersection_opt_geojson(path=inter_opt_wgs84_path, seed_results=seed_results, src_crs_name=dst_crs, dst_crs_name="EPSG:4326")
+    write_anchor_geojson(path=anchors_geojson_path, seed_results=seed_results, src_crs_name=dst_crs, dst_crs_name=dst_crs)
+    write_intersection_opt_geojson(path=inter_opt_path, seed_results=seed_results, src_crs_name=dst_crs, dst_crs_name=dst_crs)
 
     anchors_json_payload = {
         "run_id": str(run_id),
@@ -891,6 +1110,15 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
 
     bp_summary = summarize_breakpoints(breakpoints)
     write_json(breakpoints_path, bp_summary)
+
+    traj_src_detected = None
+    traj_bbox_src = None
+    traj_bbox_dst = None
+    if traj.per_file_meta:
+        first_meta = traj.per_file_meta[0]
+        traj_src_detected = first_meta.get("src_crs_detected")
+        traj_bbox_src = first_meta.get("bbox_src")
+        traj_bbox_dst = first_meta.get("bbox_dst")
 
     chosen_config = {
         "run_id": str(run_id),
@@ -905,37 +1133,39 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
         "pointcloud_path": str(pointcloud_path) if pointcloud_path else None,
         "traj_glob": traj_glob,
         "focus_node_ids": focus_ids,
-        "src_crs": str(src_crs),
+        "src_crs": str(src_crs_global),
         "dst_crs": str(dst_crs),
+        "node_src_crs": str(node_src_crs),
+        "road_src_crs": str(road_src_crs),
+        "divstrip_src_crs": str(divstrip_src_crs),
+        "traj_src_crs": str(traj_src_crs),
+        "pointcloud_crs": str(pointcloud_crs),
         "params": params,
         "load_meta": {
-            "nodes": {
-                "path": node_meta.path,
-                "src_crs": node_meta.src_crs,
-                "total_features": node_meta.total_features,
-                "kept_features": node_meta.kept_features,
-                "errors": node_errors,
-            },
-            "roads": {
-                "path": road_meta.path,
-                "src_crs": road_meta.src_crs,
-                "total_features": road_meta.total_features,
-                "kept_features": road_meta.kept_features,
-                "errors": road_errors,
-            },
+            "nodes": node_meta,
+            "roads": road_meta,
             "divstrip": divstrip_meta,
             "pointcloud": pointcloud_meta,
             "traj": {
                 "path_count": len(traj.paths),
                 "total_points": int(traj.total_points),
                 "src_crs_list": traj.src_crs_list,
+                "src_crs_detected": traj_src_detected,
+                "src_crs_used": traj.src_crs_list[0] if traj.src_crs_list else None,
+                "dst_crs": str(dst_crs),
+                "bbox_src": traj_bbox_src,
+                "bbox_dst": traj_bbox_dst,
+                "per_file_meta": traj.per_file_meta,
             },
         },
     }
     write_json(chosen_config_path, chosen_config)
 
-    # Metrics + summary
     required_paths = [
+        anchors_dst_path,
+        inter_opt_dst_path,
+        anchors_wgs84_path,
+        inter_opt_wgs84_path,
         anchors_geojson_path,
         inter_opt_path,
         anchors_json_path,
@@ -965,10 +1195,51 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             "traj_suppressed_count": int(traj_suppressed_count),
             "aoi_used": bool(aoi is not None),
             "focus_node_ids": focus_ids,
+            "dst_crs": str(dst_crs),
         }
     )
-
     write_json(metrics_path, metrics)
+
+    crs_diag = {
+        "dst_crs": str(dst_crs),
+        "layer_crs": {
+            "node": {
+                "src_crs_detected": node_meta.get("src_crs_detected"),
+                "src_crs_used": node_meta.get("src_crs_used"),
+                "dst_crs": node_meta.get("dst_crs"),
+                "bbox_src": node_meta.get("bbox_src"),
+                "bbox_dst": node_meta.get("bbox_dst"),
+            },
+            "road": {
+                "src_crs_detected": road_meta.get("src_crs_detected"),
+                "src_crs_used": road_meta.get("src_crs_used"),
+                "dst_crs": road_meta.get("dst_crs"),
+                "bbox_src": road_meta.get("bbox_src"),
+                "bbox_dst": road_meta.get("bbox_dst"),
+            },
+            "divstrip": {
+                "src_crs_detected": divstrip_meta.get("src_crs_detected"),
+                "src_crs_used": divstrip_meta.get("src_crs_used"),
+                "dst_crs": divstrip_meta.get("dst_crs"),
+                "bbox_src": divstrip_meta.get("bbox_src"),
+                "bbox_dst": divstrip_meta.get("bbox_dst"),
+            },
+            "traj": {
+                "src_crs_detected": traj_src_detected,
+                "src_crs_used": traj.src_crs_list[0] if traj.src_crs_list else None,
+                "dst_crs": str(dst_crs),
+                "bbox_src": traj_bbox_src,
+                "bbox_dst": traj_bbox_dst,
+            },
+            "pointcloud": {
+                "src_crs_detected": pointcloud_meta.get("src_crs_detected"),
+                "src_crs_used": pointcloud_meta.get("src_crs_used"),
+                "dst_crs": pointcloud_meta.get("dst_crs"),
+                "bbox_src": pointcloud_meta.get("bbox_src"),
+                "bbox_dst": pointcloud_meta.get("bbox_dst"),
+            },
+        },
+    }
 
     summary = build_summary_text(
         run_id=str(run_id),
@@ -977,6 +1248,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
         metrics=metrics,
         breakpoints_summary=bp_summary,
         seed_results=[_serialize_seed_result(x) for x in seed_results],
+        crs_diag=crs_diag,
     )
     write_text(summary_path, summary)
 
@@ -1002,6 +1274,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
                 "traj_suppressed_count": int(traj_suppressed_count),
                 "aoi_used": bool(aoi is not None),
                 "focus_node_ids": focus_ids,
+                "dst_crs": str(dst_crs),
             }
         )
         write_json(metrics_path, metrics)
@@ -1012,6 +1285,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             metrics=metrics,
             breakpoints_summary=bp_summary,
             seed_results=[_serialize_seed_result(x) for x in seed_results],
+            crs_diag=crs_diag,
         )
         write_text(summary_path, summary)
 
@@ -1024,7 +1298,6 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
     )
 
 
-# Backward-compatible wrapper for old tests/callers.
 def run_patch(
     *,
     patch_dir: Path | str,
@@ -1040,6 +1313,11 @@ def run_patch(
         "run_id": str(run_id or "auto"),
         "src_crs": str(cfg.get("src_crs", "auto")),
         "dst_crs": str(cfg.get("dst_crs", "EPSG:3857")),
+        "node_src_crs": cfg.get("node_src_crs"),
+        "road_src_crs": cfg.get("road_src_crs"),
+        "divstrip_src_crs": cfg.get("divstrip_src_crs"),
+        "traj_src_crs": cfg.get("traj_src_crs"),
+        "pointcloud_crs": cfg.get("pointcloud_crs"),
         "global_node_path": cfg.get("global_node_path"),
         "global_road_path": cfg.get("global_road_path"),
         "divstrip_path": cfg.get("divstrip_path"),

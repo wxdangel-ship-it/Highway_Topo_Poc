@@ -6,6 +6,7 @@ from typing import Any
 
 from shapely.geometry import LineString, Point, mapping
 
+from .crs_norm import transform_coords_recursive
 from .io_geojson import make_feature_collection, write_geojson
 
 
@@ -31,17 +32,32 @@ def _props_min(item: dict[str, Any]) -> dict[str, Any]:
         "scan_dist_m": item.get("scan_dist_m"),
         "trigger": item.get("trigger"),
         "dist_to_divstrip_m": item.get("dist_to_divstrip_m"),
+        "dist_line_to_divstrip_m": item.get("dist_line_to_divstrip_m"),
         "confidence": item.get("confidence"),
         "flags": item.get("flags", []),
         "resolved_from": item.get("resolved_from"),
+        "first_divstrip_hit_dist_m": item.get("first_divstrip_hit_dist_m"),
+        "best_divstrip_pc_dist_m": item.get("best_divstrip_pc_dist_m"),
+        "first_pc_only_dist_m": item.get("first_pc_only_dist_m"),
+        "stop_reason": item.get("stop_reason"),
     }
+
+
+def _transform_geometry_dict(geom: dict[str, Any], *, src_crs: str, dst_crs: str) -> dict[str, Any]:
+    if src_crs == dst_crs:
+        return geom
+    out = dict(geom)
+    if "coordinates" in out:
+        out["coordinates"] = transform_coords_recursive(out["coordinates"], src_crs, dst_crs)
+    return out
 
 
 def write_anchor_geojson(
     *,
     path: Path,
     seed_results: list[dict[str, Any]],
-    crs_name: str,
+    src_crs_name: str,
+    dst_crs_name: str,
 ) -> None:
     features: list[dict[str, Any]] = []
     for item in seed_results:
@@ -49,32 +65,37 @@ def write_anchor_geojson(
 
         pt = item.get("anchor_point")
         if isinstance(pt, Point):
+            geom = mapping(pt)
+            geom = _transform_geometry_dict(geom, src_crs=src_crs_name, dst_crs=dst_crs_name)
             features.append(
                 {
                     "type": "Feature",
                     "properties": {**props, "feature_role": "anchor_point"},
-                    "geometry": mapping(pt),
+                    "geometry": geom,
                 }
             )
 
         line = item.get("crossline_opt")
         if isinstance(line, LineString):
+            geom = mapping(line)
+            geom = _transform_geometry_dict(geom, src_crs=src_crs_name, dst_crs=dst_crs_name)
             features.append(
                 {
                     "type": "Feature",
                     "properties": {**props, "feature_role": "crossline_opt"},
-                    "geometry": mapping(line),
+                    "geometry": geom,
                 }
             )
 
-    write_geojson(path, make_feature_collection(features, crs_name=crs_name))
+    write_geojson(path, make_feature_collection(features, crs_name=dst_crs_name))
 
 
 def write_intersection_opt_geojson(
     *,
     path: Path,
     seed_results: list[dict[str, Any]],
-    crs_name: str,
+    src_crs_name: str,
+    dst_crs_name: str,
 ) -> None:
     features: list[dict[str, Any]] = []
     for item in seed_results:
@@ -82,15 +103,17 @@ def write_intersection_opt_geojson(
         if not isinstance(line, LineString):
             continue
         props = _props_min(item)
+        geom = mapping(line)
+        geom = _transform_geometry_dict(geom, src_crs=src_crs_name, dst_crs=dst_crs_name)
         features.append(
             {
                 "type": "Feature",
                 "properties": props,
-                "geometry": mapping(line),
+                "geometry": geom,
             }
         )
 
-    write_geojson(path, make_feature_collection(features, crs_name=crs_name))
+    write_geojson(path, make_feature_collection(features, crs_name=dst_crs_name))
 
 
 __all__ = ["write_anchor_geojson", "write_intersection_opt_geojson", "write_json", "write_text"]
