@@ -1,42 +1,22 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 from typing import Any, Sequence
 
 import numpy as np
 
 
-BP_MISSING_INTERSECTION_L = "MISSING_INTERSECTION_L"
-BP_MULTIPLE_INTERSECTION_L = "MULTIPLE_INTERSECTION_L"
-BP_ROAD_LINK_NOT_FOUND = "ROAD_LINK_NOT_FOUND"
+BP_FOCUS_NODE_NOT_FOUND = "FOCUS_NODE_NOT_FOUND"
 BP_UNSUPPORTED_KIND = "UNSUPPORTED_KIND"
 BP_AMBIGUOUS_KIND = "AMBIGUOUS_KIND"
-BP_POINTCLOUD_MISSING_OR_UNUSABLE = "POINTCLOUD_MISSING_OR_UNUSABLE"
+BP_ROAD_LINK_NOT_FOUND = "ROAD_LINK_NOT_FOUND"
+BP_ROAD_GRAPH_WEAK_STOP = "ROAD_GRAPH_WEAK_STOP"
 BP_DIVSTRIPZONE_MISSING = "DIVSTRIPZONE_MISSING"
+BP_POINTCLOUD_MISSING_OR_UNUSABLE = "POINTCLOUD_MISSING_OR_UNUSABLE"
+BP_TRAJ_MISSING = "TRAJ_MISSING"
 BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION = "NO_TRIGGER_BEFORE_NEXT_INTERSECTION"
 BP_SCAN_EXCEED_200M = "SCAN_EXCEED_200M"
 BP_DIVSTRIP_TOLERANCE_VIOLATION = "DIVSTRIP_TOLERANCE_VIOLATION"
-
-
-def clamp01(v: float) -> float:
-    return min(1.0, max(0.0, float(v)))
-
-
-def compute_confidence(trigger: str, scan_dist_m: float | None) -> float:
-    v = 0.4
-    if trigger == "divstrip+pc":
-        v += 0.4
-    elif trigger == "pc_only":
-        v += 0.25
-    elif trigger == "divstrip_only_degraded":
-        v += 0.15
-
-    d = float(scan_dist_m) if scan_dist_m is not None else 0.0
-    if d > 20.0:
-        v -= 0.2
-    if d > 200.0:
-        v -= 0.3
-    return clamp01(v)
 
 
 def make_breakpoint(
@@ -60,23 +40,7 @@ def make_breakpoint(
 
 def summarize_breakpoints(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
     cnt = Counter(str(x.get("code", "")) for x in items)
-    nodes_by_code: dict[str, list[int]] = defaultdict(list)
-    for x in items:
-        code = str(x.get("code", ""))
-        nodeid = x.get("nodeid")
-        if isinstance(nodeid, int):
-            nodes_by_code[code].append(int(nodeid))
-
-    by_code = []
-    for code, c in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0])):
-        by_code.append(
-            {
-                "code": code,
-                "count": int(c),
-                "nodeids_topk": sorted(set(nodes_by_code.get(code, [])))[:10],
-            }
-        )
-
+    by_code = [{"code": code, "count": int(c)} for code, c in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))]
     return {
         "count": int(len(items)),
         "by_code": by_code,
@@ -84,108 +48,112 @@ def summarize_breakpoints(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _ratio(num: int, den: int) -> float:
-    if den <= 0:
-        return 0.0
-    return float(num) / float(den)
-
-
 def _distance_stats(vals: list[float]) -> dict[str, float | None]:
     if not vals:
-        return {"min": None, "p50": None, "p90": None, "max": None}
+        return {"min": None, "mean": None, "p50": None, "p95": None, "max": None}
     arr = np.asarray(vals, dtype=np.float64)
     return {
         "min": float(np.min(arr)),
+        "mean": float(np.mean(arr)),
         "p50": float(np.percentile(arr, 50.0)),
-        "p90": float(np.percentile(arr, 90.0)),
+        "p95": float(np.percentile(arr, 95.0)),
         "max": float(np.max(arr)),
     }
 
 
+def clamp01(v: float) -> float:
+    return min(1.0, max(0.0, float(v)))
+
+
+def compute_confidence(*, trigger: str, scan_dist_m: float | None) -> float:
+    val = 0.35
+    if trigger == "divstrip+pc":
+        val += 0.45
+    elif trigger == "pc_only":
+        val += 0.30
+    elif trigger == "divstrip_only_degraded":
+        val += 0.15
+
+    d = float(scan_dist_m) if scan_dist_m is not None else 0.0
+    if d > 20.0:
+        val -= 0.20
+    if d > 200.0:
+        val -= 0.30
+    return clamp01(val)
+
+
+def _count_code(items: Sequence[dict[str, Any]], code: str) -> int:
+    return int(sum(1 for x in items if str(x.get("code")) == code))
+
+
 def build_metrics(
     *,
+    patch_id: str,
+    mode: str,
     seed_results: Sequence[dict[str, Any]],
     breakpoints: Sequence[dict[str, Any]],
-    config: dict[str, Any],
-    must_inputs_ok: bool,
+    params: dict[str, Any],
     required_outputs_ok: bool,
 ) -> dict[str, Any]:
     seed_total = int(len(seed_results))
     found_count = int(sum(1 for x in seed_results if bool(x.get("anchor_found", False))))
+    missing_count = int(seed_total - found_count)
 
-    no_trigger_count = int(
-        sum(1 for x in breakpoints if str(x.get("code")) == BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION)
-    )
-    scan_exceed_count = int(sum(1 for x in breakpoints if str(x.get("code")) == BP_SCAN_EXCEED_200M))
-    multiple_intersection_count = int(
-        sum(1 for x in breakpoints if str(x.get("code")) == BP_MULTIPLE_INTERSECTION_L)
-    )
-    divstrip_tol_violation_count = int(
-        sum(1 for x in breakpoints if str(x.get("code")) == BP_DIVSTRIP_TOLERANCE_VIOLATION)
-    )
+    ratio = float(found_count / seed_total) if seed_total > 0 else 0.0
 
-    found_dists = [float(x["scan_dist_m"]) for x in seed_results if x.get("anchor_found") and x.get("scan_dist_m") is not None]
+    scan_dists = [float(x.get("scan_dist_m")) for x in seed_results if x.get("scan_dist_m") is not None]
 
-    anchor_found_ratio = _ratio(found_count, seed_total)
-    no_trigger_ratio = _ratio(no_trigger_count, seed_total)
-    scan_exceed_ratio = _ratio(scan_exceed_count, seed_total)
+    no_trigger_count = _count_code(breakpoints, BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION)
+    scan_exceed_count = _count_code(breakpoints, BP_SCAN_EXCEED_200M)
+
+    min_ratio = float(params["min_anchor_found_ratio_focus"] if mode == "global_focus" else params["min_anchor_found_ratio_patch"])
+    no_trigger_max = int(params.get("no_trigger_count_max_focus", 0 if mode == "global_focus" else seed_total))
+    scan_exceed_max = int(params.get("scan_exceed_200m_count_max_focus", 0 if mode == "global_focus" else seed_total))
 
     hard_checks = {
-        "must_inputs_parsed": bool(must_inputs_ok),
-        "seed_total_gt_0": seed_total > 0,
-        "multiple_intersection_l_zero": multiple_intersection_count == 0,
         "required_outputs_present": bool(required_outputs_ok),
+        "seed_total_gt_0": bool(seed_total > 0),
     }
-    if bool(config.get("divstrip_tolerance_violation_hard", True)):
-        hard_checks["divstrip_tolerance_violation_zero"] = divstrip_tol_violation_count == 0
 
     soft_checks = {
         "anchor_found_ratio": {
-            "value": float(anchor_found_ratio),
-            "threshold": float(config["anchor_found_ratio_min"]),
-            "pass": float(anchor_found_ratio) >= float(config["anchor_found_ratio_min"]),
+            "value": ratio,
+            "threshold": min_ratio,
+            "pass": ratio >= min_ratio,
         },
-        "no_trigger_before_next_intersection_ratio": {
-            "value": float(no_trigger_ratio),
-            "threshold": float(config["no_trigger_before_next_intersection_ratio_max"]),
-            "pass": float(no_trigger_ratio)
-            <= float(config["no_trigger_before_next_intersection_ratio_max"]),
+        "no_trigger_count": {
+            "value": int(no_trigger_count),
+            "threshold": int(no_trigger_max),
+            "pass": int(no_trigger_count) <= int(no_trigger_max),
         },
-        "scan_exceed_200m_ratio": {
-            "value": float(scan_exceed_ratio),
-            "threshold": float(config["scan_exceed_200m_ratio_max"]),
-            "pass": float(scan_exceed_ratio) <= float(config["scan_exceed_200m_ratio_max"]),
+        "scan_exceed_200m_count": {
+            "value": int(scan_exceed_count),
+            "threshold": int(scan_exceed_max),
+            "pass": int(scan_exceed_count) <= int(scan_exceed_max),
         },
     }
 
     hard_pass = all(bool(v) for v in hard_checks.values())
     soft_pass = all(bool(v.get("pass", False)) for v in soft_checks.values())
-    overall_pass = bool(hard_pass and soft_pass)
+
+    bp_summary = summarize_breakpoints(breakpoints)
 
     return {
+        "patch_id": str(patch_id),
+        "mode": str(mode),
         "seed_total": int(seed_total),
-        "anchor_found_count": int(found_count),
-        "anchor_found_ratio": float(anchor_found_ratio),
-        "anchors_found_ratio": float(anchor_found_ratio),
-        "no_trigger_before_next_intersection_count": int(no_trigger_count),
-        "no_trigger_before_next_intersection_ratio": float(no_trigger_ratio),
-        "scan_exceed_200m_count": int(scan_exceed_count),
-        "scan_exceed_200m_ratio": float(scan_exceed_ratio),
-        "multiple_intersection_l_count": int(multiple_intersection_count),
-        "divstrip_tolerance_violation_count": int(divstrip_tol_violation_count),
-        "status_count": {
-            "ok": int(sum(1 for x in seed_results if str(x.get("status")) == "ok")),
-            "suspect": int(sum(1 for x in seed_results if str(x.get("status")) == "suspect")),
-            "fail": int(sum(1 for x in seed_results if str(x.get("status")) == "fail")),
-        },
-        "scan_dist_m_stats": _distance_stats(found_dists),
+        "anchors_found_count": int(found_count),
+        "anchors_missing_count": int(missing_count),
+        "anchor_found_ratio": float(ratio),
+        "scan_dist_m_stats": _distance_stats(scan_dists),
+        "breakpoints_by_code": bp_summary.get("by_code", []),
         "gate_eval": {
             "hard": hard_checks,
             "soft": soft_checks,
             "hard_pass": bool(hard_pass),
             "soft_pass": bool(soft_pass),
         },
-        "overall_pass": bool(overall_pass),
+        "overall_pass": bool(hard_pass and soft_pass),
     }
 
 
@@ -193,70 +161,71 @@ def build_summary_text(
     *,
     run_id: str,
     patch_id: str,
+    mode: str,
     metrics: dict[str, Any],
     breakpoints_summary: dict[str, Any],
     seed_results: Sequence[dict[str, Any]],
-    max_lines: int = 60,
 ) -> str:
     lines: list[str] = []
     lines.append("=== t04_rc_sw_anchor summary ===")
     lines.append(f"run_id: {run_id}")
     lines.append(f"patch_id: {patch_id}")
+    lines.append(f"mode: {mode}")
     lines.append(f"overall_pass: {str(bool(metrics.get('overall_pass', False))).lower()}")
     lines.append("")
+    lines.append(
+        "seed_total={seed_total} found={found} missing={missing} ratio={ratio:.3f}".format(
+            seed_total=int(metrics.get("seed_total", 0)),
+            found=int(metrics.get("anchors_found_count", 0)),
+            missing=int(metrics.get("anchors_missing_count", 0)),
+            ratio=float(metrics.get("anchor_found_ratio", 0.0)),
+        )
+    )
 
-    lines.append(f"seed_total: {metrics.get('seed_total', 0)}")
-    lines.append(f"anchor_found_ratio: {metrics.get('anchor_found_ratio', 0.0):.3f}")
-    lines.append(f"no_trigger_ratio: {metrics.get('no_trigger_before_next_intersection_ratio', 0.0):.3f}")
-    lines.append(f"scan_exceed_200m_ratio: {metrics.get('scan_exceed_200m_ratio', 0.0):.3f}")
+    lines.append("")
+    lines.append("per_node:")
+    for item in seed_results:
+        lines.append(
+            "- nodeid={nodeid} anchor_type={anchor_type} status={status} scan_dist_m={scan_dist} trigger={trigger} stop_dist_m={stop}".format(
+                nodeid=item.get("nodeid"),
+                anchor_type=item.get("anchor_type"),
+                status=item.get("status"),
+                scan_dist=item.get("scan_dist_m"),
+                trigger=item.get("trigger"),
+                stop=item.get("stop_dist_m"),
+            )
+        )
 
     lines.append("")
     lines.append("top_breakpoints:")
     by_code = breakpoints_summary.get("by_code", [])
     if isinstance(by_code, list) and by_code:
-        for item in by_code[:5]:
-            code = str(item.get("code", "na"))
-            count = int(item.get("count", 0))
-            nodes = item.get("nodeids_topk", [])
-            lines.append(f"- {code}: count={count} nodes={nodes}")
+        for row in by_code[:8]:
+            lines.append(f"- {row.get('code')}: {row.get('count')}")
     else:
         lines.append("- (none)")
 
+    soft = metrics.get("gate_eval", {}).get("soft", {})
     lines.append("")
-    lines.append("scan_dist_topk:")
-    ranked = [x for x in seed_results if x.get("scan_dist_m") is not None]
-    ranked = sorted(ranked, key=lambda x: float(x.get("scan_dist_m", -1.0)), reverse=True)
-    if ranked:
-        for item in ranked[:5]:
-            nodeid = item.get("nodeid")
-            status = item.get("status")
-            dist = float(item.get("scan_dist_m", 0.0))
-            trigger = item.get("trigger")
-            lines.append(f"- nodeid={nodeid} status={status} scan_dist_m={dist:.2f} trigger={trigger}")
-    else:
-        lines.append("- (none)")
-
+    lines.append("gates:")
+    lines.append(f"- anchor_found_ratio >= {soft.get('anchor_found_ratio', {}).get('threshold')}")
+    lines.append(f"- no_trigger_count <= {soft.get('no_trigger_count', {}).get('threshold')}")
+    lines.append(f"- scan_exceed_200m_count <= {soft.get('scan_exceed_200m_count', {}).get('threshold')}")
     lines.append("=== END ===")
-
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        lines.append("Truncated: true (reason=line_limit)")
-    else:
-        lines.append("Truncated: false (reason=na)")
-
     return "\n".join(lines) + "\n"
 
 
 __all__ = [
     "BP_AMBIGUOUS_KIND",
-    "BP_DIVSTRIP_TOLERANCE_VIOLATION",
     "BP_DIVSTRIPZONE_MISSING",
-    "BP_MISSING_INTERSECTION_L",
-    "BP_MULTIPLE_INTERSECTION_L",
+    "BP_DIVSTRIP_TOLERANCE_VIOLATION",
+    "BP_FOCUS_NODE_NOT_FOUND",
     "BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION",
     "BP_POINTCLOUD_MISSING_OR_UNUSABLE",
+    "BP_ROAD_GRAPH_WEAK_STOP",
     "BP_ROAD_LINK_NOT_FOUND",
     "BP_SCAN_EXCEED_200M",
+    "BP_TRAJ_MISSING",
     "BP_UNSUPPORTED_KIND",
     "build_metrics",
     "build_summary_text",

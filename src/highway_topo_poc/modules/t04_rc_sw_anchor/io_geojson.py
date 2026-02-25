@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
+from pyproj import Transformer
 from shapely.geometry import LineString, Point, shape
-from shapely.ops import unary_union
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import transform, unary_union
 
 
 @dataclass(frozen=True)
@@ -17,12 +20,6 @@ class NodeRecord:
 
 
 @dataclass(frozen=True)
-class IntersectionLineRecord:
-    nodeid: int
-    line: LineString
-
-
-@dataclass(frozen=True)
 class RoadRecord:
     snodeid: int
     enodeid: int
@@ -30,19 +27,19 @@ class RoadRecord:
     length_m: float
 
 
-def _to_int(value: Any, *, default: int | None = None) -> int | None:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    try:
-        return int(str(value).strip())
-    except Exception:
-        return default
+@dataclass(frozen=True)
+class IntersectionLineRecord:
+    nodeid: int
+    line: LineString
+
+
+@dataclass(frozen=True)
+class GeoLoadMeta:
+    path: str
+    src_crs: str
+    dst_crs: str
+    total_features: int
+    kept_features: int
 
 
 def read_geojson(path: Path) -> dict[str, Any]:
@@ -55,8 +52,7 @@ def read_geojson(path: Path) -> dict[str, Any]:
 
     if not isinstance(payload, dict) or payload.get("type") != "FeatureCollection":
         raise ValueError(f"geojson_not_feature_collection: {path}")
-    features = payload.get("features")
-    if not isinstance(features, list):
+    if not isinstance(payload.get("features"), list):
         raise ValueError(f"geojson_features_not_list: {path}")
     return payload
 
@@ -64,6 +60,13 @@ def read_geojson(path: Path) -> dict[str, Any]:
 def write_geojson(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def make_feature_collection(features: list[dict[str, Any]], *, crs_name: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"type": "FeatureCollection", "features": features}
+    if crs_name:
+        payload["crs"] = {"type": "name", "properties": {"name": str(crs_name)}}
+    return payload
 
 
 def extract_crs_name(payload: dict[str, Any]) -> str | None:
@@ -79,22 +82,107 @@ def extract_crs_name(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def make_feature_collection(features: list[dict[str, Any]], *, crs_name: str | None) -> dict[str, Any]:
-    obj: dict[str, Any] = {"type": "FeatureCollection", "features": features}
-    if crs_name:
-        obj["crs"] = {"type": "name", "properties": {"name": crs_name}}
-    return obj
+def _iter_coords_any(geom: Any) -> Iterable[tuple[float, float]]:
+    if not isinstance(geom, dict):
+        return []
+    gtype = geom.get("type")
+    coords = geom.get("coordinates")
+    if gtype == "Point" and isinstance(coords, list) and len(coords) >= 2:
+        return [(float(coords[0]), float(coords[1]))]
+
+    out: list[tuple[float, float]] = []
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, list):
+            if len(obj) >= 2 and all(isinstance(x, (int, float)) for x in obj[:2]):
+                out.append((float(obj[0]), float(obj[1])))
+                return
+            for it in obj:
+                walk(it)
+
+    walk(coords)
+    return out
 
 
-def load_nodes(payload: dict[str, Any]) -> tuple[list[NodeRecord], list[str]]:
+def _guess_src_crs_from_payload(payload: dict[str, Any]) -> str:
+    feats = payload.get("features")
+    if not isinstance(feats, list):
+        return "EPSG:3857"
+
+    sample: list[tuple[float, float]] = []
+    for feat in feats[:200]:
+        if not isinstance(feat, dict):
+            continue
+        geom = feat.get("geometry")
+        for xy in _iter_coords_any(geom):
+            sample.append(xy)
+            if len(sample) >= 1000:
+                break
+        if len(sample) >= 1000:
+            break
+
+    if not sample:
+        return "EPSG:3857"
+
+    lonlat_like = sum(1 for x, y in sample if abs(x) <= 180.0 and abs(y) <= 90.0)
+    if lonlat_like >= int(0.95 * len(sample)):
+        return "EPSG:4326"
+    return "EPSG:3857"
+
+
+def resolve_source_crs(payload: dict[str, Any], *, src_crs_override: str) -> str:
+    explicit = str(src_crs_override).strip()
+    if explicit and explicit.lower() != "auto":
+        return explicit
+
+    from_payload = extract_crs_name(payload)
+    if from_payload:
+        return from_payload
+
+    return _guess_src_crs_from_payload(payload)
+
+
+def _safe_int(value: Any, default: int | None = None) -> int | None:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _build_transformer(src_crs: str, dst_crs: str) -> Transformer:
+    return Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+
+
+def _project_geom(geom: BaseGeometry, transformer: Transformer | None) -> BaseGeometry:
+    if transformer is None:
+        return geom
+    return transform(transformer.transform, geom)
+
+
+def load_nodes(
+    *,
+    path: Path,
+    src_crs_override: str,
+    dst_crs: str,
+    aoi: BaseGeometry | None = None,
+) -> tuple[list[NodeRecord], GeoLoadMeta, list[str]]:
+    payload = read_geojson(path)
+    src_crs = resolve_source_crs(payload, src_crs_override=src_crs_override)
+    transformer = None if src_crs == dst_crs else _build_transformer(src_crs, dst_crs)
+
     errors: list[str] = []
     out: list[NodeRecord] = []
+    total = 0
 
     for idx, feat in enumerate(payload.get("features", [])):
+        total += 1
         if not isinstance(feat, dict):
             errors.append(f"node_feature_not_object:{idx}")
             continue
-
+        props = feat.get("properties")
+        props = props if isinstance(props, dict) else {}
         geom = feat.get("geometry")
         if not isinstance(geom, dict):
             errors.append(f"node_geometry_missing:{idx}")
@@ -105,77 +193,58 @@ def load_nodes(payload: dict[str, Any]) -> tuple[list[NodeRecord], list[str]]:
         except Exception as exc:  # noqa: BLE001
             errors.append(f"node_geometry_invalid:{idx}:{type(exc).__name__}")
             continue
-
         if not isinstance(g, Point):
             errors.append(f"node_geometry_not_point:{idx}")
             continue
 
-        props = feat.get("properties")
-        props = props if isinstance(props, dict) else {}
+        g2 = _project_geom(g, transformer)
+        if aoi is not None and not g2.intersects(aoi):
+            continue
 
-        nodeid = _to_int(props.get("mainid"), default=None)
+        nodeid = _safe_int(props.get("mainid"), default=None)
         if nodeid is None:
-            nodeid = _to_int(props.get("id"), default=None)
+            nodeid = _safe_int(props.get("id"), default=None)
+        if nodeid is None:
+            nodeid = _safe_int(props.get("nodeid"), default=None)
         if nodeid is None:
             errors.append(f"nodeid_missing:{idx}")
             continue
 
-        kind = _to_int(props.get("Kind"), default=0)
-        out.append(NodeRecord(nodeid=int(nodeid), kind=int(kind or 0), point=g))
+        kind = _safe_int(props.get("Kind"), default=0)
+        out.append(NodeRecord(nodeid=int(nodeid), kind=int(kind or 0), point=Point(float(g2.x), float(g2.y))))
 
-    return out, errors
-
-
-def load_intersection_lines(payload: dict[str, Any]) -> tuple[list[IntersectionLineRecord], list[str]]:
-    errors: list[str] = []
-    out: list[IntersectionLineRecord] = []
-
-    for idx, feat in enumerate(payload.get("features", [])):
-        if not isinstance(feat, dict):
-            errors.append(f"intersection_feature_not_object:{idx}")
-            continue
-
-        geom = feat.get("geometry")
-        if not isinstance(geom, dict):
-            errors.append(f"intersection_geometry_missing:{idx}")
-            continue
-
-        try:
-            g = shape(geom)
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"intersection_geometry_invalid:{idx}:{type(exc).__name__}")
-            continue
-
-        if not isinstance(g, LineString):
-            errors.append(f"intersection_geometry_not_linestring:{idx}")
-            continue
-
-        props = feat.get("properties")
-        props = props if isinstance(props, dict) else {}
-
-        nodeid = _to_int(props.get("nodeid"), default=None)
-        if nodeid is None:
-            nodeid = _to_int(props.get("mainid"), default=None)
-        if nodeid is None:
-            nodeid = _to_int(props.get("id"), default=None)
-        if nodeid is None:
-            errors.append(f"intersection_nodeid_missing:{idx}")
-            continue
-
-        out.append(IntersectionLineRecord(nodeid=int(nodeid), line=g))
-
-    return out, errors
+    meta = GeoLoadMeta(
+        path=str(path),
+        src_crs=str(src_crs),
+        dst_crs=str(dst_crs),
+        total_features=int(total),
+        kept_features=int(len(out)),
+    )
+    return out, meta, errors
 
 
-def load_roads(payload: dict[str, Any]) -> tuple[list[RoadRecord], list[str]]:
+def load_roads(
+    *,
+    path: Path,
+    src_crs_override: str,
+    dst_crs: str,
+    aoi: BaseGeometry | None = None,
+) -> tuple[list[RoadRecord], GeoLoadMeta, list[str]]:
+    payload = read_geojson(path)
+    src_crs = resolve_source_crs(payload, src_crs_override=src_crs_override)
+    transformer = None if src_crs == dst_crs else _build_transformer(src_crs, dst_crs)
+
     errors: list[str] = []
     out: list[RoadRecord] = []
+    total = 0
 
     for idx, feat in enumerate(payload.get("features", [])):
+        total += 1
         if not isinstance(feat, dict):
             errors.append(f"road_feature_not_object:{idx}")
             continue
-
+        props = feat.get("properties")
+        props = props if isinstance(props, dict) else {}
         geom = feat.get("geometry")
         if not isinstance(geom, dict):
             errors.append(f"road_geometry_missing:{idx}")
@@ -186,16 +255,16 @@ def load_roads(payload: dict[str, Any]) -> tuple[list[RoadRecord], list[str]]:
         except Exception as exc:  # noqa: BLE001
             errors.append(f"road_geometry_invalid:{idx}:{type(exc).__name__}")
             continue
-
         if not isinstance(g, LineString):
             errors.append(f"road_geometry_not_linestring:{idx}")
             continue
 
-        props = feat.get("properties")
-        props = props if isinstance(props, dict) else {}
+        g2 = _project_geom(g, transformer)
+        if aoi is not None and not g2.intersects(aoi):
+            continue
 
-        snodeid = _to_int(props.get("snodeid"), default=None)
-        enodeid = _to_int(props.get("enodeid"), default=None)
+        snodeid = _safe_int(props.get("snodeid"), default=None)
+        enodeid = _safe_int(props.get("enodeid"), default=None)
         if snodeid is None or enodeid is None:
             errors.append(f"road_nodeid_missing:{idx}")
             continue
@@ -204,59 +273,156 @@ def load_roads(payload: dict[str, Any]) -> tuple[list[RoadRecord], list[str]]:
             RoadRecord(
                 snodeid=int(snodeid),
                 enodeid=int(enodeid),
-                line=g,
-                length_m=float(g.length),
+                line=g2,
+                length_m=float(g2.length),
             )
         )
 
-    return out, errors
+    meta = GeoLoadMeta(
+        path=str(path),
+        src_crs=str(src_crs),
+        dst_crs=str(dst_crs),
+        total_features=int(total),
+        kept_features=int(len(out)),
+    )
+    return out, meta, errors
 
 
-def load_divstrip_union(payload: dict[str, Any]) -> tuple[Any | None, list[str]]:
+def load_intersection_lines(
+    *,
+    path: Path,
+    src_crs_override: str,
+    dst_crs: str,
+    aoi: BaseGeometry | None = None,
+) -> tuple[list[IntersectionLineRecord], GeoLoadMeta, list[str]]:
+    payload = read_geojson(path)
+    src_crs = resolve_source_crs(payload, src_crs_override=src_crs_override)
+    transformer = None if src_crs == dst_crs else _build_transformer(src_crs, dst_crs)
+
     errors: list[str] = []
-    geoms: list[Any] = []
+    out: list[IntersectionLineRecord] = []
+    total = 0
 
     for idx, feat in enumerate(payload.get("features", [])):
+        total += 1
+        if not isinstance(feat, dict):
+            errors.append(f"intersection_feature_not_object:{idx}")
+            continue
+        props = feat.get("properties")
+        props = props if isinstance(props, dict) else {}
+        geom = feat.get("geometry")
+        if not isinstance(geom, dict):
+            errors.append(f"intersection_geometry_missing:{idx}")
+            continue
+
+        try:
+            g = shape(geom)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"intersection_geometry_invalid:{idx}:{type(exc).__name__}")
+            continue
+        if not isinstance(g, LineString):
+            errors.append(f"intersection_geometry_not_linestring:{idx}")
+            continue
+
+        g2 = _project_geom(g, transformer)
+        if aoi is not None and not g2.intersects(aoi):
+            continue
+
+        nodeid = _safe_int(props.get("nodeid"), default=None)
+        if nodeid is None:
+            nodeid = _safe_int(props.get("mainid"), default=None)
+        if nodeid is None:
+            nodeid = _safe_int(props.get("id"), default=None)
+        if nodeid is None:
+            errors.append(f"intersection_nodeid_missing:{idx}")
+            continue
+
+        out.append(IntersectionLineRecord(nodeid=int(nodeid), line=g2))
+
+    meta = GeoLoadMeta(
+        path=str(path),
+        src_crs=str(src_crs),
+        dst_crs=str(dst_crs),
+        total_features=int(total),
+        kept_features=int(len(out)),
+    )
+    return out, meta, errors
+
+
+def load_divstrip_union(
+    *,
+    path: Path,
+    src_crs_override: str,
+    dst_crs: str,
+    aoi: BaseGeometry | None = None,
+) -> tuple[BaseGeometry | None, GeoLoadMeta, list[str]]:
+    payload = read_geojson(path)
+    src_crs = resolve_source_crs(payload, src_crs_override=src_crs_override)
+    transformer = None if src_crs == dst_crs else _build_transformer(src_crs, dst_crs)
+
+    errors: list[str] = []
+    geoms: list[BaseGeometry] = []
+    total = 0
+
+    for idx, feat in enumerate(payload.get("features", [])):
+        total += 1
         if not isinstance(feat, dict):
             errors.append(f"divstrip_feature_not_object:{idx}")
             continue
         geom = feat.get("geometry")
         if not isinstance(geom, dict):
             continue
-
         try:
             g = shape(geom)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"divstrip_geometry_invalid:{idx}:{type(exc).__name__}")
             continue
-
         if g.is_empty:
             continue
+        if g.geom_type not in {"Polygon", "MultiPolygon"}:
+            continue
+        g2 = _project_geom(g, transformer)
+        if aoi is not None and not g2.intersects(aoi):
+            continue
+        geoms.append(g2)
 
-        gt = g.geom_type
-        if gt in {"Polygon", "MultiPolygon"}:
-            geoms.append(g)
+    union = None
+    if geoms:
+        try:
+            union = unary_union(geoms)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"divstrip_union_failed:{type(exc).__name__}")
 
-    if not geoms:
-        return None, errors
+    meta = GeoLoadMeta(
+        path=str(path),
+        src_crs=str(src_crs),
+        dst_crs=str(dst_crs),
+        total_features=int(total),
+        kept_features=int(len(geoms)),
+    )
+    return union, meta, errors
 
-    try:
-        return unary_union(geoms), errors
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"divstrip_union_failed:{type(exc).__name__}")
-        return None, errors
+
+def infer_lonlat_like_bbox(min_x: float, min_y: float, max_x: float, max_y: float) -> bool:
+    vals = [min_x, min_y, max_x, max_y]
+    if any((not isinstance(v, (int, float)) or not math.isfinite(float(v))) for v in vals):
+        return False
+    return abs(min_x) <= 180.0 and abs(max_x) <= 180.0 and abs(min_y) <= 90.0 and abs(max_y) <= 90.0
 
 
 __all__ = [
-    "NodeRecord",
+    "GeoLoadMeta",
     "IntersectionLineRecord",
+    "NodeRecord",
     "RoadRecord",
     "extract_crs_name",
+    "infer_lonlat_like_bbox",
     "load_divstrip_union",
     "load_intersection_lines",
     "load_nodes",
     "load_roads",
     "make_feature_collection",
     "read_geojson",
+    "resolve_source_crs",
     "write_geojson",
 ]

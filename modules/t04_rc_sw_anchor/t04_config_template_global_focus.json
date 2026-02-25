@@ -1,0 +1,19 @@
+{
+  "mode": "global_focus",
+  "patch_dir": "D:/TestData/highway_topo_poc_data/normal/2855795596723843",
+  "out_root": "D:/Work/Highway_Topo_Poc/outputs/_work/t04_rc_sw_anchor",
+  "global_node_path": "D:/TestData/.../RCSDNode.geojson",
+  "global_road_path": "D:/TestData/.../RCSDRoad.geojson",
+  "divstrip_path": "D:/TestData/highway_topo_poc_data/normal/2855795596723843/Vector/DivStripZone.geojson",
+  "pointcloud_path": "D:/TestData/highway_topo_poc_data/normal/2855795596723843/PointCloud/merged_cleaned_classified_3857.laz",
+  "traj_glob": "D:/TestData/highway_topo_poc_data/normal/2855795596723843/Traj/*/raw_dat_pose.geojson",
+  "focus_node_ids": [
+    "5278670377721456",
+    "5278670377721468"
+  ],
+  "src_crs": "auto",
+  "dst_crs": "EPSG:3857",
+  "params": {
+    "traj_buffer_m": 1.5
+  }
+}

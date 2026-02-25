@@ -1,56 +1,53 @@
 # t04_rc_sw_anchor
 
-## 1. 模块简介
-`t04_rc_sw_anchor` 用于 RC/SW 场景中的分歧/合流锚点识别与横截线优化。
-当前版本仅覆盖 merge/diverge；cross 与其它类型只记录断点，不输出锚点结果。
+## 1. 模块能力
+- 识别 merge/diverge 路口锚点（gore tip/nose 近似）
+- 产出最终横截线 `intersection_l_opt.geojson`（QGIS 验收关键）
+- 支持 `global_focus`：全局 Node/Road + patch 专属 DivStrip/PointCloud/Traj
 
-## 2. 输入输出概览
-输入（`patch_dir` 下）：
-- MUST：`Vector/RCSDNode.geojson`、`Vector/intersection_l.geojson`、`Vector/RCSDRoad.geojson`
-- SHOULD：`Vector/DivStripZone.geojson`、`PointCloud/merged.laz|merged.las`
-- OPTIONAL：`Tiles/`（忽略）
+## 2. 运行入口
+```bash
+python -m highway_topo_poc.modules.t04_rc_sw_anchor --help
+```
 
-输出（`outputs/_work/t04_rc_sw_anchor/<run_id>/`）：
+## 3. 推荐运行（config_json）
+```bash
+python -m highway_topo_poc.modules.t04_rc_sw_anchor \
+  --config_json modules/t04_rc_sw_anchor/t04_config_template_global_focus.json
+```
+
+## 4. 纯 CLI 示例
+```bash
+python -m highway_topo_poc.modules.t04_rc_sw_anchor \
+  --mode global_focus \
+  --patch_dir /mnt/d/TestData/highway_topo_poc_data/normal/2855795596723843 \
+  --out_root outputs/_work/t04_rc_sw_anchor \
+  --focus_node_ids "5278670377721456,5278670377721468" \
+  --global_node_path /mnt/d/TestData/.../RCSDNode.geojson \
+  --global_road_path /mnt/d/TestData/.../RCSDRoad.geojson \
+  --divstrip_path /mnt/d/TestData/highway_topo_poc_data/normal/2855795596723843/Vector/DivStripZone.geojson \
+  --pointcloud_path /mnt/d/TestData/highway_topo_poc_data/normal/2855795596723843/PointCloud/merged_cleaned_classified_3857.laz \
+  --traj_glob "/mnt/d/TestData/highway_topo_poc_data/normal/2855795596723843/Traj/*/raw_dat_pose.geojson" \
+  --src_crs auto \
+  --dst_crs EPSG:3857
+```
+
+## 5. Focus NodeIDs 三种提供方式
+- `--focus_node_ids "id1,id2"`
+- `--focus_node_ids_file <txt|json|csv>`
+- `--config_json` 中 `focus_node_ids`
+
+优先级：CLI 覆盖 `config_json`。
+
+## 6. 输出目录
+`outputs/_work/t04_rc_sw_anchor/<run_id>/`：
 - `anchors.geojson`
+- `intersection_l_opt.geojson`
 - `anchors.json`
 - `metrics.json`
 - `breakpoints.json`
 - `summary.txt`
-- 建议：`intersection_l_opt.geojson`、`chosen_config.json`
+- `chosen_config.json`
 
-## 3. 运行方式
-```bash
-python -m highway_topo_poc.modules.t04_rc_sw_anchor \
-  --patch_dir <patch_dir> \
-  --out_root outputs/_work/t04_rc_sw_anchor \
-  --run_id <optional> \
-  --config_json <optional> \
-  --set key=value
-```
-
-说明：
-- `--run_id` 缺省时自动生成时间戳+短 uuid。
-- `--set key=value` 可重复，用于覆盖默认参数。
-
-## 4. 关键口径
-- seed node：`Kind` 含 bit4(diverge) 或 bit3(merge)。
-- `intersection_l`：每个 seed 必须且仅有 1 条。
-- 扫描触发优先级：`divstrip+pc > pc_only > divstrip_only_degraded`。
-- 未触发：`NO_TRIGGER_BEFORE_NEXT_INTERSECTION`。
-
-## 5. 质量门禁
-Hard：
-- MUST 输入可解析
-- `seed_total > 0`
-- `MULTIPLE_INTERSECTION_L == 0`
-- 输出文件齐全
-
-Soft（默认阈值）：
-- `anchor_found_ratio >= 0.90`
-- `NO_TRIGGER_BEFORE_NEXT_INTERSECTION_ratio <= 0.05`
-- `SCAN_EXCEED_200M_ratio <= 0.02`
-
-## 6. 测试
-外网环境使用合成 patch 冒烟测试：
-- `tests/t04_rc_sw_anchor/test_smoke_synth.py`
-- 支持 `PointCloud/merged.geojson` 的 test-only fallback 点云读取路径。
+## 7. 配置模板
+见：`modules/t04_rc_sw_anchor/t04_config_template_global_focus.json`
