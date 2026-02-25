@@ -18,31 +18,30 @@
   - 若 `.laz` 写出因压缩 backend 失败，自动回退 `.las`；
   - 在 `classified_manifest.jsonl` 与 `classified_summary.json` 记录 fallback 原因与计数。
 
-## multilayer_clean_and_classify（Traj 合并参考面 + 多层簇护栏）
+## multilayer_clean_and_classify v2（EPSG:3857 + TrajZ双方案 + 多层簇护栏）
 - 输入：patch 点云 `merged.laz/las` + 同 patch 所有 Traj（优先 `Traj/*/raw_dat_pose.geojson`）。
-- 参考面构建：
-  - 以点云 header `minX/minY` 为网格原点；
-  - `ref_grid_m` cell 内 `ref_z = median(traj_z)`；
-  - `spread = robust_sigma = 1.4826*MAD`（样本过少时 `spread=0.1`）。
-- 自适应非对称阈值（每 cell）：
-  - `dz_up_keep = clamp(dz_up_base_m + dz_up_k*spread, dz_up_base_m, dz_up_max_m)`；
-  - `dz_down_keep = clamp(dz_down_base_m + dz_down_k*spread, dz_down_min_m, dz_down_max_m)`。
-- 检测阈值（Pass1，较强远离判定）：
-  - `dz_up_detect = max(detect_up_min_m, dz_up_keep + detect_up_extra_m)`；
-  - `dz_down_detect = max(detect_down_min_m, dz_down_keep + detect_down_extra_m)`。
-- 删除护栏（必须同时满足）：
-  - cell 属于“远离 ref_z 的密集候选”且在 8 邻域大连通簇内；
-  - 点落在异层面带宽内（`layer_band_m`）；
-  - 高层：`dz > dz_up_keep && abs(dz - mean_dz_high)<=layer_band_m`
-  - 低层：`dz < -dz_down_keep && abs(dz - mean_dz_low)<=layer_band_m`
+- 坐标统一：点云/轨迹先统一到 EPSG:3857，再做网格/距离/方向计算；输出点云也为 EPSG:3857。
+- `traj_z_mode`：
+  - `auto`（默认）：`nonzero_ratio<0.01 且 z_std<0.05` 判为退化；
+  - `force_traj_z`：强制 TrajZ 正常方案（`road_z=traj_z median`）；
+  - `force_degraded`：强制退化方案（corridor 内点云双峰 + 轨迹方向 2-state DP）。
+- 走廊与地面定义：
+  - corridor：由 Traj XY + `corridor_radius_m` 生成；
+  - ground：corridor 内 `|z - road_z(cell)| <= ground_band_m`（默认 `0.3m`）；
+  - corridor 外默认非地面，且永不标记 overlap `12`。
+- overlap 删除护栏（必须同时满足）：
+  - cell 为“疑似叠层密集平面”候选（`sep/support/ratio`门槛，含密度自适应缩放）；
+  - 候选 cell 需通过 8 邻域连通簇最小规模过滤；
+  - 点需贴近干扰层 band（`layer_band_m`）才标 `12`；
+  - 稀疏路侧高物体（杆件/标志牌）应保留。
 - 保留口径：
   - Traj 未覆盖 cell 默认 `keep`（不删）；
-  - `spread > traj_spread_cap_m` 的 ref cell 视为不可靠，默认 `keep`；
-  - 稀疏路侧高物体通常不会形成密集簇，且若不贴近异层面也不会删。
+  - corridor 外默认 `keep`；
+  - 稀疏路侧高物体通常不会形成密集簇，且不贴近干扰层 band 时不会删。
 - 输出：
-  - `merged_cleaned_classified.<laz|las>`：仅 kept 点，`class=2/1`
-  - `merged_full_tagged.<laz|las>`：全点，removed 点 `class=12`
-  - 伴随统计：`patch_stats.json`、`ref_surface_stats.json`、`overlap_cells_report.json`、`clean_pass2_stats.json`
+  - `merged_cleaned_classified_3857.<laz|las>`：仅 kept 点，`class=2/1`
+  - `merged_full_tagged_3857.<laz|las>`：全点，removed 点 `class=12`
+  - 伴随统计：`patch_stats.json`、`ref_surface_stats.json`、`overlap_cells_report.json`、`road_z_surface.csv`、`road_z_variation_report.json`
 
 ## 地面分类路径（优先级）
 1. `las_classification`
