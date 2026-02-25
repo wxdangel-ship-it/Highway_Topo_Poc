@@ -43,21 +43,23 @@ def _write_geojson(path: Path, coords: list[list[float]]) -> None:
 
 
 def _build_points() -> tuple[np.ndarray, np.ndarray]:
-    xs = np.arange(0.0, 40.0, 1.0)
-    ys = np.arange(0.0, 40.0, 1.0)
+    x_off = 1000.0
+    y_off = 2000.0
+    xs = np.arange(0.0, 40.0, 1.0) + x_off
+    ys = np.arange(0.0, 40.0, 1.0) + y_off
     xx, yy = np.meshgrid(xs, ys)
     ground = np.column_stack([xx.ravel(), yy.ravel(), np.zeros((xx.size,), dtype=np.float64)])
 
-    hx = np.arange(10.0, 30.0, 1.0)
-    hy = np.arange(10.0, 30.0, 1.0)
+    hx = np.arange(10.0, 30.0, 1.0) + x_off
+    hy = np.arange(10.0, 30.0, 1.0) + y_off
     hxx, hyy = np.meshgrid(hx, hy)
     high = np.column_stack([hxx.ravel(), hyy.ravel(), np.full((hxx.size,), 10.0, dtype=np.float64)])
 
     side_z = np.arange(0.0, 7.0, 1.0, dtype=np.float64)
     side = np.column_stack(
         [
-            np.full((side_z.size,), 12.25, dtype=np.float64),
-            np.full((side_z.size,), 15.25, dtype=np.float64),
+            np.full((side_z.size,), x_off + 12.25, dtype=np.float64),
+            np.full((side_z.size,), y_off + 15.25, dtype=np.float64),
             side_z,
         ]
     )
@@ -75,8 +77,8 @@ def test_multilayer_clean_keeps_roadside_and_tags_removed(tmp_path: Path) -> Non
     points, side = _build_points()
     _write_las(cloud_path, points)
 
-    traj1 = [[float(x), 15.0, 0.0] for x in np.arange(0.0, 40.0, 1.0)]
-    traj2 = [[float(x), 25.0, 0.0] for x in np.arange(0.0, 40.0, 1.0)]
+    traj1 = [[float(x + 1000.0), 2015.0, 0.0] for x in np.arange(0.0, 40.0, 1.0)]
+    traj2 = [[float(x + 1000.0), 2025.0, 0.0] for x in np.arange(0.0, 40.0, 1.0)]
     _write_geojson(patch_dir / "Traj" / "0000" / "raw_dat_pose.geojson", traj1)
     _write_geojson(patch_dir / "Traj" / "0001" / "raw_dat_pose.geojson", traj2)
 
@@ -147,8 +149,8 @@ def test_multilayer_clean_keeps_roadside_and_tags_removed(tmp_path: Path) -> Non
     assert exit_code == 0
 
     patch_out = out_root / run_id / "multilayer_clean" / "patchA"
-    cleaned_path = patch_out / "merged_cleaned_classified.las"
-    full_path = patch_out / "merged_full_tagged.las"
+    cleaned_path = patch_out / "merged_cleaned_classified_3857.las"
+    full_path = patch_out / "merged_full_tagged_3857.las"
     stats_path = patch_out / "patch_stats.json"
     ref_stats_path = patch_out / "ref_surface_stats.json"
     overlap_path = patch_out / "overlap_cells_report.json"
@@ -174,7 +176,9 @@ def test_multilayer_clean_keeps_roadside_and_tags_removed(tmp_path: Path) -> Non
     cx = np.asarray(cleaned.x, dtype=np.float64)
     cy = np.asarray(cleaned.y, dtype=np.float64)
     cz = np.asarray(cleaned.z, dtype=np.float64)
-    side_mask = np.isclose(cx, 12.25, atol=0.01) & np.isclose(cy, 15.25, atol=0.01)
+    side_x = float(side[0, 0])
+    side_y = float(side[0, 1])
+    side_mask = np.isclose(cx, side_x, atol=0.01) & np.isclose(cy, side_y, atol=0.01)
     side_cleaned = np.sort(cz[side_mask])
     assert side_cleaned.size >= side.shape[0]
     for expect_z in side[:, 2].tolist():
