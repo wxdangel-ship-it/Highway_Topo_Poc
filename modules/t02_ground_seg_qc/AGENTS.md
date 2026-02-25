@@ -79,8 +79,10 @@
   - `outputs/_work/t02_ground_seg_qc/<run_id>/multilayer_summary.json`
 - 关键规则：
   - 参考面来自同 patch 内所有 Traj 合并（按 `ref_grid_m` cell 取 `median(z)`）；
+  - `spread > traj_spread_cap_m` 的 ref cell 视为不可靠，默认不参与删点；
   - 阈值采用非对称自适应：`dz_up_keep>=2m`、`dz_down_keep<=1m`；
   - 删除仅在高/低异层“密集连通簇”且落在 `layer_band_m` 内触发。
+  - `merged_cleaned_classified` 仅包含 kept 点（`class=2/1`），`merged_full_tagged` 的 removed 点必须标 `class=12`。
 
 ## 非目标
 - 不替代 t01 的融合质量评估职责。

@@ -15,6 +15,7 @@ import numpy as np
 from .io import load_traj_xyz
 
 POINT_EXTS = {".laz", ".las"}
+MAX_TRAJ_SAMPLES_PER_CELL = 2048
 
 GROUND_CLASS = 2
 NON_GROUND_CLASS = 1
@@ -37,6 +38,7 @@ class RefSurface:
     keys_sorted: np.ndarray
     ref_z_sorted: np.ndarray
     spread_sorted: np.ndarray
+    reliable_sorted: np.ndarray
     dz_up_keep_sorted: np.ndarray
     dz_down_keep_sorted: np.ndarray
     traj_file_count: int
@@ -69,6 +71,18 @@ def run_batch(
     suspect_min_far_points: int = 2000,
     min_total_points_per_cell: int = 5000,
     min_cluster_cells: int = 200,
+    detect_up_min_m: float = 6.0,
+    detect_up_extra_m: float = 3.0,
+    detect_down_min_m: float = 4.0,
+    detect_down_extra_m: float = 2.0,
+    dz_up_base_m: float = 2.0,
+    dz_up_k: float = 3.0,
+    dz_up_max_m: float = 8.0,
+    dz_down_base_m: float = 0.8,
+    dz_down_k: float = 2.0,
+    dz_down_min_m: float = 0.3,
+    dz_down_max_m: float = 1.0,
+    traj_spread_cap_m: float = 1.5,
     out_format: str = "laz",
     write_full_tagged: bool = True,
     verify: bool = True,
@@ -91,12 +105,36 @@ def run_batch(
         raise ValueError("min_total_points_per_cell must be >= 1")
     if min_cluster_cells < 1:
         raise ValueError("min_cluster_cells must be >= 1")
+    if detect_up_min_m < 0:
+        raise ValueError("detect_up_min_m must be >= 0")
+    if detect_up_extra_m < 0:
+        raise ValueError("detect_up_extra_m must be >= 0")
+    if detect_down_min_m < 0:
+        raise ValueError("detect_down_min_m must be >= 0")
+    if detect_down_extra_m < 0:
+        raise ValueError("detect_down_extra_m must be >= 0")
+    if dz_up_base_m < 2.0:
+        raise ValueError("dz_up_base_m must be >= 2.0")
+    if dz_up_max_m < dz_up_base_m:
+        raise ValueError("dz_up_max_m must be >= dz_up_base_m")
+    if dz_up_k < 0:
+        raise ValueError("dz_up_k must be >= 0")
+    if dz_down_k < 0:
+        raise ValueError("dz_down_k must be >= 0")
+    if dz_down_min_m <= 0:
+        raise ValueError("dz_down_min_m must be > 0")
+    if dz_down_max_m > 1.0:
+        raise ValueError("dz_down_max_m must be <= 1.0")
+    if dz_down_min_m > dz_down_max_m:
+        raise ValueError("dz_down_min_m must be <= dz_down_max_m")
+    if traj_spread_cap_m <= 0:
+        raise ValueError("traj_spread_cap_m must be > 0")
 
     fmt = str(out_format).strip().lower()
     if fmt not in {"laz", "las"}:
         raise ValueError("out_format must be one of: laz, las")
 
-    patches = discover_patch_inputs(data_root)
+    patches = discover_patches(data_root)
     if not patches:
         raise ValueError(f"no_patch_found_under: {Path(data_root)}")
 
@@ -123,6 +161,18 @@ def run_batch(
         "suspect_min_far_points": int(suspect_min_far_points),
         "min_total_points_per_cell": int(min_total_points_per_cell),
         "min_cluster_cells": int(min_cluster_cells),
+        "detect_up_min_m": float(detect_up_min_m),
+        "detect_up_extra_m": float(detect_up_extra_m),
+        "detect_down_min_m": float(detect_down_min_m),
+        "detect_down_extra_m": float(detect_down_extra_m),
+        "dz_up_base_m": float(dz_up_base_m),
+        "dz_up_k": float(dz_up_k),
+        "dz_up_max_m": float(dz_up_max_m),
+        "dz_down_base_m": float(dz_down_base_m),
+        "dz_down_k": float(dz_down_k),
+        "dz_down_min_m": float(dz_down_min_m),
+        "dz_down_max_m": float(dz_down_max_m),
+        "traj_spread_cap_m": float(traj_spread_cap_m),
         "out_format": fmt,
         "write_full_tagged": bool(write_full_tagged),
         "verify": bool(verify),
@@ -259,6 +309,14 @@ def _process_patch(
         points_path=points_path,
         traj_paths=patch.traj_paths,
         ref_grid_m=float(params["ref_grid_m"]),
+        traj_spread_cap_m=float(params["traj_spread_cap_m"]),
+        dz_up_base_m=float(params["dz_up_base_m"]),
+        dz_up_k=float(params["dz_up_k"]),
+        dz_up_max_m=float(params["dz_up_max_m"]),
+        dz_down_base_m=float(params["dz_down_base_m"]),
+        dz_down_k=float(params["dz_down_k"]),
+        dz_down_min_m=float(params["dz_down_min_m"]),
+        dz_down_max_m=float(params["dz_down_max_m"]),
         x0=x0,
         y0=y0,
         maxx=maxx,
@@ -274,6 +332,10 @@ def _process_patch(
         suspect_min_far_points=int(params["suspect_min_far_points"]),
         min_total_points_per_cell=int(params["min_total_points_per_cell"]),
         min_cluster_cells=int(params["min_cluster_cells"]),
+        detect_up_min_m=float(params["detect_up_min_m"]),
+        detect_up_extra_m=float(params["detect_up_extra_m"]),
+        detect_down_min_m=float(params["detect_down_min_m"]),
+        detect_down_extra_m=float(params["detect_down_extra_m"]),
     )
     _write_json(out_dir / "overlap_cells_report.json", overlap_model.report)
 
@@ -397,6 +459,18 @@ def _process_patch(
             "suspect_min_far_points": int(params["suspect_min_far_points"]),
             "min_total_points_per_cell": int(params["min_total_points_per_cell"]),
             "min_cluster_cells": int(params["min_cluster_cells"]),
+            "detect_up_min_m": float(params["detect_up_min_m"]),
+            "detect_up_extra_m": float(params["detect_up_extra_m"]),
+            "detect_down_min_m": float(params["detect_down_min_m"]),
+            "detect_down_extra_m": float(params["detect_down_extra_m"]),
+            "dz_up_base_m": float(params["dz_up_base_m"]),
+            "dz_up_k": float(params["dz_up_k"]),
+            "dz_up_max_m": float(params["dz_up_max_m"]),
+            "dz_down_base_m": float(params["dz_down_base_m"]),
+            "dz_down_k": float(params["dz_down_k"]),
+            "dz_down_min_m": float(params["dz_down_min_m"]),
+            "dz_down_max_m": float(params["dz_down_max_m"]),
+            "traj_spread_cap_m": float(params["traj_spread_cap_m"]),
             "write_full_tagged": write_full_tagged,
             "classification": {
                 "ground": GROUND_CLASS,
@@ -426,23 +500,19 @@ def _process_patch(
     }
 
 
-def discover_patch_inputs(data_root: str | Path) -> list[PatchInput]:
+def discover_patches(data_root: str | Path) -> list[PatchInput]:
     root = Path(data_root)
     if not root.exists() or not root.is_dir():
         raise ValueError(f"data_root_not_found: {root}")
 
     patch_dirs: set[Path] = set()
-
-    for child in root.iterdir():
-        if child.is_dir():
-            patch_dirs.add(child)
-
-    files = [p for p in root.rglob("*") if p.is_file()]
-    for p in files:
+    for p in sorted(root.rglob("*"), key=lambda q: q.as_posix()):
+        if not p.is_file():
+            continue
         name = p.name.lower()
         suffix = p.suffix.lower()
         rel = p.relative_to(root).as_posix().lower()
-        is_point = suffix in POINT_EXTS and ("pointcloud/" in rel or "merged" in name or "point" in name or "cloud" in name)
+        is_point = suffix in POINT_EXTS and ("pointcloud/" in rel or name.startswith("merged.") or "point" in name or "cloud" in name)
         is_traj = suffix == ".geojson" and ("traj" in name or "pose" in name or "raw_dat_pose" in name)
         if is_point or is_traj:
             patch_dirs.add(_infer_patch_dir(root=root, path=p))
@@ -464,6 +534,10 @@ def discover_patch_inputs(data_root: str | Path) -> list[PatchInput]:
             )
         )
     return out
+
+
+def discover_patch_inputs(data_root: str | Path) -> list[PatchInput]:
+    return discover_patches(data_root)
 
 
 def _find_points_path_for_patch(patch_dir: Path) -> Path | None:
@@ -523,7 +597,8 @@ def _find_traj_paths_for_patch(patch_dir: Path) -> list[Path]:
         if not p.is_file():
             continue
         name = p.name.lower()
-        if "traj" not in name and "pose" not in name and "raw_dat_pose" not in name:
+        rel = p.relative_to(patch_dir).as_posix().lower()
+        if ("traj" not in name and "pose" not in name and "raw_dat_pose" not in name and "traj" not in rel and "pose" not in rel):
             continue
         if _traj_has_valid_z(p):
             fallback.append(p)
@@ -550,6 +625,14 @@ def _build_ref_surface(
     points_path: Path,
     traj_paths: list[Path],
     ref_grid_m: float,
+    traj_spread_cap_m: float,
+    dz_up_base_m: float,
+    dz_up_k: float,
+    dz_up_max_m: float,
+    dz_down_base_m: float,
+    dz_down_k: float,
+    dz_down_min_m: float,
+    dz_down_max_m: float,
     x0: float,
     y0: float,
     maxx: float,
@@ -557,6 +640,7 @@ def _build_ref_surface(
 ) -> RefSurface:
     cell_z: dict[int, list[float]] = {}
     traj_point_count = 0
+    traj_valid_file_count = 0
 
     for traj_path in traj_paths:
         try:
@@ -573,6 +657,7 @@ def _build_ref_surface(
         if not np.any(valid):
             continue
 
+        traj_valid_file_count += 1
         xv = x[valid]
         yv = y[valid]
         zv = z[valid]
@@ -595,26 +680,37 @@ def _build_ref_surface(
         ends = np.concatenate([starts[1:], np.array([keys_sorted.size], dtype=np.int64)])
         for s, e in zip(starts.tolist(), ends.tolist()):
             key = int(keys_sorted[s])
-            bucket = cell_z.get(key)
-            if bucket is None:
-                bucket = []
-                cell_z[key] = bucket
-            bucket.extend(np.asarray(z_sorted[s:e], dtype=np.float64).tolist())
+            _append_cell_samples(
+                cell_z=cell_z,
+                key=key,
+                zvals=np.asarray(z_sorted[s:e], dtype=np.float64),
+                max_samples=MAX_TRAJ_SAMPLES_PER_CELL,
+            )
 
     if not cell_z:
         stats = {
             "points_path": str(points_path),
+            "traj_count": int(len(traj_paths)),
+            "traj_valid_count": int(traj_valid_file_count),
+            "traj_pts": int(traj_point_count),
             "traj_file_count": int(len(traj_paths)),
             "traj_point_count": int(traj_point_count),
             "ref_cell_count": 0,
+            "reliable_cell_count": 0,
+            "unreliable_cell_count": 0,
+            "coverage": 0.0,
             "coverage_est": 0.0,
             "cell_z_samples": {"min": 0, "median": 0, "p90": 0},
             "dz_up_keep_stats": {"min": 0.0, "median": 0.0, "p90": 0.0, "max": 0.0},
             "dz_down_keep_stats": {"min": 0.0, "median": 0.0, "p90": 0.0, "max": 0.0},
             "ref_grid_m": float(ref_grid_m),
+            "traj_spread_cap_m": float(traj_spread_cap_m),
+            "sample_cap_per_cell": int(MAX_TRAJ_SAMPLES_PER_CELL),
+            "spread_method_counts": {"default": 0},
         }
         empty_i64 = np.empty((0,), dtype=np.int64)
         empty_f64 = np.empty((0,), dtype=np.float64)
+        empty_b = np.empty((0,), dtype=bool)
         return RefSurface(
             x0=x0,
             y0=y0,
@@ -622,6 +718,7 @@ def _build_ref_surface(
             keys_sorted=empty_i64,
             ref_z_sorted=empty_f64,
             spread_sorted=empty_f64,
+            reliable_sorted=empty_b,
             dz_up_keep_sorted=empty_f64,
             dz_down_keep_sorted=empty_f64,
             traj_file_count=int(len(traj_paths)),
@@ -634,6 +731,7 @@ def _build_ref_surface(
     ref_z = np.empty((n,), dtype=np.float64)
     spread = np.empty((n,), dtype=np.float64)
     sample_counts = np.empty((n,), dtype=np.int64)
+    spread_method_counts: dict[str, int] = {"mad": 0, "p90_p10": 0, "std": 0, "default": 0}
 
     for i, key in enumerate(keys.tolist()):
         zvals = np.asarray(cell_z[int(key)], dtype=np.float64)
@@ -642,43 +740,50 @@ def _build_ref_surface(
         if zvals.size == 0:
             ref_z[i] = np.nan
             spread[i] = 0.1
+            spread_method_counts["default"] = int(spread_method_counts["default"] + 1)
             continue
 
         med = float(np.median(zvals))
         ref_z[i] = med
-        if zvals.size < 3:
-            spread[i] = 0.1
-        else:
-            mad = float(np.median(np.abs(zvals - med)))
-            sig = 1.4826 * mad
-            if not math.isfinite(sig):
-                sig = 0.1
-            spread[i] = max(0.0, float(sig))
+        sig, method = _estimate_spread(zvals=zvals, median=med)
+        spread[i] = float(sig)
+        spread_method_counts[method] = int(spread_method_counts.get(method, 0) + 1)
 
-    dz_up = np.clip(2.0 + 3.0 * spread, 2.0, 8.0).astype(np.float64)
-    dz_down = np.clip(0.8 + 2.0 * spread, 0.3, 1.0).astype(np.float64)
+    dz_up = np.clip(dz_up_base_m + dz_up_k * spread, dz_up_base_m, dz_up_max_m).astype(np.float64)
+    dz_down = np.clip(dz_down_base_m + dz_down_k * spread, dz_down_min_m, dz_down_max_m).astype(np.float64)
+    reliable = np.isfinite(ref_z) & np.isfinite(spread) & (spread <= float(traj_spread_cap_m))
 
     bbox_cells = int(max(1.0, math.ceil(max((maxx - x0), 0.0) / ref_grid_m) + 1) * max(1.0, math.ceil(max((maxy - y0), 0.0) / ref_grid_m) + 1))
     coverage_est = float(n / bbox_cells) if bbox_cells > 0 else 0.0
 
     stats = {
         "points_path": str(points_path),
+        "traj_count": int(len(traj_paths)),
+        "traj_valid_count": int(traj_valid_file_count),
+        "traj_pts": int(traj_point_count),
         "traj_file_count": int(len(traj_paths)),
         "traj_point_count": int(traj_point_count),
         "ref_cell_count": int(n),
+        "reliable_cell_count": int(np.count_nonzero(reliable)),
+        "unreliable_cell_count": int(n - np.count_nonzero(reliable)),
+        "coverage": float(coverage_est),
         "coverage_est": float(coverage_est),
         "cell_z_samples": {
             "min": int(np.min(sample_counts)) if sample_counts.size > 0 else 0,
             "median": int(np.median(sample_counts)) if sample_counts.size > 0 else 0,
             "p90": int(np.quantile(sample_counts, 0.90)) if sample_counts.size > 0 else 0,
         },
+        "spread_stats": _series_stats(spread),
+        "spread_method_counts": spread_method_counts,
         "dz_up_keep_stats": _series_stats(dz_up),
         "dz_down_keep_stats": _series_stats(dz_down),
         "ref_grid_m": float(ref_grid_m),
+        "traj_spread_cap_m": float(traj_spread_cap_m),
+        "sample_cap_per_cell": int(MAX_TRAJ_SAMPLES_PER_CELL),
         "threshold_formula": {
-            "spread": "1.4826*MAD (if sample<3 -> 0.1)",
-            "dz_up_keep": "clamp(2.0 + 3.0*spread, 2.0, 8.0)",
-            "dz_down_keep": "clamp(0.8 + 2.0*spread, 0.3, 1.0)",
+            "spread": "MAD -> (p90-p10)/2 -> std -> 0.1",
+            "dz_up_keep": f"clamp({dz_up_base_m} + {dz_up_k}*spread, {dz_up_base_m}, {dz_up_max_m})",
+            "dz_down_keep": f"clamp({dz_down_base_m} + {dz_down_k}*spread, {dz_down_min_m}, {dz_down_max_m})",
         },
     }
 
@@ -689,6 +794,7 @@ def _build_ref_surface(
         keys_sorted=keys,
         ref_z_sorted=ref_z,
         spread_sorted=spread,
+        reliable_sorted=reliable,
         dz_up_keep_sorted=dz_up,
         dz_down_keep_sorted=dz_down,
         traj_file_count=int(len(traj_paths)),
@@ -706,6 +812,10 @@ def _pass1_find_overlap_cells(
     suspect_min_far_points: int,
     min_total_points_per_cell: int,
     min_cluster_cells: int,
+    detect_up_min_m: float,
+    detect_up_extra_m: float,
+    detect_down_min_m: float,
+    detect_down_extra_m: float,
 ) -> OverlapModel:
     total_ref_count: dict[int, int] = {}
     above_far_count: dict[int, int] = {}
@@ -713,7 +823,7 @@ def _pass1_find_overlap_cells(
     sum_dz_above_far: dict[int, float] = {}
     sum_dz_below_far: dict[int, float] = {}
 
-    if ref_surface.keys_sorted.size > 0:
+    if ref_surface.keys_sorted.size > 0 and np.any(ref_surface.reliable_sorted):
         try:
             import laspy  # type: ignore
         except Exception as exc:  # pragma: no cover - env-dependent
@@ -741,12 +851,19 @@ def _pass1_find_overlap_cells(
                 if not np.any(matched):
                     continue
 
-                keys_ref = keys[matched]
-                dz = zv[matched] - ref_surface.ref_z_sorted[pos[matched]]
-                dz_up_keep = ref_surface.dz_up_keep_sorted[pos[matched]]
-                dz_down_keep = ref_surface.dz_down_keep_sorted[pos[matched]]
-                dz_up_detect = np.maximum(6.0, dz_up_keep + 3.0)
-                dz_down_detect = np.maximum(4.0, dz_down_keep + 2.0)
+                matched_idx = np.flatnonzero(matched)
+                reliable_hit = ref_surface.reliable_sorted[pos[matched_idx]]
+                if not np.any(reliable_hit):
+                    continue
+                keep_idx = matched_idx[reliable_hit]
+
+                keys_ref = keys[keep_idx]
+                pos_ref = pos[keep_idx]
+                dz = zv[keep_idx] - ref_surface.ref_z_sorted[pos_ref]
+                dz_up_keep = ref_surface.dz_up_keep_sorted[pos_ref]
+                dz_down_keep = ref_surface.dz_down_keep_sorted[pos_ref]
+                dz_up_detect = np.maximum(float(detect_up_min_m), dz_up_keep + float(detect_up_extra_m))
+                dz_down_detect = np.maximum(float(detect_down_min_m), dz_down_keep + float(detect_down_extra_m))
 
                 above_far = dz > dz_up_detect
                 below_far = dz < -dz_down_detect
@@ -814,11 +931,17 @@ def _pass1_find_overlap_cells(
             "high": [int(x) for x in sorted(high_cluster_sizes, reverse=True)[:10]],
             "low": [int(x) for x in sorted(low_cluster_sizes, reverse=True)[:10]],
         },
+        "reliable_ref_cell_count": int(np.count_nonzero(ref_surface.reliable_sorted)),
+        "unreliable_ref_cell_count": int(ref_surface.reliable_sorted.size - np.count_nonzero(ref_surface.reliable_sorted)),
         "suspect_gate": {
             "suspect_far_ratio_gate": float(suspect_far_ratio_gate),
             "suspect_min_far_points": int(suspect_min_far_points),
             "min_total_points_per_cell": int(min_total_points_per_cell),
             "min_cluster_cells": int(min_cluster_cells),
+            "detect_up_min_m": float(detect_up_min_m),
+            "detect_up_extra_m": float(detect_up_extra_m),
+            "detect_down_min_m": float(detect_down_min_m),
+            "detect_down_extra_m": float(detect_down_extra_m),
         },
     }
 
@@ -1007,6 +1130,7 @@ def _pass3_write_outputs(
         cleaned_count = _read_point_count(out_cleaned_path)
         if cleaned_count != expected_n_kept:
             raise ValueError(f"verify_cleaned_count_mismatch: expected={expected_n_kept} actual={cleaned_count}")
+        _verify_cleaned_classes(path=out_cleaned_path, chunk_points=int(chunk_points))
         if write_full_tagged and out_full_path is not None:
             full_count = _read_point_count(out_full_path)
             if full_count != expected_n_in:
@@ -1059,12 +1183,19 @@ def _compute_keep_masks(
     if not np.any(matched_ref):
         return keep, del_high, del_low
 
-    idx_ref = idx_valid[matched_ref]
-    keys_ref = keys[matched_ref]
-    z_ref = zv[matched_ref]
-    dz = z_ref - ref_surface.ref_z_sorted[pos_ref[matched_ref]]
-    dz_up_keep = ref_surface.dz_up_keep_sorted[pos_ref[matched_ref]]
-    dz_down_keep = ref_surface.dz_down_keep_sorted[pos_ref[matched_ref]]
+    matched_idx = np.flatnonzero(matched_ref)
+    reliable_hit = ref_surface.reliable_sorted[pos_ref[matched_idx]]
+    if not np.any(reliable_hit):
+        return keep, del_high, del_low
+    use_idx = matched_idx[reliable_hit]
+    pos_use = pos_ref[use_idx]
+
+    idx_ref = idx_valid[use_idx]
+    keys_ref = keys[use_idx]
+    z_ref = zv[use_idx]
+    dz = z_ref - ref_surface.ref_z_sorted[pos_use]
+    dz_up_keep = ref_surface.dz_up_keep_sorted[pos_use]
+    dz_down_keep = ref_surface.dz_down_keep_sorted[pos_use]
 
     delete_any = np.zeros((n,), dtype=bool)
 
@@ -1238,6 +1369,45 @@ def _accumulate_min(cell_min: dict[int, float], keys: np.ndarray, vals: np.ndarr
             cell_min[key] = zmin
 
 
+def _append_cell_samples(*, cell_z: dict[int, list[float]], key: int, zvals: np.ndarray, max_samples: int) -> None:
+    z = np.asarray(zvals, dtype=np.float64)
+    if z.size <= 0:
+        return
+    bucket = cell_z.get(int(key))
+    if bucket is None:
+        bucket = []
+        cell_z[int(key)] = bucket
+    bucket.extend(z.tolist())
+    if len(bucket) > max_samples:
+        stride = int(math.ceil(len(bucket) / max_samples))
+        bucket[:] = bucket[::max(1, stride)][:max_samples]
+
+
+def _estimate_spread(*, zvals: np.ndarray, median: float) -> tuple[float, str]:
+    z = np.asarray(zvals, dtype=np.float64)
+    z = z[np.isfinite(z)]
+    if z.size <= 0:
+        return 0.1, "default"
+
+    if z.size >= 3 and math.isfinite(median):
+        mad = float(np.median(np.abs(z - float(median))))
+        sig = 1.4826 * mad
+        if math.isfinite(sig) and sig > 0:
+            return float(sig), "mad"
+
+        p10 = float(np.quantile(z, 0.10))
+        p90 = float(np.quantile(z, 0.90))
+        sig = 0.5 * (p90 - p10)
+        if math.isfinite(sig) and sig > 0:
+            return float(sig), "p90_p10"
+
+        sig = float(np.std(z))
+        if math.isfinite(sig) and sig > 0:
+            return float(sig), "std"
+
+    return 0.1, "default"
+
+
 def _lookup_match_positions(query_keys: np.ndarray, sorted_keys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     n_table = int(sorted_keys.size)
     n_query = int(query_keys.size)
@@ -1278,6 +1448,28 @@ def _read_point_count(path: Path) -> int:
         return int(reader.header.point_count)
 
 
+def _verify_cleaned_classes(*, path: Path, chunk_points: int) -> None:
+    import laspy  # type: ignore
+
+    allowed = {GROUND_CLASS, NON_GROUND_CLASS}
+    seen: set[int] = set()
+
+    with laspy.open(str(path)) as reader:
+        for chunk in reader.chunk_iterator(int(chunk_points)):
+            cls = np.asarray(chunk.classification, dtype=np.uint8)
+            if cls.size <= 0:
+                continue
+            uniq = np.unique(cls)
+            for v in uniq.tolist():
+                iv = int(v)
+                if iv not in allowed:
+                    raise ValueError(f"verify_cleaned_class_invalid: class={iv}")
+                seen.add(iv)
+
+    if not seen:
+        return
+
+
 def _resolve_existing_outputs(*, out_dir: Path, preferred_format: str, write_full_tagged: bool) -> dict[str, object] | None:
     cleaned_pref = out_dir / f"merged_cleaned_classified.{preferred_format}"
     cleaned_las = out_dir / "merged_cleaned_classified.las"
@@ -1314,10 +1506,10 @@ def _infer_patch_dir(*, root: Path, path: Path) -> Path:
     parts = rel.parts
 
     for i, part in enumerate(parts):
-        if part.lower() == "pointcloud" and i >= 1:
-            return root.joinpath(*parts[:i])
-        if part.lower() == "traj" and i >= 1:
-            return root.joinpath(*parts[:i])
+        if part.lower() == "pointcloud":
+            return root.joinpath(*parts[:i]) if i >= 1 else root
+        if part.lower() == "traj":
+            return root.joinpath(*parts[:i]) if i >= 1 else root
     if len(parts) >= 2:
         return root / parts[0]
     return path.parent
@@ -1481,6 +1673,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--suspect_min_far_points", type=int, default=2000)
     parser.add_argument("--min_total_points_per_cell", type=int, default=5000)
     parser.add_argument("--min_cluster_cells", type=int, default=200)
+    parser.add_argument("--detect_up_min_m", type=float, default=6.0)
+    parser.add_argument("--detect_up_extra_m", type=float, default=3.0)
+    parser.add_argument("--detect_down_min_m", type=float, default=4.0)
+    parser.add_argument("--detect_down_extra_m", type=float, default=2.0)
+    parser.add_argument("--dz_up_base_m", type=float, default=2.0)
+    parser.add_argument("--dz_up_k", type=float, default=3.0)
+    parser.add_argument("--dz_up_max_m", type=float, default=8.0)
+    parser.add_argument("--dz_down_base_m", type=float, default=0.8)
+    parser.add_argument("--dz_down_k", type=float, default=2.0)
+    parser.add_argument("--dz_down_min_m", type=float, default=0.3)
+    parser.add_argument("--dz_down_max_m", type=float, default=1.0)
+    parser.add_argument("--traj_spread_cap_m", type=float, default=1.5)
     parser.add_argument("--out_format", default="laz")
     parser.add_argument("--write_full_tagged", type=_parse_bool, default=True)
     parser.add_argument("--verify", type=_parse_bool, default=True)
@@ -1505,6 +1709,18 @@ def main(argv: list[str] | None = None) -> int:
             suspect_min_far_points=int(args.suspect_min_far_points),
             min_total_points_per_cell=int(args.min_total_points_per_cell),
             min_cluster_cells=int(args.min_cluster_cells),
+            detect_up_min_m=float(args.detect_up_min_m),
+            detect_up_extra_m=float(args.detect_up_extra_m),
+            detect_down_min_m=float(args.detect_down_min_m),
+            detect_down_extra_m=float(args.detect_down_extra_m),
+            dz_up_base_m=float(args.dz_up_base_m),
+            dz_up_k=float(args.dz_up_k),
+            dz_up_max_m=float(args.dz_up_max_m),
+            dz_down_base_m=float(args.dz_down_base_m),
+            dz_down_k=float(args.dz_down_k),
+            dz_down_min_m=float(args.dz_down_min_m),
+            dz_down_max_m=float(args.dz_down_max_m),
+            traj_spread_cap_m=float(args.traj_spread_cap_m),
             out_format=str(args.out_format),
             write_full_tagged=bool(args.write_full_tagged),
             verify=bool(args.verify),

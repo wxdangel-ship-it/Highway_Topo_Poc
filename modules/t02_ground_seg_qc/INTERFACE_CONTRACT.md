@@ -84,6 +84,18 @@ run_batch(
     suspect_min_far_points: int = 2000,
     min_total_points_per_cell: int = 5000,
     min_cluster_cells: int = 200,
+    detect_up_min_m: float = 6.0,
+    detect_up_extra_m: float = 3.0,
+    detect_down_min_m: float = 4.0,
+    detect_down_extra_m: float = 2.0,
+    dz_up_base_m: float = 2.0,
+    dz_up_k: float = 3.0,
+    dz_up_max_m: float = 8.0,
+    dz_down_base_m: float = 0.8,
+    dz_down_k: float = 2.0,
+    dz_down_min_m: float = 0.3,
+    dz_down_max_m: float = 1.0,
+    traj_spread_cap_m: float = 1.5,
     out_format: str = "laz",
     write_full_tagged: bool = True,
     verify: bool = True,
@@ -92,6 +104,7 @@ run_batch(
 
 - 入口模块：`highway_topo_poc.modules.t02_ground_seg_qc.batch_multilayer_clean_and_classify`。
 - 参考面由同 patch 全部 Traj 合并构建，Traj 未覆盖 cell 默认不删。
+- `spread > traj_spread_cap_m` 的 cell 视为不可靠，默认不删（保护复杂路口/误配区）。
 - 删除仅在“异层密集连通簇”内触发，且必须落在异层面带宽 `layer_band_m` 内。
 - 输出两份点云：`cleaned_classified`（删点后）与 `full_tagged`（全点审计，removed=`class 12`）。
 
@@ -147,6 +160,18 @@ python -m highway_topo_poc.modules.t02_ground_seg_qc.batch_multilayer_clean_and_
   --suspect_min_far_points 2000 \
   --min_total_points_per_cell 5000 \
   --min_cluster_cells 200 \
+  --detect_up_min_m 6.0 \
+  --detect_up_extra_m 3.0 \
+  --detect_down_min_m 4.0 \
+  --detect_down_extra_m 2.0 \
+  --dz_up_base_m 2.0 \
+  --dz_up_k 3.0 \
+  --dz_up_max_m 8.0 \
+  --dz_down_base_m 0.8 \
+  --dz_down_k 2.0 \
+  --dz_down_min_m 0.3 \
+  --dz_down_max_m 1.0 \
+  --traj_spread_cap_m 1.5 \
   --out_format laz \
   --write_full_tagged true \
   --verify true
@@ -177,6 +202,18 @@ python -m highway_topo_poc.modules.t02_ground_seg_qc.batch_multilayer_clean_and_
 - `--suspect_min_far_points`
 - `--min_total_points_per_cell`
 - `--min_cluster_cells`
+- `--detect_up_min_m`
+- `--detect_up_extra_m`
+- `--detect_down_min_m`
+- `--detect_down_extra_m`
+- `--dz_up_base_m`
+- `--dz_up_k`
+- `--dz_up_max_m`
+- `--dz_down_base_m`
+- `--dz_down_k`
+- `--dz_down_min_m`
+- `--dz_down_max_m`
+- `--traj_spread_cap_m`
 - `--write_full_tagged` (`true/false`)
 
 退出码：

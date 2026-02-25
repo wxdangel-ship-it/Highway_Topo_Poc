@@ -25,11 +25,11 @@
   - `ref_grid_m` cell 内 `ref_z = median(traj_z)`；
   - `spread = robust_sigma = 1.4826*MAD`（样本过少时 `spread=0.1`）。
 - 自适应非对称阈值（每 cell）：
-  - `dz_up_keep = clamp(2.0 + 3.0*spread, 2.0, 8.0)`；
-  - `dz_down_keep = clamp(0.8 + 2.0*spread, 0.3, 1.0)`。
+  - `dz_up_keep = clamp(dz_up_base_m + dz_up_k*spread, dz_up_base_m, dz_up_max_m)`；
+  - `dz_down_keep = clamp(dz_down_base_m + dz_down_k*spread, dz_down_min_m, dz_down_max_m)`。
 - 检测阈值（Pass1，较强远离判定）：
-  - `dz_up_detect = max(6.0, dz_up_keep + 3.0)`；
-  - `dz_down_detect = max(4.0, dz_down_keep + 2.0)`。
+  - `dz_up_detect = max(detect_up_min_m, dz_up_keep + detect_up_extra_m)`；
+  - `dz_down_detect = max(detect_down_min_m, dz_down_keep + detect_down_extra_m)`。
 - 删除护栏（必须同时满足）：
   - cell 属于“远离 ref_z 的密集候选”且在 8 邻域大连通簇内；
   - 点落在异层面带宽内（`layer_band_m`）；
@@ -37,6 +37,7 @@
   - 低层：`dz < -dz_down_keep && abs(dz - mean_dz_low)<=layer_band_m`
 - 保留口径：
   - Traj 未覆盖 cell 默认 `keep`（不删）；
+  - `spread > traj_spread_cap_m` 的 ref cell 视为不可靠，默认 `keep`；
   - 稀疏路侧高物体通常不会形成密集簇，且若不贴近异层面也不会删。
 - 输出：
   - `merged_cleaned_classified.<laz|las>`：仅 kept 点，`class=2/1`

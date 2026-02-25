@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from highway_topo_poc.modules.t02_ground_seg_qc.batch_multilayer_clean_and_classify import main
+from highway_topo_poc.modules.t02_ground_seg_qc.batch_multilayer_clean_and_classify import discover_patches, main
 
 
 def _write_las(path: Path, xyz: np.ndarray) -> None:
@@ -112,6 +112,30 @@ def test_multilayer_clean_keeps_roadside_and_tags_removed(tmp_path: Path) -> Non
             "40",
             "--min_cluster_cells",
             "1",
+            "--detect_up_min_m",
+            "6.0",
+            "--detect_up_extra_m",
+            "3.0",
+            "--detect_down_min_m",
+            "4.0",
+            "--detect_down_extra_m",
+            "2.0",
+            "--dz_up_base_m",
+            "2.0",
+            "--dz_up_k",
+            "3.0",
+            "--dz_up_max_m",
+            "8.0",
+            "--dz_down_base_m",
+            "0.8",
+            "--dz_down_k",
+            "2.0",
+            "--dz_down_min_m",
+            "0.3",
+            "--dz_down_max_m",
+            "1.0",
+            "--traj_spread_cap_m",
+            "1.5",
             "--out_format",
             "las",
             "--write_full_tagged",
@@ -126,10 +150,14 @@ def test_multilayer_clean_keeps_roadside_and_tags_removed(tmp_path: Path) -> Non
     cleaned_path = patch_out / "merged_cleaned_classified.las"
     full_path = patch_out / "merged_full_tagged.las"
     stats_path = patch_out / "patch_stats.json"
+    ref_stats_path = patch_out / "ref_surface_stats.json"
+    overlap_path = patch_out / "overlap_cells_report.json"
 
     assert cleaned_path.is_file()
     assert full_path.is_file()
     assert stats_path.is_file()
+    assert ref_stats_path.is_file()
+    assert overlap_path.is_file()
 
     import laspy
 
@@ -141,7 +169,7 @@ def test_multilayer_clean_keeps_roadside_and_tags_removed(tmp_path: Path) -> Non
     cleaned_z = np.asarray(cleaned.z, dtype=np.float64)
     in_high = int(np.count_nonzero(in_z > 8.0))
     cleaned_high = int(np.count_nonzero(cleaned_z > 8.0))
-    assert cleaned_high < in_high
+    assert cleaned_high <= int(round(in_high * 0.70))
 
     cx = np.asarray(cleaned.x, dtype=np.float64)
     cy = np.asarray(cleaned.y, dtype=np.float64)
@@ -153,10 +181,40 @@ def test_multilayer_clean_keeps_roadside_and_tags_removed(tmp_path: Path) -> Non
         assert np.any(np.isclose(side_cleaned, expect_z, atol=0.01))
 
     full_cls = np.asarray(full.classification, dtype=np.uint8)
+    cleaned_cls = np.asarray(cleaned.classification, dtype=np.uint8)
     kept_cls = full_cls[full_cls != 12]
     assert int(np.count_nonzero(full_cls == 12)) > 0
+    assert np.all(np.isin(cleaned_cls, np.array([1, 2], dtype=np.uint8)))
     assert np.all(np.isin(kept_cls, np.array([1, 2], dtype=np.uint8)))
     assert int(np.count_nonzero(kept_cls == 2)) > 0
 
     stats = json.loads(stats_path.read_text(encoding="utf-8"))
-    assert int(np.count_nonzero(full_cls == 12)) == int(stats["class12_count"])
+    class12_count = int(np.count_nonzero(full_cls == 12))
+    assert class12_count == int(stats["class12_count"])
+    assert class12_count == int(stats["n_removed"])
+    assert int(cleaned.header.point_count) == int(stats["n_kept"])
+    assert int(full.header.point_count) == int(stats["n_in"])
+
+    ref_stats = json.loads(ref_stats_path.read_text(encoding="utf-8"))
+    assert int(ref_stats["traj_count"]) == 2
+    assert int(ref_stats["traj_pts"]) > 0
+    assert float(ref_stats["coverage"]) > 0.0
+
+    overlap_report = json.loads(overlap_path.read_text(encoding="utf-8"))
+    assert "cluster_size_topK" in overlap_report
+
+
+def test_discover_patches_supports_patch_root_as_data_root(tmp_path: Path) -> None:
+    patch_dir = tmp_path / "00000042"
+    cloud_path = patch_dir / "PointCloud" / "merged.las"
+    cloud_path.parent.mkdir(parents=True, exist_ok=True)
+    xyz = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 0.1]], dtype=np.float64)
+    _write_las(cloud_path, xyz)
+    _write_geojson(patch_dir / "Traj" / "0000" / "raw_dat_pose.geojson", [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]])
+
+    patches = discover_patches(patch_dir)
+    assert len(patches) == 1
+    p = patches[0]
+    assert p.patch_dir == patch_dir
+    assert p.points_path == cloud_path
+    assert len(p.traj_paths) == 1
