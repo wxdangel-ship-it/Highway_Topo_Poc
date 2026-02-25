@@ -10,7 +10,23 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def create_synth_patch(root: Path) -> dict[str, Any]:
+def _node_props(*, node_id: int, kind_value: int, kind_key: str, id_mode: str) -> dict[str, Any]:
+    props: dict[str, Any] = {kind_key: int(kind_value)}
+    if id_mode == "id":
+        props["id"] = int(node_id)
+    elif id_mode == "mainnodeid":
+        props["mainnodeid"] = int(node_id)
+    else:
+        raise ValueError(f"unsupported_id_mode: {id_mode}")
+    return props
+
+
+def create_synth_patch(
+    root: Path,
+    *,
+    kind_key: str = "Kind",
+    id_mode: str = "id",
+) -> dict[str, Any]:
     patch_id = "2855795596723843"
     node_a = 5278670377721456
     node_b = 5278670377721468
@@ -26,22 +42,22 @@ def create_synth_patch(root: Path) -> dict[str, Any]:
     node_features = [
         {
             "type": "Feature",
-            "properties": {"mainid": node_a, "id": node_a, "Kind": 16},
+            "properties": _node_props(node_id=node_a, kind_value=16, kind_key=kind_key, id_mode=id_mode),
             "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
         },
         {
             "type": "Feature",
-            "properties": {"mainid": node_b, "id": node_b, "Kind": 8},
+            "properties": _node_props(node_id=node_b, kind_value=8, kind_key=kind_key, id_mode=id_mode),
             "geometry": {"type": "Point", "coordinates": [0.0, 100.0]},
         },
         {
             "type": "Feature",
-            "properties": {"mainid": 9001, "id": 9001, "Kind": 4},
+            "properties": _node_props(node_id=9001, kind_value=4, kind_key=kind_key, id_mode=id_mode),
             "geometry": {"type": "Point", "coordinates": [0.0, 40.0]},
         },
         {
             "type": "Feature",
-            "properties": {"mainid": 9002, "id": 9002, "Kind": 4},
+            "properties": _node_props(node_id=9002, kind_value=4, kind_key=kind_key, id_mode=id_mode),
             "geometry": {"type": "Point", "coordinates": [0.0, 60.0]},
         },
     ]
@@ -112,7 +128,6 @@ def create_synth_patch(root: Path) -> dict[str, Any]:
         },
     )
 
-    # Non-ground class=1 near divstrip windows, outside trajectory buffer (x~3m).
     pc_features: list[dict[str, Any]] = []
     for dx in [2.6, 2.8, 3.0, 3.2, 3.4, 3.6]:
         pc_features.append(
@@ -131,7 +146,6 @@ def create_synth_patch(root: Path) -> dict[str, Any]:
             }
         )
 
-    # class=1 near trajectory centerline, should be suppressed by traj_buffer.
     for dy in [12.0, 88.0]:
         for dx in [0.0, 0.4, 0.8]:
             pc_features.append(
@@ -142,7 +156,6 @@ def create_synth_patch(root: Path) -> dict[str, Any]:
                 }
             )
 
-    # class=12 should be ignored.
     for dy in [12.0, 88.0]:
         pc_features.append(
             {
@@ -152,7 +165,6 @@ def create_synth_patch(root: Path) -> dict[str, Any]:
             }
         )
 
-    # class=2 ground background.
     for y in [0.0, 20.0, 40.0, 60.0, 80.0, 100.0]:
         pc_features.append(
             {
@@ -188,6 +200,7 @@ def create_synth_patch(root: Path) -> dict[str, Any]:
         },
     )
 
+    matched_field = "id" if id_mode == "id" else "mainnodeid"
     return {
         "patch_dir": patch_dir,
         "global_node_path": global_dir / "RCSDNode.geojson",
@@ -196,4 +209,5 @@ def create_synth_patch(root: Path) -> dict[str, Any]:
         "pointcloud_path": patch_dir / "PointCloud" / "merged.geojson",
         "traj_glob": str((patch_dir / "Traj" / "*" / "raw_dat_pose.geojson").as_posix()),
         "focus_node_ids": [str(node_a), str(node_b)],
+        "expected_matched_field": matched_field,
     }

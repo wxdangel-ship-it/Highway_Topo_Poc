@@ -22,6 +22,9 @@ def write_text(path: Path, text: str) -> None:
 def _props_min(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "nodeid": item.get("nodeid"),
+        "kind": item.get("kind"),
+        "is_merge_kind": item.get("is_merge_kind"),
+        "is_diverge_kind": item.get("is_diverge_kind"),
         "anchor_type": item.get("anchor_type"),
         "status": item.get("status"),
         "scan_dir": item.get("scan_dir"),
@@ -30,6 +33,7 @@ def _props_min(item: dict[str, Any]) -> dict[str, Any]:
         "dist_to_divstrip_m": item.get("dist_to_divstrip_m"),
         "confidence": item.get("confidence"),
         "flags": item.get("flags", []),
+        "resolved_from": item.get("resolved_from"),
     }
 
 

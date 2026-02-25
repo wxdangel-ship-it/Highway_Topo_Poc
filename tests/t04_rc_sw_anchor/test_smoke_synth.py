@@ -13,15 +13,15 @@ def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_t04_rc_sw_anchor_smoke_synth(tmp_path: Path) -> None:
-    data = create_synth_patch(tmp_path)
+def _run_case(tmp_path: Path, *, kind_key: str, id_mode: str) -> tuple[dict, Path]:
+    data = create_synth_patch(tmp_path, kind_key=kind_key, id_mode=id_mode)
 
     out_root = tmp_path / "outputs" / "_work" / "t04_rc_sw_anchor"
     runtime = {
         "mode": "global_focus",
         "patch_dir": str(data["patch_dir"]),
         "out_root": str(out_root),
-        "run_id": "smoke_t04",
+        "run_id": f"smoke_t04_{kind_key}_{id_mode}",
         "global_node_path": str(data["global_node_path"]),
         "global_road_path": str(data["global_road_path"]),
         "divstrip_path": str(data["divstrip_path"]),
@@ -34,41 +34,57 @@ def test_t04_rc_sw_anchor_smoke_synth(tmp_path: Path) -> None:
     }
 
     result = run_from_runtime(runtime)
+    return data, result.out_dir
 
-    out_dir = result.out_dir
-    anchors_geojson = out_dir / "anchors.geojson"
-    anchors_json = out_dir / "anchors.json"
-    metrics_json = out_dir / "metrics.json"
-    breakpoints_json = out_dir / "breakpoints.json"
-    summary_txt = out_dir / "summary.txt"
-    inter_opt_geojson = out_dir / "intersection_l_opt.geojson"
-    chosen_config_json = out_dir / "chosen_config.json"
 
-    assert anchors_geojson.is_file()
-    assert anchors_json.is_file()
-    assert metrics_json.is_file()
-    assert breakpoints_json.is_file()
-    assert summary_txt.is_file()
-    assert inter_opt_geojson.is_file()
-    assert chosen_config_json.is_file()
+def _assert_common_outputs(out_dir: Path) -> None:
+    for name in [
+        "anchors.geojson",
+        "anchors.json",
+        "metrics.json",
+        "breakpoints.json",
+        "summary.txt",
+        "intersection_l_opt.geojson",
+        "chosen_config.json",
+    ]:
+        assert (out_dir / name).is_file(), name
 
-    metrics = _read_json(metrics_json)
+
+def _assert_anchor_quality(out_dir: Path, expected_matched_field: str) -> None:
+    metrics = _read_json(out_dir / "metrics.json")
     assert metrics.get("overall_pass") is True
     assert metrics.get("anchors_found_count") == 2
 
-    anchors = _read_json(anchors_json)
+    bp = _read_json(out_dir / "breakpoints.json")
+    by_code = {str(x.get("code")): int(x.get("count", 0)) for x in bp.get("by_code", [])}
+    assert by_code.get("UNSUPPORTED_KIND", 0) == 0
+
+    anchors = _read_json(out_dir / "anchors.json")
     items = anchors.get("items", [])
     assert isinstance(items, list)
     assert len(items) == 2
 
     for record in items:
         assert record.get("status") == "ok"
+        assert int(record.get("kind")) in {8, 16}
         scan_dist = float(record.get("scan_dist_m"))
         assert scan_dist <= 20.0
         dist_to_divstrip = record.get("dist_to_divstrip_m")
         assert dist_to_divstrip is not None
         assert float(dist_to_divstrip) <= 1.0
 
-    bp = _read_json(breakpoints_json)
-    by_code = {str(x.get("code")): int(x.get("count", 0)) for x in bp.get("by_code", [])}
-    assert by_code.get("NO_TRIGGER_BEFORE_NEXT_INTERSECTION", 0) == 0
+        resolved = record.get("resolved_from")
+        assert isinstance(resolved, dict)
+        assert str(resolved.get("matched_field")) == expected_matched_field
+
+
+def test_t04_rc_sw_anchor_kind_lower_id_alias(tmp_path: Path) -> None:
+    data, out_dir = _run_case(tmp_path, kind_key="kind", id_mode="id")
+    _assert_common_outputs(out_dir)
+    _assert_anchor_quality(out_dir, expected_matched_field=str(data["expected_matched_field"]))
+
+
+def test_t04_rc_sw_anchor_mainnodeid_alias(tmp_path: Path) -> None:
+    data, out_dir = _run_case(tmp_path, kind_key="kind", id_mode="mainnodeid")
+    _assert_common_outputs(out_dir)
+    _assert_anchor_quality(out_dir, expected_matched_field=str(data["expected_matched_field"]))

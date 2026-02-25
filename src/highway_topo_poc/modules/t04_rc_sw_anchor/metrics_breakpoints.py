@@ -7,10 +7,12 @@ import numpy as np
 
 
 BP_FOCUS_NODE_NOT_FOUND = "FOCUS_NODE_NOT_FOUND"
+BP_MISSING_KIND_FIELD = "MISSING_KIND_FIELD"
 BP_UNSUPPORTED_KIND = "UNSUPPORTED_KIND"
 BP_AMBIGUOUS_KIND = "AMBIGUOUS_KIND"
 BP_ROAD_LINK_NOT_FOUND = "ROAD_LINK_NOT_FOUND"
 BP_ROAD_GRAPH_WEAK_STOP = "ROAD_GRAPH_WEAK_STOP"
+BP_ROAD_FIELD_MISSING = "ROAD_FIELD_MISSING"
 BP_DIVSTRIPZONE_MISSING = "DIVSTRIPZONE_MISSING"
 BP_POINTCLOUD_MISSING_OR_UNUSABLE = "POINTCLOUD_MISSING_OR_UNUSABLE"
 BP_TRAJ_MISSING = "TRAJ_MISSING"
@@ -185,14 +187,27 @@ def build_summary_text(
     lines.append("")
     lines.append("per_node:")
     for item in seed_results:
+        focus_resolve = item.get("resolved_from")
+        if isinstance(focus_resolve, dict):
+            focus_text = "{focus}->{canon}({field})".format(
+                focus=focus_resolve.get("focus_id"),
+                canon=focus_resolve.get("canonical_id"),
+                field=focus_resolve.get("matched_field"),
+            )
+        else:
+            focus_text = "na"
         lines.append(
-            "- nodeid={nodeid} anchor_type={anchor_type} status={status} scan_dist_m={scan_dist} trigger={trigger} stop_dist_m={stop}".format(
+            "- nodeid={nodeid} kind={kind} kind_bits(merge={is_merge},diverge={is_diverge}) anchor_type={anchor_type} status={status} scan_dist_m={scan_dist} trigger={trigger} stop_dist_m={stop} focus_resolve={focus_resolve}".format(
                 nodeid=item.get("nodeid"),
+                kind=item.get("kind"),
+                is_merge=item.get("is_merge_kind"),
+                is_diverge=item.get("is_diverge_kind"),
                 anchor_type=item.get("anchor_type"),
                 status=item.get("status"),
                 scan_dist=item.get("scan_dist_m"),
                 trigger=item.get("trigger"),
                 stop=item.get("stop_dist_m"),
+                focus_resolve=focus_text,
             )
         )
 
@@ -220,8 +235,10 @@ __all__ = [
     "BP_DIVSTRIPZONE_MISSING",
     "BP_DIVSTRIP_TOLERANCE_VIOLATION",
     "BP_FOCUS_NODE_NOT_FOUND",
+    "BP_MISSING_KIND_FIELD",
     "BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION",
     "BP_POINTCLOUD_MISSING_OR_UNUSABLE",
+    "BP_ROAD_FIELD_MISSING",
     "BP_ROAD_GRAPH_WEAK_STOP",
     "BP_ROAD_LINK_NOT_FOUND",
     "BP_SCAN_EXCEED_200M",

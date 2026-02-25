@@ -28,8 +28,10 @@ from .metrics_breakpoints import (
     BP_DIVSTRIPZONE_MISSING,
     BP_DIVSTRIP_TOLERANCE_VIOLATION,
     BP_FOCUS_NODE_NOT_FOUND,
+    BP_MISSING_KIND_FIELD,
     BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION,
     BP_POINTCLOUD_MISSING_OR_UNUSABLE,
+    BP_ROAD_FIELD_MISSING,
     BP_ROAD_GRAPH_WEAK_STOP,
     BP_ROAD_LINK_NOT_FOUND,
     BP_SCAN_EXCEED_200M,
@@ -133,20 +135,91 @@ def _build_aoi(
     return None
 
 
+def _resolve_nodes_aliases(
+    *,
+    nodes: list[NodeRecord],
+    roads: list[RoadRecord],
+) -> tuple[list[NodeRecord], dict[int, tuple[int, str]]]:
+    endpoint_id_set: set[int] = set()
+    for road in roads:
+        endpoint_id_set.add(int(road.snodeid))
+        endpoint_id_set.add(int(road.enodeid))
+
+    resolved_nodes: list[NodeRecord] = []
+    alias_to_canonical: dict[int, tuple[int, str]] = {}
+    used_canonical: set[int] = set()
+
+    for node in nodes:
+        id_fields = list(node.id_fields)
+        if not id_fields:
+            id_fields = [("nodeid", int(node.nodeid))]
+
+        # Prefer IDs that align with road endpoints; then fallback to field order.
+        canonical_id: int | None = None
+        canonical_field: str | None = None
+        for field in ["mainid", "mainnodeid", "id", "nodeid"]:
+            for f, v in id_fields:
+                if f == field and int(v) in endpoint_id_set:
+                    canonical_id = int(v)
+                    canonical_field = str(f)
+                    break
+            if canonical_id is not None:
+                break
+
+        if canonical_id is None:
+            for field in ["mainid", "mainnodeid", "id", "nodeid"]:
+                for f, v in id_fields:
+                    if f == field:
+                        canonical_id = int(v)
+                        canonical_field = str(f)
+                        break
+                if canonical_id is not None:
+                    break
+
+        if canonical_id is None:
+            canonical_id = int(node.nodeid)
+            canonical_field = "nodeid"
+
+        if canonical_id in used_canonical:
+            # Keep first canonical record to avoid duplicate seeds.
+            continue
+        used_canonical.add(canonical_id)
+
+        resolved = NodeRecord(
+            nodeid=int(canonical_id),
+            kind=node.kind,
+            point=node.point,
+            id_fields=tuple(id_fields),
+            kind_raw=node.kind_raw,
+        )
+        resolved_nodes.append(resolved)
+
+        for f, v in id_fields:
+            if int(v) not in alias_to_canonical:
+                alias_to_canonical[int(v)] = (int(canonical_id), str(f))
+        if canonical_id not in alias_to_canonical:
+            alias_to_canonical[int(canonical_id)] = (int(canonical_id), str(canonical_field))
+
+    return resolved_nodes, alias_to_canonical
+
+
 def _pick_seed_nodes(
     *,
     mode: str,
     nodes: list[NodeRecord],
     focus_ids: list[str],
+    alias_to_canonical: dict[int, tuple[int, str]],
     breakpoints: list[dict[str, Any]],
-) -> list[NodeRecord]:
+) -> tuple[list[NodeRecord], dict[int, dict[str, Any]]]:
     node_by_id = {int(n.nodeid): n for n in nodes}
+    resolved_from: dict[int, dict[str, Any]] = {}
 
     if mode == "global_focus":
         out: list[NodeRecord] = []
+        seen: set[int] = set()
         for raw in focus_ids:
             try:
-                nid = int(str(raw))
+                fid = int(str(raw))
             except Exception:
                 breakpoints.append(
                     make_breakpoint(
@@ -157,39 +230,89 @@ def _pick_seed_nodes(
                     )
                 )
                 continue
-            hit = node_by_id.get(nid)
-            if hit is None:
+
+            hit_meta = alias_to_canonical.get(fid)
+            if hit_meta is None:
                 breakpoints.append(
                     make_breakpoint(
                         code=BP_FOCUS_NODE_NOT_FOUND,
                         severity="hard",
-                        nodeid=nid,
-                        message="focus_node_not_found_in_loaded_nodes",
+                        nodeid=fid,
+                        message="focus_node_not_found_in_alias_map",
                     )
                 )
                 continue
-            out.append(hit)
-        return out
+
+            canonical_id, matched_field = hit_meta
+            hit_node = node_by_id.get(int(canonical_id))
+            if hit_node is None:
+                breakpoints.append(
+                    make_breakpoint(
+                        code=BP_FOCUS_NODE_NOT_FOUND,
+                        severity="hard",
+                        nodeid=fid,
+                        message="focus_node_canonical_missing",
+                        extra={"canonical_id": int(canonical_id)},
+                    )
+                )
+                continue
+
+            if int(canonical_id) in seen:
+                continue
+            seen.add(int(canonical_id))
+            out.append(hit_node)
+            resolved_from[int(canonical_id)] = {
+                "focus_id": str(fid),
+                "canonical_id": int(canonical_id),
+                "matched_field": str(matched_field),
+            }
+        return out, resolved_from
 
     if focus_ids:
         out2: list[NodeRecord] = []
+        seen2: set[int] = set()
         for raw in focus_ids:
             try:
-                nid = int(str(raw))
+                fid = int(str(raw))
             except Exception:
                 continue
-            hit = node_by_id.get(nid)
-            if hit is not None:
-                out2.append(hit)
-        return out2
+            hit_meta = alias_to_canonical.get(fid)
+            if hit_meta is None:
+                continue
+            canonical_id, matched_field = hit_meta
+            hit_node = node_by_id.get(int(canonical_id))
+            if hit_node is None or int(canonical_id) in seen2:
+                continue
+            seen2.add(int(canonical_id))
+            out2.append(hit_node)
+            resolved_from[int(canonical_id)] = {
+                "focus_id": str(fid),
+                "canonical_id": int(canonical_id),
+                "matched_field": str(matched_field),
+            }
+        return out2, resolved_from
 
-    return sorted(nodes, key=lambda n: int(n.nodeid))
+    return sorted(nodes, key=lambda n: int(n.nodeid)), resolved_from
 
 
-def _empty_fail_result(*, nodeid: int, anchor_type: str, scan_dir: str, line: Any, divstrip_union: BaseGeometry | None) -> dict[str, Any]:
+def _empty_fail_result(
+    *,
+    nodeid: int,
+    kind: int | None,
+    anchor_type: str,
+    scan_dir: str,
+    line: Any,
+    divstrip_union: BaseGeometry | None,
+    resolved_from: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     pt, dist = anchor_point_from_crossline(line=line, divstrip_union=divstrip_union)
+    is_merge = bool(kind is not None and (int(kind) & (1 << 3)) != 0)
+    is_diverge = bool(kind is not None and (int(kind) & (1 << 4)) != 0)
     return {
         "nodeid": int(nodeid),
+        "kind": None if kind is None else int(kind),
+        "is_merge_kind": bool(is_merge),
+        "is_diverge_kind": bool(is_diverge),
         "anchor_type": str(anchor_type),
         "status": "fail",
         "anchor_found": False,
@@ -207,6 +330,7 @@ def _empty_fail_result(*, nodeid: int, anchor_type: str, scan_dir: str, line: An
         "first_hit_non_ground_m": None,
         "ng_candidates_before_suppress": 0,
         "ng_candidates_after_suppress": 0,
+        "resolved_from": resolved_from,
     }
 
 
@@ -219,16 +343,37 @@ def _evaluate_node(
     params: dict[str, Any],
     breakpoints: list[dict[str, Any]],
     pointcloud_usable: bool,
+    resolved_from: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     nodeid = int(node.nodeid)
-    kind = int(node.kind)
-    is_merge = (kind & (1 << 3)) != 0
-    is_diverge = (kind & (1 << 4)) != 0
+    kind = None if node.kind is None else int(node.kind)
+    is_merge = bool(kind is not None and (int(kind) & (1 << 3)) != 0)
+    is_diverge = bool(kind is not None and (int(kind) & (1 << 4)) != 0)
 
     dummy_line = LocalFrame.from_tangent(origin_xy=(float(node.point.x), float(node.point.y)), tangent_xy=(1.0, 0.0)).crossline(
         scan_dist_m=0.0,
         cross_half_len_m=float(params["cross_half_len_m"]),
     )
+
+    if kind is None:
+        breakpoints.append(
+            make_breakpoint(
+                code=BP_MISSING_KIND_FIELD,
+                severity="hard",
+                nodeid=nodeid,
+                message="kind_missing_or_parse_failed",
+                extra={"kind_raw": node.kind_raw},
+            )
+        )
+        return _empty_fail_result(
+            nodeid=nodeid,
+            kind=kind,
+            anchor_type="kind_missing",
+            scan_dir="na",
+            line=dummy_line,
+            divstrip_union=divstrip_union,
+            resolved_from=resolved_from,
+        )
 
     if is_merge and is_diverge:
         breakpoints.append(
@@ -241,10 +386,12 @@ def _evaluate_node(
         )
         return _empty_fail_result(
             nodeid=nodeid,
+            kind=kind,
             anchor_type="ambiguous",
             scan_dir="na",
             line=dummy_line,
             divstrip_union=divstrip_union,
+            resolved_from=resolved_from,
         )
 
     if not is_merge and not is_diverge:
@@ -254,15 +401,17 @@ def _evaluate_node(
                 severity="hard",
                 nodeid=nodeid,
                 message="kind_is_not_merge_or_diverge",
-                extra={"kind": int(kind)},
+                extra={"kind": int(kind), "kind_raw": node.kind_raw},
             )
         )
         return _empty_fail_result(
             nodeid=nodeid,
+            kind=kind,
             anchor_type="unsupported",
             scan_dir="na",
             line=dummy_line,
             divstrip_union=divstrip_union,
+            resolved_from=resolved_from,
         )
 
     if is_diverge:
@@ -285,10 +434,12 @@ def _evaluate_node(
         )
         return _empty_fail_result(
             nodeid=nodeid,
+            kind=kind,
             anchor_type=anchor_type,
             scan_dir=scan_dir_label,
             line=dummy_line,
             divstrip_union=divstrip_union,
+            resolved_from=resolved_from,
         )
 
     tangent = pick.tangent_at_node
@@ -418,6 +569,9 @@ def _evaluate_node(
             )
         return {
             "nodeid": int(nodeid),
+            "kind": None if kind is None else int(kind),
+            "is_merge_kind": bool(is_merge),
+            "is_diverge_kind": bool(is_diverge),
             "anchor_type": anchor_type,
             "status": "fail",
             "anchor_found": False,
@@ -435,6 +589,7 @@ def _evaluate_node(
             "first_hit_non_ground_m": first_ng_s,
             "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
             "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+            "resolved_from": resolved_from,
         }
 
     final_line = lines[found_idx]
@@ -476,6 +631,9 @@ def _evaluate_node(
 
     return {
         "nodeid": int(nodeid),
+        "kind": None if kind is None else int(kind),
+        "is_merge_kind": bool(is_merge),
+        "is_diverge_kind": bool(is_diverge),
         "anchor_type": anchor_type,
         "status": status,
         "anchor_found": True,
@@ -493,6 +651,7 @@ def _evaluate_node(
         "first_hit_non_ground_m": first_ng_s,
         "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
         "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+        "resolved_from": resolved_from,
     }
 
 
@@ -565,15 +724,34 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
 
     aoi = _build_aoi(pointcloud_path=pointcloud_path, traj_points_xy=traj.points_xy, dst_crs=dst_crs)
 
-    nodes, node_meta, node_errors = load_nodes(path=node_path, src_crs_override=src_crs, dst_crs=dst_crs, aoi=aoi)
+    nodes_raw, node_meta, node_errors = load_nodes(path=node_path, src_crs_override=src_crs, dst_crs=dst_crs, aoi=aoi)
     roads, road_meta, road_errors = load_roads(path=road_path, src_crs_override=src_crs, dst_crs=dst_crs, aoi=aoi)
+
+    for err in road_errors:
+        if str(err).startswith("road_field_missing:"):
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_ROAD_FIELD_MISSING,
+                    severity="soft",
+                    nodeid=None,
+                    message=str(err),
+                )
+            )
+
+    nodes, alias_to_canonical = _resolve_nodes_aliases(nodes=nodes_raw, roads=roads)
 
     # Parse warnings are kept in chosen_config; avoid stdout/raw dumps.
     focus_ids = [str(x) for x in runtime.get("focus_node_ids", [])]
-    seeds = _pick_seed_nodes(mode=mode, nodes=nodes, focus_ids=focus_ids, breakpoints=breakpoints)
+    seeds, resolved_from_map = _pick_seed_nodes(
+        mode=mode,
+        nodes=nodes,
+        focus_ids=focus_ids,
+        alias_to_canonical=alias_to_canonical,
+        breakpoints=breakpoints,
+    )
 
     node_points = {int(n.nodeid): Point(float(n.point.x), float(n.point.y)) for n in nodes}
-    node_kinds = {int(n.nodeid): int(n.kind) for n in nodes}
+    node_kinds = {int(n.nodeid): int(n.kind) if n.kind is not None else 0 for n in nodes}
 
     road_graph = RoadGraph(roads=roads, node_points=node_points, node_kinds=node_kinds)
 
@@ -686,6 +864,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             params=params,
             breakpoints=breakpoints,
             pointcloud_usable=pointcloud_usable,
+            resolved_from=resolved_from_map.get(int(node.nodeid)),
         )
         res["ng_candidates_before_suppress"] = int(ng_before_suppress)
         res["ng_candidates_after_suppress"] = int(ng_after_suppress)

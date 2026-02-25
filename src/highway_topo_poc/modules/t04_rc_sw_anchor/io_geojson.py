@@ -11,12 +11,17 @@ from shapely.geometry import LineString, Point, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform, unary_union
 
+from .field_norm import get_first_int, get_first_raw, normalize_props
+
 
 @dataclass(frozen=True)
 class NodeRecord:
     nodeid: int
-    kind: int
+    kind: int | None
     point: Point
+    # (field_name, id_value), field_name in normalized namespace.
+    id_fields: tuple[tuple[str, int], ...] = ()
+    kind_raw: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -142,15 +147,6 @@ def resolve_source_crs(payload: dict[str, Any], *, src_crs_override: str) -> str
     return _guess_src_crs_from_payload(payload)
 
 
-def _safe_int(value: Any, default: int | None = None) -> int | None:
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except Exception:
-        return default
-
-
 def _build_transformer(src_crs: str, dst_crs: str) -> Transformer:
     return Transformer.from_crs(src_crs, dst_crs, always_xy=True)
 
@@ -159,6 +155,10 @@ def _project_geom(geom: BaseGeometry, transformer: Transformer | None) -> BaseGe
     if transformer is None:
         return geom
     return transform(transformer.transform, geom)
+
+
+def _int_field(props_norm: dict[str, Any], keys: list[str]) -> int | None:
+    return get_first_int(props_norm, keys)
 
 
 def load_nodes(
@@ -181,8 +181,11 @@ def load_nodes(
         if not isinstance(feat, dict):
             errors.append(f"node_feature_not_object:{idx}")
             continue
+
         props = feat.get("properties")
         props = props if isinstance(props, dict) else {}
+        props_norm = normalize_props(props)
+
         geom = feat.get("geometry")
         if not isinstance(geom, dict):
             errors.append(f"node_geometry_missing:{idx}")
@@ -201,17 +204,40 @@ def load_nodes(
         if aoi is not None and not g2.intersects(aoi):
             continue
 
-        nodeid = _safe_int(props.get("mainid"), default=None)
-        if nodeid is None:
-            nodeid = _safe_int(props.get("id"), default=None)
-        if nodeid is None:
-            nodeid = _safe_int(props.get("nodeid"), default=None)
-        if nodeid is None:
+        # Keep all id aliases for later canonical alignment in runner.
+        raw_id_pairs: list[tuple[str, int]] = []
+        for key in ["mainid", "mainnodeid", "id", "nodeid"]:
+            val = _int_field(props_norm, [key])
+            if val is not None:
+                raw_id_pairs.append((key, int(val)))
+
+        if not raw_id_pairs:
             errors.append(f"nodeid_missing:{idx}")
             continue
 
-        kind = _safe_int(props.get("Kind"), default=0)
-        out.append(NodeRecord(nodeid=int(nodeid), kind=int(kind or 0), point=Point(float(g2.x), float(g2.y))))
+        # Dedup while preserving first-seen field order.
+        id_pairs: list[tuple[str, int]] = []
+        seen_val: set[int] = set()
+        for field, value in raw_id_pairs:
+            if value in seen_val:
+                continue
+            seen_val.add(value)
+            id_pairs.append((field, value))
+
+        kind = _int_field(props_norm, ["kind"])
+        kind_raw = get_first_raw(props_norm, ["kind"])
+        if kind is None and kind_raw is not None:
+            errors.append(f"kind_parse_error:{idx}:{kind_raw!r}")
+
+        out.append(
+            NodeRecord(
+                nodeid=int(id_pairs[0][1]),
+                kind=None if kind is None else int(kind),
+                point=Point(float(g2.x), float(g2.y)),
+                id_fields=tuple(id_pairs),
+                kind_raw=kind_raw,
+            )
+        )
 
     meta = GeoLoadMeta(
         path=str(path),
@@ -243,8 +269,11 @@ def load_roads(
         if not isinstance(feat, dict):
             errors.append(f"road_feature_not_object:{idx}")
             continue
+
         props = feat.get("properties")
         props = props if isinstance(props, dict) else {}
+        props_norm = normalize_props(props)
+
         geom = feat.get("geometry")
         if not isinstance(geom, dict):
             errors.append(f"road_geometry_missing:{idx}")
@@ -263,10 +292,10 @@ def load_roads(
         if aoi is not None and not g2.intersects(aoi):
             continue
 
-        snodeid = _safe_int(props.get("snodeid"), default=None)
-        enodeid = _safe_int(props.get("enodeid"), default=None)
+        snodeid = _int_field(props_norm, ["snodeid", "startnodeid", "fromnodeid", "startid", "snode"])
+        enodeid = _int_field(props_norm, ["enodeid", "endnodeid", "tonodeid", "endid", "enode"])
         if snodeid is None or enodeid is None:
-            errors.append(f"road_nodeid_missing:{idx}")
+            errors.append(f"road_field_missing:{idx}:snodeid_or_enodeid")
             continue
 
         out.append(
@@ -308,8 +337,11 @@ def load_intersection_lines(
         if not isinstance(feat, dict):
             errors.append(f"intersection_feature_not_object:{idx}")
             continue
+
         props = feat.get("properties")
         props = props if isinstance(props, dict) else {}
+        props_norm = normalize_props(props)
+
         geom = feat.get("geometry")
         if not isinstance(geom, dict):
             errors.append(f"intersection_geometry_missing:{idx}")
@@ -328,11 +360,7 @@ def load_intersection_lines(
         if aoi is not None and not g2.intersects(aoi):
             continue
 
-        nodeid = _safe_int(props.get("nodeid"), default=None)
-        if nodeid is None:
-            nodeid = _safe_int(props.get("mainid"), default=None)
-        if nodeid is None:
-            nodeid = _safe_int(props.get("id"), default=None)
+        nodeid = _int_field(props_norm, ["nodeid", "mainid", "mainnodeid", "id"])
         if nodeid is None:
             errors.append(f"intersection_nodeid_missing:{idx}")
             continue
@@ -369,6 +397,7 @@ def load_divstrip_union(
         if not isinstance(feat, dict):
             errors.append(f"divstrip_feature_not_object:{idx}")
             continue
+
         geom = feat.get("geometry")
         if not isinstance(geom, dict):
             continue
@@ -381,6 +410,7 @@ def load_divstrip_union(
             continue
         if g.geom_type not in {"Polygon", "MultiPolygon"}:
             continue
+
         g2 = _project_geom(g, transformer)
         if aoi is not None and not g2.intersects(aoi):
             continue
