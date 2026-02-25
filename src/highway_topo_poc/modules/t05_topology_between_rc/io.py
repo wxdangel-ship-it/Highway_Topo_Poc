@@ -15,6 +15,10 @@ from shapely.ops import transform
 
 
 _TRAJ_FILE_NAME = "raw_dat_pose.geojson"
+_NODE_PRIMARY_NAME = "RCSDNode.geojson"
+_NODE_FALLBACK_NAME = "Node.geojson"
+_ROAD_PRIMARY_NAME = "RCSDRoad.geojson"
+_ROAD_FALLBACK_NAME = "Road.geojson"
 
 
 @dataclass(frozen=True)
@@ -92,6 +96,22 @@ class InputDataError(ValueError):
     pass
 
 
+def _resolve_vector_file(
+    *,
+    vector_dir: Path,
+    primary_name: str,
+    fallback_name: str | None = None,
+) -> Path:
+    primary = vector_dir / primary_name
+    if primary.is_file():
+        return primary
+    if fallback_name:
+        fallback = vector_dir / fallback_name
+        if fallback.is_file():
+            return fallback
+    return primary
+
+
 def resolve_repo_root(start: Path) -> Path:
     p = start.resolve()
     for cand in [p, *p.parents]:
@@ -139,8 +159,16 @@ def probe_patch(patch_dir: Path) -> PatchProbe:
 
     intersection_path = vector_dir / "intersection_l.geojson"
     laneboundary_path = vector_dir / "LaneBoundary.geojson"
-    node_path = vector_dir / "Node.geojson"
-    road_path = vector_dir / "Road.geojson"
+    node_path = _resolve_vector_file(
+        vector_dir=vector_dir,
+        primary_name=_NODE_PRIMARY_NAME,
+        fallback_name=_NODE_FALLBACK_NAME,
+    )
+    road_path = _resolve_vector_file(
+        vector_dir=vector_dir,
+        primary_name=_ROAD_PRIMARY_NAME,
+        fallback_name=_ROAD_FALLBACK_NAME,
+    )
     tiles_dir = patch_dir / "Tiles"
 
     intersection_features = _safe_geojson_feature_count(intersection_path)
@@ -187,8 +215,16 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
 
     intersection_path = vector_dir / "intersection_l.geojson"
     laneboundary_path = vector_dir / "LaneBoundary.geojson"
-    node_path = vector_dir / "Node.geojson"
-    road_path = vector_dir / "Road.geojson"
+    node_path = _resolve_vector_file(
+        vector_dir=vector_dir,
+        primary_name=_NODE_PRIMARY_NAME,
+        fallback_name=_NODE_FALLBACK_NAME,
+    )
+    road_path = _resolve_vector_file(
+        vector_dir=vector_dir,
+        primary_name=_ROAD_PRIMARY_NAME,
+        fallback_name=_ROAD_FALLBACK_NAME,
+    )
     tiles_dir = patch_dir / "Tiles"
 
     if not intersection_path.is_file():
@@ -224,7 +260,7 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
         input_summary={
             "has_road_prior": road_path.is_file(),
             "has_tiles_dir": tiles_dir.is_dir(),
-            "road_prior_name": "Road.geojson" if road_path.is_file() else None,
+            "road_prior_name": road_path.name if road_path.is_file() else None,
             "tiles_layout": "xyz" if tiles_dir.is_dir() else None,
         },
     )

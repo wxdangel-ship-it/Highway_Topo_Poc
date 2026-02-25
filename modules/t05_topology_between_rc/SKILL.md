@@ -32,7 +32,7 @@
 - `conf = clamp01(CONF_W1_SUPPORT*f_support + CONF_W2_COVERAGE*f_coverage + CONF_W3_SMOOTH*f_smooth)`
 
 5) 输出要求
-- `Road.geojson`：有向路段几何与属性
+- `RCSDRoad.geojson`：有向路段几何与属性
 - `metrics.json`：聚合指标
 - `intervals.json`：Top-K 断点
 - `summary.txt`：可粘贴摘要

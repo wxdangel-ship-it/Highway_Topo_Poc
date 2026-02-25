@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Migrate patch schema to v3 by adding Vector/Road.geojson and Tiles/."""
+"""Migrate patch schema to v3 by adding Vector/RCSDRoad.geojson and Tiles/."""
 
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
-ROAD_FILENAME = "Road.geojson"
+ROAD_FILENAME = "RCSDRoad.geojson"
+LEGACY_ROAD_FILENAME = "Road.geojson"
 TILES_DIRNAME = "Tiles"
 TRAJ_FILENAME = "raw_dat_pose.geojson"
 
@@ -34,6 +35,8 @@ class MigrationStats:
     patch_count: int = 0
     patches_to_modify: int = 0
     created_road: int = 0
+    renamed_legacy_road: int = 0
+    deleted_legacy_road_dup: int = 0
     created_tiles_dir: int = 0
     copied_tiles: int = 0
     copied_tiles_files: int = 0
@@ -47,7 +50,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     default_report_dir = f"outputs/_work/patch_schema_migration_v3_{ts}"
     default_backup_dir = f"{default_report_dir}/backup"
 
-    parser = argparse.ArgumentParser(description="Migrate patch schema v3 (Road.geojson + Tiles/).")
+    parser = argparse.ArgumentParser(description="Migrate patch schema v3 (RCSDRoad.geojson + Tiles/).")
     parser.add_argument("--roots", nargs="+", default=["data/synth_local", "data/synth"])
     parser.add_argument("--apply", action="store_true", help="Write changes. Default is dry-run.")
     parser.add_argument("--backup-dir", default=default_backup_dir)
@@ -333,19 +336,26 @@ def process_patch(
         return
 
     road_path = vector_dir / ROAD_FILENAME
+    legacy_road_path = vector_dir / LEGACY_ROAD_FILENAME
     tiles_dir = patch_dir / TILES_DIRNAME
 
-    needs_road = not road_path.is_file()
+    needs_rename_legacy_road = legacy_road_path.is_file() and not road_path.is_file()
+    needs_delete_legacy_road_dup = legacy_road_path.is_file() and road_path.is_file()
+    needs_road = not road_path.is_file() and not needs_rename_legacy_road
     needs_tiles = not tiles_dir.is_dir()
     tiles_source = find_tiles_source(record) if (needs_tiles and tiles_mode == "copy_if_exists") else None
     will_copy_tiles = tiles_source is not None
 
-    if not (needs_road or needs_tiles):
+    if not (needs_rename_legacy_road or needs_delete_legacy_road_dup or needs_road or needs_tiles):
         return
 
     stats.patches_to_modify += 1
     stats.modified_patch_dirs.append(repo_rel(patch_dir, repo_root))
 
+    if needs_rename_legacy_road:
+        stats.renamed_legacy_road += 1
+    if needs_delete_legacy_road_dup:
+        stats.deleted_legacy_road_dup += 1
     if needs_road:
         stats.created_road += 1
     if needs_tiles:
@@ -355,6 +365,33 @@ def process_patch(
 
     if not apply_mode:
         return
+
+    if needs_rename_legacy_road:
+        try:
+            legacy_road_path.replace(road_path)
+            rollback_ops.append(
+                {
+                    "op": "rename_file",
+                    "from": repo_rel(road_path, repo_root),
+                    "to": repo_rel(legacy_road_path, repo_root),
+                    "reason": "renamed_legacy_road_to_rcsdroad",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            stats.errors.append(f"road_rename_failed: {legacy_road_path} -> {road_path}: {exc}")
+
+    if needs_delete_legacy_road_dup:
+        try:
+            legacy_road_path.unlink(missing_ok=True)
+            rollback_ops.append(
+                {
+                    "op": "restore_file_from_backup",
+                    "path": repo_rel(legacy_road_path, repo_root),
+                    "reason": "deleted_duplicate_legacy_road",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            stats.errors.append(f"legacy_road_delete_failed: {legacy_road_path}: {exc}")
 
     if needs_road:
         crs = detect_crs_for_road(patch_dir, stats.errors)
@@ -409,7 +446,7 @@ def write_rollback_manifest(
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "repo_root": str(repo_root),
             "operations": rollback_ops,
-            "note": "Rollback can remove created Road.geojson and Tiles/ entries in reverse order.",
+            "note": "Rollback can remove created RCSDRoad.geojson and Tiles/ entries in reverse order.",
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return path
@@ -445,6 +482,8 @@ def write_reports(
         "patch_count": stats.patch_count,
         "patches_to_modify": stats.patches_to_modify,
         "created_road": stats.created_road,
+        "renamed_legacy_road": stats.renamed_legacy_road,
+        "deleted_legacy_road_dup": stats.deleted_legacy_road_dup,
         "created_tiles_dir": stats.created_tiles_dir,
         "copied_tiles": stats.copied_tiles,
         "copied_tiles_files": stats.copied_tiles_files,
@@ -469,6 +508,8 @@ def write_reports(
         f"  patch_count: {stats.patch_count}",
         f"  patches_to_modify: {stats.patches_to_modify}",
         f"  created_road: {stats.created_road}",
+        f"  renamed_legacy_road: {stats.renamed_legacy_road}",
+        f"  deleted_legacy_road_dup: {stats.deleted_legacy_road_dup}",
         f"  created_tiles_dir: {stats.created_tiles_dir}",
         f"  copied_tiles: {stats.copied_tiles}",
         f"  copied_tiles_files: {stats.copied_tiles_files}",

@@ -43,6 +43,11 @@ from .metrics_breakpoints import (
 )
 from .pointcloud_io import PointCloudData, count_non_ground_points_near_line, load_pointcloud
 
+NODE_PRIMARY = "RCSDNode.geojson"
+NODE_FALLBACK = "Node.geojson"
+ROAD_PRIMARY = "RCSDRoad.geojson"
+ROAD_FALLBACK = "Road.geojson"
+
 
 @dataclass(frozen=True)
 class RunResult:
@@ -136,6 +141,17 @@ def _collect_seed_nodes(nodes: list[NodeRecord]) -> tuple[list[NodeRecord], list
         elif _is_cross(kind) or kind != 0:
             unsupported.append(node)
     return seeds, unsupported
+
+
+def _resolve_vector_path(vector_dir: Path, primary_name: str, fallback_name: str | None = None) -> Path:
+    primary = vector_dir / primary_name
+    if primary.is_file():
+        return primary
+    if fallback_name:
+        fallback = vector_dir / fallback_name
+        if fallback.is_file():
+            return fallback
+    return primary
 
 
 def _scan_seed(
@@ -506,9 +522,10 @@ def run_patch(
     must_inputs_ok = True
 
     try:
-        node_payload = read_geojson(patch_dir / "Vector" / "Node.geojson")
+        vector_dir = patch_dir / "Vector"
+        node_payload = read_geojson(_resolve_vector_path(vector_dir, NODE_PRIMARY, NODE_FALLBACK))
         intersection_payload = read_geojson(patch_dir / "Vector" / "intersection_l.geojson")
-        road_payload = read_geojson(patch_dir / "Vector" / "Road.geojson")
+        road_payload = read_geojson(_resolve_vector_path(vector_dir, ROAD_PRIMARY, ROAD_FALLBACK))
 
         crs_name = extract_crs_name(node_payload) or extract_crs_name(intersection_payload) or extract_crs_name(road_payload)
 

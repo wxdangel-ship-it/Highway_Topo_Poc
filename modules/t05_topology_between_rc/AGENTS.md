@@ -2,7 +2,7 @@
 
 ## 模块目标
 - 基于 `intersection_l`、轨迹、点云和 `LaneBoundary`，生成 RC 路口间有向 `Road` 中心线。
-- 输出可复核的质量产物：`Road.geojson`、`metrics.json`、`intervals.json`、`summary.txt`、`gate.json`。
+- 输出可复核的质量产物：`RCSDRoad.geojson`、`metrics.json`、`intervals.json`、`summary.txt`、`gate.json`。
 
 ## 职责边界
 - 仅处理 t05：候选路口对构建、中心线估计、门禁判断与报告导出。
@@ -15,11 +15,11 @@
 - `Traj/*/raw_dat_pose.geojson`
 - `PointCloud/*.las|*.laz`
 - `Vector/LaneBoundary.geojson`
-- 可选：`Vector/Node.geojson`、`Vector/DivStripZone.geojson`
+- 可选：`Vector/RCSDNode.geojson`、`Vector/DivStripZone.geojson`
 
 ## 输出
 固定写入：
-- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/Road.geojson`
+- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/RCSDRoad.geojson`
 - `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/metrics.json`
 - `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/intervals.json`
 - `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/summary.txt`

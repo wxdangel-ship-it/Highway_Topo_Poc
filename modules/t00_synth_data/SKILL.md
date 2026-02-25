@@ -13,7 +13,7 @@
   Vector/
     LaneBoundary.geojson
     DivStripZone.geojson
-    Node.geojson
+    RCSDNode.geojson
     intersection_l.geojson
   Traj/
     <TrajID>/

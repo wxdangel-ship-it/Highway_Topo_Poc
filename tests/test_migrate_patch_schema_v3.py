@@ -61,7 +61,7 @@ def test_patch_schema_v3_minimal(tmp_path: Path) -> None:
     res_apply = subprocess.run(cmd_apply, cwd=str(_repo_root()), capture_output=True, text=True)
     assert res_apply.returncode == 0, res_apply.stderr or res_apply.stdout
 
-    road = patch_dir / "Vector" / "Road.geojson"
+    road = patch_dir / "Vector" / "RCSDRoad.geojson"
     tiles = patch_dir / "Tiles"
     assert road.is_file()
     assert tiles.is_dir()

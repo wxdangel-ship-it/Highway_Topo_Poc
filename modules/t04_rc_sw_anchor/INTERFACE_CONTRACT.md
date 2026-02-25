@@ -10,9 +10,9 @@
 `patch_dir` 下的输入路径：
 
 MUST:
-- `Vector/Node.geojson`
+- `Vector/RCSDNode.geojson`
 - `Vector/intersection_l.geojson`
-- `Vector/Road.geojson`
+- `Vector/RCSDRoad.geojson`
 
 SHOULD:
 - `Vector/DivStripZone.geojson`（缺失可降级，需写 breakpoint）
@@ -24,7 +24,7 @@ OPTIONAL:
 
 输入字段口径：
 - `Node.Kind`：`bit4=diverge(16)`、`bit3=merge(8)`；其它组合写 `UNSUPPORTED_KIND` / `AMBIGUOUS_KIND`。
-- `Road.geojson`：`snodeid`、`enodeid` 与 `LineString`。
+- `RCSDRoad.geojson`：`snodeid`、`enodeid` 与 `LineString`。
 - `intersection_l.geojson`：按 `properties.nodeid` 与 seed node 绑定。
 
 ## 3. 输出（Output）

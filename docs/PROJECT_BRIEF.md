@@ -16,17 +16,17 @@
 ## 2.1 Patch Vector 标准（摘要）
 - `LaneBoundary.geojson`
 - `DivStripZone.geojson`（导流带标准图层）
-- `Node.geojson`（Point FeatureCollection）
+- `RCSDNode.geojson`（Point FeatureCollection）
   - `properties.Kind`: int32（bit0=无属性，bit2=交叉路口，bit3=合流路口，bit4=分歧路口）
   - `properties.mainid`: int64
   - `properties.id`: int64
 - `intersection_l.geojson`（LineString FeatureCollection）
   - `properties.nodeid`: int64
-- `Road.geojson`（历史路网先验；`direction:int8`、`snodeid:int64`、`enodeid:int64`）
+- `RCSDRoad.geojson`（历史路网先验；`direction:int8`、`snodeid:int64`、`enodeid:int64`）
 - `Tiles/`（卫星瓦片先验目录，XYZ 组织：`Tiles/<z>/<x>/<y>.<ext>`；当前阶段可空但目录必须存在）
 - 主文档只维护标准与产物摘要；模块级接口细节以 `modules/<module>/INTERFACE_CONTRACT.md` 为准。
 
-补充：`Vector/Road.geojson` 与 `Tiles/` 作为历史矢量与卫星输入，供 `t04_rc_sw_anchor` 优化阶段使用。
+补充：`Vector/RCSDRoad.geojson` 与 `Tiles/` 作为历史矢量与卫星输入，供 `t04_rc_sw_anchor` 优化阶段使用。
 
 ## 3. 关键业务背景（全局认知）
 - RC/SW 是两套不同数据：

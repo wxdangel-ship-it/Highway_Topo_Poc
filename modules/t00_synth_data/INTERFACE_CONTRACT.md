@@ -12,22 +12,22 @@
 Vector/
   LaneBoundary.geojson
   DivStripZone.geojson
-  Node.geojson
+  RCSDNode.geojson
   intersection_l.geojson
-  Road.geojson
+  RCSDRoad.geojson
 Tiles/
   <z>/<x>/<y>.<ext>
 ```
 
 约束：
 - 旧版导流带文件名不属于 v3 标准输出，t00 新生成数据中不得出现。
-- `Node.geojson` 与 `intersection_l.geojson` 允许 `features` 为空，但文件必须是合法 GeoJSON FeatureCollection。
-- `Road.geojson` 允许 `features` 为空，但文件必须是合法 GeoJSON FeatureCollection。
+- `RCSDNode.geojson` 与 `intersection_l.geojson` 允许 `features` 为空，但文件必须是合法 GeoJSON FeatureCollection。
+- `RCSDRoad.geojson` 允许 `features` 为空，但文件必须是合法 GeoJSON FeatureCollection。
 - `Tiles/` 当前阶段可为空目录，但目录必须存在。
 
 ## 3. GeoJSON 结构约束
 
-### 3.1 `Node.geojson`
+### 3.1 `RCSDNode.geojson`
 - 顶层：`{"type":"FeatureCollection","features":[...]}`
 - 几何类型：`Point`
 - 每个要素 `properties` 字段约束（有要素时）：
@@ -50,7 +50,7 @@ Tiles/
 - 顶层：`{"type":"FeatureCollection","features":[...]}`
 - 几何类型：由上游数据决定（通常为导流带相关几何），但必须满足合法 GeoJSON FeatureCollection。
 
-### 3.4 `Road.geojson`
+### 3.4 `RCSDRoad.geojson`
 - 顶层：`{"type":"FeatureCollection","features":[...]}`
 - 几何类型：`LineString`（建议）
 - 每个要素 `properties` 字段约束（有要素时）：
@@ -68,13 +68,13 @@ Tiles/
 - 当前阶段允许无瓦片文件，但 `Tiles/` 目录必须存在。
 
 ## 4.1 来源策略（Road/Tiles）
-- `Vector/Road.geojson`：
-  - 若源 patch 或源数据存在 `Road.geojson`，优先复制到目标 patch。
+- `Vector/RCSDRoad.geojson`：
+  - 若源 patch 或源数据存在 `RCSDRoad.geojson`，优先复制到目标 patch。
   - 若缺失，生成空 `FeatureCollection`（必要时继承现有输入 `crs`）。
 - `Tiles/`：
   - 默认策略：创建空目录（`mkdir_empty`）。
   - 可选策略：仅在源存在 `Tiles/` 时复制（`copy_if_exists`）。
-- 不得修改其它既有矢量内容（`LaneBoundary/DivStripZone/Node/intersection_l`）。
+- 不得修改其它既有矢量内容（`LaneBoundary/DivStripZone/RCSDNode/intersection_l`）。
 
 ## 5. patch_manifest.json 路径字段（t00）
 
@@ -101,9 +101,9 @@ Tiles/
   - `PointCloud/*.laz`
   - `Vector/LaneBoundary.geojson`
   - `Vector/DivStripZone.geojson`
-  - `Vector/Node.geojson`
+  - `Vector/RCSDNode.geojson`
   - `Vector/intersection_l.geojson`
-  - `Vector/Road.geojson`
+  - `Vector/RCSDRoad.geojson`
   - `Tiles/`（可空）
   - `Traj/<traj_id>/raw_dat_pose.geojson`
 
@@ -139,6 +139,6 @@ python -m highway_topo_poc synth \
 ## 11. 验收（Accept）
 - 命令退出码为 `0`
 - `${OUT_DIR}/patch_manifest.json` 存在且可解析
-- `${OUT_DIR}/<patch_id>/Vector/` 同时存在 `LaneBoundary.geojson`、`DivStripZone.geojson`、`Node.geojson`、`intersection_l.geojson`、`Road.geojson`
+- `${OUT_DIR}/<patch_id>/Vector/` 同时存在 `LaneBoundary.geojson`、`DivStripZone.geojson`、`RCSDNode.geojson`、`intersection_l.geojson`、`RCSDRoad.geojson`
 - `${OUT_DIR}/<patch_id>/Tiles/` 目录存在（允许为空）
 - `modules/t00_synth_data/` 目录仅保留文档契约，无 `.py` 实现文件

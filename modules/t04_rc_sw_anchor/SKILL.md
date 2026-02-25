@@ -3,7 +3,7 @@
 ## 算法口径（MVP 冻结）
 
 1) Seed 与类型判定
-- 从 `Node.geojson` 提取 `Kind` 包含 `bit4(diverge)` 或 `bit3(merge)` 的节点作为 seed。
+- 从 `RCSDNode.geojson` 提取 `Kind` 包含 `bit4(diverge)` 或 `bit3(merge)` 的节点作为 seed。
 - `bit3+bit4` 同时存在：`AMBIGUOUS_KIND`。
 - 非 merge/diverge：`UNSUPPORTED_KIND`（仅记录，不产锚点）。
 

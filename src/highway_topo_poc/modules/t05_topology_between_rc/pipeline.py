@@ -45,6 +45,8 @@ from .metrics import (
     params_digest,
 )
 
+_ROAD_OUT_NAME = "RCSDRoad.geojson"
+
 
 DEFAULT_PARAMS: dict[str, float | int] = {
     "TRAJ_XSEC_HIT_BUFFER_M": 0.5,
@@ -114,7 +116,7 @@ def run_patch(
 
     road_lines_input = metric_lines_to_input_crs(artifacts["road_lines_metric"], patch_inputs.projection_to_input)
     write_geojson_lines(
-        patch_out / "Road.geojson",
+        patch_out / _ROAD_OUT_NAME,
         lines_input_crs=road_lines_input,
         properties_list=artifacts["road_properties"],
         crs_name=patch_inputs.projection.input_crs,

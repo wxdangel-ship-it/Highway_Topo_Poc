@@ -165,9 +165,9 @@
   Vector/
     LaneBoundary.geojson
     DivStripZone.geojson
-    Node.geojson
+    RCSDNode.geojson
     intersection_l.geojson
-    Road.geojson
+    RCSDRoad.geojson
   Tiles/
     <z>/<x>/<y>.<ext>
   Traj/
@@ -181,16 +181,16 @@
   - 点云：至少 Z 可用；若缺标量轴，允许派生（必须在报告记录派生策略）
   - 矢量：可读取为要素集合（不要求原始即实体化）
 
-### 8.3 Patch Vector 标准产物摘要（v3）
+### 8.3 Patch Vector 标准产物摘要（v4）
 - `LaneBoundary.geojson`：车道边界（LineString FeatureCollection）
 - `DivStripZone.geojson`：导流带信息（v2 标准命名）
-- `Node.geojson`：路口 Node 点信息（Point FeatureCollection）
+- `RCSDNode.geojson`：路口 Node 点信息（Point FeatureCollection）
   - `properties.Kind`：`int32`（bit0=无属性，bit2=交叉路口，bit3=合流路口，bit4=分歧路口）
   - `properties.mainid`：`int64`（路口主 nodeid，同值为一组）
   - `properties.id`：`int64`（当前 node 的 id）
 - `intersection_l.geojson`：分歧/合流路口横截线（LineString FeatureCollection）
   - `properties.nodeid`：`int64`（对应主 node 的 id）
-- `Road.geojson`：历史路网先验矢量（LineString FeatureCollection，可为空）
+- `RCSDRoad.geojson`：历史路网先验矢量（LineString FeatureCollection，可为空）
   - `properties.direction`：`int8`
     - `0`：未调查（默认按双方向处理）
     - `1`：双向
@@ -198,7 +198,8 @@
     - `3`：逆行
   - `properties.snodeid`：`int64`（起点 `nodeid`）
   - `properties.enodeid`：`int64`（终点 `nodeid`）
-- 仍保留：`LaneBoundary/DivStripZone/Node/intersection_l`；不允许回退到旧版导流带命名。
+- 仍保留：`LaneBoundary/DivStripZone/RCSDNode/intersection_l`；不允许回退到旧版导流带命名。
+- 兼容期说明：读取侧可兼容旧版 Node/Road 别名，但标准产出必须使用 `RCSDNode.geojson`/`RCSDRoad.geojson`。
 - `Tiles/`：卫星瓦片输入目录（XYZ tiles）
   - 结构：`Tiles/<z>/<x>/<y>.<ext>`，`ext` 推荐 `png/jpg/webp`，实现需兼容常见后缀。
   - 当前阶段目录可为空，但 `Tiles/` 目录必须存在。

@@ -39,7 +39,7 @@ def create_synth_patch(root: Path) -> Path:
     ]
 
     _write_json(
-        patch_dir / "Vector" / "Node.geojson",
+        patch_dir / "Vector" / "RCSDNode.geojson",
         {
             "type": "FeatureCollection",
             "features": node_features,
@@ -91,7 +91,7 @@ def create_synth_patch(root: Path) -> Path:
     ]
 
     _write_json(
-        patch_dir / "Vector" / "Road.geojson",
+        patch_dir / "Vector" / "RCSDRoad.geojson",
         {
             "type": "FeatureCollection",
             "features": road_features,

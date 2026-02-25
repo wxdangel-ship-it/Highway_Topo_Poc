@@ -6,7 +6,7 @@
 
 ## 2. 输入输出概览
 输入（`patch_dir` 下）：
-- MUST：`Vector/Node.geojson`、`Vector/intersection_l.geojson`、`Vector/Road.geojson`
+- MUST：`Vector/RCSDNode.geojson`、`Vector/intersection_l.geojson`、`Vector/RCSDRoad.geojson`
 - SHOULD：`Vector/DivStripZone.geojson`、`PointCloud/merged.laz|merged.las`
 - OPTIONAL：`Tiles/`（忽略）
 

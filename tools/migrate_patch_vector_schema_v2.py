@@ -3,7 +3,7 @@
 
 Changes:
 - Remove legacy div-strip file.
-- Ensure `DivStripZone.geojson`, `Node.geojson`, `intersection_l.geojson` exist.
+- Ensure `DivStripZone.geojson`, `RCSDNode.geojson`, `intersection_l.geojson` exist.
 - Replace JSON string values containing the legacy filename with `DivStripZone.geojson`
   in `patch_manifest*.json` files.
 
@@ -433,7 +433,7 @@ def process_patch_dir(
 
     legacy_div = vector_dir / LEGACY_DIV_FILENAME
     div = vector_dir / "DivStripZone.geojson"
-    node = vector_dir / "Node.geojson"
+    node = vector_dir / "RCSDNode.geojson"
     inter = vector_dir / "intersection_l.geojson"
 
     legacy_div_exists = legacy_div.is_file()
@@ -548,7 +548,7 @@ def collect_integrity_counts(patch_dirs: Sequence[Path], stats: MigrationStats) 
             legacy_div_count += 1
         if not (vector_dir / "DivStripZone.geojson").is_file():
             miss_div += 1
-        if not (vector_dir / "Node.geojson").is_file():
+        if not (vector_dir / "RCSDNode.geojson").is_file():
             miss_node += 1
         if not (vector_dir / "intersection_l.geojson").is_file():
             miss_inter += 1

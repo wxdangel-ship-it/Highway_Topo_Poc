@@ -11,7 +11,7 @@
 - 文档契约只放 `modules/t04_rc_sw_anchor/`。
 
 ## 输入
-- MUST：`Vector/Node.geojson`、`Vector/intersection_l.geojson`、`Vector/Road.geojson`
+- MUST：`Vector/RCSDNode.geojson`、`Vector/intersection_l.geojson`、`Vector/RCSDRoad.geojson`
 - SHOULD：`Vector/DivStripZone.geojson`、`PointCloud/merged.laz|merged.las`
 - OPTIONAL：`Tiles/`（忽略）、`Traj/`（不使用）
 

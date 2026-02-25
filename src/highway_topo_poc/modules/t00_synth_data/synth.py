@@ -13,8 +13,10 @@ from typing import Any
 
 
 MANIFEST_FILENAME = "patch_manifest.json"
-SCHEMA_VERSION = "t00_synth_patch_manifest_v3"
-ROAD_FILENAME = "Road.geojson"
+SCHEMA_VERSION = "t00_synth_patch_manifest_v4"
+NODE_FILENAME = "RCSDNode.geojson"
+ROAD_FILENAME = "RCSDRoad.geojson"
+LEGACY_ROAD_FILENAME = "Road.geojson"
 TILES_DIRNAME = "Tiles"
 
 
@@ -355,9 +357,13 @@ def _candidate_source_patch_dirs(spec: StripSpec) -> list[Path]:
 
 def _find_source_road_geojson(spec: StripSpec) -> Path | None:
     for patch_dir in _candidate_source_patch_dirs(spec):
-        cand = patch_dir / "Vector" / ROAD_FILENAME
-        if cand.is_file():
-            return cand
+        vector_dir = patch_dir / "Vector"
+        cand_new = vector_dir / ROAD_FILENAME
+        if cand_new.is_file():
+            return cand_new
+        cand_old = vector_dir / LEGACY_ROAD_FILENAME
+        if cand_old.is_file():
+            return cand_old
     return None
 
 
@@ -729,7 +735,7 @@ def write_patch(
     # Vector schema v3 skeletons (can be empty but must be valid FeatureCollection files).
     lane_boundary = vec_dir / "LaneBoundary.geojson"
     div_strip_zone = vec_dir / "DivStripZone.geojson"
-    node_geojson = vec_dir / "Node.geojson"
+    node_geojson = vec_dir / NODE_FILENAME
     intersection_l = vec_dir / "intersection_l.geojson"
     road_geojson = vec_dir / ROAD_FILENAME
     write_empty_fc(lane_boundary, "LineString")

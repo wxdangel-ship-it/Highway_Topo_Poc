@@ -21,19 +21,19 @@ Patch 根目录默认位于 `data/synth_local/<patch_id>/`。
 - `Vector/LaneBoundary.geojson`
 
 推荐输入：
-- `Vector/Node.geojson`（`Kind` bit3/bit4 用于 merge/diverge）
+- `Vector/RCSDNode.geojson`（`Kind` bit3/bit4 用于 merge/diverge）
 - `Vector/DivStripZone.geojson`（诊断用途）
 
 ## 3. 输出（Output）
 单 patch 输出目录：
-- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/Road.geojson`
+- `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/RCSDRoad.geojson`
 - `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/metrics.json`
 - `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/intervals.json`
 - `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/summary.txt`
 - `outputs/_work/t05_topology_between_rc/<run_id>/patches/<patch_id>/gate.json`
 
 关键字段约束：
-- `Road.geojson`
+- `RCSDRoad.geojson`
   - 几何：`LineString`
   - 必需属性：
     - `road_id:string`
@@ -130,10 +130,10 @@ python -m highway_topo_poc.modules.t05_topology_between_rc.run \
 ## 8. 验收（Accept）
 - 命令退出码为 `0`
 - `${OUT_ROOT}/smoke_min/patches/<patch_id>/` 下存在：
-  - `Road.geojson`
+  - `RCSDRoad.geojson`
   - `metrics.json`
   - `intervals.json`
   - `summary.txt`
   - `gate.json`
 - `gate.json` 必须包含 `overall_pass`
-- `Road.geojson` 必须是合法 GeoJSON
+- `RCSDRoad.geojson` 必须是合法 GeoJSON
