@@ -8,13 +8,15 @@ import numpy as np
 from highway_topo_poc.modules.t02_ground_seg_qc.batch_multilayer_clean_and_classify import discover_patches, main
 
 
-def _write_las(path: Path, xyz: np.ndarray) -> None:
+def _write_las(path: Path, xyz: np.ndarray, *, epsg: int = 3857) -> None:
     import laspy
+    import pyproj
 
     hdr = laspy.LasHeader(point_format=3, version="1.2")
     hdr.x_scale = 0.01
     hdr.y_scale = 0.01
     hdr.z_scale = 0.01
+    hdr.add_crs(pyproj.CRS.from_epsg(int(epsg)))
 
     las = laspy.LasData(hdr)
     las.x = np.asarray(xyz[:, 0], dtype=np.float64)
@@ -191,6 +193,8 @@ def test_multilayer_clean_keeps_roadside_and_tags_removed(tmp_path: Path) -> Non
     assert np.all(np.isin(cleaned_cls, np.array([1, 2], dtype=np.uint8)))
     assert np.all(np.isin(kept_cls, np.array([1, 2], dtype=np.uint8)))
     assert int(np.count_nonzero(kept_cls == 2)) > 0
+    assert int(full.header.parse_crs().to_epsg()) == 3857
+    assert int(cleaned.header.parse_crs().to_epsg()) == 3857
 
     stats = json.loads(stats_path.read_text(encoding="utf-8"))
     class12_count = int(np.count_nonzero(full_cls == 12))

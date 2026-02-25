@@ -12,8 +12,9 @@ from highway_topo_poc.modules.t02_ground_seg_qc.road_z_degraded import choose_ro
 from highway_topo_poc.modules.t02_ground_seg_qc.traj_z_mode import check_traj_z
 
 
-def _write_las(path: Path, xyz: np.ndarray, *, lonlat_scale: bool = False) -> None:
+def _write_las(path: Path, xyz: np.ndarray, *, lonlat_scale: bool = False, epsg: int | None = None) -> None:
     import laspy
+    import pyproj
 
     hdr = laspy.LasHeader(point_format=3, version="1.2")
     if lonlat_scale:
@@ -23,6 +24,8 @@ def _write_las(path: Path, xyz: np.ndarray, *, lonlat_scale: bool = False) -> No
         hdr.x_scale = 0.01
         hdr.y_scale = 0.01
     hdr.z_scale = 0.01
+    if epsg is not None:
+        hdr.add_crs(pyproj.CRS.from_epsg(int(epsg)))
 
     las = laspy.LasData(hdr)
     las.x = np.asarray(xyz[:, 0], dtype=np.float64)
@@ -35,7 +38,7 @@ def _write_las(path: Path, xyz: np.ndarray, *, lonlat_scale: bool = False) -> No
     las.write(str(path))
 
 
-def _write_geojson(path: Path, coords: list[list[float]]) -> None:
+def _write_geojson(path: Path, coords: list[list[float]], *, crs_name: str | None = None) -> None:
     payload = {
         "type": "FeatureCollection",
         "features": [
@@ -46,6 +49,8 @@ def _write_geojson(path: Path, coords: list[list[float]]) -> None:
             }
         ],
     }
+    if crs_name:
+        payload["crs"] = {"type": "name", "properties": {"name": crs_name}}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
@@ -139,12 +144,12 @@ def test_multilayer_v2_overlap_and_export_3857(tmp_path: Path) -> None:
         ]
     )
     points = np.vstack([ground, high, poles]).astype(np.float64)
-    _write_las(cloud_path, points, lonlat_scale=True)
+    _write_las(cloud_path, points, lonlat_scale=True, epsg=4326)
 
     traj1 = [[float(lon), 22.00020, 0.0] for lon in np.linspace(114.0000, 114.0005, 24)]
     traj2 = [[float(lon), 22.00035, 0.0] for lon in np.linspace(114.0000, 114.0005, 24)]
-    _write_geojson(patch_dir / "Traj" / "0000" / "raw_dat_pose.geojson", traj1)
-    _write_geojson(patch_dir / "Traj" / "0001" / "raw_dat_pose.geojson", traj2)
+    _write_geojson(patch_dir / "Traj" / "0000" / "raw_dat_pose.geojson", traj1, crs_name="EPSG:4326")
+    _write_geojson(patch_dir / "Traj" / "0001" / "raw_dat_pose.geojson", traj2, crs_name="EPSG:4326")
 
     out_root = tmp_path / "out"
     run_id = "ut_multilayer_v2"
@@ -216,6 +221,8 @@ def test_multilayer_v2_overlap_and_export_3857(tmp_path: Path) -> None:
     assert int(stats["n_in"]) - int(stats["n_kept"]) == int(stats["class12_count"])
     assert np.all(np.isin(cls_clean, np.array([1, 2], dtype=np.uint8)))
     assert int(stats["class2_count"]) > 0
+    assert int(full.header.parse_crs().to_epsg()) == 3857
+    assert int(cleaned.header.parse_crs().to_epsg()) == 3857
 
     bbox = np.asarray([*full.header.mins[:2], *full.header.maxs[:2]], dtype=np.float64)
     assert float(np.max(np.abs(bbox))) > 100000.0
@@ -235,3 +242,158 @@ def test_multilayer_v2_overlap_and_export_3857(tmp_path: Path) -> None:
 
     high_mask = z_full > 8.0
     assert int(np.count_nonzero(cls_full[high_mask] == 12)) >= int(np.count_nonzero(cls_full == 12) * 0.8)
+
+
+def test_multilayer_v2_utm32632_to_3857(tmp_path: Path) -> None:
+    import pyproj
+
+    data_root = tmp_path / "data"
+    patch_dir = data_root / "patch_utm"
+    cloud_path = patch_dir / "PointCloud" / "merged.las"
+    cloud_path.parent.mkdir(parents=True, exist_ok=True)
+
+    xs = np.arange(460560.0, 460620.0, 5.0, dtype=np.float64)
+    ys = np.arange(5425320.0, 5425380.0, 5.0, dtype=np.float64)
+    xx, yy = np.meshgrid(xs, ys)
+    ground = np.column_stack([xx.ravel(), yy.ravel(), np.zeros((xx.size,), dtype=np.float64)])
+    high = np.column_stack([xx.ravel(), yy.ravel(), np.full((xx.size,), 8.0, dtype=np.float64)])
+    points = np.vstack([ground, high]).astype(np.float64)
+    _write_las(cloud_path, points, epsg=32632)
+
+    traj = [[float(x), float(ys[len(ys) // 2]), 0.0] for x in xs]
+    _write_geojson(patch_dir / "Traj" / "0000" / "raw_dat_pose.geojson", traj, crs_name="EPSG:32632")
+
+    out_root = tmp_path / "out"
+    run_id = "ut_multilayer_v2_utm"
+    exit_code = main(
+        [
+            "--data_root",
+            str(data_root),
+            "--out_root",
+            str(out_root),
+            "--run_id",
+            run_id,
+            "--resume",
+            "false",
+            "--workers",
+            "1",
+            "--chunk_points",
+            "512",
+            "--ref_grid_m",
+            "10.0",
+            "--corridor_radius_m",
+            "25",
+            "--ground_band_m",
+            "0.3",
+            "--traj_z_mode",
+            "auto",
+            "--z_bin_m",
+            "0.2",
+            "--min_total_points_per_cell",
+            "10",
+            "--overlap_min_support_points",
+            "5",
+            "--overlap_min_support_ratio",
+            "0.2",
+            "--min_cluster_cells",
+            "1",
+            "--out_epsg",
+            "3857",
+            "--out_format",
+            "las",
+            "--write_full_tagged",
+            "true",
+            "--verify",
+            "true",
+        ]
+    )
+    assert exit_code == 0
+
+    patch_out = out_root / run_id / "multilayer_clean" / "patch_utm"
+    full_path = patch_out / "merged_full_tagged_3857.las"
+    assert full_path.is_file()
+
+    import laspy
+
+    full = laspy.read(str(full_path))
+    assert int(full.header.parse_crs().to_epsg()) == 3857
+
+    t = pyproj.Transformer.from_crs(pyproj.CRS.from_epsg(32632), pyproj.CRS.from_epsg(3857), always_xy=True)
+    x_expect, y_expect = t.transform(float(xs[0]), float(ys[0]))
+    x_obs = float(np.asarray(full.x, dtype=np.float64)[0])
+    y_obs = float(np.asarray(full.y, dtype=np.float64)[0])
+    assert abs(x_obs - x_expect) < 2.0
+    assert abs(y_obs - y_expect) < 2.0
+
+
+def test_multilayer_v2_out_epsg_parameterized(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    patch_dir = data_root / "patch_out_epsg"
+    cloud_path = patch_dir / "PointCloud" / "merged.las"
+    cloud_path.parent.mkdir(parents=True, exist_ok=True)
+
+    xs = np.arange(460560.0, 460620.0, 10.0, dtype=np.float64)
+    ys = np.arange(5425320.0, 5425380.0, 10.0, dtype=np.float64)
+    xx, yy = np.meshgrid(xs, ys)
+    ground = np.column_stack([xx.ravel(), yy.ravel(), np.zeros((xx.size,), dtype=np.float64)])
+    _write_las(cloud_path, ground, epsg=32632)
+
+    traj = [[float(x), float(ys[len(ys) // 2]), 0.0] for x in xs]
+    _write_geojson(patch_dir / "Traj" / "0000" / "raw_dat_pose.geojson", traj, crs_name="EPSG:32632")
+
+    out_root = tmp_path / "out"
+    run_id = "ut_multilayer_out_epsg"
+    exit_code = main(
+        [
+            "--data_root",
+            str(data_root),
+            "--out_root",
+            str(out_root),
+            "--run_id",
+            run_id,
+            "--resume",
+            "false",
+            "--workers",
+            "1",
+            "--chunk_points",
+            "256",
+            "--ref_grid_m",
+            "10.0",
+            "--corridor_radius_m",
+            "25",
+            "--ground_band_m",
+            "0.3",
+            "--traj_z_mode",
+            "auto",
+            "--min_total_points_per_cell",
+            "6",
+            "--overlap_min_support_points",
+            "3",
+            "--overlap_min_support_ratio",
+            "0.2",
+            "--min_cluster_cells",
+            "1",
+            "--out_epsg",
+            "32632",
+            "--out_format",
+            "las",
+            "--write_full_tagged",
+            "true",
+            "--verify",
+            "true",
+        ]
+    )
+    assert exit_code == 0
+
+    patch_out = out_root / run_id / "multilayer_clean" / "patch_out_epsg"
+    full_path = patch_out / "merged_full_tagged_epsg32632.las"
+    cleaned_path = patch_out / "merged_cleaned_classified_epsg32632.las"
+    assert full_path.is_file()
+    assert cleaned_path.is_file()
+
+    import laspy
+
+    full = laspy.read(str(full_path))
+    cleaned = laspy.read(str(cleaned_path))
+    assert int(full.header.parse_crs().to_epsg()) == 32632
+    assert int(cleaned.header.parse_crs().to_epsg()) == 32632

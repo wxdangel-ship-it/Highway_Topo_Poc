@@ -117,11 +117,11 @@ run_batch(
 ```
 
 - 入口模块：`highway_topo_poc.modules.t02_ground_seg_qc.batch_multilayer_clean_and_classify`。
-- 所有网格/距离/方向运算在 EPSG:3857 上执行；输出点云坐标也为 EPSG:3857。
+- 所有网格/距离/方向运算在 EPSG:3857 上执行；输出点云坐标由 `out_epsg` 指定（默认 3857）。
 - `traj_z_mode=auto` 按 `nonzero_ratio<0.01 && z_std<0.05` 自动判定退化并切换方案。
 - Traj 未覆盖区域默认不删；corridor 外永不标记 `class=12`。
 - 删除仅在“异层密集连通簇 + 干扰层 band”内触发。
-- 输出两份点云：`merged_cleaned_classified_3857`（删点后）与 `merged_full_tagged_3857`（全点审计，removed=`class 12`）。
+- 输出两份点云：`merged_cleaned_classified_<suffix>`（删点后）与 `merged_full_tagged_<suffix>`（全点审计，removed=`class 12`）；其中 `suffix=3857`（默认）或 `epsg{out_epsg}`（非 3857）。
 
 ## CLI
 
@@ -243,7 +243,7 @@ python -m highway_topo_poc.modules.t02_ground_seg_qc.batch_multilayer_clean_and_
 - `--dz_down_min_m`
 - `--dz_down_max_m`
 - `--traj_spread_cap_m`
-- `--out_epsg`（当前固定 `3857`）
+- `--out_epsg`（输出坐标系，默认 `3857`）
 - `--traj_z_mode`（`auto|force_traj_z|force_degraded`）
 - `--ground_band_m`
 - `--corridor_radius_m`
@@ -326,8 +326,8 @@ outputs/_work/t02_ground_seg_qc/<run_id>/
   multilayer_summary.json      # required
   multilayer_clean/
     <patch_key>/
-      merged_cleaned_classified_3857.laz/.las  # required
-      merged_full_tagged_3857.laz/.las         # optional (write_full_tagged=true)
+      merged_cleaned_classified_<suffix>.laz/.las  # required
+      merged_full_tagged_<suffix>.laz/.las         # optional (write_full_tagged=true)
       patch_stats.json                    # required
       ref_surface_stats.json              # required
       overlap_cells_report.json           # required
@@ -387,7 +387,7 @@ outputs/_work/t02_ground_seg_qc/<run_id>/
 - `2`: ground
 - `1`: non-ground
 - `12`: overlap_removed（仅 `full_tagged`，`cleaned` 中不会出现 `12`，因为 removed 点已剔除）
-- 输出点云坐标系：EPSG:3857（米）
+- 输出点云坐标系：`EPSG:<out_epsg>`（默认 EPSG:3857）
 
 ## metrics.json（关键字段）
 - traj-clearance：`coverage`, `outlier_ratio`, `p50/p90/p99`

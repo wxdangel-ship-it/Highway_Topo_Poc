@@ -5,7 +5,7 @@
 - 基于轨迹进行横截方向（cross-track）质量检查。
 - 保留并兼容 traj-clearance QC（轨迹 Z 相对地面参考）。
 - 通过 auto_tune 在真实 patch 上迭代到 `overall_pass=True`（若可达）。
-- 提供多层重叠清理能力（v2）：统一到 EPSG:3857，支持 TrajZ 正常/退化双方案，识别并删除上下层干扰面点并产出可审计分类结果。
+- 提供多层重叠清理能力（v2）：内部统一到 EPSG:3857 计算，支持 TrajZ 正常/退化双方案，识别并删除上下层干扰面点并产出可审计分类结果；输出坐标系由 `out_epsg` 指定（默认 3857）。
 
 ## 职责边界
 - 仅处理 t02：点云地面分类、横截 QC、traj-clearance QC、异常区间与摘要。
@@ -76,19 +76,19 @@
   - `python -m highway_topo_poc.modules.t02_ground_seg_qc.batch_multilayer_clean_and_classify`
 - 输出目录规范：
   - `outputs/_work/t02_ground_seg_qc/<run_id>/multilayer_clean/<patch_key>/`
-  - 必需：`merged_cleaned_classified_3857.<laz|las>`（仅 kept 点，`class=2/1`）
-  - 可选：`merged_full_tagged_3857.<laz|las>`（全点，removed 点 `class=12`）
+  - 必需：`merged_cleaned_classified_<suffix>.<laz|las>`（仅 kept 点，`class=2/1`）
+  - 可选：`merged_full_tagged_<suffix>.<laz|las>`（全点，removed 点 `class=12`）
   - 必需：`patch_stats.json`, `ref_surface_stats.json`, `overlap_cells_report.json`
   - 必需：`road_z_surface.csv`, `road_z_variation_report.json`
 - 全局清单：
   - `outputs/_work/t02_ground_seg_qc/<run_id>/multilayer_manifest.jsonl`
   - `outputs/_work/t02_ground_seg_qc/<run_id>/multilayer_summary.json`
 - 关键规则：
-  - `out_epsg` 当前冻结为 `3857`；
+  - `out_epsg` 可指定输出 EPSG（默认 `3857`）；
   - `traj_z_mode=auto` 默认优先尝试 TrajZ，退化时自动切换 degraded（点云峰值+轨迹方向 DP）；
   - overlap 删除必须满足“密集簇护栏 + 干扰层 band”，且 corridor 外永不标记 `12`；
-  - `merged_cleaned_classified_3857` 仅包含 kept 点（`class=2/1`）；
-  - `merged_full_tagged_3857` 全点输出，removed 点必须标 `class=12`。
+  - `merged_cleaned_classified_<suffix>` 仅包含 kept 点（`class=2/1`）；
+  - `merged_full_tagged_<suffix>` 全点输出，removed 点必须标 `class=12`。
 
 ## 非目标
 - 不替代 t01 的融合质量评估职责。

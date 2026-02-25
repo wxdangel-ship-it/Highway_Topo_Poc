@@ -18,9 +18,9 @@
   - 若 `.laz` 写出因压缩 backend 失败，自动回退 `.las`；
   - 在 `classified_manifest.jsonl` 与 `classified_summary.json` 记录 fallback 原因与计数。
 
-## multilayer_clean_and_classify v2（EPSG:3857 + TrajZ双方案 + 多层簇护栏）
+## multilayer_clean_and_classify v2（内部3857 + TrajZ双方案 + 多层簇护栏）
 - 输入：patch 点云 `merged.laz/las` + 同 patch 所有 Traj（优先 `Traj/*/raw_dat_pose.geojson`）。
-- 坐标统一：点云/轨迹先统一到 EPSG:3857，再做网格/距离/方向计算；输出点云也为 EPSG:3857。
+- 坐标统一：点云/轨迹先统一到 EPSG:3857，再做网格/距离/方向计算；输出点云坐标由 `out_epsg` 指定（默认 3857）。
 - `traj_z_mode`：
   - `auto`（默认）：`nonzero_ratio<0.01 且 z_std<0.05` 判为退化；
   - `force_traj_z`：强制 TrajZ 正常方案（`road_z=traj_z median`）；
@@ -39,8 +39,9 @@
   - corridor 外默认 `keep`；
   - 稀疏路侧高物体通常不会形成密集簇，且不贴近干扰层 band 时不会删。
 - 输出：
-  - `merged_cleaned_classified_3857.<laz|las>`：仅 kept 点，`class=2/1`
-  - `merged_full_tagged_3857.<laz|las>`：全点，removed 点 `class=12`
+  - `merged_cleaned_classified_<suffix>.<laz|las>`：仅 kept 点，`class=2/1`
+  - `merged_full_tagged_<suffix>.<laz|las>`：全点，removed 点 `class=12`
+  - 其中 `suffix=3857`（默认）或 `epsg{out_epsg}`（非 3857）
   - 伴随统计：`patch_stats.json`、`ref_surface_stats.json`、`overlap_cells_report.json`、`road_z_surface.csv`、`road_z_variation_report.json`
 
 ## 地面分类路径（优先级）

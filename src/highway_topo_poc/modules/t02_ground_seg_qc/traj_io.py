@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -86,6 +87,41 @@ def iter_traj_points_geojson(path: str | Path, sample_max_points: int | None = N
                 return
 
 
+def read_geojson_crs_name(path: str | Path) -> str | None:
+    p = Path(path)
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    crs = payload.get("crs")
+    if not isinstance(crs, dict):
+        return None
+    props = crs.get("properties")
+    if not isinstance(props, dict):
+        return None
+    name = props.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return None
+
+
+def collect_traj_crs(paths: list[Path]) -> dict[str, object]:
+    names: list[str] = []
+    for p in sorted(paths, key=lambda x: x.as_posix()):
+        n = read_geojson_crs_name(p)
+        if n:
+            names.append(n)
+    uniq = sorted(set(names))
+    return {
+        "declared_count": int(len(names)),
+        "declared_crs_names": uniq,
+        "declared_crs": uniq[0] if len(uniq) == 1 else None,
+        "crs_conflict": bool(len(uniq) > 1),
+    }
+
+
 def _downsample_by_distance(
     *,
     xy: np.ndarray,
@@ -152,6 +188,7 @@ def load_traj_xyz_3857(
     *,
     step_m: float = 2.0,
     assume_lonlat: bool | None = None,
+    xy_transform: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> list[np.ndarray]:
     out: list[np.ndarray] = []
     for p in sorted(paths, key=lambda x: x.as_posix()):
@@ -177,18 +214,21 @@ def load_traj_xyz_3857(
         if x_arr.size <= 0:
             continue
 
-        lonlat_mode = bool(assume_lonlat)
-        if assume_lonlat is None:
-            lonlat_mode = bool(
-                is_lonlat_bbox(
-                    min_x=float(np.min(x_arr)),
-                    max_x=float(np.max(x_arr)),
-                    min_y=float(np.min(y_arr)),
-                    max_y=float(np.max(y_arr)),
+        if xy_transform is not None:
+            x_arr, y_arr = xy_transform(x_arr, y_arr)
+        else:
+            lonlat_mode = bool(assume_lonlat)
+            if assume_lonlat is None:
+                lonlat_mode = bool(
+                    is_lonlat_bbox(
+                        min_x=float(np.min(x_arr)),
+                        max_x=float(np.max(x_arr)),
+                        min_y=float(np.min(y_arr)),
+                        max_y=float(np.max(y_arr)),
+                    )
                 )
-            )
-        if lonlat_mode:
-            x_arr, y_arr = lonlat_array_to_3857(x_arr, y_arr)
+            if lonlat_mode:
+                x_arr, y_arr = lonlat_array_to_3857(x_arr, y_arr)
 
         xy = np.column_stack([x_arr, y_arr]).astype(np.float64)
         xy, z_arr = _downsample_by_distance(xy=xy, z=z_arr, step_m=float(step_m))
@@ -204,9 +244,10 @@ def load_traj_xy_3857(
     step_m: float = 2.0,
     sample_for_zcheck: int = 1000,
     assume_lonlat: bool | None = None,
+    xy_transform: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> list[np.ndarray]:
     del sample_for_zcheck  # kept for CLI/contract compatibility
-    xyz_list = load_traj_xyz_3857(paths, step_m=step_m, assume_lonlat=assume_lonlat)
+    xyz_list = load_traj_xyz_3857(paths, step_m=step_m, assume_lonlat=assume_lonlat, xy_transform=xy_transform)
     out: list[np.ndarray] = []
     for xyz in xyz_list:
         if xyz.shape[0] <= 0:

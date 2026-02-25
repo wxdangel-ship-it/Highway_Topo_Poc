@@ -9,22 +9,24 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
 from .corridor import build_corridor_cell_ids, pack_cells
-from .crs_mercator import is_lonlat_bbox
+from .crs_mercator import build_xy_transform
 from .export_3857 import (
+    detect_las_input_crs,
     prepare_output_header_3857,
-    read_point_count,
     transform_xy_to_3857_if_needed,
     transformed_xy_bounds_from_header,
     verify_output_bbox_is_3857,
+    read_point_count,
 )
 from .overlap_cluster import cluster_cells_8n, detect_overlap_cells, keep_clusters_by_size
 from .road_z_degraded import build_cell_z_peaks_from_pointcloud, choose_road_z_by_traj_direction
 from .road_z_trajz import build_road_z_from_trajz
-from .traj_io import collect_traj_bbox, iter_traj_points_geojson, load_traj_xy_3857, load_traj_xyz_3857
+from .traj_io import collect_traj_bbox, collect_traj_crs, iter_traj_points_geojson, load_traj_xy_3857, load_traj_xyz_3857
 from .traj_z_mode import check_traj_z
 
 POINT_EXTS = {".laz", ".las"}
@@ -100,8 +102,8 @@ def run_batch(
         raise ValueError("layer_band_m must be > 0")
     if corridor_radius_m < 0:
         raise ValueError("corridor_radius_m must be >= 0")
-    if out_epsg != 3857:
-        raise ValueError("out_epsg must be 3857")
+    if int(out_epsg) <= 0:
+        raise ValueError(f"out_epsg must be positive integer, got: {out_epsg}")
 
     traj_mode = str(traj_z_mode).strip().lower()
     if traj_mode not in {"auto", "force_traj_z", "force_degraded"}:
@@ -203,11 +205,13 @@ def _process_patch(*, patch: PatchInput, multilayer_root: Path, params: dict[str
     preferred_fmt = str(params["out_format"])
     write_full_tagged = bool(params["write_full_tagged"])
     resume = bool(params["resume"])
+    out_epsg = int(params["out_epsg"])
+    suffix = "3857" if out_epsg == 3857 else f"epsg{out_epsg}"
 
-    preferred_clean = out_dir / f"merged_cleaned_classified_3857.{preferred_fmt}"
-    preferred_full = out_dir / f"merged_full_tagged_3857.{preferred_fmt}"
-    fallback_clean = out_dir / "merged_cleaned_classified_3857.las"
-    fallback_full = out_dir / "merged_full_tagged_3857.las"
+    preferred_clean = out_dir / f"merged_cleaned_classified_{suffix}.{preferred_fmt}"
+    preferred_full = out_dir / f"merged_full_tagged_{suffix}.{preferred_fmt}"
+    fallback_clean = out_dir / f"merged_cleaned_classified_{suffix}.las"
+    fallback_full = out_dir / f"merged_full_tagged_{suffix}.las"
 
     stats_path = out_dir / "patch_stats.json"
     if resume and stats_path.is_file() and preferred_clean.is_file() and (preferred_full.is_file() or not write_full_tagged):
@@ -269,22 +273,72 @@ def _process_patch(*, patch: PatchInput, multilayer_root: Path, params: dict[str
         "max_y": 0.0,
         "lonlat_like": False,
     }
+    traj_crs_meta = collect_traj_crs(traj_paths) if traj_paths else {
+        "declared_count": 0,
+        "declared_crs_names": [],
+        "declared_crs": None,
+        "crs_conflict": False,
+    }
+    if bool(traj_crs_meta.get("crs_conflict", False)):
+        names = ",".join([str(x) for x in traj_crs_meta.get("declared_crs_names", [])])
+        return _fail_row(patch=patch, out_dir=out_dir, reason=f"traj_crs_conflict:{names}")
 
-    point_lonlat = bool(
-        is_lonlat_bbox(
-            min_x=float(point_bbox["min_x"]),
-            max_x=float(point_bbox["max_x"]),
-            min_y=float(point_bbox["min_y"]),
-            max_y=float(point_bbox["max_y"]),
-        )
-    )
+    with laspy.open(str(points_path)) as reader_for_crs:
+        point_crs_meta = detect_las_input_crs(reader_for_crs.header, target_epsg=3857)
+    point_xy_transform = point_crs_meta["xy_transform"]  # callable
+    point_transform_plan = dict(point_crs_meta.get("transform_plan", {}))
+
+    point_lonlat = bool(point_crs_meta.get("bbox_lonlat_like", False))
     traj_lonlat = bool(traj_bbox.get("lonlat_like", False))
     lonlat_detect = bool(point_lonlat or traj_lonlat)
+
+    traj_declared_crs = traj_crs_meta.get("declared_crs")
+    traj_source_assumed_from_points = False
+    if traj_declared_crs:
+        traj_source_crs = traj_declared_crs
+    elif traj_lonlat:
+        traj_source_crs = "EPSG:4326"
+    elif point_crs_meta.get("declared_crs_name"):
+        traj_source_crs = point_crs_meta.get("declared_crs_name")
+        traj_source_assumed_from_points = True
+    else:
+        traj_source_crs = None
+
+    traj_xy_transform, traj_plan_obj = build_xy_transform(
+        source_crs=traj_source_crs,
+        target_epsg=3857,
+        lonlat_hint=bool(traj_lonlat),
+    )
+    traj_transform_plan = {
+        "source_crs_name": traj_plan_obj.source_crs_name,
+        "source_epsg": traj_plan_obj.source_epsg,
+        "target_epsg": traj_plan_obj.target_epsg,
+        "method": traj_plan_obj.method,
+        "transformed": traj_plan_obj.transformed,
+        "reason": traj_plan_obj.reason,
+    }
+
+    point_source_crs = point_crs_meta.get("declared_crs_name")
+    if point_source_crs is None and bool(point_crs_meta.get("bbox_lonlat_like", False)):
+        point_source_crs = "EPSG:4326"
+    point_out_xy_transform, point_out_plan_obj = build_xy_transform(
+        source_crs=point_source_crs,
+        target_epsg=int(params["out_epsg"]),
+        lonlat_hint=bool(point_crs_meta.get("bbox_lonlat_like", False)),
+    )
+    point_out_transform_plan = {
+        "source_crs_name": point_out_plan_obj.source_crs_name,
+        "source_epsg": point_out_plan_obj.source_epsg,
+        "target_epsg": point_out_plan_obj.target_epsg,
+        "method": point_out_plan_obj.method,
+        "transformed": point_out_plan_obj.transformed,
+        "reason": point_out_plan_obj.reason,
+    }
 
     with laspy.open(str(points_path)) as reader_for_bounds:
         minx3857, maxx3857, miny3857, maxy3857 = transformed_xy_bounds_from_header(
             reader_for_bounds.header,
-            input_lonlat=point_lonlat,
+            xy_transform=point_xy_transform,
         )
     x0 = float(minx3857)
     y0 = float(miny3857)
@@ -308,11 +362,13 @@ def _process_patch(*, patch: PatchInput, multilayer_root: Path, params: dict[str
         step_m=float(params["traj_step_m"]),
         sample_for_zcheck=int(params["z_check_sample_max_points"]),
         assume_lonlat=traj_lonlat,
+        xy_transform=traj_xy_transform,
     )
     trajs_xyz = load_traj_xyz_3857(
         traj_paths,
         step_m=float(params["traj_step_m"]),
         assume_lonlat=traj_lonlat,
+        xy_transform=traj_xy_transform,
     )
 
     corridor_ids = build_corridor_cell_ids(
@@ -356,7 +412,7 @@ def _process_patch(*, patch: PatchInput, multilayer_root: Path, params: dict[str
             chunk_points=int(params["chunk_points"]),
             x0=x0,
             y0=y0,
-            input_lonlat=point_lonlat,
+            xy_transform=point_xy_transform,
         )
         if traj_z_mode_used == "degraded":
             road_z, road_variation_report = choose_road_z_by_traj_direction(
@@ -380,7 +436,7 @@ def _process_patch(*, patch: PatchInput, multilayer_root: Path, params: dict[str
             x0=x0,
             y0=y0,
             chunk_points=int(params["chunk_points"]),
-            input_lonlat=point_lonlat,
+            xy_transform=point_xy_transform,
         )
         cell_peaks = build_cell_z_peaks_from_pointcloud(
             points_path=points_path,
@@ -391,7 +447,7 @@ def _process_patch(*, patch: PatchInput, multilayer_root: Path, params: dict[str
             chunk_points=int(params["chunk_points"]),
             x0=x0,
             y0=y0,
-            input_lonlat=point_lonlat,
+            xy_transform=point_xy_transform,
         )
         traj_z_mode_used = "degraded"
         road_z, road_variation_report = choose_road_z_by_traj_direction(
@@ -472,7 +528,17 @@ def _process_patch(*, patch: PatchInput, multilayer_root: Path, params: dict[str
         "traj_count": int(len(traj_paths)),
         "traj_pts": int(_as_num(traj_bbox.get("point_count"), 0)),
         "traj_bbox": traj_bbox,
+        "traj_crs": traj_crs_meta,
+        "traj_source_crs_used": traj_source_crs,
+        "traj_source_assumed_from_points": bool(traj_source_assumed_from_points),
+        "traj_transform_plan": traj_transform_plan,
         "point_bbox": point_bbox,
+        "point_crs": {
+            "declared_crs_name": point_crs_meta.get("declared_crs_name"),
+            "declared_epsg": point_crs_meta.get("declared_epsg"),
+            "transform_plan": point_transform_plan,
+            "output_transform_plan": point_out_transform_plan,
+        },
         "lonlat_detect": bool(lonlat_detect),
         "point_lonlat_detect": bool(point_lonlat),
         "traj_lonlat_detect": bool(traj_lonlat),
@@ -501,7 +567,10 @@ def _process_patch(*, patch: PatchInput, multilayer_root: Path, params: dict[str
             out_full_path=out_full,
             write_full_tagged=write_full_tagged,
             out_epsg=int(params["out_epsg"]),
-            input_lonlat=point_lonlat,
+            point_xy_transform=point_xy_transform,
+            point_out_xy_transform=point_out_xy_transform,
+            point_transform_plan=point_transform_plan,
+            point_out_transform_plan=point_out_transform_plan,
             chunk_points=int(params["chunk_points"]),
             ref_grid_m=float(params["ref_grid_m"]),
             x0=x0,
@@ -529,7 +598,10 @@ def _process_patch(*, patch: PatchInput, multilayer_root: Path, params: dict[str
                     out_full_path=out_full,
                     write_full_tagged=write_full_tagged,
                     out_epsg=int(params["out_epsg"]),
-                    input_lonlat=point_lonlat,
+                    point_xy_transform=point_xy_transform,
+                    point_out_xy_transform=point_out_xy_transform,
+                    point_transform_plan=point_transform_plan,
+                    point_out_transform_plan=point_out_transform_plan,
                     chunk_points=int(params["chunk_points"]),
                     ref_grid_m=float(params["ref_grid_m"]),
                     x0=x0,
@@ -555,6 +627,14 @@ def _process_patch(*, patch: PatchInput, multilayer_root: Path, params: dict[str
         "traj_paths": [str(p) for p in traj_paths],
         "traj_z_mode_used": str(traj_z_mode_used),
         "traj_z_check": zcheck,
+        "traj_crs": traj_crs_meta,
+        "traj_source_crs_used": traj_source_crs,
+        "traj_source_assumed_from_points": bool(traj_source_assumed_from_points),
+        "traj_transform_plan": traj_transform_plan,
+        "point_crs_declared_name": point_crs_meta.get("declared_crs_name"),
+        "point_crs_declared_epsg": point_crs_meta.get("declared_epsg"),
+        "point_transform_plan": point_transform_plan,
+        "point_output_transform_plan": point_out_transform_plan,
         "lonlat_detect": bool(lonlat_detect),
         "point_lonlat_detect": bool(point_lonlat),
         "traj_lonlat_detect": bool(traj_lonlat),
@@ -630,7 +710,10 @@ def _write_outputs(
     out_full_path: Path,
     write_full_tagged: bool,
     out_epsg: int,
-    input_lonlat: bool,
+    point_xy_transform: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]],
+    point_out_xy_transform: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]],
+    point_transform_plan: dict[str, object],
+    point_out_transform_plan: dict[str, object],
     chunk_points: int,
     ref_grid_m: float,
     x0: float,
@@ -643,7 +726,8 @@ def _write_outputs(
     ground_band_m: float,
     verify: bool,
 ) -> dict[str, int | float]:
-    del out_epsg
+    _ = point_transform_plan
+    _ = point_out_transform_plan
     import laspy  # type: ignore
 
     corridor_sorted = np.asarray(np.unique(np.asarray(corridor_ids, dtype=np.int64)), dtype=np.int64)
@@ -665,7 +749,11 @@ def _write_outputs(
     cleaned_classes_seen: set[int] = set()
 
     with laspy.open(str(points_path)) as reader:
-        out_header = prepare_output_header_3857(reader.header, input_lonlat=input_lonlat)
+        out_header = prepare_output_header_3857(
+            reader.header,
+            xy_transform=point_out_xy_transform,
+            out_epsg=int(out_epsg),
+        )
         with laspy.open(str(out_clean_path), mode="w", header=out_header) as w_clean:
             w_full_ctx = laspy.open(str(out_full_path), mode="w", header=out_header) if write_full_tagged else None
             try:
@@ -674,11 +762,11 @@ def _write_outputs(
                     x_raw = np.asarray(chunk.x, dtype=np.float64)
                     y_raw = np.asarray(chunk.y, dtype=np.float64)
                     z = np.asarray(chunk.z, dtype=np.float64)
-                    x, y = transform_xy_to_3857_if_needed(x_raw, y_raw, input_lonlat=input_lonlat)
-                    if input_lonlat:
-                        chunk.change_scaling(scales=out_header.scales, offsets=out_header.offsets)
-                        chunk.x = np.asarray(x, dtype=np.float64)
-                        chunk.y = np.asarray(y, dtype=np.float64)
+                    x, y = transform_xy_to_3857_if_needed(x_raw, y_raw, xy_transform=point_xy_transform)
+                    x_out, y_out = transform_xy_to_3857_if_needed(x_raw, y_raw, xy_transform=point_out_xy_transform)
+                    chunk.change_scaling(scales=out_header.scales, offsets=out_header.offsets)
+                    chunk.x = np.asarray(x_out, dtype=np.float64)
+                    chunk.y = np.asarray(y_out, dtype=np.float64)
 
                     n = int(x.shape[0])
                     n_in += n
@@ -790,9 +878,9 @@ def _write_outputs(
             raise ValueError(f"verify_class12_mismatch: expected={n_removed} actual={class12_count}")
         if not cleaned_classes_seen.issubset({NON_GROUND_CLASS, GROUND_CLASS}):
             raise ValueError(f"verify_cleaned_classes_invalid: {sorted(cleaned_classes_seen)}")
-        verify_output_bbox_is_3857(out_clean_path)
+        verify_output_bbox_is_3857(out_clean_path, out_epsg=int(out_epsg))
         if write_full_tagged:
-            verify_output_bbox_is_3857(out_full_path)
+            verify_output_bbox_is_3857(out_full_path, out_epsg=int(out_epsg))
 
     return {
         "n_in": int(n_in),
@@ -997,7 +1085,7 @@ def _collect_point_cells(
     x0: float,
     y0: float,
     chunk_points: int,
-    input_lonlat: bool,
+    xy_transform: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]],
 ) -> np.ndarray:
     import laspy  # type: ignore
 
@@ -1006,7 +1094,7 @@ def _collect_point_cells(
         for chunk in reader.chunk_iterator(int(chunk_points)):
             x_raw = np.asarray(chunk.x, dtype=np.float64)
             y_raw = np.asarray(chunk.y, dtype=np.float64)
-            x, y = transform_xy_to_3857_if_needed(x_raw, y_raw, input_lonlat=input_lonlat)
+            x, y = transform_xy_to_3857_if_needed(x_raw, y_raw, xy_transform=xy_transform)
             valid = np.isfinite(x) & np.isfinite(y)
             if not np.any(valid):
                 continue

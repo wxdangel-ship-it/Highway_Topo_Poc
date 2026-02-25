@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
 from .corridor import pack_cells
-from .crs_mercator import lonlat_array_to_3857
 
 
 def _lookup_match_positions(query_keys: np.ndarray, sorted_keys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -42,7 +42,7 @@ def build_cell_z_peaks_from_pointcloud(
     chunk_points: int = 2_000_000,
     x0: float = 0.0,
     y0: float = 0.0,
-    input_lonlat: bool = False,
+    xy_transform: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> dict[int, dict[str, float | int]]:
     if ref_grid_m <= 0:
         raise ValueError("ref_grid_m must be > 0")
@@ -74,8 +74,8 @@ def build_cell_z_peaks_from_pointcloud(
             x = x[valid]
             y = y[valid]
             z = z[valid]
-            if input_lonlat:
-                x, y = lonlat_array_to_3857(x, y)
+            if xy_transform is not None:
+                x, y = xy_transform(x, y)
 
             ix = np.floor((x - float(x0)) / float(ref_grid_m)).astype(np.int64)
             iy = np.floor((y - float(y0)) / float(ref_grid_m)).astype(np.int64)
