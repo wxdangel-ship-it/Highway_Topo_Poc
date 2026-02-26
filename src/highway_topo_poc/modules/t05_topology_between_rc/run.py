@@ -20,10 +20,20 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
 
     p.add_argument("--xsec_min_points", type=int, default=int(DEFAULT_PARAMS["XSEC_MIN_POINTS"]))
     p.add_argument("--min_support_traj", type=int, default=int(DEFAULT_PARAMS["MIN_SUPPORT_TRAJ"]))
+    p.add_argument("--trj_sample_step_m", type=float, default=float(DEFAULT_PARAMS["TRJ_SAMPLE_STEP_M"]))
+    p.add_argument("--stitch_tail_m", type=float, default=float(DEFAULT_PARAMS["STITCH_TAIL_M"]))
     p.add_argument("--stitch_max_dist_m", type=float, default=float(DEFAULT_PARAMS["STITCH_MAX_DIST_M"]))
     p.add_argument("--stitch_max_angle_deg", type=float, default=float(DEFAULT_PARAMS["STITCH_MAX_ANGLE_DEG"]))
+    p.add_argument("--stitch_forward_dot_min", type=float, default=float(DEFAULT_PARAMS["STITCH_FORWARD_DOT_MIN"]))
+    p.add_argument("--stitch_min_advance_m", type=float, default=float(DEFAULT_PARAMS["STITCH_MIN_ADVANCE_M"]))
     p.add_argument("--stitch_topk", type=int, default=int(DEFAULT_PARAMS["STITCH_TOPK"]))
     p.add_argument("--neighbor_max_dist_m", type=float, default=float(DEFAULT_PARAMS["NEIGHBOR_MAX_DIST_M"]))
+    p.add_argument("--xsec_across_half_window_m", type=float, default=float(DEFAULT_PARAMS["XSEC_ACROSS_HALF_WINDOW_M"]))
+    p.add_argument("--corridor_half_width_m", type=float, default=float(DEFAULT_PARAMS["CORRIDOR_HALF_WIDTH_M"]))
+    p.add_argument("--offset_smooth_win_m_1", type=float, default=float(DEFAULT_PARAMS["OFFSET_SMOOTH_WIN_M_1"]))
+    p.add_argument("--offset_smooth_win_m_2", type=float, default=float(DEFAULT_PARAMS["OFFSET_SMOOTH_WIN_M_2"]))
+    p.add_argument("--max_offset_delta_per_step_m", type=float, default=float(DEFAULT_PARAMS["MAX_OFFSET_DELTA_PER_STEP_M"]))
+    p.add_argument("--simplify_tol_m", type=float, default=float(DEFAULT_PARAMS["SIMPLIFY_TOL_M"]))
     p.add_argument("--point_class_fallback_any", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["POINT_CLASS_FALLBACK_ANY"]))
 
     return p.parse_args(list(argv) if argv is not None else None)
@@ -43,12 +53,28 @@ def main(argv: Iterable[str] | None = None) -> int:
     params_override = {
         "XSEC_MIN_POINTS": int(args.xsec_min_points),
         "MIN_SUPPORT_TRAJ": int(args.min_support_traj),
+        "TRJ_SAMPLE_STEP_M": float(args.trj_sample_step_m),
+        "STITCH_TAIL_M": float(args.stitch_tail_m),
         "STITCH_MAX_DIST_M": float(args.stitch_max_dist_m),
         "STITCH_MAX_ANGLE_DEG": float(args.stitch_max_angle_deg),
+        "STITCH_FORWARD_DOT_MIN": float(args.stitch_forward_dot_min),
+        "STITCH_MIN_ADVANCE_M": float(args.stitch_min_advance_m),
         "STITCH_TOPK": int(args.stitch_topk),
         "NEIGHBOR_MAX_DIST_M": float(args.neighbor_max_dist_m),
+        "XSEC_ACROSS_HALF_WINDOW_M": float(args.xsec_across_half_window_m),
+        "CORRIDOR_HALF_WIDTH_M": float(args.corridor_half_width_m),
+        "OFFSET_SMOOTH_WIN_M_1": float(args.offset_smooth_win_m_1),
+        "OFFSET_SMOOTH_WIN_M_2": float(args.offset_smooth_win_m_2),
+        "MAX_OFFSET_DELTA_PER_STEP_M": float(args.max_offset_delta_per_step_m),
+        "SIMPLIFY_TOL_M": float(args.simplify_tol_m),
         "POINT_CLASS_FALLBACK_ANY": int(args.point_class_fallback_any),
     }
+    levels = list(DEFAULT_PARAMS.get("STITCH_MAX_DIST_LEVELS_M", [float(args.stitch_max_dist_m)]))
+    if levels:
+        levels[0] = float(args.stitch_max_dist_m)
+    else:
+        levels = [float(args.stitch_max_dist_m)]
+    params_override["STITCH_MAX_DIST_LEVELS_M"] = [float(v) for v in levels]
     (run_dir / "params.json").write_text(
         json.dumps(
             {

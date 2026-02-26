@@ -50,10 +50,15 @@ def test_stitch_graph_can_bridge_broken_trajectories() -> None:
         trajectories,
         cross.events_by_traj,
         node_type_map={100: "unknown", 200: "unknown"},
+        trj_sample_step_m=2.0,
+        stitch_tail_m=30.0,
+        stitch_max_dist_levels_m=[12.0, 25.0, 50.0],
         stitch_max_dist_m=12.0,
         stitch_max_angle_deg=35.0,
+        stitch_forward_dot_min=0.0,
+        stitch_min_advance_m=5.0,
         stitch_penalty=2.0,
-        stitch_topk=1,
+        stitch_topk=3,
         neighbor_max_dist_m=2000.0,
         multi_road_sep_m=8.0,
         multi_road_topn=10,
@@ -64,6 +69,44 @@ def test_stitch_graph_can_bridge_broken_trajectories() -> None:
     assert support.support_event_count >= 1
     assert support.stitch_hops
     assert max(support.stitch_hops) >= 1
+    assert res.stitch_accept_count >= 1
+    assert res.stitch_query_count >= 1
+
+
+def test_stitch_can_connect_to_midpoint_when_start_far() -> None:
+    trajectories = [
+        _traj("t1", [(-5.0, 0.0), (0.0, 0.0), (10.0, 0.0)]),
+        _traj("t2", [(-40.0, 0.0), (20.0, 0.0), (80.0, 0.0)]),
+    ]
+    xsecs = [_xsec(100, 0.0), _xsec(200, 70.0)]
+
+    cross = extract_crossing_events(
+        trajectories,
+        xsecs,
+        hit_buffer_m=0.5,
+        dedup_gap_m=2.0,
+    )
+    res = build_pair_supports(
+        trajectories,
+        cross.events_by_traj,
+        node_type_map={100: "unknown", 200: "unknown"},
+        trj_sample_step_m=2.0,
+        stitch_tail_m=30.0,
+        stitch_max_dist_levels_m=[12.0, 25.0, 50.0],
+        stitch_max_dist_m=12.0,
+        stitch_max_angle_deg=35.0,
+        stitch_forward_dot_min=0.0,
+        stitch_min_advance_m=5.0,
+        stitch_penalty=2.0,
+        stitch_topk=3,
+        neighbor_max_dist_m=2000.0,
+        multi_road_sep_m=8.0,
+        multi_road_topn=10,
+    )
+
+    assert (100, 200) in res.supports
+    assert res.stitch_accept_count > 0
+    assert any(int(v) > 0 for v in res.stitch_levels_used_hist.values())
 
 
 def test_unresolved_neighbor_is_reported_when_stitch_fails() -> None:
@@ -83,10 +126,15 @@ def test_unresolved_neighbor_is_reported_when_stitch_fails() -> None:
         trajectories,
         cross.events_by_traj,
         node_type_map={100: "unknown", 200: "unknown"},
+        trj_sample_step_m=2.0,
+        stitch_tail_m=30.0,
+        stitch_max_dist_levels_m=[12.0],
         stitch_max_dist_m=12.0,
         stitch_max_angle_deg=35.0,
+        stitch_forward_dot_min=0.0,
+        stitch_min_advance_m=5.0,
         stitch_penalty=2.0,
-        stitch_topk=1,
+        stitch_topk=3,
         neighbor_max_dist_m=2000.0,
         multi_road_sep_m=8.0,
         multi_road_topn=10,
@@ -95,3 +143,4 @@ def test_unresolved_neighbor_is_reported_when_stitch_fails() -> None:
     assert (100, 200) not in res.supports
     assert res.unresolved_events
     assert any(str(item.get("reason")) == SOFT_UNRESOLVED_NEIGHBOR for item in res.unresolved_events)
+    assert res.stitch_accept_count == 0

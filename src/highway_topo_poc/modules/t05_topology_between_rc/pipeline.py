@@ -52,14 +52,19 @@ _SOFT_CROSS_GEOM_UNEXPECTED = "CROSS_GEOM_UNEXPECTED"
 _SOFT_CROSS_DISTANCE_GATE_REJECT = "CROSS_DISTANCE_GATE_REJECT"
 
 
-DEFAULT_PARAMS: dict[str, float | int] = {
+DEFAULT_PARAMS: dict[str, Any] = {
     "TRAJ_XSEC_HIT_BUFFER_M": 0.5,
     "TRAJ_XSEC_DEDUP_GAP_M": 2.0,
     "MIN_SUPPORT_TRAJ": 2,
+    "TRJ_SAMPLE_STEP_M": 2.0,
+    "STITCH_TAIL_M": 30.0,
+    "STITCH_MAX_DIST_LEVELS_M": [12.0, 25.0, 50.0],
     "STITCH_MAX_DIST_M": 12.0,
     "STITCH_MAX_ANGLE_DEG": 35.0,
+    "STITCH_FORWARD_DOT_MIN": 0.0,
+    "STITCH_MIN_ADVANCE_M": 5.0,
     "STITCH_PENALTY": 2.0,
-    "STITCH_TOPK": 1,
+    "STITCH_TOPK": 3,
     "NEIGHBOR_MAX_DIST_M": 2000.0,
     "MULTI_ROAD_SEP_M": 8.0,
     "MULTI_ROAD_TOPN": 10,
@@ -67,12 +72,17 @@ DEFAULT_PARAMS: dict[str, float | int] = {
     "STABLE_OFFSET_MARGIN_M": 5.0,
     "CENTER_SAMPLE_STEP_M": 5.0,
     "XSEC_ALONG_HALF_WINDOW_M": 1.0,
-    "XSEC_ACROSS_HALF_WINDOW_M": 30.0,
+    "XSEC_ACROSS_HALF_WINDOW_M": 20.0,
+    "CORRIDOR_HALF_WIDTH_M": 15.0,
     "XSEC_MIN_POINTS": 200,
     "WIDTH_PCT_LOW": 5,
     "WIDTH_PCT_HIGH": 95,
     "MIN_CENTER_COVERAGE": 0.6,
     "SMOOTH_WINDOW_M": 25.0,
+    "OFFSET_SMOOTH_WIN_M_1": 50.0,
+    "OFFSET_SMOOTH_WIN_M_2": 100.0,
+    "MAX_OFFSET_DELTA_PER_STEP_M": 1.0,
+    "SIMPLIFY_TOL_M": 0.8,
     "TURN_LIMIT_DEG_PER_10M": 30.0,
     "ENDPOINT_ON_XSEC_TOL_M": 1.0,
     "TOPK_INTERVALS": 20,
@@ -281,8 +291,16 @@ def _run_patch_core(
         patch_inputs.trajectories,
         events_by_traj,
         node_type_map=seed_type_map,
+        trj_sample_step_m=float(params["TRJ_SAMPLE_STEP_M"]),
+        stitch_tail_m=float(params["STITCH_TAIL_M"]),
+        stitch_max_dist_levels_m=_as_float_list(
+            params.get("STITCH_MAX_DIST_LEVELS_M"),
+            fallback=[float(params["STITCH_MAX_DIST_M"])],
+        ),
         stitch_max_dist_m=float(params["STITCH_MAX_DIST_M"]),
         stitch_max_angle_deg=float(params["STITCH_MAX_ANGLE_DEG"]),
+        stitch_forward_dot_min=float(params["STITCH_FORWARD_DOT_MIN"]),
+        stitch_min_advance_m=float(params["STITCH_MIN_ADVANCE_M"]),
         stitch_penalty=float(params["STITCH_PENALTY"]),
         stitch_topk=int(params["STITCH_TOPK"]),
         neighbor_max_dist_m=float(params["NEIGHBOR_MAX_DIST_M"]),
@@ -299,8 +317,16 @@ def _run_patch_core(
         patch_inputs.trajectories,
         events_by_traj,
         node_type_map=node_type_map,
+        trj_sample_step_m=float(params["TRJ_SAMPLE_STEP_M"]),
+        stitch_tail_m=float(params["STITCH_TAIL_M"]),
+        stitch_max_dist_levels_m=_as_float_list(
+            params.get("STITCH_MAX_DIST_LEVELS_M"),
+            fallback=[float(params["STITCH_MAX_DIST_M"])],
+        ),
         stitch_max_dist_m=float(params["STITCH_MAX_DIST_M"]),
         stitch_max_angle_deg=float(params["STITCH_MAX_ANGLE_DEG"]),
+        stitch_forward_dot_min=float(params["STITCH_FORWARD_DOT_MIN"]),
+        stitch_min_advance_m=float(params["STITCH_MIN_ADVANCE_M"]),
         stitch_penalty=float(params["STITCH_PENALTY"]),
         stitch_topk=int(params["STITCH_TOPK"]),
         neighbor_max_dist_m=float(params["NEIGHBOR_MAX_DIST_M"]),
@@ -343,6 +369,13 @@ def _run_patch_core(
                 "stitch_edge_count": int(supports_result.stitch_edge_count),
                 "graph_node_count": int(supports_result.graph_node_count),
                 "graph_edge_count": int(supports_result.graph_edge_count),
+                "stitch_query_count": int(supports_result.stitch_query_count),
+                "stitch_candidates_total": int(supports_result.stitch_candidates_total),
+                "stitch_reject_dist_count": int(supports_result.stitch_reject_dist_count),
+                "stitch_reject_angle_count": int(supports_result.stitch_reject_angle_count),
+                "stitch_reject_forward_count": int(supports_result.stitch_reject_forward_count),
+                "stitch_accept_count": int(supports_result.stitch_accept_count),
+                "stitch_levels_used_hist": dict(supports_result.stitch_levels_used_hist),
             },
         )
 
@@ -410,6 +443,11 @@ def _run_patch_core(
             width_pct_high=float(params["WIDTH_PCT_HIGH"]),
             min_center_coverage=float(params["MIN_CENTER_COVERAGE"]),
             smooth_window_m=float(params["SMOOTH_WINDOW_M"]),
+            corridor_half_width_m=float(params["CORRIDOR_HALF_WIDTH_M"]),
+            offset_smooth_win_m_1=float(params["OFFSET_SMOOTH_WIN_M_1"]),
+            offset_smooth_win_m_2=float(params["OFFSET_SMOOTH_WIN_M_2"]),
+            max_offset_delta_per_step_m=float(params["MAX_OFFSET_DELTA_PER_STEP_M"]),
+            simplify_tol_m=float(params["SIMPLIFY_TOL_M"]),
             stable_offset_m=float(params["STABLE_OFFSET_M"]),
             stable_margin_m=float(params["STABLE_OFFSET_MARGIN_M"]),
             endpoint_tol_m=float(params["ENDPOINT_ON_XSEC_TOL_M"]),
@@ -423,6 +461,8 @@ def _run_patch_core(
         road["width_med_m"] = center.width_med_m
         road["width_p90_m"] = center.width_p90_m
         road["max_turn_deg_per_10m"] = center.max_turn_deg_per_10m
+        road["endpoint_center_offset_m_src"] = center.endpoint_center_offset_m_src
+        road["endpoint_center_offset_m_dst"] = center.endpoint_center_offset_m_dst
 
         soft_flags = set(center.soft_flags)
         hard_flags = set(center.hard_flags)
@@ -512,6 +552,18 @@ def _run_patch_core(
         if d0 > float(params["ENDPOINT_ON_XSEC_TOL_M"]) or d1 > float(params["ENDPOINT_ON_XSEC_TOL_M"]):
             overall_pass = False
 
+    endpoint_vals: list[float] = []
+    for road in road_records:
+        for k in ("endpoint_center_offset_m_src", "endpoint_center_offset_m_dst"):
+            v = road.get(k)
+            try:
+                fv = float(v)
+            except Exception:
+                continue
+            if np.isfinite(fv):
+                endpoint_vals.append(float(fv))
+    endpoint_arr = np.asarray(endpoint_vals, dtype=np.float64) if endpoint_vals else np.empty((0,), dtype=np.float64)
+
     return _finalize_payloads(
         run_id=run_id,
         repo_root=repo_root,
@@ -533,6 +585,20 @@ def _run_patch_core(
             "stitch_edge_count": int(supports_result.stitch_edge_count),
             "graph_node_count": int(supports_result.graph_node_count),
             "graph_edge_count": int(supports_result.graph_edge_count),
+            "stitch_query_count": int(supports_result.stitch_query_count),
+            "stitch_candidates_total": int(supports_result.stitch_candidates_total),
+            "stitch_reject_dist_count": int(supports_result.stitch_reject_dist_count),
+            "stitch_reject_angle_count": int(supports_result.stitch_reject_angle_count),
+            "stitch_reject_forward_count": int(supports_result.stitch_reject_forward_count),
+            "stitch_accept_count": int(supports_result.stitch_accept_count),
+            "stitch_levels_used_hist": dict(supports_result.stitch_levels_used_hist),
+            "endpoint_center_offset_p50": (
+                float(np.percentile(endpoint_arr, 50.0)) if endpoint_arr.size > 0 else None
+            ),
+            "endpoint_center_offset_p90": (
+                float(np.percentile(endpoint_arr, 90.0)) if endpoint_arr.size > 0 else None
+            ),
+            "endpoint_center_offset_max": (float(np.max(endpoint_arr)) if endpoint_arr.size > 0 else None),
         },
     )
 
@@ -595,6 +661,21 @@ def _support_union_bbox(
     return (minx, miny, maxx, maxy)
 
 
+def _as_float_list(value: Any, *, fallback: Sequence[float]) -> list[float]:
+    if isinstance(value, (list, tuple)):
+        out: list[float] = []
+        for v in value:
+            try:
+                fv = float(v)
+            except Exception:
+                continue
+            if np.isfinite(fv) and fv > 0:
+                out.append(float(fv))
+        if out:
+            return out
+    return [float(v) for v in fallback if np.isfinite(float(v)) and float(v) > 0]
+
+
 def _build_cross_section_map(patch_inputs: PatchInputs) -> dict[int, Any]:
     out: dict[int, Any] = {}
     for cs in patch_inputs.intersection_lines:
@@ -641,6 +722,8 @@ def _make_base_road_record(
         "stable_offset_m_src": None,
         "stable_offset_m_dst": None,
         "center_sample_coverage": 0.0,
+        "endpoint_center_offset_m_src": None,
+        "endpoint_center_offset_m_dst": None,
         "width_med_m": None,
         "width_p90_m": None,
         "max_turn_deg_per_10m": None,
@@ -648,6 +731,9 @@ def _make_base_road_record(
         "stitch_hops_p50": stitch_p50,
         "stitch_hops_p90": stitch_p90,
         "stitch_hops_max": stitch_max,
+        "cluster_count": int(support.cluster_count),
+        "main_cluster_ratio": float(support.main_cluster_ratio),
+        "cluster_sep_m_est": support.cluster_sep_m_est,
         "hard_anomaly": False,
         "hard_reasons": [],
         "soft_issue_flags": [],
@@ -731,7 +817,13 @@ def _finalize_payloads(
     summary_params = {**params, "params_digest": digest}
     if extra_metrics:
         for k, v in extra_metrics.items():
-            if str(k).startswith("n_cross_") or str(k).startswith("crossing_"):
+            sk = str(k)
+            if (
+                sk.startswith("n_cross_")
+                or sk.startswith("crossing_")
+                or sk.startswith("stitch_")
+                or sk.startswith("endpoint_center_offset_")
+            ):
                 summary_params[str(k)] = v
 
     summary_text = build_summary_text(
@@ -761,7 +853,7 @@ def _finalize_payloads(
     }
 
 
-def get_default_params() -> dict[str, float | int]:
+def get_default_params() -> dict[str, Any]:
     return dict(DEFAULT_PARAMS)
 
 
