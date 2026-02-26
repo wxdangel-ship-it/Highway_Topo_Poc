@@ -71,6 +71,16 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--lb_snap_m", type=float, default=float(DEFAULT_PARAMS["LB_SNAP_M"]))
     p.add_argument("--lb_start_end_topk", type=int, default=int(DEFAULT_PARAMS["LB_START_END_TOPK"]))
     p.add_argument("--lambda_outside", type=float, default=float(DEFAULT_PARAMS["LAMBDA_OUTSIDE"]))
+    p.add_argument(
+        "--outside_edge_ratio_max",
+        type=float,
+        default=float(DEFAULT_PARAMS["OUTSIDE_EDGE_RATIO_MAX"]),
+    )
+    p.add_argument(
+        "--surf_node_buffer_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["SURF_NODE_BUFFER_M"]),
+    )
     p.add_argument("--trend_fit_win_m", type=float, default=float(DEFAULT_PARAMS["TREND_FIT_WIN_M"]))
     p.add_argument("--surf_slice_step_m", type=float, default=float(DEFAULT_PARAMS["SURF_SLICE_STEP_M"]))
     p.add_argument("--surf_slice_half_win_m", type=float, default=float(DEFAULT_PARAMS["SURF_SLICE_HALF_WIN_M"]))
@@ -99,6 +109,7 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
         default=int(DEFAULT_PARAMS["TRAJ_SURF_MIN_UNIQUE_TRAJ"]),
     )
     p.add_argument("--point_class_fallback_any", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["POINT_CLASS_FALLBACK_ANY"]))
+    p.add_argument("--cache_enabled", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["CACHE_ENABLED"]))
     p.add_argument("--debug_dump", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["DEBUG_DUMP"]))
 
     return p.parse_args(list(argv) if argv is not None else None)
@@ -153,6 +164,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         "LB_SNAP_M": float(args.lb_snap_m),
         "LB_START_END_TOPK": int(args.lb_start_end_topk),
         "LAMBDA_OUTSIDE": float(args.lambda_outside),
+        "OUTSIDE_EDGE_RATIO_MAX": float(args.outside_edge_ratio_max),
+        "SURF_NODE_BUFFER_M": float(args.surf_node_buffer_m),
         "TREND_FIT_WIN_M": float(args.trend_fit_win_m),
         "SURF_SLICE_STEP_M": float(args.surf_slice_step_m),
         "SURF_SLICE_HALF_WIN_M": float(args.surf_slice_half_win_m),
@@ -165,6 +178,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "TRAJ_SURF_MIN_COVERED_LEN_RATIO": float(args.traj_surf_min_covered_len_ratio),
         "TRAJ_SURF_MIN_UNIQUE_TRAJ": int(args.traj_surf_min_unique_traj),
         "POINT_CLASS_FALLBACK_ANY": int(args.point_class_fallback_any),
+        "CACHE_ENABLED": int(args.cache_enabled),
         "DEBUG_DUMP": int(args.debug_dump),
     }
     levels = list(DEFAULT_PARAMS.get("STITCH_MAX_DIST_LEVELS_M", [float(args.stitch_max_dist_m)]))

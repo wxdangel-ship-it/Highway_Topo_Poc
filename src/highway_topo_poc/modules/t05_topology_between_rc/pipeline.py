@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Sequence
 
 import numpy as np
@@ -115,6 +118,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "LB_SNAP_M": 1.0,
     "LB_START_END_TOPK": 5,
     "LAMBDA_OUTSIDE": 5.0,
+    "OUTSIDE_EDGE_RATIO_MAX": 0.2,
+    "SURF_NODE_BUFFER_M": 2.0,
     "TREND_FIT_WIN_M": 20.0,
     "SURF_SLICE_STEP_M": 5.0,
     "SURF_SLICE_HALF_WIN_M": 2.0,
@@ -134,7 +139,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "ROAD_MAX_VERTICES": 2000,
     "POINT_CLASS_PRIMARY": 2,
     "POINT_CLASS_FALLBACK_ANY": 0,
-    "DEBUG_DUMP": 1,
+    "DEBUG_DUMP": 0,
+    "CACHE_ENABLED": 1,
 }
 
 @dataclass(frozen=True)
@@ -148,6 +154,39 @@ class RunResult:
     soft_breakpoints: list[dict[str, Any]]
 
 
+class _StageTimer:
+    def __init__(self) -> None:
+        self.ms: dict[str, float] = {}
+
+    def add(self, key: str, dt_ms: float) -> None:
+        if not key:
+            return
+        self.ms[key] = float(self.ms.get(key, 0.0) + float(max(0.0, dt_ms)))
+
+    def scope(self, key: str) -> "_StageTimerScope":
+        return _StageTimerScope(self, key)
+
+
+class _StageTimerScope:
+    def __init__(self, timer: _StageTimer, key: str) -> None:
+        self._timer = timer
+        self._key = key
+        self._t0 = 0.0
+
+    def __enter__(self) -> None:
+        self._t0 = perf_counter()
+        return None
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        dt_ms = (perf_counter() - self._t0) * 1000.0
+        self._timer.add(self._key, dt_ms)
+
+
+def _stable_json_digest(payload: dict[str, Any]) -> str:
+    blob = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:20]
+
+
 def run_patch(
     *,
     data_root: str | Path,
@@ -157,7 +196,9 @@ def run_patch(
     params_override: dict[str, Any] | None = None,
 ) -> RunResult:
     repo_root = resolve_repo_root(Path.cwd())
+    t0_load = perf_counter()
     patch_inputs = load_patch_inputs(data_root, patch_id)
+    t_load_inputs_ms = (perf_counter() - t0_load) * 1000.0
 
     run_id_val = make_run_id("t05_topology_between_rc", repo_root=repo_root) if run_id == "auto" else str(run_id)
 
@@ -175,6 +216,9 @@ def run_patch(
         params=params,
         run_id=run_id_val,
         repo_root=repo_root,
+        prefill_metrics={
+            "t_load_traj": float(max(0.0, t_load_inputs_ms)),
+        },
     )
 
     write_geojson_lines(
@@ -214,12 +258,31 @@ def _run_patch_core(
     params: dict[str, Any],
     run_id: str,
     repo_root: Path,
+    prefill_metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    stage_timer = _StageTimer()
+    if prefill_metrics:
+        for k, v in dict(prefill_metrics).items():
+            if str(k).startswith("t_"):
+                stage_timer.add(str(k), float(v))
+
+    pointcloud_stats: dict[str, Any] = {
+        "pointcloud_cache_hit": False,
+        "pointcloud_cache_key": None,
+        "pointcloud_bbox_point_count": 0,
+        "pointcloud_selected_point_count": 0,
+    }
+
     xsec_map = _build_cross_section_map(patch_inputs)
     node_ids = sorted(xsec_map.keys())
 
     hard_breakpoints: list[dict[str, Any]] = []
     soft_breakpoints: list[dict[str, Any]] = []
+    surface_timing_per_k: dict[str, float] = {}
+    shortest_timing_per_k: dict[str, float] = {}
+    surface_cache_hit_count = 0
+    surface_cache_miss_count = 0
+    traj_points_cache: dict[tuple[str, ...], tuple[np.ndarray, int]] = {}
     divstrip_missing = patch_inputs.divstrip_source_path is None
     if divstrip_missing:
         soft_breakpoints.append(
@@ -235,6 +298,28 @@ def _run_patch_core(
                 "hint": "DivStripZone.geojson_missing",
             }
         )
+
+    def _timing_extra_metrics() -> dict[str, Any]:
+        required = (
+            "t_load_traj",
+            "t_load_pointcloud",
+            "t_build_traj_projection",
+            "t_build_surfaces_total",
+            "t_build_lane_graph",
+            "t_shortest_path_total",
+            "t_centerline_offset",
+            "t_gate_in_ratio",
+            "t_debug_dump",
+        )
+        payload: dict[str, Any] = {}
+        for k in required:
+            payload[str(k)] = float(round(stage_timer.ms.get(str(k), 0.0), 3))
+        payload["t_build_surfaces_per_k_ms"] = {k: float(round(v, 3)) for k, v in sorted(surface_timing_per_k.items())}
+        payload["t_shortest_path_per_k_ms"] = {k: float(round(v, 3)) for k, v in sorted(shortest_timing_per_k.items())}
+        payload["traj_surface_cache_hit_count"] = int(surface_cache_hit_count)
+        payload["traj_surface_cache_miss_count"] = int(surface_cache_miss_count)
+        payload.update(pointcloud_stats)
+        return payload
 
     if not node_ids:
         road_lines_metric: list[LineString] = []
@@ -260,6 +345,7 @@ def _run_patch_core(
             soft_breakpoints=soft_breakpoints,
             params=params,
             overall_pass=False,
+            extra_metrics=_timing_extra_metrics(),
         )
 
     # 先用 Node.Kind 建初值，再用图度数二次推断。
@@ -449,10 +535,12 @@ def _run_patch_core(
                 "neighbor_search_pass": int(neighbor_search_pass),
                 "neighbor_search_pass2_used": bool(int(neighbor_search_pass) == 2),
                 "divstrip_missing": bool(divstrip_missing),
+                **_timing_extra_metrics(),
             },
         )
 
-    points_xyz = _load_surface_points(patch_inputs, supports, params)
+    with stage_timer.scope("t_load_pointcloud"):
+        points_xyz, pointcloud_stats = _load_surface_points(patch_inputs, supports, params)
     gore_zone_metric = patch_inputs.divstrip_zone_metric
     if gore_zone_metric is not None:
         try:
@@ -516,19 +604,64 @@ def _run_patch_core(
         dst_type = node_type_map.get(dst, "unknown")
         cluster_ids = _select_cluster_candidates(support, max_clusters=3)
         candidate_roads: list[dict[str, Any]] = []
-
+        cluster_inputs: list[tuple[int, PairSupport, dict[str, Any]]] = []
         for cluster_id in cluster_ids:
             support_k = _subset_support_by_cluster(support, cluster_id)
             if support_k is None or support_k.support_event_count <= 0:
                 continue
-            surface_hint = _build_traj_surface_hint_for_cluster(
-                support=support_k,
-                src_xsec=src_xsec.geometry_metric,
-                dst_xsec=dst_xsec.geometry_metric,
-                patch_inputs=patch_inputs,
-                gore_zone_metric=gore_zone_metric,
-                params=params,
+            with stage_timer.scope("t_build_surfaces_total"):
+                surface_hint = _build_traj_surface_hint_for_cluster(
+                    support=support_k,
+                    cluster_id=int(cluster_id),
+                    src_xsec=src_xsec.geometry_metric,
+                    dst_xsec=dst_xsec.geometry_metric,
+                    patch_inputs=patch_inputs,
+                    gore_zone_metric=gore_zone_metric,
+                    params=params,
+                    traj_points_cache=traj_points_cache,
+                )
+            stage_timer.add("t_build_traj_projection", float(surface_hint.get("timing_ms", 0.0)))
+            key_k = f"{src}_{dst}_k{int(cluster_id)}"
+            surface_timing_per_k[key_k] = float(surface_hint.get("timing_ms", 0.0))
+            if bool(surface_hint.get("cache_hit", False)):
+                surface_cache_hit_count += 1
+            else:
+                surface_cache_miss_count += 1
+            cluster_inputs.append((int(cluster_id), support_k, surface_hint))
+
+        heavy_inputs: list[tuple[int, PairSupport, dict[str, Any]]] = []
+        ranked_inputs: list[tuple[float, int, tuple[int, PairSupport, dict[str, Any]]]] = []
+        for cid, support_k, surface_hint in cluster_inputs:
+            enforced = bool(surface_hint.get("traj_surface_enforced", False))
+            surface_geom = surface_hint.get("surface_metric")
+            support_ok = True
+            if enforced and surface_geom is not None and (not surface_geom.is_empty):
+                support_ok = _xsec_has_surface_support(
+                    xsec=src_xsec.geometry_metric,
+                    gore_zone_metric=gore_zone_metric,
+                    surface_metric=surface_geom,
+                    buffer_m=float(params.get("SURF_NODE_BUFFER_M", 2.0)),
+                ) and _xsec_has_surface_support(
+                    xsec=dst_xsec.geometry_metric,
+                    gore_zone_metric=gore_zone_metric,
+                    surface_metric=surface_geom,
+                    buffer_m=float(params.get("SURF_NODE_BUFFER_M", 2.0)),
+                )
+            if support_ok:
+                heavy_inputs.append((cid, support_k, surface_hint))
+            coverage_score = (
+                2.0 * float(surface_hint.get("slice_valid_ratio", 0.0))
+                + float(surface_hint.get("covered_length_ratio", 0.0))
+                + 0.2 * float(surface_hint.get("unique_traj_count", 0))
+                + (0.5 if enforced else 0.0)
             )
+            ranked_inputs.append((coverage_score, cid, (cid, support_k, surface_hint)))
+
+        if not heavy_inputs and ranked_inputs:
+            ranked_inputs.sort(key=lambda it: (-it[0], int(it[1])))
+            heavy_inputs = [it[2] for it in ranked_inputs[:2]]
+
+        for cluster_id, support_k, surface_hint in heavy_inputs:
             road_k = _evaluate_candidate_road(
                 src=src,
                 dst=dst,
@@ -549,6 +682,13 @@ def _run_patch_core(
                 params=params,
                 traj_surface_hint=surface_hint,
             )
+            key_k = f"{src}_{dst}_k{int(cluster_id)}"
+            stage_timer.add("t_build_lane_graph", float(road_k.get("_timing_lb_graph_ms", 0.0)))
+            sp_ms = float(road_k.get("_timing_shortest_path_ms", 0.0))
+            shortest_timing_per_k[key_k] = sp_ms
+            stage_timer.add("t_shortest_path_total", sp_ms)
+            stage_timer.add("t_centerline_offset", float(road_k.get("_timing_centerline_ms", 0.0)))
+            stage_timer.add("t_gate_in_ratio", float(road_k.get("_timing_gate_ms", 0.0)))
             candidate_roads.append(road_k)
 
         if not candidate_roads:
@@ -575,8 +715,19 @@ def _run_patch_core(
             )
             continue
 
-        selected = sorted(candidate_roads, key=_candidate_sort_key, reverse=True)[0]
+        ranked_candidates = sorted(candidate_roads, key=_candidate_sort_key, reverse=True)
+        selected = ranked_candidates[0]
         selected["chosen_cluster_id"] = int(selected.get("candidate_cluster_id", 0))
+        selected["cluster_score_top2"] = [
+            {
+                "cluster_id": int(c.get("candidate_cluster_id", -1)),
+                "score": float(c.get("_candidate_score", -1e9)),
+                "feasible": bool(c.get("_candidate_feasible", False)),
+                "in_ratio": _to_finite_float(c.get("_candidate_in_ratio"), 0.0),
+                "max_segment_m": c.get("max_segment_m"),
+            }
+            for c in ranked_candidates[:2]
+        ]
         road_line = selected.get("_geometry_metric")
         road_records.append(selected)
         if isinstance(road_line, LineString) and (not road_line.is_empty):
@@ -634,15 +785,16 @@ def _run_patch_core(
                 )
             )
 
-        if bool(int(params.get("DEBUG_DUMP", 1))):
-            _collect_debug_layers_for_selected(
-                debug_layers=debug_layers,
-                road=selected,
-                src_xsec=src_xsec.geometry_metric,
-                dst_xsec=dst_xsec.geometry_metric,
-                gore_zone_metric=gore_zone_metric,
-                bridge_max_seg_m=float(params["BRIDGE_MAX_SEG_M"]),
-            )
+        if bool(int(params.get("DEBUG_DUMP", 0))):
+            with stage_timer.scope("t_debug_dump"):
+                _collect_debug_layers_for_selected(
+                    debug_layers=debug_layers,
+                    road=selected,
+                    src_xsec=src_xsec.geometry_metric,
+                    dst_xsec=dst_xsec.geometry_metric,
+                    gore_zone_metric=gore_zone_metric,
+                    bridge_max_seg_m=float(params["BRIDGE_MAX_SEG_M"]),
+                )
 
     overall_pass = True
     if hard_breakpoints:
@@ -850,6 +1002,7 @@ def _run_patch_core(
             ),
             "neighbor_search_pass": int(neighbor_search_pass),
             "neighbor_search_pass2_used": bool(int(neighbor_search_pass) == 2),
+            **_timing_extra_metrics(),
         },
     )
 
@@ -858,13 +1011,54 @@ def _load_surface_points(
     patch_inputs: PatchInputs,
     supports: dict[tuple[int, int], PairSupport],
     params: dict[str, Any],
-) -> np.ndarray:
+) -> tuple[np.ndarray, dict[str, Any]]:
+    stats: dict[str, Any] = {
+        "pointcloud_cache_hit": False,
+        "pointcloud_cache_key": None,
+        "pointcloud_bbox_point_count": 0,
+        "pointcloud_selected_point_count": 0,
+    }
     if patch_inputs.point_cloud_path is None:
-        return np.empty((0, 3), dtype=np.float64)
+        return np.empty((0, 3), dtype=np.float64), stats
 
     bbox = _support_union_bbox(patch_inputs, supports, margin_m=float(params["XSEC_ACROSS_HALF_WINDOW_M"]) + 5.0)
     if bbox is None:
-        return np.empty((0, 3), dtype=np.float64)
+        return np.empty((0, 3), dtype=np.float64), stats
+
+    cache_enabled = bool(int(params.get("CACHE_ENABLED", 1)))
+    cache_path: Path | None = None
+    cache_key: str | None = None
+    if cache_enabled:
+        try:
+            st = patch_inputs.point_cloud_path.stat()
+            cache_key_payload = {
+                "v": 1,
+                "patch_id": str(patch_inputs.patch_id),
+                "point_cloud_name": str(patch_inputs.point_cloud_path.name),
+                "point_cloud_size": int(st.st_size),
+                "point_cloud_mtime_ns": int(st.st_mtime_ns),
+                "bbox": [round(float(v), 3) for v in bbox],
+                "point_class_primary": int(params.get("POINT_CLASS_PRIMARY", 2)),
+                "point_class_fallback_any": int(params.get("POINT_CLASS_FALLBACK_ANY", 0)),
+                "max_points": 900_000,
+            }
+            cache_key = _stable_json_digest(cache_key_payload)
+            cache_dir = patch_inputs.patch_dir / ".t05_cache" / "pointcloud"
+            cache_path = cache_dir / f"ground_{cache_key}.npz"
+            if cache_path.is_file():
+                with np.load(cache_path, allow_pickle=False) as zf:
+                    xyz = np.asarray(zf["xyz"], dtype=np.float64)
+                    stats.update(
+                        {
+                            "pointcloud_cache_hit": True,
+                            "pointcloud_cache_key": cache_key,
+                            "pointcloud_bbox_point_count": int(zf["bbox_point_count"].item()),
+                            "pointcloud_selected_point_count": int(zf["selected_point_count"].item()),
+                        }
+                    )
+                return xyz, stats
+        except Exception:
+            cache_path = None
 
     try:
         primary_cls = int(params.get("POINT_CLASS_PRIMARY", 2))
@@ -877,9 +1071,29 @@ def _load_surface_points(
             fallback_to_any_class=fallback_any,
             max_points=900_000,
         )
-        return window.xyz_metric
+        xyz = window.xyz_metric
+        stats.update(
+            {
+                "pointcloud_cache_hit": False,
+                "pointcloud_cache_key": cache_key,
+                "pointcloud_bbox_point_count": int(window.bbox_point_count),
+                "pointcloud_selected_point_count": int(window.selected_point_count),
+            }
+        )
+        if cache_enabled and cache_path is not None:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(
+                    cache_path,
+                    xyz=np.asarray(xyz, dtype=np.float64),
+                    bbox_point_count=np.asarray([int(window.bbox_point_count)], dtype=np.int64),
+                    selected_point_count=np.asarray([int(window.selected_point_count)], dtype=np.int64),
+                )
+            except Exception:
+                pass
+        return xyz, stats
     except InputDataError:
-        return np.empty((0, 3), dtype=np.float64)
+        return np.empty((0, 3), dtype=np.float64), stats
 
 
 def _support_union_bbox(
@@ -1070,6 +1284,12 @@ def _build_traj_surface_from_refline(
     right_pts: list[tuple[float, float]] = []
     valid_mask = np.zeros((stations.size,), dtype=bool)
     valid_stations: list[float] = []
+    gore_mask_all = np.zeros((traj_xy.shape[0],), dtype=bool)
+    if gore_zone_metric is not None and traj_xy.shape[0] > 0:
+        try:
+            gore_mask_all = np.asarray(contains_xy(gore_zone_metric, traj_xy[:, 0], traj_xy[:, 1]), dtype=bool)
+        except Exception:
+            gore_mask_all = np.zeros((traj_xy.shape[0],), dtype=bool)
 
     delta = min(2.0, max(0.5, step * 0.5))
     for i, s in enumerate(stations):
@@ -1083,12 +1303,8 @@ def _build_traj_surface_from_refline(
         along = rel[:, 0] * tx + rel[:, 1] * ty
         across = rel[:, 0] * nx + rel[:, 1] * ny
         keep = np.abs(along) <= half_win
-        if gore_zone_metric is not None and np.any(keep):
-            try:
-                gore_mask = np.asarray(contains_xy(gore_zone_metric, traj_xy[:, 0], traj_xy[:, 1]), dtype=bool)
-            except Exception:
-                gore_mask = np.zeros((traj_xy.shape[0],), dtype=bool)
-            keep = keep & (~gore_mask)
+        if gore_mask_all.any():
+            keep = keep & (~gore_mask_all)
         if np.count_nonzero(keep) < min_pts:
             continue
         vals = across[keep]
@@ -1129,6 +1345,8 @@ def _build_traj_surface_from_refline(
         "surface": surface,
         "stations": stations,
         "valid_mask": valid_mask,
+        "left_pts": np.asarray(left_pts, dtype=np.float64),
+        "right_pts": np.asarray(right_pts, dtype=np.float64),
         "total_slices": total_slices,
         "valid_slices": valid_slices,
         "slice_valid_ratio": slice_valid_ratio,
@@ -1136,16 +1354,102 @@ def _build_traj_surface_from_refline(
     }
 
 
+def _surface_from_lr(
+    *,
+    left_pts: np.ndarray,
+    right_pts: np.ndarray,
+    surf_buf_m: float,
+    gore_zone_metric: BaseGeometry | None,
+) -> BaseGeometry | None:
+    if left_pts.ndim != 2 or right_pts.ndim != 2:
+        return None
+    if left_pts.shape[0] < 2 or right_pts.shape[0] < 2:
+        return None
+    ring = [tuple(map(float, p)) for p in left_pts] + [tuple(map(float, p)) for p in right_pts[::-1, :]]
+    if len(ring) < 4:
+        return None
+    try:
+        poly = Polygon(ring)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+    except Exception:
+        return None
+    if poly is None or poly.is_empty:
+        return None
+    try:
+        surf = poly.buffer(float(max(0.0, surf_buf_m)))
+    except Exception:
+        surf = poly
+    if gore_zone_metric is not None and surf is not None and (not surf.is_empty):
+        try:
+            surf = surf.difference(gore_zone_metric)
+        except Exception:
+            pass
+    return surf if (surf is not None and not surf.is_empty) else None
+
+
+def _traj_surface_cache_path(
+    *,
+    patch_inputs: PatchInputs,
+    support: PairSupport,
+    cluster_id: int,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    params: dict[str, Any],
+) -> tuple[Path, str]:
+    traj_meta: list[dict[str, Any]] = []
+    by_id = {str(t.traj_id): t for t in patch_inputs.trajectories}
+    for tid in sorted({str(v) for v in support.support_traj_ids}):
+        t = by_id.get(tid)
+        if t is None:
+            traj_meta.append({"traj_id": tid, "missing": True})
+            continue
+        try:
+            st = Path(t.source_path).stat()
+            traj_meta.append({"traj_id": tid, "size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns)})
+        except Exception:
+            traj_meta.append({"traj_id": tid, "missing": True})
+
+    key_payload = {
+        "v": 1,
+        "patch_id": str(patch_inputs.patch_id),
+        "src": int(support.src_nodeid),
+        "dst": int(support.dst_nodeid),
+        "cluster_id": int(cluster_id),
+        "traj_meta": traj_meta,
+        "src_xsec_bbox": [round(float(v), 3) for v in src_xsec.bounds],
+        "dst_xsec_bbox": [round(float(v), 3) for v in dst_xsec.bounds],
+        "slice_step": float(params["SURF_SLICE_STEP_M"]),
+        "slice_half_win": float(params["SURF_SLICE_HALF_WIN_M"]),
+        "quant_low": float(params["SURF_QUANT_LOW"]),
+        "quant_high": float(params["SURF_QUANT_HIGH"]),
+        "surf_buf_m": float(params["SURF_BUF_M"]),
+        "min_points_per_slice": int(params["TRAJ_SURF_MIN_POINTS_PER_SLICE"]),
+    }
+    cache_key = _stable_json_digest(key_payload)
+    cache_path = patch_inputs.patch_dir / ".t05_cache" / "traj_surface" / f"traj_surface_{cache_key}.npz"
+    return cache_path, cache_key
+
+
 def _build_traj_surface_hint_for_cluster(
     *,
     support: PairSupport,
+    cluster_id: int,
     src_xsec: LineString,
     dst_xsec: LineString,
     patch_inputs: PatchInputs,
     gore_zone_metric: BaseGeometry | None,
     params: dict[str, Any],
+    traj_points_cache: dict[tuple[str, ...], tuple[np.ndarray, int]] | None = None,
 ) -> dict[str, Any]:
-    traj_xy, unique_traj_count = _collect_support_traj_points(patch_inputs, support)
+    t0 = perf_counter()
+    ids_key = tuple(sorted(str(v) for v in support.support_traj_ids))
+    if traj_points_cache is not None and ids_key in traj_points_cache:
+        traj_xy, unique_traj_count = traj_points_cache[ids_key]
+    else:
+        traj_xy, unique_traj_count = _collect_support_traj_points(patch_inputs, support)
+        if traj_points_cache is not None:
+            traj_points_cache[ids_key] = (traj_xy, unique_traj_count)
     out: dict[str, Any] = {
         "surface_metric": None,
         "traj_surface_enforced": False,
@@ -1154,43 +1458,116 @@ def _build_traj_surface_hint_for_cluster(
         "unique_traj_count": int(unique_traj_count),
         "valid_slices": 0,
         "total_slices": 0,
+        "cache_hit": False,
+        "cache_key": None,
+        "timing_ms": 0.0,
+        "_stations": None,
+        "_valid_mask": None,
     }
     if traj_xy.shape[0] < 8 or unique_traj_count <= 0:
         out["reason"] = "traj_points_insufficient"
+        out["timing_ms"] = float((perf_counter() - t0) * 1000.0)
         return out
     p_src = src_xsec.interpolate(0.5, normalized=True) if src_xsec.length > 0 else None
     p_dst = dst_xsec.interpolate(0.5, normalized=True) if dst_xsec.length > 0 else None
     if p_src is None or p_dst is None:
         out["reason"] = "xsec_center_missing"
+        out["timing_ms"] = float((perf_counter() - t0) * 1000.0)
         return out
     ref_line = LineString([(float(p_src.x), float(p_src.y)), (float(p_dst.x), float(p_dst.y))])
     if ref_line.length <= 1.0:
         out["reason"] = "ref_line_short"
+        out["timing_ms"] = float((perf_counter() - t0) * 1000.0)
         return out
 
-    built = _build_traj_surface_from_refline(
-        ref_line=ref_line,
-        traj_xy=traj_xy,
-        gore_zone_metric=gore_zone_metric,
-        params=params,
-    )
-    out["surface_metric"] = built["surface"]
-    out["slice_valid_ratio"] = float(built["slice_valid_ratio"])
-    out["covered_length_ratio"] = float(built["covered_length_ratio"])
-    out["valid_slices"] = int(built["valid_slices"])
-    out["total_slices"] = int(built["total_slices"])
+    cache_enabled = bool(int(params.get("CACHE_ENABLED", 1)))
+    cache_path: Path | None = None
+    cache_key: str | None = None
+    if cache_enabled:
+        try:
+            cache_path, cache_key = _traj_surface_cache_path(
+                patch_inputs=patch_inputs,
+                support=support,
+                cluster_id=int(cluster_id),
+                src_xsec=src_xsec,
+                dst_xsec=dst_xsec,
+                params=params,
+            )
+            out["cache_key"] = cache_key
+            if cache_path.is_file():
+                with np.load(cache_path, allow_pickle=False) as zf:
+                    left_pts = np.asarray(zf["left_pts"], dtype=np.float64)
+                    right_pts = np.asarray(zf["right_pts"], dtype=np.float64)
+                    stations = np.asarray(zf["stations"], dtype=np.float64)
+                    valid_mask = np.asarray(zf["valid_mask"], dtype=bool)
+                    valid_slices = int(zf["valid_slices"].item())
+                    total_slices = int(zf["total_slices"].item())
+                    slice_valid_ratio = float(zf["slice_valid_ratio"].item())
+                    covered_length_ratio = float(zf["covered_length_ratio"].item())
+                surface = _surface_from_lr(
+                    left_pts=left_pts,
+                    right_pts=right_pts,
+                    surf_buf_m=float(params["SURF_BUF_M"]),
+                    gore_zone_metric=gore_zone_metric,
+                )
+                out.update(
+                    {
+                        "surface_metric": surface,
+                        "slice_valid_ratio": float(slice_valid_ratio),
+                        "covered_length_ratio": float(covered_length_ratio),
+                        "valid_slices": int(valid_slices),
+                        "total_slices": int(total_slices),
+                        "_stations": stations,
+                        "_valid_mask": valid_mask,
+                        "cache_hit": True,
+                    }
+                )
+        except Exception:
+            pass
+
+    if out.get("surface_metric") is None and not bool(out.get("cache_hit", False)):
+        built = _build_traj_surface_from_refline(
+            ref_line=ref_line,
+            traj_xy=traj_xy,
+            gore_zone_metric=gore_zone_metric,
+            params=params,
+        )
+        out["surface_metric"] = built["surface"]
+        out["slice_valid_ratio"] = float(built["slice_valid_ratio"])
+        out["covered_length_ratio"] = float(built["covered_length_ratio"])
+        out["valid_slices"] = int(built["valid_slices"])
+        out["total_slices"] = int(built["total_slices"])
+        out["_stations"] = built.get("stations")
+        out["_valid_mask"] = built.get("valid_mask")
+        if cache_enabled and cache_path is not None:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(
+                    cache_path,
+                    left_pts=np.asarray(built.get("left_pts"), dtype=np.float64),
+                    right_pts=np.asarray(built.get("right_pts"), dtype=np.float64),
+                    stations=np.asarray(built.get("stations"), dtype=np.float64),
+                    valid_mask=np.asarray(built.get("valid_mask"), dtype=np.bool_),
+                    valid_slices=np.asarray([int(built["valid_slices"])], dtype=np.int64),
+                    total_slices=np.asarray([int(built["total_slices"])], dtype=np.int64),
+                    slice_valid_ratio=np.asarray([float(built["slice_valid_ratio"])], dtype=np.float64),
+                    covered_length_ratio=np.asarray([float(built["covered_length_ratio"])], dtype=np.float64),
+                )
+            except Exception:
+                pass
 
     sufficient = (
-        int(built["valid_slices"]) >= 2
-        and float(built["slice_valid_ratio"]) >= float(params["TRAJ_SURF_MIN_SLICE_VALID_RATIO"])
-        and float(built["covered_length_ratio"]) >= float(params["TRAJ_SURF_MIN_COVERED_LEN_RATIO"])
+        int(out["valid_slices"]) >= 2
+        and float(out["slice_valid_ratio"]) >= float(params["TRAJ_SURF_MIN_SLICE_VALID_RATIO"])
+        and float(out["covered_length_ratio"]) >= float(params["TRAJ_SURF_MIN_COVERED_LEN_RATIO"])
         and int(unique_traj_count) >= int(params["TRAJ_SURF_MIN_UNIQUE_TRAJ"])
-        and built["surface"] is not None
-        and (not built["surface"].is_empty)
+        and out["surface_metric"] is not None
+        and (not out["surface_metric"].is_empty)
     )
     out["traj_surface_enforced"] = bool(sufficient)
     if not sufficient:
         out["reason"] = "traj_surface_insufficient"
+    out["timing_ms"] = float((perf_counter() - t0) * 1000.0)
     return out
 
 
@@ -1203,6 +1580,7 @@ def _eval_traj_surface_gate(
     patch_inputs: PatchInputs,
     gore_zone_metric: BaseGeometry | None,
     params: dict[str, Any],
+    traj_surface_hint: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], set[str], set[str], list[dict[str, Any]]]:
     result: dict[str, Any] = {
         "traj_surface_enforced": False,
@@ -1242,31 +1620,56 @@ def _eval_traj_surface_gate(
         )
         return result, soft_flags, hard_flags, breakpoints
 
-    traj_xy, unique_traj_count = _collect_support_traj_points(patch_inputs, support)
-    if traj_xy.shape[0] < 8 or unique_traj_count <= 0:
-        soft_flags.add(SOFT_TRAJ_SURFACE_INSUFFICIENT)
-        breakpoints.append(
-            build_breakpoint(
-                road=road,
-                reason=SOFT_TRAJ_SURFACE_INSUFFICIENT,
-                severity="soft",
-                hint="traj_points_insufficient",
+    surface = None
+    stations = np.empty((0,), dtype=np.float64)
+    valid_mask = np.empty((0,), dtype=bool)
+    valid_slices = 0
+    total_slices = 0
+    slice_valid_ratio = 0.0
+    covered_len_ratio = 0.0
+    unique_traj_count = 0
+
+    hint = traj_surface_hint if isinstance(traj_surface_hint, dict) else None
+    if hint is not None:
+        surface = hint.get("surface_metric")
+        valid_slices = int(hint.get("valid_slices", 0))
+        total_slices = int(hint.get("total_slices", 0))
+        slice_valid_ratio = float(hint.get("slice_valid_ratio", 0.0))
+        covered_len_ratio = float(hint.get("covered_length_ratio", 0.0))
+        unique_traj_count = int(hint.get("unique_traj_count", 0))
+        st = hint.get("_stations")
+        vm = hint.get("_valid_mask")
+        if isinstance(st, np.ndarray):
+            stations = np.asarray(st, dtype=np.float64)
+        if isinstance(vm, np.ndarray):
+            valid_mask = np.asarray(vm, dtype=bool)
+    else:
+        traj_xy, unique_traj_count = _collect_support_traj_points(patch_inputs, support)
+        if traj_xy.shape[0] < 8 or unique_traj_count <= 0:
+            soft_flags.add(SOFT_TRAJ_SURFACE_INSUFFICIENT)
+            breakpoints.append(
+                build_breakpoint(
+                    road=road,
+                    reason=SOFT_TRAJ_SURFACE_INSUFFICIENT,
+                    severity="soft",
+                    hint="traj_points_insufficient",
+                )
             )
+            return result, soft_flags, hard_flags, breakpoints
+        built = _build_traj_surface_from_refline(
+            ref_line=ref_line,
+            traj_xy=traj_xy,
+            gore_zone_metric=gore_zone_metric,
+            params=params,
         )
-        return result, soft_flags, hard_flags, breakpoints
+        surface = built.get("surface")
+        stations = np.asarray(built.get("stations"), dtype=np.float64)
+        valid_mask = np.asarray(built.get("valid_mask"), dtype=bool)
+        valid_slices = int(built.get("valid_slices", 0))
+        total_slices = int(built.get("total_slices", 0))
+        slice_valid_ratio = float(built.get("slice_valid_ratio", 0.0))
+        covered_len_ratio = float(built.get("covered_length_ratio", 0.0))
 
-    step = max(1.0, float(params["SURF_SLICE_STEP_M"]))
-    half_win = max(0.5, float(params["SURF_SLICE_HALF_WIN_M"]))
-    q_lo = max(0.0, min(0.5, float(params["SURF_QUANT_LOW"])))
-    q_hi = max(0.5, min(1.0, float(params["SURF_QUANT_HIGH"])))
-    if q_hi <= q_lo:
-        q_lo, q_hi = 0.02, 0.98
-    min_pts = max(3, int(params["TRAJ_SURF_MIN_POINTS_PER_SLICE"]))
-
-    stations = np.arange(0.0, ref_len + step * 0.5, step, dtype=np.float64)
-    if stations.size == 0 or abs(float(stations[-1]) - ref_len) > 1e-6:
-        stations = np.concatenate((stations, np.asarray([ref_len], dtype=np.float64)))
-    stations = np.unique(np.clip(stations, 0.0, ref_len))
     if stations.size < 2:
         soft_flags.add(SOFT_TRAJ_SURFACE_INSUFFICIENT)
         breakpoints.append(
@@ -1279,66 +1682,6 @@ def _eval_traj_surface_gate(
         )
         return result, soft_flags, hard_flags, breakpoints
 
-    left_pts: list[tuple[float, float]] = []
-    right_pts: list[tuple[float, float]] = []
-    valid_mask = np.zeros((stations.size,), dtype=bool)
-    valid_stations: list[float] = []
-
-    delta = min(2.0, max(0.5, step * 0.5))
-    for i, s in enumerate(stations):
-        p = ref_line.interpolate(float(s))
-        p_xy = (float(p.x), float(p.y))
-        p0 = ref_line.interpolate(max(0.0, float(s - delta)))
-        p1 = ref_line.interpolate(min(ref_len, float(s + delta)))
-        tx, ty = _unit_xy(float(p1.x - p0.x), float(p1.y - p0.y))
-        nx, ny = (-ty, tx)
-
-        rel = traj_xy - np.asarray([p_xy[0], p_xy[1]], dtype=np.float64)[None, :]
-        along = rel[:, 0] * tx + rel[:, 1] * ty
-        across = rel[:, 0] * nx + rel[:, 1] * ny
-        keep = np.abs(along) <= half_win
-        if gore_zone_metric is not None and np.any(keep):
-            try:
-                gore_mask = np.asarray(contains_xy(gore_zone_metric, traj_xy[:, 0], traj_xy[:, 1]), dtype=bool)
-            except Exception:
-                gore_mask = np.zeros((traj_xy.shape[0],), dtype=bool)
-            keep = keep & (~gore_mask)
-        if np.count_nonzero(keep) < min_pts:
-            continue
-        vals = across[keep]
-        lo = float(np.quantile(vals, q_lo))
-        hi = float(np.quantile(vals, q_hi))
-        left_pts.append((float(p_xy[0] + nx * lo), float(p_xy[1] + ny * lo)))
-        right_pts.append((float(p_xy[0] + nx * hi), float(p_xy[1] + ny * hi)))
-        valid_mask[i] = True
-        valid_stations.append(float(s))
-
-    total_slices = int(stations.size)
-    valid_slices = int(np.count_nonzero(valid_mask))
-    slice_valid_ratio = float(valid_slices / max(1, total_slices))
-    covered_len = (max(valid_stations) - min(valid_stations)) if len(valid_stations) >= 2 else 0.0
-    covered_len_ratio = float(covered_len / max(ref_len, 1e-6))
-
-    surface = None
-    if len(left_pts) >= 2 and len(right_pts) >= 2:
-        ring = [*left_pts, *reversed(right_pts)]
-        if len(ring) >= 4:
-            try:
-                poly = Polygon(ring)
-                if not poly.is_valid:
-                    poly = poly.buffer(0)
-            except Exception:
-                poly = None
-            if poly is not None and not poly.is_empty:
-                try:
-                    surface = poly.buffer(float(params["SURF_BUF_M"]))
-                except Exception:
-                    surface = poly
-                if gore_zone_metric is not None and surface is not None and not surface.is_empty:
-                    try:
-                        surface = surface.difference(gore_zone_metric)
-                    except Exception:
-                        pass
     result["_traj_surface_geom_metric"] = surface
     result["traj_surface_valid_slices"] = int(valid_slices)
     result["traj_surface_total_slices"] = int(total_slices)
@@ -1480,6 +1823,7 @@ def _evaluate_candidate_road(
     params: dict[str, Any],
     traj_surface_hint: dict[str, Any],
 ) -> dict[str, Any]:
+    t0_center = perf_counter()
     center = estimate_centerline(
         support=support,
         src_xsec=src_xsec,
@@ -1510,6 +1854,8 @@ def _evaluate_candidate_road(
         lb_snap_m=float(params["LB_SNAP_M"]),
         lb_start_end_topk=int(params["LB_START_END_TOPK"]),
         lb_outside_lambda=float(params.get("LAMBDA_OUTSIDE", 5.0)),
+        lb_outside_edge_ratio_max=float(params.get("OUTSIDE_EDGE_RATIO_MAX", 1.0)),
+        lb_surface_node_buffer_m=float(params.get("SURF_NODE_BUFFER_M", 2.0)),
         trend_fit_win_m=float(params["TREND_FIT_WIN_M"]),
         traj_surface_metric=traj_surface_hint.get("surface_metric"),
         traj_surface_enforced=bool(traj_surface_hint.get("traj_surface_enforced", False)),
@@ -1526,6 +1872,7 @@ def _evaluate_candidate_road(
         transition_m=float(params["TRANSITION_M"]),
         stable_fallback_m=float(params["STABLE_FALLBACK_M"]),
     )
+    t_center_ms = float((perf_counter() - t0_center) * 1000.0)
 
     road = _make_base_road_record(
         src=src,
@@ -1568,6 +1915,8 @@ def _evaluate_candidate_road(
     road["lb_path_found"] = bool(center.lb_path_found)
     road["lb_path_edge_count"] = int(center.lb_path_edge_count)
     road["lb_path_length_m"] = center.lb_path_length_m
+    road["lb_graph_edge_total"] = center.diagnostics.get("lb_graph_edge_total")
+    road["lb_graph_edge_filtered"] = center.diagnostics.get("lb_graph_edge_filtered")
     road["traj_surface_hint_enforced"] = bool(traj_surface_hint.get("traj_surface_enforced", False))
     road["traj_surface_hint_valid_slices"] = int(traj_surface_hint.get("valid_slices", 0))
     road["traj_surface_hint_total_slices"] = int(traj_surface_hint.get("total_slices", 0))
@@ -1610,7 +1959,9 @@ def _evaluate_candidate_road(
 
     candidate_hard_breakpoints: list[dict[str, Any]] = []
     candidate_soft_breakpoints: list[dict[str, Any]] = []
+    t_gate_ms = 0.0
     if road_line is not None:
+        t0_gate = perf_counter()
         (
             traj_surface_info,
             traj_surface_soft,
@@ -1624,7 +1975,9 @@ def _evaluate_candidate_road(
             patch_inputs=patch_inputs,
             gore_zone_metric=gore_zone_metric,
             params=params,
+            traj_surface_hint=traj_surface_hint,
         )
+        t_gate_ms = float((perf_counter() - t0_gate) * 1000.0)
         road.update(traj_surface_info)
         soft_flags.update(traj_surface_soft)
         hard_flags.update(traj_surface_hard)
@@ -1638,6 +1991,11 @@ def _evaluate_candidate_road(
 
     if road.get("_traj_surface_geom_metric") is None and traj_surface_hint.get("surface_metric") is not None:
         road["_traj_surface_geom_metric"] = traj_surface_hint.get("surface_metric")
+
+    road["_timing_centerline_ms"] = float(max(0.0, t_center_ms))
+    road["_timing_gate_ms"] = float(max(0.0, t_gate_ms if road_line is not None else 0.0))
+    road["_timing_lb_graph_ms"] = float(_to_finite_float(center.diagnostics.get("lb_graph_build_ms"), 0.0))
+    road["_timing_shortest_path_ms"] = float(_to_finite_float(center.diagnostics.get("lb_shortest_path_ms"), 0.0))
 
     road["hard_anomaly"] = bool(hard_flags)
     road["hard_reasons"] = sorted(hard_flags)
@@ -1707,6 +2065,41 @@ def _iter_line_parts(geom: BaseGeometry | None) -> list[LineString]:
             out.extend(_iter_line_parts(g))
         return out
     return []
+
+
+def _xsec_has_surface_support(
+    *,
+    xsec: LineString,
+    gore_zone_metric: BaseGeometry | None,
+    surface_metric: BaseGeometry | None,
+    buffer_m: float,
+) -> bool:
+    if xsec.is_empty or xsec.length <= 0:
+        return False
+    if surface_metric is None or surface_metric.is_empty:
+        return False
+    xsec_valid: BaseGeometry = xsec
+    if gore_zone_metric is not None:
+        try:
+            diff = xsec.difference(gore_zone_metric)
+            if diff is not None and not diff.is_empty:
+                xsec_valid = diff
+        except Exception:
+            pass
+    surf = surface_metric
+    if float(buffer_m) > 0.0:
+        try:
+            surf = surface_metric.buffer(float(buffer_m))
+        except Exception:
+            surf = surface_metric
+    try:
+        inter = xsec_valid.intersection(surf)
+    except Exception:
+        return False
+    for part in _iter_line_parts(inter):
+        if part.length > 1e-6:
+            return True
+    return False
 
 
 def _collect_debug_layers_for_selected(
@@ -1991,7 +2384,8 @@ def _finalize_payloads(
         for k, v in extra_metrics.items():
             sk = str(k)
             if (
-                sk.startswith("n_cross_")
+                sk.startswith("t_")
+                or sk.startswith("n_cross_")
                 or sk.startswith("crossing_")
                 or sk.startswith("stitch_")
                 or sk.startswith("endpoint_center_offset_")
@@ -2000,6 +2394,8 @@ def _finalize_payloads(
                 or sk.startswith("max_segment_")
                 or sk.startswith("traj_in_ratio")
                 or sk.startswith("traj_surface_")
+                or sk.startswith("pointcloud_")
+                or sk.startswith("traj_surface_cache_")
                 or sk.startswith("neighbor_search_")
                 or sk.startswith("width_near_minus_base_")
                 or sk in {"expanded_end_count", "gore_tip_end_count", "fallback_end_count", "divstrip_missing"}

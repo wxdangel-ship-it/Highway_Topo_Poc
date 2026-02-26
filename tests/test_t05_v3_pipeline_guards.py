@@ -16,6 +16,7 @@ from highway_topo_poc.modules.t05_topology_between_rc.geometry import (
 from highway_topo_poc.modules.t05_topology_between_rc.io import (
     CrossSection,
     PatchInputs,
+    PointCloudWindow,
     ProjectionInfo,
     TrajectoryData,
 )
@@ -254,3 +255,55 @@ def test_neighbor_pass2_is_triggered_when_no_supports(tmp_path: Path) -> None:
     assert "NO_ADJACENT_PAIR_AFTER_PASS2" in reasons
     assert out["metrics_payload"].get("neighbor_search_pass") == 2
     assert out["metrics_payload"].get("neighbor_search_pass2_used") is True
+
+
+def test_surface_point_cache_skips_second_laz_read(tmp_path: Path, monkeypatch) -> None:
+    xsec = CrossSection(
+        nodeid=1,
+        geometry_metric=LineString([(0.0, -2.0), (0.0, 2.0)]),
+        properties={"nodeid": 1},
+    )
+    pc_path = tmp_path / "merged_cleaned_classified_3857.laz"
+    pc_path.write_bytes(b"stub")
+    patch_inputs = PatchInputs(
+        patch_id="unit_patch",
+        patch_dir=tmp_path,
+        projection=ProjectionInfo(input_crs="EPSG:3857", metric_crs="EPSG:3857", projected=False),
+        projection_to_metric=lambda geom: geom,
+        projection_to_input=lambda geom: geom,
+        intersection_lines=[xsec],
+        lane_boundaries_metric=[],
+        node_kind_map={},
+        trajectories=[],
+        divstrip_zone_metric=None,
+        divstrip_source_path=None,
+        point_cloud_path=pc_path,
+        road_prior_path=None,
+        tiles_dir=None,
+        input_summary={},
+    )
+    params = dict(pipeline.DEFAULT_PARAMS)
+    params["CACHE_ENABLED"] = 1
+
+    call_count = {"n": 0}
+
+    def _fake_load(*args, **kwargs):
+        call_count["n"] += 1
+        return PointCloudWindow(
+            xyz_metric=np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float64),
+            bbox_point_count=2,
+            selected_point_count=2,
+            has_classification=True,
+            used_class_filter=True,
+            point_cloud_path=pc_path,
+        )
+
+    monkeypatch.setattr(pipeline, "load_point_cloud_window", _fake_load)
+
+    xyz_1, stats_1 = pipeline._load_surface_points(patch_inputs, {}, params)
+    xyz_2, stats_2 = pipeline._load_surface_points(patch_inputs, {}, params)
+
+    assert xyz_1.shape == xyz_2.shape
+    assert call_count["n"] == 1
+    assert stats_1.get("pointcloud_cache_hit") is False
+    assert stats_2.get("pointcloud_cache_hit") is True
