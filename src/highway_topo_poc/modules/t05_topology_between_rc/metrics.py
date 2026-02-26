@@ -111,6 +111,22 @@ def build_intervals_payload(
             item["last_node_ref"] = bp.get("last_node_ref")
         if "stitch_candidate_count" in bp:
             item["stitch_candidate_count"] = bp.get("stitch_candidate_count")
+        if "seg_index" in bp:
+            item["seg_index"] = bp.get("seg_index")
+        if "seg_length_m" in bp:
+            item["seg_length_m"] = bp.get("seg_length_m")
+        if "max_segment_m" in bp:
+            item["max_segment_m"] = bp.get("max_segment_m")
+        if "traj_surface_enforced" in bp:
+            item["traj_surface_enforced"] = bp.get("traj_surface_enforced")
+        if "traj_in_ratio" in bp:
+            item["traj_in_ratio"] = bp.get("traj_in_ratio")
+        if "slice_valid_ratio" in bp:
+            item["slice_valid_ratio"] = bp.get("slice_valid_ratio")
+        if "covered_length_ratio" in bp:
+            item["covered_length_ratio"] = bp.get("covered_length_ratio")
+        if "unique_traj_count" in bp:
+            item["unique_traj_count"] = bp.get("unique_traj_count")
         intervals.append(item)
 
     return {"topk": intervals}
@@ -289,9 +305,11 @@ def _breakpoint_sort_key(bp: dict[str, Any]) -> tuple[int, int, float]:
         "NON_RC_IN_BETWEEN": 1,
         "CENTER_ESTIMATE_EMPTY": 2,
         "ENDPOINT_NOT_ON_XSEC": 3,
+        "BRIDGE_SEGMENT_TOO_LONG": 4,
         "LOW_SUPPORT": 10,
         "SPARSE_SURFACE_POINTS": 11,
         "NO_LB_CONTINUOUS": 12,
+        "NO_LB_CONTINUOUS_PATH": 13,
         "WIGGLY_CENTERLINE": 13,
         "OPEN_END": 14,
         "UNRESOLVED_NEIGHBOR": 15,
@@ -300,6 +318,9 @@ def _breakpoint_sort_key(bp: dict[str, Any]) -> tuple[int, int, float]:
         "CROSS_EMPTY_SKIPPED": 18,
         "CROSS_GEOM_UNEXPECTED": 19,
         "CROSS_DISTANCE_GATE_REJECT": 20,
+        "ROAD_OUTSIDE_TRAJ_SURFACE": 21,
+        "TRAJ_SURFACE_INSUFFICIENT": 22,
+        "TRAJ_SURFACE_GAP": 23,
     }
     r = order.get(reason, 99)
 

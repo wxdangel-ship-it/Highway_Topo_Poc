@@ -46,6 +46,36 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--gore_buffer_m", type=float, default=float(DEFAULT_PARAMS["GORE_BUFFER_M"]))
     p.add_argument("--transition_m", type=float, default=float(DEFAULT_PARAMS["TRANSITION_M"]))
     p.add_argument("--stable_fallback_m", type=float, default=float(DEFAULT_PARAMS["STABLE_FALLBACK_M"]))
+    p.add_argument("--bridge_max_seg_m", type=float, default=float(DEFAULT_PARAMS["BRIDGE_MAX_SEG_M"]))
+    p.add_argument("--lb_snap_m", type=float, default=float(DEFAULT_PARAMS["LB_SNAP_M"]))
+    p.add_argument("--lb_start_end_topk", type=int, default=int(DEFAULT_PARAMS["LB_START_END_TOPK"]))
+    p.add_argument("--trend_fit_win_m", type=float, default=float(DEFAULT_PARAMS["TREND_FIT_WIN_M"]))
+    p.add_argument("--surf_slice_step_m", type=float, default=float(DEFAULT_PARAMS["SURF_SLICE_STEP_M"]))
+    p.add_argument("--surf_slice_half_win_m", type=float, default=float(DEFAULT_PARAMS["SURF_SLICE_HALF_WIN_M"]))
+    p.add_argument("--surf_quant_low", type=float, default=float(DEFAULT_PARAMS["SURF_QUANT_LOW"]))
+    p.add_argument("--surf_quant_high", type=float, default=float(DEFAULT_PARAMS["SURF_QUANT_HIGH"]))
+    p.add_argument("--surf_buf_m", type=float, default=float(DEFAULT_PARAMS["SURF_BUF_M"]))
+    p.add_argument("--in_ratio_min", type=float, default=float(DEFAULT_PARAMS["IN_RATIO_MIN"]))
+    p.add_argument(
+        "--traj_surf_min_points_per_slice",
+        type=int,
+        default=int(DEFAULT_PARAMS["TRAJ_SURF_MIN_POINTS_PER_SLICE"]),
+    )
+    p.add_argument(
+        "--traj_surf_min_slice_valid_ratio",
+        type=float,
+        default=float(DEFAULT_PARAMS["TRAJ_SURF_MIN_SLICE_VALID_RATIO"]),
+    )
+    p.add_argument(
+        "--traj_surf_min_covered_len_ratio",
+        type=float,
+        default=float(DEFAULT_PARAMS["TRAJ_SURF_MIN_COVERED_LEN_RATIO"]),
+    )
+    p.add_argument(
+        "--traj_surf_min_unique_traj",
+        type=int,
+        default=int(DEFAULT_PARAMS["TRAJ_SURF_MIN_UNIQUE_TRAJ"]),
+    )
     p.add_argument("--point_class_fallback_any", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["POINT_CLASS_FALLBACK_ANY"]))
 
     return p.parse_args(list(argv) if argv is not None else None)
@@ -91,6 +121,20 @@ def main(argv: Iterable[str] | None = None) -> int:
         "GORE_BUFFER_M": float(args.gore_buffer_m),
         "TRANSITION_M": float(args.transition_m),
         "STABLE_FALLBACK_M": float(args.stable_fallback_m),
+        "BRIDGE_MAX_SEG_M": float(args.bridge_max_seg_m),
+        "LB_SNAP_M": float(args.lb_snap_m),
+        "LB_START_END_TOPK": int(args.lb_start_end_topk),
+        "TREND_FIT_WIN_M": float(args.trend_fit_win_m),
+        "SURF_SLICE_STEP_M": float(args.surf_slice_step_m),
+        "SURF_SLICE_HALF_WIN_M": float(args.surf_slice_half_win_m),
+        "SURF_QUANT_LOW": float(args.surf_quant_low),
+        "SURF_QUANT_HIGH": float(args.surf_quant_high),
+        "SURF_BUF_M": float(args.surf_buf_m),
+        "IN_RATIO_MIN": float(args.in_ratio_min),
+        "TRAJ_SURF_MIN_POINTS_PER_SLICE": int(args.traj_surf_min_points_per_slice),
+        "TRAJ_SURF_MIN_SLICE_VALID_RATIO": float(args.traj_surf_min_slice_valid_ratio),
+        "TRAJ_SURF_MIN_COVERED_LEN_RATIO": float(args.traj_surf_min_covered_len_ratio),
+        "TRAJ_SURF_MIN_UNIQUE_TRAJ": int(args.traj_surf_min_unique_traj),
         "POINT_CLASS_FALLBACK_ANY": int(args.point_class_fallback_any),
     }
     levels = list(DEFAULT_PARAMS.get("STITCH_MAX_DIST_LEVELS_M", [float(args.stitch_max_dist_m)]))

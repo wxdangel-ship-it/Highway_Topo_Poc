@@ -7,9 +7,9 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 from shapely import contains_xy
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import nearest_points, substring
+from shapely.ops import linemerge, nearest_points, substring
 
 from .io import CrossSection, TrajectoryData
 
@@ -18,15 +18,20 @@ HARD_MULTI_ROAD = "MULTI_ROAD_SAME_PAIR"
 HARD_NON_RC = "NON_RC_IN_BETWEEN"
 HARD_CENTER_EMPTY = "CENTER_ESTIMATE_EMPTY"
 HARD_ENDPOINT = "ENDPOINT_NOT_ON_XSEC"
+HARD_BRIDGE_SEGMENT = "BRIDGE_SEGMENT_TOO_LONG"
 
 SOFT_LOW_SUPPORT = "LOW_SUPPORT"
 SOFT_SPARSE_POINTS = "SPARSE_SURFACE_POINTS"
 SOFT_NO_LB = "NO_LB_CONTINUOUS"
+SOFT_NO_LB_PATH = "NO_LB_CONTINUOUS_PATH"
 SOFT_WIGGLY = "WIGGLY_CENTERLINE"
 SOFT_OPEN_END = "OPEN_END"
 SOFT_UNRESOLVED_NEIGHBOR = "UNRESOLVED_NEIGHBOR"
 SOFT_NO_STABLE_SECTION = "NO_STABLE_SECTION"
 SOFT_DIVSTRIP_MISSING = "DIVSTRIP_MISSING"
+SOFT_ROAD_OUTSIDE_TRAJ_SURFACE = "ROAD_OUTSIDE_TRAJ_SURFACE"
+SOFT_TRAJ_SURFACE_INSUFFICIENT = "TRAJ_SURFACE_INSUFFICIENT"
+SOFT_TRAJ_SURFACE_GAP = "TRAJ_SURFACE_GAP"
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,8 @@ class PairSupportBuildResult:
 class CenterEstimate:
     centerline_metric: LineString | None
     shape_ref_metric: LineString | None
+    lb_path_found: bool
+    lb_path_edge_count: int
     stable_offset_m_src: float | None
     stable_offset_m_dst: float | None
     center_sample_coverage: float
@@ -119,6 +126,8 @@ class CenterEstimate:
     dst_stable_s_m: float | None
     src_cut_mode: str
     dst_cut_mode: str
+    endpoint_tangent_deviation_deg_src: float | None
+    endpoint_tangent_deviation_deg_dst: float | None
     endpoint_center_offset_m_src: float | None
     endpoint_center_offset_m_dst: float | None
     soft_flags: set[str]
@@ -334,7 +343,8 @@ def build_pair_supports(
                 prev_edge=search.prev_edge,
                 traj_line_map=graph.traj_line_map,
             )
-            if path_line is None or path_line.length <= 0:
+            edge_kinds = _path_edge_kinds(path_keys=path_keys, prev_edge=search.prev_edge)
+            if (path_line is None or path_line.length <= 0) and ("stitch" not in edge_kinds):
                 src_xy = point_xy_safe(ev.cross_point, context="pair_path_fallback_src")
                 dst_xy = point_xy_safe(target_node.point, context="pair_path_fallback_dst")
                 if src_xy is None or dst_xy is None:
@@ -345,6 +355,9 @@ def build_pair_supports(
                         (float(dst_xy[0]), float(dst_xy[1])),
                     ]
                 )
+            if path_line is None or path_line.length <= 0:
+                # 不允许把 stitch 直连段带入几何证据，拓扑支持仍可保留。
+                continue
 
             path_traj_ids = _extract_path_traj_ids(path_keys=path_keys, nodes=graph.nodes)
             if not path_traj_ids:
@@ -359,7 +372,6 @@ def build_pair_supports(
             support.evidence_traj_ids.append(str(traj_id))
             support.evidence_lengths_m.append(float(search.distance_m))
 
-            edge_kinds = _path_edge_kinds(path_keys=path_keys, prev_edge=search.prev_edge)
             is_open_end = ("start" in edge_kinds) or ("end" in edge_kinds)
             support.open_end_flags.append(bool(is_open_end))
             support.open_end = support.open_end or is_open_end
@@ -526,6 +538,22 @@ class _EndStableDecision:
     cut_mode: str
     used_fallback: bool
     short_base_proxy: bool
+
+
+@dataclass(frozen=True)
+class _ShapeRefChoice:
+    line: LineString | None
+    used_lane_boundary: bool
+    lb_path_found: bool
+    lb_path_edge_count: int
+
+
+@dataclass(frozen=True)
+class _LbGraphEdge:
+    u: int
+    v: int
+    length: float
+    coords: tuple[tuple[float, float], tuple[float, float]]
 
 
 def _build_forward_graph(
@@ -879,19 +907,13 @@ def _build_path_linestring(
     if len(path_keys) < 2:
         return None
 
-    coords: list[tuple[float, float]] = []
+    traj_parts: list[LineString] = []
     for idx in range(1, len(path_keys)):
         to_key = path_keys[idx]
         edge = prev_edge.get(to_key)
         if edge is None:
             continue
-        from_key = path_keys[idx - 1]
-        from_node = nodes.get(from_key)
-        to_node = nodes.get(to_key)
-        if from_node is None or to_node is None:
-            continue
 
-        seg: LineString | None = None
         if edge.kind == "traj" and edge.traj_id is not None:
             line = traj_line_map.get(edge.traj_id)
             s0 = 0.0 if edge.station_from is None else float(edge.station_from)
@@ -902,22 +924,52 @@ def _build_path_linestring(
                 except Exception:
                     part = None
                 if isinstance(part, LineString) and not part.is_empty and len(part.coords) >= 2:
-                    seg = part
-        if seg is None:
-            from_xy = point_xy_safe(from_node.point, context="build_path_from")
-            to_xy = point_xy_safe(to_node.point, context="build_path_to")
-            if from_xy is None or to_xy is None:
-                continue
-            seg = LineString([(float(from_xy[0]), float(from_xy[1])), (float(to_xy[0]), float(to_xy[1]))])
-        _append_coords(coords, list(seg.coords))
+                    traj_parts.append(part)
 
-    coords = _dedup_coords(coords, eps=1e-4)
-    if len(coords) < 2:
+    if not traj_parts:
         return None
-    line = LineString(coords)
-    if line.is_empty or line.length <= 0:
-        return None
-    return line
+
+    merged: BaseGeometry
+    if len(traj_parts) == 1:
+        merged = traj_parts[0]
+    else:
+        try:
+            merged = linemerge(MultiLineString(traj_parts))
+        except Exception:
+            merged = MultiLineString(traj_parts)
+
+    if isinstance(merged, LineString):
+        if merged.is_empty or merged.length <= 0 or len(merged.coords) < 2:
+            return None
+        return merged
+
+    if isinstance(merged, MultiLineString):
+        valid = [ls for ls in merged.geoms if isinstance(ls, LineString) and not ls.is_empty and len(ls.coords) >= 2]
+        if not valid:
+            return None
+        best = max(valid, key=lambda g: float(g.length))
+        if best.length <= 0:
+            return None
+        return best
+
+    # stitch 只用于拓扑，不可进入几何；这里仅保留真实轨迹片段。
+    if isinstance(merged, BaseGeometry) and not merged.is_empty:
+        if getattr(merged, "geom_type", "") == "GeometryCollection":
+            lines = [
+                g
+                for g in getattr(merged, "geoms", [])
+                if isinstance(g, LineString) and not g.is_empty and len(g.coords) >= 2
+            ]
+            if lines:
+                return max(lines, key=lambda g: float(g.length))
+
+    # nodes 参数保留用于兼容调用签名。
+    del nodes
+    if traj_parts:
+        best = max(traj_parts, key=lambda g: float(g.length))
+        if best.length > 0:
+            return best
+    return None
 
 
 def _extract_path_traj_ids(*, path_keys: list[str], nodes: dict[str, _GraphNode]) -> set[str]:
@@ -1033,6 +1085,9 @@ def estimate_centerline(
     stable_margin_m: float,
     endpoint_tol_m: float,
     road_max_vertices: int,
+    lb_snap_m: float,
+    lb_start_end_topk: int,
+    trend_fit_win_m: float,
     divstrip_zone_metric: BaseGeometry | None,
     d_min: float,
     d_max: float,
@@ -1052,12 +1107,24 @@ def estimate_centerline(
     hard_flags: set[str] = set(support.hard_anomalies)
     diagnostics: dict[str, Any] = {}
 
-    shape_ref, used_lb = _choose_shape_ref(support, src_xsec, dst_xsec, lane_boundaries_metric)
+    shape_choice = _choose_shape_ref_with_graph(
+        support=support,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        lane_boundaries_metric=lane_boundaries_metric,
+        lb_snap_m=float(lb_snap_m),
+        lb_start_end_topk=int(lb_start_end_topk),
+    )
+    shape_ref = shape_choice.line
+    used_lb = bool(shape_choice.used_lane_boundary)
     if shape_ref is None:
         hard_flags.add(HARD_CENTER_EMPTY)
+        soft_flags.add(SOFT_NO_LB_PATH)
         return CenterEstimate(
             centerline_metric=None,
             shape_ref_metric=None,
+            lb_path_found=False,
+            lb_path_edge_count=0,
             stable_offset_m_src=None,
             stable_offset_m_dst=None,
             center_sample_coverage=0.0,
@@ -1079,6 +1146,8 @@ def estimate_centerline(
             dst_stable_s_m=None,
             src_cut_mode="fallback_50m",
             dst_cut_mode="fallback_50m",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
@@ -1088,6 +1157,7 @@ def estimate_centerline(
 
     if not used_lb:
         soft_flags.add(SOFT_NO_LB)
+        soft_flags.add(SOFT_NO_LB_PATH)
 
     ss, sp, tv, nv = _sample_line(shape_ref, step_m=center_sample_step_m)
     if sp.shape[0] < 2:
@@ -1095,6 +1165,8 @@ def estimate_centerline(
         return CenterEstimate(
             centerline_metric=None,
             shape_ref_metric=shape_ref,
+            lb_path_found=bool(shape_choice.lb_path_found),
+            lb_path_edge_count=int(shape_choice.lb_path_edge_count),
             stable_offset_m_src=None,
             stable_offset_m_dst=None,
             center_sample_coverage=0.0,
@@ -1116,6 +1188,8 @@ def estimate_centerline(
             dst_stable_s_m=None,
             src_cut_mode="fallback_50m",
             dst_cut_mode="fallback_50m",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
@@ -1156,6 +1230,8 @@ def estimate_centerline(
         return CenterEstimate(
             centerline_metric=None,
             shape_ref_metric=shape_ref,
+            lb_path_found=bool(shape_choice.lb_path_found),
+            lb_path_edge_count=int(shape_choice.lb_path_edge_count),
             stable_offset_m_src=None,
             stable_offset_m_dst=None,
             center_sample_coverage=float(coverage),
@@ -1177,6 +1253,8 @@ def estimate_centerline(
             dst_stable_s_m=None,
             src_cut_mode="fallback_50m",
             dst_cut_mode="fallback_50m",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
@@ -1236,12 +1314,15 @@ def estimate_centerline(
     if src_decision.short_base_proxy or dst_decision.short_base_proxy:
         diagnostics["short_road_base_proxy"] = True
 
+    center_samples = sp + nv * smoothed_clamped[:, None]
     centerline = _offset_line(sample_points=sp, normals=nv, offsets=smoothed_clamped)
     if centerline is None or centerline.length <= 0:
         hard_flags.add(HARD_CENTER_EMPTY)
         return CenterEstimate(
             centerline_metric=None,
             shape_ref_metric=shape_ref,
+            lb_path_found=bool(shape_choice.lb_path_found),
+            lb_path_edge_count=int(shape_choice.lb_path_edge_count),
             stable_offset_m_src=stable_src,
             stable_offset_m_dst=stable_dst,
             center_sample_coverage=float(coverage),
@@ -1263,6 +1344,8 @@ def estimate_centerline(
             dst_stable_s_m=dst_decision.stable_s_m,
             src_cut_mode=src_decision.cut_mode,
             dst_cut_mode=dst_decision.cut_mode,
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
@@ -1278,18 +1361,39 @@ def estimate_centerline(
         if isinstance(simp, LineString) and not simp.is_empty and len(simp.coords) >= 2:
             centerline = simp
 
-    clipped, clip_reason = clip_line_to_cross_sections(
-        centerline,
-        src_xsec,
-        dst_xsec,
-        endpoint_tol_m=endpoint_tol_m,
+    trend_line, trend_dev_src, trend_dev_dst, trend_reason = _apply_endpoint_trend_projection(
+        base_line=centerline,
+        sample_stations=ss,
+        sample_center_points=center_samples,
+        src_decision=src_decision,
+        dst_decision=dst_decision,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        trend_fit_win_m=float(trend_fit_win_m),
+        gore_zone_metric=divstrip_zone_metric,
+        endpoint_tol_m=float(endpoint_tol_m),
+        road_max_vertices=int(road_max_vertices),
     )
+    if trend_line is None:
+        clipped, clip_reason = clip_line_to_cross_sections(
+            centerline,
+            src_xsec,
+            dst_xsec,
+            endpoint_tol_m=endpoint_tol_m,
+        )
+        trend_dev_src = None
+        trend_dev_dst = None
+    else:
+        clipped = trend_line
+        clip_reason = trend_reason
 
     if clipped is None:
         hard_flags.add(clip_reason or HARD_CENTER_EMPTY)
         return CenterEstimate(
             centerline_metric=None,
             shape_ref_metric=shape_ref,
+            lb_path_found=bool(shape_choice.lb_path_found),
+            lb_path_edge_count=int(shape_choice.lb_path_edge_count),
             stable_offset_m_src=stable_src,
             stable_offset_m_dst=stable_dst,
             center_sample_coverage=float(coverage),
@@ -1311,6 +1415,8 @@ def estimate_centerline(
             dst_stable_s_m=dst_decision.stable_s_m,
             src_cut_mode=src_decision.cut_mode,
             dst_cut_mode=dst_decision.cut_mode,
+            endpoint_tangent_deviation_deg_src=trend_dev_src,
+            endpoint_tangent_deviation_deg_dst=trend_dev_dst,
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
@@ -1349,12 +1455,16 @@ def estimate_centerline(
     )
     diagnostics["endpoint_center_offset_m_src"] = endpoint_src
     diagnostics["endpoint_center_offset_m_dst"] = endpoint_dst
+    diagnostics["endpoint_tangent_deviation_deg_src"] = trend_dev_src
+    diagnostics["endpoint_tangent_deviation_deg_dst"] = trend_dev_dst
     diagnostics["src_cut_mode"] = src_decision.cut_mode
     diagnostics["dst_cut_mode"] = dst_decision.cut_mode
 
     return CenterEstimate(
         centerline_metric=clipped,
         shape_ref_metric=shape_ref,
+        lb_path_found=bool(shape_choice.lb_path_found),
+        lb_path_edge_count=int(shape_choice.lb_path_edge_count),
         stable_offset_m_src=stable_src,
         stable_offset_m_dst=stable_dst,
         center_sample_coverage=float(coverage),
@@ -1376,6 +1486,8 @@ def estimate_centerline(
         dst_stable_s_m=dst_decision.stable_s_m,
         src_cut_mode=src_decision.cut_mode,
         dst_cut_mode=dst_decision.cut_mode,
+        endpoint_tangent_deviation_deg_src=trend_dev_src,
+        endpoint_tangent_deviation_deg_dst=trend_dev_dst,
         endpoint_center_offset_m_src=endpoint_src,
         endpoint_center_offset_m_dst=endpoint_dst,
         soft_flags=soft_flags,
@@ -1422,6 +1534,273 @@ def clip_line_to_cross_sections(
     return seg, None
 
 
+def _apply_endpoint_trend_projection(
+    *,
+    base_line: LineString,
+    sample_stations: np.ndarray,
+    sample_center_points: np.ndarray,
+    src_decision: _EndStableDecision,
+    dst_decision: _EndStableDecision,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    trend_fit_win_m: float,
+    gore_zone_metric: BaseGeometry | None,
+    endpoint_tol_m: float,
+    road_max_vertices: int,
+) -> tuple[LineString | None, float | None, float | None, str | None]:
+    if base_line.is_empty or base_line.length <= 0:
+        return None, None, None, HARD_CENTER_EMPTY
+    if sample_center_points.shape[0] < 2 or sample_stations.size != sample_center_points.shape[0]:
+        return None, None, None, HARD_CENTER_EMPTY
+
+    n = int(sample_center_points.shape[0])
+    if src_decision.anchor_station_m is None or dst_decision.anchor_station_m is None:
+        return None, None, None, HARD_CENTER_EMPTY
+    i_src = int(np.argmin(np.abs(sample_stations - float(src_decision.anchor_station_m))))
+    i_dst = int(np.argmin(np.abs(sample_stations - float(dst_decision.anchor_station_m))))
+    i_src = max(0, min(n - 1, i_src))
+    i_dst = max(0, min(n - 1, i_dst))
+    if i_dst <= i_src:
+        return None, None, None, HARD_CENTER_EMPTY
+
+    src_anchor = sample_center_points[i_src, :]
+    dst_anchor = sample_center_points[i_dst, :]
+
+    t_src = _fit_endpoint_trend(
+        stations=sample_stations,
+        points=sample_center_points,
+        anchor_idx=i_src,
+        from_src=True,
+        fit_win_m=max(5.0, float(trend_fit_win_m)),
+    )
+    t_dst = _fit_endpoint_trend(
+        stations=sample_stations,
+        points=sample_center_points,
+        anchor_idx=i_dst,
+        from_src=False,
+        fit_win_m=max(5.0, float(trend_fit_win_m)),
+    )
+    if t_src is None or t_dst is None:
+        return None, None, None, HARD_CENTER_EMPTY
+
+    p_src = _project_trend_to_xsec(
+        anchor_xy=(float(src_anchor[0]), float(src_anchor[1])),
+        trend_xy=t_src,
+        xsec=src_xsec,
+    )
+    p_dst = _project_trend_to_xsec(
+        anchor_xy=(float(dst_anchor[0]), float(dst_anchor[1])),
+        trend_xy=t_dst,
+        xsec=dst_xsec,
+    )
+    if p_src is None or p_dst is None:
+        return None, None, None, HARD_CENTER_EMPTY
+
+    p_src = _adjust_endpoint_on_xsec_gore(
+        endpoint_xy=p_src,
+        xsec=src_xsec,
+        gore_zone_metric=gore_zone_metric,
+    )
+    p_dst = _adjust_endpoint_on_xsec_gore(
+        endpoint_xy=p_dst,
+        xsec=dst_xsec,
+        gore_zone_metric=gore_zone_metric,
+    )
+
+    coords: list[tuple[float, float]] = []
+    coords.append((float(p_src[0]), float(p_src[1])))
+    coords.append((float(src_anchor[0]), float(src_anchor[1])))
+    for i in range(i_src + 1, i_dst):
+        coords.append((float(sample_center_points[i, 0]), float(sample_center_points[i, 1])))
+    coords.append((float(dst_anchor[0]), float(dst_anchor[1])))
+    coords.append((float(p_dst[0]), float(p_dst[1])))
+    coords = _dedup_coords(coords, eps=1e-4)
+    if len(coords) < 2:
+        return None, None, None, HARD_CENTER_EMPTY
+    line = LineString(coords)
+    if line.is_empty or line.length <= 0:
+        return None, None, None, HARD_CENTER_EMPTY
+    line = _limit_vertices(line, road_max_vertices)
+
+    p0 = Point(line.coords[0])
+    p1 = Point(line.coords[-1])
+    d0 = float(p0.distance(src_xsec))
+    d1 = float(p1.distance(dst_xsec))
+    if d0 > float(endpoint_tol_m) or d1 > float(endpoint_tol_m):
+        return None, None, None, HARD_ENDPOINT
+
+    dev_src = None
+    dev_dst = None
+    if len(line.coords) >= 2:
+        sv = (
+            float(line.coords[1][0] - line.coords[0][0]),
+            float(line.coords[1][1] - line.coords[0][1]),
+        )
+        ev = (
+            float(line.coords[-1][0] - line.coords[-2][0]),
+            float(line.coords[-1][1] - line.coords[-2][1]),
+        )
+        dev_src = _angle_deg(_unit_vec(np.asarray([sv[0], sv[1]], dtype=np.float64)), _unit_vec(np.asarray(t_src)))
+        dev_dst = _angle_deg(_unit_vec(np.asarray([ev[0], ev[1]], dtype=np.float64)), _unit_vec(np.asarray(t_dst)))
+
+    return line, dev_src, dev_dst, None
+
+
+def _fit_endpoint_trend(
+    *,
+    stations: np.ndarray,
+    points: np.ndarray,
+    anchor_idx: int,
+    from_src: bool,
+    fit_win_m: float,
+) -> tuple[float, float] | None:
+    n = int(points.shape[0])
+    if n < 2:
+        return None
+    anchor_idx = max(0, min(n - 1, int(anchor_idx)))
+    anchor_s = float(stations[anchor_idx])
+
+    if from_src:
+        mask = (stations >= max(0.0, anchor_s - float(fit_win_m)) - 1e-9) & (stations <= anchor_s + 1e-9)
+    else:
+        mask = (stations >= anchor_s - 1e-9) & (stations <= min(float(stations[-1]), anchor_s + float(fit_win_m)) + 1e-9)
+    idx = np.flatnonzero(mask)
+    if idx.size < 3:
+        lo = max(0, anchor_idx - 2)
+        hi = min(n, anchor_idx + 3)
+        idx = np.arange(lo, hi, dtype=np.int64)
+    if idx.size < 2:
+        return None
+
+    pts = points[idx, :]
+    ctr = np.mean(pts, axis=0)
+    rel = pts - ctr[None, :]
+    try:
+        cov = np.cov(rel.T)
+        eig_vals, eig_vecs = np.linalg.eigh(cov)
+        vec = eig_vecs[:, int(np.argmax(eig_vals))]
+    except Exception:
+        vec = rel[-1, :] - rel[0, :]
+    if not np.isfinite(vec).all():
+        return None
+    if np.linalg.norm(vec) <= 1e-9:
+        return None
+    vec_u = np.asarray(_unit_vec(vec), dtype=np.float64)
+
+    if from_src:
+        side_idx = max(0, anchor_idx - min(2, anchor_idx))
+    else:
+        side_idx = min(n - 1, anchor_idx + min(2, n - 1 - anchor_idx))
+    side_vec = points[side_idx, :] - points[anchor_idx, :]
+    if np.linalg.norm(side_vec) > 1e-9 and float(np.dot(vec_u, side_vec)) < 0.0:
+        vec_u = -vec_u
+
+    return (float(vec_u[0]), float(vec_u[1]))
+
+
+def _project_trend_to_xsec(
+    *,
+    anchor_xy: tuple[float, float],
+    trend_xy: tuple[float, float],
+    xsec: LineString,
+) -> tuple[float, float] | None:
+    t = np.asarray([float(trend_xy[0]), float(trend_xy[1])], dtype=np.float64)
+    if np.linalg.norm(t) <= 1e-9:
+        return None
+    t = np.asarray(_unit_vec(t), dtype=np.float64)
+    a = np.asarray([float(anchor_xy[0]), float(anchor_xy[1])], dtype=np.float64)
+    seg = LineString(
+        [
+            (float(a[0] - 5000.0 * t[0]), float(a[1] - 5000.0 * t[1])),
+            (float(a[0] + 5000.0 * t[0]), float(a[1] + 5000.0 * t[1])),
+        ]
+    )
+    try:
+        inter = seg.intersection(xsec)
+    except Exception:
+        inter = None
+    p_xy = _pick_nearest_point_xy(inter, ref_xy=anchor_xy)
+    if p_xy is not None:
+        return p_xy
+    try:
+        _lp, xp = nearest_points(seg, xsec)
+    except Exception:
+        return None
+    xp_xy = point_xy_safe(xp, context="trend_project_nearest")
+    if xp_xy is None:
+        return None
+    return (float(xp_xy[0]), float(xp_xy[1]))
+
+
+def _pick_nearest_point_xy(geom: Any, *, ref_xy: tuple[float, float]) -> tuple[float, float] | None:
+    if geom is None:
+        return None
+    gtype = getattr(geom, "geom_type", "")
+    if gtype == "Point":
+        return point_xy_safe(geom, context="pick_nearest_point")
+    if gtype == "MultiPoint":
+        best = None
+        best_d = float("inf")
+        for g in getattr(geom, "geoms", []):
+            xy = point_xy_safe(g, context="pick_nearest_multipoint")
+            if xy is None:
+                continue
+            d = math.hypot(float(xy[0]) - float(ref_xy[0]), float(xy[1]) - float(ref_xy[1]))
+            if d < best_d:
+                best_d = d
+                best = xy
+        return best
+    if gtype in {"LineString", "LinearRing", "MultiLineString", "Polygon", "MultiPolygon", "GeometryCollection"}:
+        rp = point_xy_safe(geom, context="pick_nearest_fallback")
+        if rp is not None:
+            return (float(rp[0]), float(rp[1]))
+    return None
+
+
+def _adjust_endpoint_on_xsec_gore(
+    *,
+    endpoint_xy: tuple[float, float],
+    xsec: LineString,
+    gore_zone_metric: BaseGeometry | None,
+) -> tuple[float, float]:
+    out = (float(endpoint_xy[0]), float(endpoint_xy[1]))
+    if gore_zone_metric is None:
+        return out
+    try:
+        if not bool(contains_xy(gore_zone_metric, np.asarray([out[0]]), np.asarray([out[1]])).item()):
+            return out
+    except Exception:
+        return out
+    if xsec.is_empty or xsec.length <= 0:
+        return out
+    ref_pt = Point(out[0], out[1])
+    try:
+        s0 = float(xsec.project(ref_pt))
+    except Exception:
+        s0 = 0.0
+    L = float(xsec.length)
+    offsets = np.linspace(-20.0, 20.0, 81, dtype=np.float64)
+    for off in offsets[np.argsort(np.abs(offsets))]:
+        s = min(L, max(0.0, s0 + float(off)))
+        p = xsec.interpolate(s)
+        p_xy = point_xy_safe(p, context="adjust_gore_candidate")
+        if p_xy is None:
+            continue
+        try:
+            in_gore = bool(
+                contains_xy(
+                    gore_zone_metric,
+                    np.asarray([float(p_xy[0])], dtype=np.float64),
+                    np.asarray([float(p_xy[1])], dtype=np.float64),
+                ).item()
+            )
+        except Exception:
+            in_gore = False
+        if not in_gore:
+            return (float(p_xy[0]), float(p_xy[1]))
+    return out
+
+
 def compute_max_turn_deg_per_10m(line: LineString) -> float | None:
     coords = np.asarray(line.coords, dtype=np.float64)
     if coords.shape[0] < 3:
@@ -1444,6 +1823,19 @@ def compute_max_turn_deg_per_10m(line: LineString) -> float | None:
             max_val = scaled
 
     return float(max_val)
+
+
+def compute_max_segment_m(line: LineString) -> float | None:
+    if line.is_empty:
+        return None
+    coords = np.asarray(line.coords, dtype=np.float64)
+    if coords.shape[0] < 2:
+        return None
+    seg = coords[1:, :] - coords[:-1, :]
+    d = np.linalg.norm(seg, axis=1)
+    if d.size == 0:
+        return None
+    return float(np.max(d))
 
 
 def _kind_to_node_type(kind: int) -> str:
@@ -1857,26 +2249,231 @@ def _choose_shape_ref(
     src_xsec: LineString,
     dst_xsec: LineString,
     lane_boundaries_metric: Sequence[LineString],
-) -> tuple[LineString | None, bool]:
-    src_buf = src_xsec.buffer(0.5)
-    dst_buf = dst_xsec.buffer(0.5)
+) -> _ShapeRefChoice:
+    return _choose_shape_ref_with_graph(
+        support=support,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        lane_boundaries_metric=lane_boundaries_metric,
+        lb_snap_m=1.0,
+        lb_start_end_topk=5,
+    )
 
-    candidates: list[LineString] = []
-    for lb in lane_boundaries_metric:
-        if lb.is_empty or lb.length <= 0:
-            continue
-        if lb.intersects(src_buf) and lb.intersects(dst_buf):
-            candidates.append(lb)
 
-    if candidates:
-        best = max(candidates, key=lambda g: g.length)
-        return _orient_line(best, src_xsec, dst_xsec), True
+def _choose_shape_ref_with_graph(
+    *,
+    support: PairSupport,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    lane_boundaries_metric: Sequence[LineString],
+    lb_snap_m: float,
+    lb_start_end_topk: int,
+) -> _ShapeRefChoice:
+    lb_path = _build_lb_graph_path(
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        lane_boundaries_metric=lane_boundaries_metric,
+        snap_m=max(0.1, float(lb_snap_m)),
+        topk=max(1, int(lb_start_end_topk)),
+    )
+    if lb_path is not None and lb_path[0] is not None:
+        return _ShapeRefChoice(
+            line=_orient_line(lb_path[0], src_xsec, dst_xsec),
+            used_lane_boundary=True,
+            lb_path_found=True,
+            lb_path_edge_count=int(lb_path[1]),
+        )
 
     if support.traj_segments:
         best = max(support.traj_segments, key=lambda g: g.length)
-        return _orient_line(best, src_xsec, dst_xsec), False
+        return _ShapeRefChoice(
+            line=_orient_line(best, src_xsec, dst_xsec),
+            used_lane_boundary=False,
+            lb_path_found=False,
+            lb_path_edge_count=0,
+        )
 
-    return None, False
+    return _ShapeRefChoice(
+        line=None,
+        used_lane_boundary=False,
+        lb_path_found=False,
+        lb_path_edge_count=0,
+    )
+
+
+def _build_lb_graph_path(
+    *,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    lane_boundaries_metric: Sequence[LineString],
+    snap_m: float,
+    topk: int,
+) -> tuple[LineString, int] | None:
+    if not lane_boundaries_metric:
+        return None
+
+    nodes_xy: list[tuple[float, float]] = []
+    edges: list[_LbGraphEdge] = []
+    adj: dict[int, list[tuple[int, int, bool]]] = {}
+
+    def _snap_node(xy: tuple[float, float]) -> int:
+        if not nodes_xy:
+            nodes_xy.append((float(xy[0]), float(xy[1])))
+            return 0
+        best_idx = -1
+        best_dist = float("inf")
+        for i, p in enumerate(nodes_xy):
+            d = math.hypot(float(xy[0]) - p[0], float(xy[1]) - p[1])
+            if d <= snap_m + 1e-9 and d < best_dist:
+                best_idx = int(i)
+                best_dist = float(d)
+        if best_idx >= 0:
+            return best_idx
+        nodes_xy.append((float(xy[0]), float(xy[1])))
+        return int(len(nodes_xy) - 1)
+
+    for lb in lane_boundaries_metric:
+        if lb is None or lb.is_empty or lb.length <= 0:
+            continue
+        coords = list(lb.coords)
+        if len(coords) < 2:
+            continue
+        for i in range(len(coords) - 1):
+            p0 = (float(coords[i][0]), float(coords[i][1]))
+            p1 = (float(coords[i + 1][0]), float(coords[i + 1][1]))
+            seg_len = float(math.hypot(p1[0] - p0[0], p1[1] - p0[1]))
+            if seg_len <= 1e-6:
+                continue
+            u = _snap_node(p0)
+            v = _snap_node(p1)
+            if u == v:
+                continue
+            eidx = len(edges)
+            edges.append(_LbGraphEdge(u=u, v=v, length=seg_len, coords=(p0, p1)))
+            adj.setdefault(u, []).append((v, eidx, True))
+            adj.setdefault(v, []).append((u, eidx, False))
+
+    if not nodes_xy or not edges:
+        return None
+
+    start_nodes = _rank_lb_nodes_for_xsec(nodes_xy=nodes_xy, xsec=src_xsec, topk=topk)
+    end_nodes = _rank_lb_nodes_for_xsec(nodes_xy=nodes_xy, xsec=dst_xsec, topk=topk)
+    if start_nodes and end_nodes:
+        start_set = {int(v) for v in start_nodes}
+        end_filtered = [int(v) for v in end_nodes if int(v) not in start_set]
+        if end_filtered:
+            end_nodes = end_filtered
+        elif start_set == {int(v) for v in end_nodes}:
+            start_nodes = [int(start_nodes[0])]
+            end_pick = int(end_nodes[0])
+            if end_pick == int(start_nodes[0]) and len(end_nodes) > 1:
+                end_pick = int(end_nodes[1])
+            end_nodes = [end_pick]
+    if not start_nodes or not end_nodes:
+        return None
+
+    best = _dijkstra_lb_path(
+        start_nodes=start_nodes,
+        end_nodes=end_nodes,
+        adj=adj,
+        edges=edges,
+    )
+    if best is None:
+        return None
+    path_nodes, path_edge_refs = best
+    if len(path_nodes) < 2 or len(path_edge_refs) < 1:
+        return None
+
+    coords: list[tuple[float, float]] = []
+    for edge_idx, forward in path_edge_refs:
+        e = edges[edge_idx]
+        seg = [e.coords[0], e.coords[1]] if forward else [e.coords[1], e.coords[0]]
+        _append_coords(coords, seg)
+    coords = _dedup_coords(coords, eps=1e-3)
+    if len(coords) < 2:
+        return None
+    line = LineString(coords)
+    if line.is_empty or line.length <= 0:
+        return None
+    return line, int(len(path_edge_refs))
+
+
+def _rank_lb_nodes_for_xsec(
+    *,
+    nodes_xy: Sequence[tuple[float, float]],
+    xsec: LineString,
+    topk: int,
+) -> list[int]:
+    if not nodes_xy:
+        return []
+    scores: list[tuple[float, int]] = []
+    for i, xy in enumerate(nodes_xy):
+        try:
+            d = float(Point(float(xy[0]), float(xy[1])).distance(xsec))
+        except Exception:
+            d = float("inf")
+        scores.append((d, int(i)))
+    scores.sort(key=lambda it: (it[0], it[1]))
+    out = [idx for _, idx in scores[: max(1, int(topk))]]
+    return out
+
+
+def _dijkstra_lb_path(
+    *,
+    start_nodes: Sequence[int],
+    end_nodes: Sequence[int],
+    adj: dict[int, list[tuple[int, int, bool]]],
+    edges: Sequence[_LbGraphEdge],
+) -> tuple[list[int], list[tuple[int, bool]]] | None:
+    target_set = {int(v) for v in end_nodes}
+    start_set = {int(v) for v in start_nodes}
+    if not target_set:
+        return None
+
+    best: dict[int, float] = {}
+    prev: dict[int, tuple[int, int, bool]] = {}
+    heap: list[tuple[float, int]] = []
+    for s in start_nodes:
+        s_int = int(s)
+        best[s_int] = 0.0
+        heapq.heappush(heap, (0.0, s_int))
+
+    end_hit: int | None = None
+    while heap:
+        dist, node = heapq.heappop(heap)
+        cur_best = best.get(node)
+        if cur_best is None or dist > cur_best + 1e-9:
+            continue
+        if node in target_set and not (node in start_set and dist <= 1e-9):
+            end_hit = int(node)
+            break
+        for nei, eidx, forward in adj.get(node, []):
+            w = float(edges[eidx].length)
+            nd = float(dist + w)
+            old = best.get(int(nei))
+            if old is not None and nd >= old - 1e-9:
+                continue
+            best[int(nei)] = nd
+            prev[int(nei)] = (int(node), int(eidx), bool(forward))
+            heapq.heappush(heap, (nd, int(nei)))
+
+    if end_hit is None:
+        return None
+
+    nodes_out: list[int] = [int(end_hit)]
+    edge_out: list[tuple[int, bool]] = []
+    cur = int(end_hit)
+    while cur not in start_set:
+        p = prev.get(cur)
+        if p is None:
+            return None
+        prev_node, edge_idx, forward = p
+        edge_out.append((int(edge_idx), bool(forward)))
+        nodes_out.append(int(prev_node))
+        cur = int(prev_node)
+    nodes_out.reverse()
+    edge_out.reverse()
+    return nodes_out, edge_out
 
 
 def _orient_line(line: LineString, src_xsec: LineString, dst_xsec: LineString) -> LineString:
@@ -2549,6 +3146,7 @@ __all__ = [
     "CrossingExtractResult",
     "HARD_CENTER_EMPTY",
     "HARD_ENDPOINT",
+    "HARD_BRIDGE_SEGMENT",
     "HARD_MULTI_ROAD",
     "HARD_NON_RC",
     "PairSupport",
@@ -2556,13 +3154,18 @@ __all__ = [
     "SOFT_LOW_SUPPORT",
     "SOFT_DIVSTRIP_MISSING",
     "SOFT_NO_LB",
+    "SOFT_NO_LB_PATH",
     "SOFT_NO_STABLE_SECTION",
     "SOFT_OPEN_END",
+    "SOFT_ROAD_OUTSIDE_TRAJ_SURFACE",
     "SOFT_SPARSE_POINTS",
+    "SOFT_TRAJ_SURFACE_GAP",
+    "SOFT_TRAJ_SURFACE_INSUFFICIENT",
     "SOFT_UNRESOLVED_NEIGHBOR",
     "SOFT_WIGGLY",
     "build_pair_supports",
     "clip_line_to_cross_sections",
+    "compute_max_segment_m",
     "compute_max_turn_deg_per_10m",
     "estimate_centerline",
     "extract_crossing_events",
