@@ -43,6 +43,9 @@ class CrossingExtractResult:
     events_by_traj: dict[str, list[CrossingEvent]]
     raw_hit_count: int
     dedup_drop_count: int
+    n_cross_empty_skipped: int
+    n_cross_geom_unexpected: int
+    n_cross_distance_gate_reject: int
 
 
 @dataclass
@@ -101,21 +104,31 @@ def extract_crossing_events(
     out: dict[str, list[CrossingEvent]] = {}
     raw_hit_count = 0
     dedup_drop_count = 0
+    n_cross_empty_skipped = 0
+    n_cross_geom_unexpected = 0
+    n_cross_distance_gate_reject = 0
 
     if not cross_sections:
         return CrossingExtractResult(
             events_by_traj=out,
             raw_hit_count=0,
             dedup_drop_count=0,
+            n_cross_empty_skipped=0,
+            n_cross_geom_unexpected=0,
+            n_cross_distance_gate_reject=0,
         )
 
-    xsecs: list[tuple[int, LineString, Any, Point]] = []
+    xsecs: list[tuple[int, LineString, Point]] = []
     for x in cross_sections:
         geom = x.geometry_metric
         if geom.is_empty or geom.length <= 0:
             continue
         center = geom.interpolate(0.5, normalized=True)
-        xsecs.append((x.nodeid, geom, geom.buffer(hit_buffer_m), center))
+        center_xy = point_xy_safe(center, context="xsec_center")
+        if center_xy is None:
+            n_cross_empty_skipped += 1
+            continue
+        xsecs.append((x.nodeid, geom, Point(center_xy[0], center_xy[1])))
 
     for traj in trajectories:
         coords = np.asarray(traj.xyz_metric[:, :2], dtype=np.float64)
@@ -134,19 +147,37 @@ def extract_crossing_events(
                 continue
 
             seg = LineString([tuple(p0), tuple(p1)])
+            if seg.is_empty or seg.length <= 1e-9:
+                n_cross_geom_unexpected += 1
+                continue
             seg_heading = _unit_vec(p1 - p0)
             seg_len = float(np.linalg.norm(p1 - p0))
-            for nodeid, xline, xbuf, xcenter in xsecs:
-                if not seg.intersects(xbuf):
+            for nodeid, xline, xcenter in xsecs:
+                if xline.is_empty or xline.length <= 0:
+                    n_cross_geom_unexpected += 1
+                    continue
+                try:
+                    dist_seg_xsec = float(seg.distance(xline))
+                except Exception:
+                    n_cross_geom_unexpected += 1
+                    continue
+                if not math.isfinite(dist_seg_xsec):
+                    n_cross_geom_unexpected += 1
+                    continue
+                if dist_seg_xsec > float(hit_buffer_m):
+                    n_cross_distance_gate_reject += 1
                     continue
 
                 cp = _segment_cross_point(seg, xline)
-                if cp is None:
+                cp_xy = point_xy_safe(cp, context="cross_event")
+                if cp_xy is None:
+                    n_cross_empty_skipped += 1
                     continue
 
-                frac = _segment_fraction(cp, p0, p1)
+                frac = _segment_fraction_xy(cp_xy, p0, p1)
                 seq_val = int(round(float(seq[i] + frac * (seq[i + 1] - seq[i]))))
                 station_m = float(station[i] + frac * seg_len)
+                cp_point = Point(cp_xy[0], cp_xy[1])
                 events.append(
                     CrossingEvent(
                         traj_id=traj.traj_id,
@@ -155,9 +186,9 @@ def extract_crossing_events(
                         seg_idx=int(i),
                         seq_idx=int(i),
                         station_m=station_m,
-                        cross_point=cp,
+                        cross_point=cp_point,
                         heading_xy=seg_heading,
-                        cross_dist_m=float(cp.distance(xcenter)),
+                        cross_dist_m=float(cp_point.distance(xcenter)),
                     )
                 )
                 raw_hit_count += 1
@@ -171,6 +202,9 @@ def extract_crossing_events(
         events_by_traj=out,
         raw_hit_count=int(raw_hit_count),
         dedup_drop_count=int(dedup_drop_count),
+        n_cross_empty_skipped=int(n_cross_empty_skipped),
+        n_cross_geom_unexpected=int(n_cross_geom_unexpected),
+        n_cross_distance_gate_reject=int(n_cross_distance_gate_reject),
     )
 
 
@@ -256,10 +290,14 @@ def build_pair_supports(
                 traj_line_map=graph.traj_line_map,
             )
             if path_line is None or path_line.length <= 0:
+                src_xy = point_xy_safe(ev.cross_point, context="pair_path_fallback_src")
+                dst_xy = point_xy_safe(target_node.point, context="pair_path_fallback_dst")
+                if src_xy is None or dst_xy is None:
+                    continue
                 path_line = LineString(
                     [
-                        (float(ev.cross_point.x), float(ev.cross_point.y)),
-                        (float(target_node.point.x), float(target_node.point.y)),
+                        (float(src_xy[0]), float(src_xy[1])),
+                        (float(dst_xy[0]), float(dst_xy[1])),
                     ]
                 )
 
@@ -502,12 +540,18 @@ def _build_forward_graph(
         start_grid: dict[tuple[int, int], list[str]] = {}
         for sk in start_keys:
             sn = nodes[sk]
-            key = _grid_key(sn.point.x, sn.point.y, cell)
+            sn_xy = point_xy_safe(sn.point, context="stitch_start_grid")
+            if sn_xy is None:
+                continue
+            key = _grid_key(float(sn_xy[0]), float(sn_xy[1]), cell)
             start_grid.setdefault(key, []).append(sk)
 
         for ek in end_keys:
             en = nodes[ek]
-            gx, gy = _grid_key(en.point.x, en.point.y, cell)
+            en_xy = point_xy_safe(en.point, context="stitch_end_grid")
+            if en_xy is None:
+                continue
+            gx, gy = _grid_key(float(en_xy[0]), float(en_xy[1]), cell)
             cands: list[tuple[float, float, str, str]] = []
             for ix in range(gx - 1, gx + 2):
                 for iy in range(gy - 1, gy + 2):
@@ -679,7 +723,11 @@ def _build_path_linestring(
                 if isinstance(part, LineString) and not part.is_empty and len(part.coords) >= 2:
                     seg = part
         if seg is None:
-            seg = LineString([(float(from_node.point.x), float(from_node.point.y)), (float(to_node.point.x), float(to_node.point.y))])
+            from_xy = point_xy_safe(from_node.point, context="build_path_from")
+            to_xy = point_xy_safe(to_node.point, context="build_path_to")
+            if from_xy is None or to_xy is None:
+                continue
+            seg = LineString([(float(from_xy[0]), float(from_xy[1])), (float(to_xy[0]), float(to_xy[1]))])
         _append_coords(coords, list(seg.coords))
 
     coords = _dedup_coords(coords, eps=1e-4)
@@ -1048,14 +1096,14 @@ def _detect_multi_road_channels(
     use_n = min(n, max(3, int(topn)))
     mids = np.zeros((use_n, 2), dtype=np.float64)
     for i in range(use_n):
-        line = support.traj_segments[i]
-        if line is not None and not line.is_empty and line.length > 0:
-            p = line.interpolate(0.5, normalized=True)
-            mids[i, :] = [float(p.x), float(p.y)]
-        else:
-            sp = support.src_cross_points[i]
-            dp = support.dst_cross_points[i]
-            mids[i, :] = [0.5 * (float(sp.x) + float(dp.x)), 0.5 * (float(sp.y) + float(dp.y))]
+        mid_xy = _safe_midpoint_xy(
+            support.traj_segments[i],
+            support.src_cross_points[i],
+            support.dst_cross_points[i],
+        )
+        if mid_xy is None:
+            return False, None
+        mids[i, :] = [float(mid_xy[0]), float(mid_xy[1])]
 
     if mids.shape[0] < 4:
         return False, None
@@ -1075,14 +1123,14 @@ def _detect_multi_road_channels(
 
     radial_all = np.zeros((n,), dtype=np.float64)
     for i in range(n):
-        line = support.traj_segments[i]
-        if line is not None and not line.is_empty and line.length > 0:
-            p = line.interpolate(0.5, normalized=True)
-            mid = np.asarray([float(p.x), float(p.y)], dtype=np.float64)
-        else:
-            sp = support.src_cross_points[i]
-            dp = support.dst_cross_points[i]
-            mid = np.asarray([0.5 * (float(sp.x) + float(dp.x)), 0.5 * (float(sp.y) + float(dp.y))], dtype=np.float64)
+        mid_xy = _safe_midpoint_xy(
+            support.traj_segments[i],
+            support.src_cross_points[i],
+            support.dst_cross_points[i],
+        )
+        if mid_xy is None:
+            return False, None
+        mid = np.asarray([float(mid_xy[0]), float(mid_xy[1])], dtype=np.float64)
         radial_all[i] = float(np.linalg.norm(mid - ref))
 
     cluster_counts = [0 for _ in centers]
@@ -1098,6 +1146,26 @@ def _detect_multi_road_channels(
     if not keep_idx:
         return False, None
     return True, keep_idx
+
+
+def _safe_midpoint_xy(
+    line: LineString | None,
+    src_pt: Point,
+    dst_pt: Point,
+) -> tuple[float, float] | None:
+    if line is not None and not line.is_empty and line.length > 0:
+        p = line.interpolate(0.5, normalized=True)
+        p_xy = point_xy_safe(p, context="multi_road_line_mid")
+        if p_xy is not None:
+            return p_xy
+    src_xy = point_xy_safe(src_pt, context="multi_road_src")
+    dst_xy = point_xy_safe(dst_pt, context="multi_road_dst")
+    if src_xy is None or dst_xy is None:
+        return None
+    return (
+        0.5 * (float(src_xy[0]) + float(dst_xy[0])),
+        0.5 * (float(src_xy[1]) + float(dst_xy[1])),
+    )
 
 
 def _cluster_1d(values: np.ndarray, *, tol: float) -> tuple[list[int], list[float]]:
@@ -1168,54 +1236,65 @@ def _append_coords(dst: list[tuple[float, float]], src: list[tuple[float, float]
     dst.extend([(float(x), float(y)) for x, y in src])
 
 
+def point_xy_safe(pt: Any, *, context: str) -> tuple[float, float] | None:
+    del context
+    if pt is None:
+        return None
+    try:
+        if isinstance(pt, Point):
+            if pt.is_empty:
+                return None
+            return (float(pt.x), float(pt.y))
+
+        gtype = getattr(pt, "geom_type", "")
+        if gtype == "MultiPoint":
+            for sub in getattr(pt, "geoms", []):
+                xy = point_xy_safe(sub, context="multipoint")
+                if xy is not None:
+                    return xy
+            return None
+
+        if gtype in {
+            "LineString",
+            "LinearRing",
+            "MultiLineString",
+            "Polygon",
+            "MultiPolygon",
+            "GeometryCollection",
+        }:
+            rp = pt.representative_point()
+            if rp is None or rp.is_empty:
+                return None
+            return (float(rp.x), float(rp.y))
+    except Exception:
+        return None
+    return None
+
+
 def _segment_cross_point(seg: LineString, xline: LineString) -> Point | None:
+    if seg.is_empty or xline.is_empty:
+        return None
     try:
-        inter = seg.intersection(xline)
-    except Exception:
-        inter = None
-
-    p = _geometry_to_point(inter)
-    if p is not None:
-        return p
-
-    try:
-        p0, _ = nearest_points(seg, xline)
-        if isinstance(p0, Point):
-            return p0
+        p_seg, p_xsec = nearest_points(seg, xline)
     except Exception:
         return None
 
-    return None
-
-
-def _geometry_to_point(geom: Any) -> Point | None:
-    if geom is None:
+    xy_seg = point_xy_safe(p_seg, context="nearest_seg")
+    xy_xsec = point_xy_safe(p_xsec, context="nearest_xsec")
+    if xy_seg is None or xy_xsec is None:
         return None
-    if isinstance(geom, Point):
-        return geom
-
-    gtype = getattr(geom, "geom_type", "")
-    if gtype == "MultiPoint":
-        pts = [g for g in geom.geoms if isinstance(g, Point)]
-        if not pts:
-            return None
-        return pts[0]
-    if gtype in {"LineString", "MultiLineString", "GeometryCollection"}:
-        try:
-            centroid = geom.centroid
-            if isinstance(centroid, Point):
-                return centroid
-        except Exception:
-            return None
-    return None
+    return Point(
+        0.5 * (float(xy_seg[0]) + float(xy_xsec[0])),
+        0.5 * (float(xy_seg[1]) + float(xy_xsec[1])),
+    )
 
 
-def _segment_fraction(cp: Point, p0: np.ndarray, p1: np.ndarray) -> float:
+def _segment_fraction_xy(cp_xy: tuple[float, float], p0: np.ndarray, p1: np.ndarray) -> float:
     d = p1 - p0
     l2 = float(np.dot(d, d))
     if l2 <= 1e-12:
         return 0.5
-    t = float(((cp.x - p0[0]) * d[0] + (cp.y - p0[1]) * d[1]) / l2)
+    t = float(((float(cp_xy[0]) - p0[0]) * d[0] + (float(cp_xy[1]) - p0[1]) * d[1]) / l2)
     return min(1.0, max(0.0, t))
 
 
@@ -1251,10 +1330,15 @@ def _extract_traj_segment(traj: TrajectoryData, a: CrossingEvent, b: CrossingEve
     if i1 < i0:
         i0, i1 = i1, i0
 
-    coords: list[tuple[float, float]] = [(float(a.cross_point.x), float(a.cross_point.y))]
+    a_xy = point_xy_safe(a.cross_point, context="extract_traj_segment_a")
+    b_xy = point_xy_safe(b.cross_point, context="extract_traj_segment_b")
+    if a_xy is None or b_xy is None:
+        return None
+
+    coords: list[tuple[float, float]] = [(float(a_xy[0]), float(a_xy[1]))]
     for i in range(i0 + 1, i1 + 1):
         coords.append((float(xy[i, 0]), float(xy[i, 1])))
-    coords.append((float(b.cross_point.x), float(b.cross_point.y)))
+    coords.append((float(b_xy[0]), float(b_xy[1])))
 
     coords = _dedup_coords(coords)
     if len(coords) < 2:
@@ -1337,14 +1421,26 @@ def _sample_line(line: LineString, *, step_m: float) -> tuple[np.ndarray, np.nda
 
     for i, s in enumerate(ss):
         p = line.interpolate(float(s))
-        pts[i, :] = [p.x, p.y]
+        p_xy = point_xy_safe(p, context="sample_line_point")
+        if p_xy is None:
+            if i > 0:
+                pts[i, :] = pts[i - 1, :]
+            else:
+                p0 = line.coords[0]
+                pts[i, :] = [float(p0[0]), float(p0[1])]
+        else:
+            pts[i, :] = [float(p_xy[0]), float(p_xy[1])]
 
         s0 = max(0.0, float(s - delta))
         s1 = min(length, float(s + delta))
         p0 = line.interpolate(s0)
         p1 = line.interpolate(s1)
-
-        v = np.asarray([p1.x - p0.x, p1.y - p0.y], dtype=np.float64)
+        p0_xy = point_xy_safe(p0, context="sample_line_tangent_p0")
+        p1_xy = point_xy_safe(p1, context="sample_line_tangent_p1")
+        if p0_xy is None or p1_xy is None:
+            v = np.asarray([0.0, 0.0], dtype=np.float64)
+        else:
+            v = np.asarray([float(p1_xy[0]) - float(p0_xy[0]), float(p1_xy[1]) - float(p0_xy[1])], dtype=np.float64)
         nv = np.linalg.norm(v)
         if nv <= 1e-9:
             if i > 0:
@@ -1554,8 +1650,9 @@ def _locate_on_line(line: LineString, xsec: LineString, *, tol: float) -> float 
     except Exception:
         inter = None
 
-    p = _geometry_to_point(inter)
-    if p is not None:
+    p_xy = point_xy_safe(inter, context="locate_on_line_intersection")
+    if p_xy is not None:
+        p = Point(float(p_xy[0]), float(p_xy[1]))
         try:
             return float(line.project(p))
         except Exception:
@@ -1563,9 +1660,13 @@ def _locate_on_line(line: LineString, xsec: LineString, *, tol: float) -> float 
 
     try:
         lp, xp = nearest_points(line, xsec)
-        if isinstance(lp, Point) and isinstance(xp, Point):
-            if lp.distance(xp) <= max(0.5, tol * 2.0):
-                return float(line.project(lp))
+        lp_xy = point_xy_safe(lp, context="locate_on_line_lp")
+        xp_xy = point_xy_safe(xp, context="locate_on_line_xp")
+        if lp_xy is not None and xp_xy is not None:
+            lp_p = Point(float(lp_xy[0]), float(lp_xy[1]))
+            xp_p = Point(float(xp_xy[0]), float(xp_xy[1]))
+            if lp_p.distance(xp_p) <= max(0.5, tol * 2.0):
+                return float(line.project(lp_p))
     except Exception:
         return None
 
@@ -1626,4 +1727,5 @@ __all__ = [
     "estimate_centerline",
     "extract_crossing_events",
     "infer_node_types",
+    "point_xy_safe",
 ]

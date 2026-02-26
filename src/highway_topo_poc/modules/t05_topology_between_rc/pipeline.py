@@ -47,6 +47,9 @@ from .metrics import (
 
 _ROAD_OUT_NAME = "Road.geojson"
 _ROAD_COMPAT_OUT_NAME = "RCSDRoad.geojson"
+_SOFT_CROSS_EMPTY_SKIPPED = "CROSS_EMPTY_SKIPPED"
+_SOFT_CROSS_GEOM_UNEXPECTED = "CROSS_GEOM_UNEXPECTED"
+_SOFT_CROSS_DISTANCE_GATE_REJECT = "CROSS_DISTANCE_GATE_REJECT"
 
 
 DEFAULT_PARAMS: dict[str, float | int] = {
@@ -200,6 +203,49 @@ def _run_patch_core(
     )
     events_by_traj = cross_result.events_by_traj
 
+    if int(cross_result.n_cross_empty_skipped) > 0:
+        soft_breakpoints.append(
+            {
+                "road_id": "na",
+                "src_nodeid": None,
+                "dst_nodeid": None,
+                "traj_id": None,
+                "seq_range": None,
+                "station_range_m": None,
+                "reason": _SOFT_CROSS_EMPTY_SKIPPED,
+                "severity": "soft",
+                "hint": f"n_cross_empty_skipped={int(cross_result.n_cross_empty_skipped)}",
+            }
+        )
+    if int(cross_result.n_cross_geom_unexpected) > 0:
+        soft_breakpoints.append(
+            {
+                "road_id": "na",
+                "src_nodeid": None,
+                "dst_nodeid": None,
+                "traj_id": None,
+                "seq_range": None,
+                "station_range_m": None,
+                "reason": _SOFT_CROSS_GEOM_UNEXPECTED,
+                "severity": "soft",
+                "hint": f"n_cross_geom_unexpected={int(cross_result.n_cross_geom_unexpected)}",
+            }
+        )
+    if int(cross_result.n_cross_distance_gate_reject) > 0:
+        soft_breakpoints.append(
+            {
+                "road_id": "na",
+                "src_nodeid": None,
+                "dst_nodeid": None,
+                "traj_id": None,
+                "seq_range": None,
+                "station_range_m": None,
+                "reason": _SOFT_CROSS_DISTANCE_GATE_REJECT,
+                "severity": "soft",
+                "hint": f"n_cross_distance_gate_reject={int(cross_result.n_cross_distance_gate_reject)}",
+            }
+        )
+
     if not events_by_traj:
         hard_breakpoints.append(
             {
@@ -222,6 +268,13 @@ def _run_patch_core(
             soft_breakpoints=soft_breakpoints,
             params=params,
             overall_pass=False,
+            extra_metrics={
+                "crossing_raw_hit_count": int(cross_result.raw_hit_count),
+                "crossing_dedup_drop_count": int(cross_result.dedup_drop_count),
+                "n_cross_empty_skipped": int(cross_result.n_cross_empty_skipped),
+                "n_cross_geom_unexpected": int(cross_result.n_cross_geom_unexpected),
+                "n_cross_distance_gate_reject": int(cross_result.n_cross_distance_gate_reject),
+            },
         )
 
     supports_seed_result = build_pair_supports(
@@ -283,6 +336,9 @@ def _run_patch_core(
             extra_metrics={
                 "crossing_raw_hit_count": int(cross_result.raw_hit_count),
                 "crossing_dedup_drop_count": int(cross_result.dedup_drop_count),
+                "n_cross_empty_skipped": int(cross_result.n_cross_empty_skipped),
+                "n_cross_geom_unexpected": int(cross_result.n_cross_geom_unexpected),
+                "n_cross_distance_gate_reject": int(cross_result.n_cross_distance_gate_reject),
                 "stitch_candidate_count": int(supports_result.stitch_candidate_count),
                 "stitch_edge_count": int(supports_result.stitch_edge_count),
                 "graph_node_count": int(supports_result.graph_node_count),
@@ -470,6 +526,9 @@ def _run_patch_core(
         extra_metrics={
             "crossing_raw_hit_count": int(cross_result.raw_hit_count),
             "crossing_dedup_drop_count": int(cross_result.dedup_drop_count),
+            "n_cross_empty_skipped": int(cross_result.n_cross_empty_skipped),
+            "n_cross_geom_unexpected": int(cross_result.n_cross_geom_unexpected),
+            "n_cross_distance_gate_reject": int(cross_result.n_cross_distance_gate_reject),
             "stitch_candidate_count": int(supports_result.stitch_candidate_count),
             "stitch_edge_count": int(supports_result.stitch_edge_count),
             "graph_node_count": int(supports_result.graph_node_count),
@@ -619,6 +678,9 @@ def _reason_hint(reason: str) -> str:
         SOFT_WIGGLY: "turn_rate_exceeds_limit",
         SOFT_OPEN_END: "patch_boundary_open_end",
         SOFT_UNRESOLVED_NEIGHBOR: "stitch_graph_neighbor_unresolved",
+        _SOFT_CROSS_EMPTY_SKIPPED: "cross_point_empty_skipped",
+        _SOFT_CROSS_GEOM_UNEXPECTED: "cross_geometry_unexpected",
+        _SOFT_CROSS_DISTANCE_GATE_REJECT: "cross_distance_gate_reject",
     }
     return hints.get(reason, "")
 
@@ -666,6 +728,12 @@ def _finalize_payloads(
         params_digest_value=digest,
     )
 
+    summary_params = {**params, "params_digest": digest}
+    if extra_metrics:
+        for k, v in extra_metrics.items():
+            if str(k).startswith("n_cross_") or str(k).startswith("crossing_"):
+                summary_params[str(k)] = v
+
     summary_text = build_summary_text(
         run_id=run_id,
         git_sha=git_sha,
@@ -674,7 +742,7 @@ def _finalize_payloads(
         roads=roads,
         hard_breakpoints=hard_breakpoints,
         soft_breakpoints=soft_breakpoints,
-        params={**params, "params_digest": digest},
+        params=summary_params,
     )
 
     return {

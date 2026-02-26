@@ -283,6 +283,9 @@ def _breakpoint_sort_key(bp: dict[str, Any]) -> tuple[int, int, float]:
         "WIGGLY_CENTERLINE": 13,
         "OPEN_END": 14,
         "UNRESOLVED_NEIGHBOR": 15,
+        "CROSS_EMPTY_SKIPPED": 16,
+        "CROSS_GEOM_UNEXPECTED": 17,
+        "CROSS_DISTANCE_GATE_REJECT": 18,
     }
     r = order.get(reason, 99)
 
