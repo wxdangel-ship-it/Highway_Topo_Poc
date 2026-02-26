@@ -4,7 +4,15 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-/mnt/d/Work/Highway_Topo_Poc}"
 DATA_ROOT="${DATA_ROOT:-/mnt/d/TestData/highway_topo_poc_data/normal}"
 
-PATCH_IDS=("$@")
+DEBUG_DUMP=0
+PATCH_IDS=()
+for arg in "$@"; do
+  if [ "$arg" = "--debug" ]; then
+    DEBUG_DUMP=1
+  else
+    PATCH_IDS+=("$arg")
+  fi
+done
 if [ "${#PATCH_IDS[@]}" -eq 0 ]; then
   PATCH_IDS=("2855795596723843" "2855832070394132" "2855832875697813")
 fi
@@ -16,7 +24,7 @@ if [ ! -x "$PY" ]; then
   exit 1
 fi
 
-RUN_ID="t05_v3_$(date +%Y%m%d_%H%M%S)"
+RUN_ID="t05_v4speed_$(date +%Y%m%d_%H%M%S)"
 OUT_ROOT="$REPO_ROOT/outputs/_work/t05_topology_between_rc"
 
 cd "$REPO_ROOT"
@@ -24,6 +32,7 @@ cd "$REPO_ROOT"
 echo "REPO_ROOT=$REPO_ROOT"
 echo "DATA_ROOT=$DATA_ROOT"
 echo "RUN_ID=$RUN_ID"
+echo "DEBUG_DUMP=$DEBUG_DUMP"
 echo "PATCH_IDS=${PATCH_IDS[*]}"
 
 COMMON_ARGS=(
@@ -36,7 +45,7 @@ COMMON_ARGS=(
 for PATCH_ID in "${PATCH_IDS[@]}"; do
   echo
   echo "===== run patch $PATCH_ID ====="
-  CMD=("$PY" "${COMMON_ARGS[@]}" --patch_id "$PATCH_ID")
+  CMD=("$PY" "${COMMON_ARGS[@]}" --patch_id "$PATCH_ID" --debug_dump "$DEBUG_DUMP")
   if ! "${CMD[@]}"; then
     echo "WARN: patch run failed: $PATCH_ID"
   fi
@@ -91,6 +100,8 @@ keys = [
     "road_count",
     "neighbor_search_pass",
     "neighbor_search_pass2_used",
+    "pointcloud_cache_hit",
+    "pointcloud_selected_point_count",
     "road_outside_traj_surface_count",
     "hard_anomaly_count",
     "soft_issue_count",
@@ -102,6 +113,15 @@ keys = [
     "traj_surface_insufficient_count",
     "traj_in_ratio_p50",
     "traj_in_ratio_p90",
+    "t_load_traj",
+    "t_load_pointcloud",
+    "t_build_traj_projection",
+    "t_build_surfaces_total",
+    "t_build_lane_graph",
+    "t_shortest_path_total",
+    "t_centerline_offset",
+    "t_gate_in_ratio",
+    "t_debug_dump",
 ]
 for k in keys:
     print(f"{k}={m.get(k)}")
@@ -143,7 +163,7 @@ import json, sys
 p = sys.argv[1]
 with open(p, "r", encoding="utf-8") as f:
     it = json.load(f)
-items = it.get("items") or []
+items = it.get("topk") or it.get("items") or []
 focus = {"BRIDGE_SEGMENT_TOO_LONG", "ROAD_OUTSIDE_TRAJ_SURFACE", "MULTI_ROAD_SAME_PAIR"}
 for bp in items:
     if str(bp.get("reason")) not in focus:
@@ -159,10 +179,11 @@ for bp in items:
 PY
   fi
 
-  echo "debug_dir=$OUT_DIR/debug"
+  echo "debug_dir=$OUT_DIR/debug (enabled=$DEBUG_DUMP)"
 
 done
 
 echo
 echo "DONE run_id=$RUN_ID"
-echo "example: bash scripts/wsl_verify_t05.sh 2855795596723843 2855832070394132 2855832875697813"
+echo "example fast:  bash scripts/wsl_verify_t05.sh 2855795596723843 2855832070394132 2855832875697813"
+echo "example debug: bash scripts/wsl_verify_t05.sh --debug 2855795596723843 2855832070394132 2855832875697813"

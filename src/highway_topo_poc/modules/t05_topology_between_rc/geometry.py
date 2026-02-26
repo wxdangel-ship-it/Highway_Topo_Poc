@@ -3,6 +3,7 @@ from __future__ import annotations
 import heapq
 import math
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any, Iterable, Sequence
 
 import numpy as np
@@ -561,6 +562,10 @@ class _ShapeRefChoice:
     lb_path_found: bool
     lb_path_edge_count: int
     lb_path_length_m: float | None
+    lb_graph_build_ms: float | None = None
+    lb_shortest_path_ms: float | None = None
+    lb_graph_edge_total: int = 0
+    lb_graph_edge_filtered: int = 0
 
 
 @dataclass(frozen=True)
@@ -1110,6 +1115,8 @@ def estimate_centerline(
     lb_snap_m: float,
     lb_start_end_topk: int,
     lb_outside_lambda: float,
+    lb_outside_edge_ratio_max: float,
+    lb_surface_node_buffer_m: float,
     trend_fit_win_m: float,
     traj_surface_metric: BaseGeometry | None,
     traj_surface_enforced: bool,
@@ -1141,6 +1148,9 @@ def estimate_centerline(
         lb_start_end_topk=int(lb_start_end_topk),
         traj_surface_metric=traj_surface_metric,
         lb_outside_lambda=float(lb_outside_lambda),
+        traj_surface_enforced=bool(traj_surface_enforced),
+        outside_edge_ratio_max=float(lb_outside_edge_ratio_max),
+        surface_node_buffer_m=float(lb_surface_node_buffer_m),
     )
     shape_ref = shape_choice.line
     used_lb = bool(shape_choice.used_lane_boundary)
@@ -1194,6 +1204,17 @@ def estimate_centerline(
         shape_ref = fallback_shape
         used_lb = False
         diagnostics["shape_ref_fallback"] = "surface_skeleton"
+
+    if shape_ref is not None and (not shape_ref.is_empty) and shape_ref.length > 1.0:
+        clipped_shape_ref = _shape_ref_substring_by_xsecs(shape_ref, src_xsec=src_xsec, dst_xsec=dst_xsec)
+        if clipped_shape_ref is not None and clipped_shape_ref.length > 1.0:
+            shape_ref = clipped_shape_ref
+            diagnostics["shape_ref_substring_applied"] = True
+
+    diagnostics["lb_graph_build_ms"] = shape_choice.lb_graph_build_ms
+    diagnostics["lb_shortest_path_ms"] = shape_choice.lb_shortest_path_ms
+    diagnostics["lb_graph_edge_total"] = int(shape_choice.lb_graph_edge_total)
+    diagnostics["lb_graph_edge_filtered"] = int(shape_choice.lb_graph_edge_filtered)
 
     if not used_lb:
         soft_flags.add(SOFT_NO_LB)
@@ -2371,6 +2392,16 @@ def _unit_vec(v: np.ndarray) -> tuple[float, float]:
     return (x / n, y / n)
 
 
+def _as_float_or_none(v: Any) -> float | None:
+    try:
+        f = float(v)
+    except Exception:
+        return None
+    if not np.isfinite(f):
+        return None
+    return float(f)
+
+
 def _angle_deg(a: tuple[float, float], b: tuple[float, float]) -> float:
     ax, ay = float(a[0]), float(a[1])
     bx, by = float(b[0]), float(b[1])
@@ -2550,7 +2581,11 @@ def _choose_shape_ref_with_graph(
     lb_start_end_topk: int,
     traj_surface_metric: BaseGeometry | None = None,
     lb_outside_lambda: float = 0.0,
+    traj_surface_enforced: bool = False,
+    outside_edge_ratio_max: float = 1.0,
+    surface_node_buffer_m: float = 2.0,
 ) -> _ShapeRefChoice:
+    lb_diag: dict[str, Any] = {}
     lb_path = _build_lb_graph_path(
         src_xsec=src_xsec,
         dst_xsec=dst_xsec,
@@ -2559,6 +2594,10 @@ def _choose_shape_ref_with_graph(
         topk=max(1, int(lb_start_end_topk)),
         traj_surface_metric=traj_surface_metric,
         outside_lambda=max(0.0, float(lb_outside_lambda)),
+        enforce_surface=bool(traj_surface_enforced),
+        outside_edge_ratio_max=float(outside_edge_ratio_max),
+        surface_node_buffer_m=float(surface_node_buffer_m),
+        diag_out=lb_diag,
     )
     if lb_path is not None and lb_path[0] is not None:
         lb_line = _orient_line(lb_path[0], src_xsec, dst_xsec)
@@ -2568,6 +2607,10 @@ def _choose_shape_ref_with_graph(
             lb_path_found=True,
             lb_path_edge_count=int(lb_path[1]),
             lb_path_length_m=float(lb_line.length),
+            lb_graph_build_ms=_as_float_or_none(lb_diag.get("t_build_lane_graph_ms")),
+            lb_shortest_path_ms=_as_float_or_none(lb_diag.get("t_shortest_path_ms")),
+            lb_graph_edge_total=int(lb_diag.get("edge_total", 0)),
+            lb_graph_edge_filtered=int(lb_diag.get("edge_filtered", 0)),
         )
 
     return _ShapeRefChoice(
@@ -2576,6 +2619,10 @@ def _choose_shape_ref_with_graph(
         lb_path_found=False,
         lb_path_edge_count=0,
         lb_path_length_m=None,
+        lb_graph_build_ms=_as_float_or_none(lb_diag.get("t_build_lane_graph_ms")),
+        lb_shortest_path_ms=_as_float_or_none(lb_diag.get("t_shortest_path_ms")),
+        lb_graph_edge_total=int(lb_diag.get("edge_total", 0)),
+        lb_graph_edge_filtered=int(lb_diag.get("edge_filtered", 0)),
     )
 
 
@@ -2668,13 +2715,32 @@ def _build_lb_graph_path(
     topk: int,
     traj_surface_metric: BaseGeometry | None = None,
     outside_lambda: float = 0.0,
+    enforce_surface: bool = False,
+    outside_edge_ratio_max: float = 1.0,
+    surface_node_buffer_m: float = 2.0,
+    diag_out: dict[str, Any] | None = None,
 ) -> tuple[LineString, int] | None:
     if not lane_boundaries_metric:
         return None
 
+    t0_build = perf_counter()
     nodes_xy: list[tuple[float, float]] = []
     edges: list[_LbGraphEdge] = []
     adj: dict[int, list[tuple[int, int, bool]]] = {}
+    edge_total = 0
+    edge_filtered = 0
+
+    surface_metric = traj_surface_metric
+    if (
+        bool(enforce_surface)
+        and traj_surface_metric is not None
+        and (not traj_surface_metric.is_empty)
+        and float(surface_node_buffer_m) > 0.0
+    ):
+        try:
+            surface_metric = traj_surface_metric.buffer(float(surface_node_buffer_m))
+        except Exception:
+            surface_metric = traj_surface_metric
 
     def _snap_node(xy: tuple[float, float]) -> int:
         if not nodes_xy:
@@ -2704,17 +2770,23 @@ def _build_lb_graph_path(
             seg_len = float(math.hypot(p1[0] - p0[0], p1[1] - p0[1]))
             if seg_len <= 1e-6:
                 continue
+            edge_total += 1
             outside_len = 0.0
             if (
-                traj_surface_metric is not None
-                and (not traj_surface_metric.is_empty)
-                and float(outside_lambda) > 0.0
+                surface_metric is not None
+                and (not surface_metric.is_empty)
+                and (float(outside_lambda) > 0.0 or bool(enforce_surface))
             ):
                 try:
                     seg_geom = LineString([p0, p1])
-                    outside_len = float(seg_geom.difference(traj_surface_metric).length)
+                    outside_len = float(seg_geom.difference(surface_metric).length)
                 except Exception:
                     outside_len = 0.0
+            if bool(enforce_surface):
+                ratio = float(outside_len / max(seg_len, 1e-6))
+                if ratio > float(max(0.0, outside_edge_ratio_max)):
+                    edge_filtered += 1
+                    continue
             seg_cost = float(seg_len + max(0.0, float(outside_lambda)) * max(0.0, outside_len))
             u = _snap_node(p0)
             v = _snap_node(p1)
@@ -2735,10 +2807,25 @@ def _build_lb_graph_path(
             adj.setdefault(v, []).append((u, eidx, False))
 
     if not nodes_xy or not edges:
+        if diag_out is not None:
+            diag_out["t_build_lane_graph_ms"] = float((perf_counter() - t0_build) * 1000.0)
+            diag_out["t_shortest_path_ms"] = 0.0
+            diag_out["edge_total"] = int(edge_total)
+            diag_out["edge_filtered"] = int(edge_filtered)
         return None
 
-    start_nodes = _rank_lb_nodes_for_xsec(nodes_xy=nodes_xy, xsec=src_xsec, topk=topk)
-    end_nodes = _rank_lb_nodes_for_xsec(nodes_xy=nodes_xy, xsec=dst_xsec, topk=topk)
+    start_nodes = _rank_lb_nodes_for_xsec(
+        nodes_xy=nodes_xy,
+        xsec=src_xsec,
+        topk=topk,
+        surface_filter_geom=(surface_metric if bool(enforce_surface) else None),
+    )
+    end_nodes = _rank_lb_nodes_for_xsec(
+        nodes_xy=nodes_xy,
+        xsec=dst_xsec,
+        topk=topk,
+        surface_filter_geom=(surface_metric if bool(enforce_surface) else None),
+    )
     if start_nodes and end_nodes:
         start_set = {int(v) for v in start_nodes}
         end_filtered = [int(v) for v in end_nodes if int(v) not in start_set]
@@ -2751,15 +2838,28 @@ def _build_lb_graph_path(
                 end_pick = int(end_nodes[1])
             end_nodes = [end_pick]
     if not start_nodes or not end_nodes:
+        if diag_out is not None:
+            diag_out["t_build_lane_graph_ms"] = float((perf_counter() - t0_build) * 1000.0)
+            diag_out["t_shortest_path_ms"] = 0.0
+            diag_out["edge_total"] = int(edge_total)
+            diag_out["edge_filtered"] = int(edge_filtered)
         return None
 
+    t1_build = perf_counter()
+    t0_sp = perf_counter()
     best = _dijkstra_lb_path(
         start_nodes=start_nodes,
         end_nodes=end_nodes,
         adj=adj,
         edges=edges,
     )
+    t_sp_ms = float((perf_counter() - t0_sp) * 1000.0)
     if best is None:
+        if diag_out is not None:
+            diag_out["t_build_lane_graph_ms"] = float((t1_build - t0_build) * 1000.0)
+            diag_out["t_shortest_path_ms"] = float(t_sp_ms)
+            diag_out["edge_total"] = int(edge_total)
+            diag_out["edge_filtered"] = int(edge_filtered)
         return None
     path_nodes, path_edge_refs = best
     if len(path_nodes) < 2 or len(path_edge_refs) < 1:
@@ -2783,6 +2883,11 @@ def _build_lb_graph_path(
         simp = line
     if isinstance(simp, LineString) and not simp.is_empty and len(simp.coords) >= 2:
         line = _densify_line(simp, step_m=5.0)
+    if diag_out is not None:
+        diag_out["t_build_lane_graph_ms"] = float((t1_build - t0_build) * 1000.0)
+        diag_out["t_shortest_path_ms"] = float(t_sp_ms)
+        diag_out["edge_total"] = int(edge_total)
+        diag_out["edge_filtered"] = int(edge_filtered)
     return line, int(len(path_edge_refs))
 
 
@@ -2791,11 +2896,24 @@ def _rank_lb_nodes_for_xsec(
     nodes_xy: Sequence[tuple[float, float]],
     xsec: LineString,
     topk: int,
+    surface_filter_geom: BaseGeometry | None = None,
 ) -> list[int]:
     if not nodes_xy:
         return []
+    surface_check_geom = None
+    if surface_filter_geom is not None and (not surface_filter_geom.is_empty):
+        try:
+            surface_check_geom = surface_filter_geom.buffer(1e-6)
+        except Exception:
+            surface_check_geom = surface_filter_geom
     scores: list[tuple[float, int]] = []
     for i, xy in enumerate(nodes_xy):
+        if surface_check_geom is not None:
+            try:
+                if not bool(surface_check_geom.covers(Point(float(xy[0]), float(xy[1])))):
+                    continue
+            except Exception:
+                continue
         try:
             d = float(Point(float(xy[0]), float(xy[1])).distance(xsec))
         except Exception:
@@ -2875,6 +2993,42 @@ def _orient_line(line: LineString, src_xsec: LineString, dst_xsec: LineString) -
     if backward < forward:
         return LineString(list(line.coords)[::-1])
     return line
+
+
+def _shape_ref_substring_by_xsecs(
+    line: LineString,
+    *,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+) -> LineString | None:
+    if line.is_empty or line.length <= 0:
+        return None
+    try:
+        p_src_line, _ = nearest_points(line, src_xsec)
+        p_dst_line, _ = nearest_points(line, dst_xsec)
+    except Exception:
+        return None
+    p_src_xy = point_xy_safe(p_src_line, context="shape_ref_sub_src")
+    p_dst_xy = point_xy_safe(p_dst_line, context="shape_ref_sub_dst")
+    if p_src_xy is None or p_dst_xy is None:
+        return None
+    try:
+        s_src = float(line.project(Point(float(p_src_xy[0]), float(p_src_xy[1]))))
+        s_dst = float(line.project(Point(float(p_dst_xy[0]), float(p_dst_xy[1]))))
+    except Exception:
+        return None
+    if abs(s_dst - s_src) < 1e-3:
+        return None
+    s0 = min(s_src, s_dst)
+    s1 = max(s_src, s_dst)
+    try:
+        seg = substring(line, s0, s1)
+    except Exception:
+        return None
+    if seg is None or seg.is_empty or (not isinstance(seg, LineString)) or len(seg.coords) < 2:
+        return None
+    seg = _orient_line(seg, src_xsec, dst_xsec)
+    return seg
 
 
 def _densify_line(line: LineString, *, step_m: float) -> LineString:
