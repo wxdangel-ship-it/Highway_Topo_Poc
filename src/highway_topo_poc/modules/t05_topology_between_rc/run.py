@@ -18,6 +18,7 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--run_id", default="auto")
     p.add_argument("--out_root", default="outputs/_work/t05_topology_between_rc")
 
+    p.add_argument("--traj_xsec_hit_buffer_m", type=float, default=float(DEFAULT_PARAMS["TRAJ_XSEC_HIT_BUFFER_M"]))
     p.add_argument("--xsec_min_points", type=int, default=int(DEFAULT_PARAMS["XSEC_MIN_POINTS"]))
     p.add_argument("--min_support_traj", type=int, default=int(DEFAULT_PARAMS["MIN_SUPPORT_TRAJ"]))
     p.add_argument("--trj_sample_step_m", type=float, default=float(DEFAULT_PARAMS["TRJ_SAMPLE_STEP_M"]))
@@ -28,6 +29,26 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--stitch_min_advance_m", type=float, default=float(DEFAULT_PARAMS["STITCH_MIN_ADVANCE_M"]))
     p.add_argument("--stitch_topk", type=int, default=int(DEFAULT_PARAMS["STITCH_TOPK"]))
     p.add_argument("--neighbor_max_dist_m", type=float, default=float(DEFAULT_PARAMS["NEIGHBOR_MAX_DIST_M"]))
+    p.add_argument(
+        "--pass2_traj_xsec_hit_buffer_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["PASS2_TRAJ_XSEC_HIT_BUFFER_M"]),
+    )
+    p.add_argument(
+        "--pass2_stitch_max_dist_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["PASS2_STITCH_MAX_DIST_M"]),
+    )
+    p.add_argument(
+        "--pass2_stitch_forward_dot_min",
+        type=float,
+        default=float(DEFAULT_PARAMS["PASS2_STITCH_FORWARD_DOT_MIN"]),
+    )
+    p.add_argument(
+        "--pass2_neighbor_max_dist_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["PASS2_NEIGHBOR_MAX_DIST_M"]),
+    )
     p.add_argument("--xsec_across_half_window_m", type=float, default=float(DEFAULT_PARAMS["XSEC_ACROSS_HALF_WINDOW_M"]))
     p.add_argument("--corridor_half_width_m", type=float, default=float(DEFAULT_PARAMS["CORRIDOR_HALF_WIDTH_M"]))
     p.add_argument("--offset_smooth_win_m_1", type=float, default=float(DEFAULT_PARAMS["OFFSET_SMOOTH_WIN_M_1"]))
@@ -93,6 +114,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
 
     params_override = {
+        "TRAJ_XSEC_HIT_BUFFER_M": float(args.traj_xsec_hit_buffer_m),
         "XSEC_MIN_POINTS": int(args.xsec_min_points),
         "MIN_SUPPORT_TRAJ": int(args.min_support_traj),
         "TRJ_SAMPLE_STEP_M": float(args.trj_sample_step_m),
@@ -103,6 +125,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         "STITCH_MIN_ADVANCE_M": float(args.stitch_min_advance_m),
         "STITCH_TOPK": int(args.stitch_topk),
         "NEIGHBOR_MAX_DIST_M": float(args.neighbor_max_dist_m),
+        "PASS2_TRAJ_XSEC_HIT_BUFFER_M": float(args.pass2_traj_xsec_hit_buffer_m),
+        "PASS2_STITCH_MAX_DIST_M": float(args.pass2_stitch_max_dist_m),
+        "PASS2_STITCH_FORWARD_DOT_MIN": float(args.pass2_stitch_forward_dot_min),
+        "PASS2_NEIGHBOR_MAX_DIST_M": float(args.pass2_neighbor_max_dist_m),
         "XSEC_ACROSS_HALF_WINDOW_M": float(args.xsec_across_half_window_m),
         "CORRIDOR_HALF_WIDTH_M": float(args.corridor_half_width_m),
         "OFFSET_SMOOTH_WIN_M_1": float(args.offset_smooth_win_m_1),

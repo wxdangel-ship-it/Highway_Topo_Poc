@@ -60,22 +60,27 @@ _ROAD_COMPAT_OUT_NAME = "RCSDRoad.geojson"
 _SOFT_CROSS_EMPTY_SKIPPED = "CROSS_EMPTY_SKIPPED"
 _SOFT_CROSS_GEOM_UNEXPECTED = "CROSS_GEOM_UNEXPECTED"
 _SOFT_CROSS_DISTANCE_GATE_REJECT = "CROSS_DISTANCE_GATE_REJECT"
+_HARD_NO_ADJACENT_PAIR_AFTER_PASS2 = "NO_ADJACENT_PAIR_AFTER_PASS2"
 
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "TRAJ_XSEC_HIT_BUFFER_M": 0.5,
     "TRAJ_XSEC_DEDUP_GAP_M": 2.0,
+    "PASS2_TRAJ_XSEC_HIT_BUFFER_M": 2.0,
     "MIN_SUPPORT_TRAJ": 2,
     "TRJ_SAMPLE_STEP_M": 2.0,
     "STITCH_TAIL_M": 30.0,
     "STITCH_MAX_DIST_LEVELS_M": [12.0, 25.0, 50.0],
     "STITCH_MAX_DIST_M": 12.0,
+    "PASS2_STITCH_MAX_DIST_M": 50.0,
     "STITCH_MAX_ANGLE_DEG": 35.0,
     "STITCH_FORWARD_DOT_MIN": 0.0,
+    "PASS2_STITCH_FORWARD_DOT_MIN": -0.2,
     "STITCH_MIN_ADVANCE_M": 5.0,
     "STITCH_PENALTY": 2.0,
     "STITCH_TOPK": 3,
     "NEIGHBOR_MAX_DIST_M": 2000.0,
+    "PASS2_NEIGHBOR_MAX_DIST_M": 8000.0,
     "MULTI_ROAD_SEP_M": 8.0,
     "MULTI_ROAD_TOPN": 10,
     "STABLE_OFFSET_M": 50.0,
@@ -255,136 +260,141 @@ def _run_patch_core(
 
     # 先用 Node.Kind 建初值，再用图度数二次推断。
     seed_type_map = _seed_node_type_map(node_ids=node_ids, node_kind_map=patch_inputs.node_kind_map)
+    def _append_cross_breakpoints(cross_result_obj: Any) -> None:
+        if int(cross_result_obj.n_cross_empty_skipped) > 0:
+            soft_breakpoints.append(
+                {
+                    "road_id": "na",
+                    "src_nodeid": None,
+                    "dst_nodeid": None,
+                    "traj_id": None,
+                    "seq_range": None,
+                    "station_range_m": None,
+                    "reason": _SOFT_CROSS_EMPTY_SKIPPED,
+                    "severity": "soft",
+                    "hint": f"n_cross_empty_skipped={int(cross_result_obj.n_cross_empty_skipped)}",
+                }
+            )
+        if int(cross_result_obj.n_cross_geom_unexpected) > 0:
+            soft_breakpoints.append(
+                {
+                    "road_id": "na",
+                    "src_nodeid": None,
+                    "dst_nodeid": None,
+                    "traj_id": None,
+                    "seq_range": None,
+                    "station_range_m": None,
+                    "reason": _SOFT_CROSS_GEOM_UNEXPECTED,
+                    "severity": "soft",
+                    "hint": f"n_cross_geom_unexpected={int(cross_result_obj.n_cross_geom_unexpected)}",
+                }
+            )
+        if int(cross_result_obj.n_cross_distance_gate_reject) > 0:
+            soft_breakpoints.append(
+                {
+                    "road_id": "na",
+                    "src_nodeid": None,
+                    "dst_nodeid": None,
+                    "traj_id": None,
+                    "seq_range": None,
+                    "station_range_m": None,
+                    "reason": _SOFT_CROSS_DISTANCE_GATE_REJECT,
+                    "severity": "soft",
+                    "hint": f"n_cross_distance_gate_reject={int(cross_result_obj.n_cross_distance_gate_reject)}",
+                }
+            )
 
-    cross_result = extract_crossing_events(
-        patch_inputs.trajectories,
-        list(xsec_map.values()),
+    def _run_neighbor_pass(
+        *,
+        hit_buffer_m: float,
+        stitch_max_dist_m: float,
+        stitch_forward_dot_min: float,
+        neighbor_max_dist_m: float,
+    ) -> tuple[Any, Any, dict[int, str], dict[int, int], dict[int, int]]:
+        cross_obj = extract_crossing_events(
+            patch_inputs.trajectories,
+            list(xsec_map.values()),
+            hit_buffer_m=float(hit_buffer_m),
+            dedup_gap_m=float(params["TRAJ_XSEC_DEDUP_GAP_M"]),
+        )
+        levels = _as_float_list(
+            params.get("STITCH_MAX_DIST_LEVELS_M"),
+            fallback=[float(stitch_max_dist_m)],
+        )
+        if levels:
+            levels[0] = float(stitch_max_dist_m)
+        else:
+            levels = [float(stitch_max_dist_m)]
+
+        supports_seed_obj = build_pair_supports(
+            patch_inputs.trajectories,
+            cross_obj.events_by_traj,
+            node_type_map=seed_type_map,
+            trj_sample_step_m=float(params["TRJ_SAMPLE_STEP_M"]),
+            stitch_tail_m=float(params["STITCH_TAIL_M"]),
+            stitch_max_dist_levels_m=levels,
+            stitch_max_dist_m=float(stitch_max_dist_m),
+            stitch_max_angle_deg=float(params["STITCH_MAX_ANGLE_DEG"]),
+            stitch_forward_dot_min=float(stitch_forward_dot_min),
+            stitch_min_advance_m=float(params["STITCH_MIN_ADVANCE_M"]),
+            stitch_penalty=float(params["STITCH_PENALTY"]),
+            stitch_topk=int(params["STITCH_TOPK"]),
+            neighbor_max_dist_m=float(neighbor_max_dist_m),
+            multi_road_sep_m=float(params["MULTI_ROAD_SEP_M"]),
+            multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
+        )
+        nt_map, indeg_map, outdeg_map = infer_node_types(
+            node_ids=node_ids,
+            pair_supports=supports_seed_obj.supports,
+            node_kind_map=patch_inputs.node_kind_map,
+        )
+        supports_obj = build_pair_supports(
+            patch_inputs.trajectories,
+            cross_obj.events_by_traj,
+            node_type_map=nt_map,
+            trj_sample_step_m=float(params["TRJ_SAMPLE_STEP_M"]),
+            stitch_tail_m=float(params["STITCH_TAIL_M"]),
+            stitch_max_dist_levels_m=levels,
+            stitch_max_dist_m=float(stitch_max_dist_m),
+            stitch_max_angle_deg=float(params["STITCH_MAX_ANGLE_DEG"]),
+            stitch_forward_dot_min=float(stitch_forward_dot_min),
+            stitch_min_advance_m=float(params["STITCH_MIN_ADVANCE_M"]),
+            stitch_penalty=float(params["STITCH_PENALTY"]),
+            stitch_topk=int(params["STITCH_TOPK"]),
+            neighbor_max_dist_m=float(neighbor_max_dist_m),
+            multi_road_sep_m=float(params["MULTI_ROAD_SEP_M"]),
+            multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
+        )
+        return cross_obj, supports_obj, nt_map, indeg_map, outdeg_map
+
+    pass1_cross, pass1_supports, pass1_node_type_map, pass1_in_degree, pass1_out_degree = _run_neighbor_pass(
         hit_buffer_m=float(params["TRAJ_XSEC_HIT_BUFFER_M"]),
-        dedup_gap_m=float(params["TRAJ_XSEC_DEDUP_GAP_M"]),
-    )
-    events_by_traj = cross_result.events_by_traj
-
-    if int(cross_result.n_cross_empty_skipped) > 0:
-        soft_breakpoints.append(
-            {
-                "road_id": "na",
-                "src_nodeid": None,
-                "dst_nodeid": None,
-                "traj_id": None,
-                "seq_range": None,
-                "station_range_m": None,
-                "reason": _SOFT_CROSS_EMPTY_SKIPPED,
-                "severity": "soft",
-                "hint": f"n_cross_empty_skipped={int(cross_result.n_cross_empty_skipped)}",
-            }
-        )
-    if int(cross_result.n_cross_geom_unexpected) > 0:
-        soft_breakpoints.append(
-            {
-                "road_id": "na",
-                "src_nodeid": None,
-                "dst_nodeid": None,
-                "traj_id": None,
-                "seq_range": None,
-                "station_range_m": None,
-                "reason": _SOFT_CROSS_GEOM_UNEXPECTED,
-                "severity": "soft",
-                "hint": f"n_cross_geom_unexpected={int(cross_result.n_cross_geom_unexpected)}",
-            }
-        )
-    if int(cross_result.n_cross_distance_gate_reject) > 0:
-        soft_breakpoints.append(
-            {
-                "road_id": "na",
-                "src_nodeid": None,
-                "dst_nodeid": None,
-                "traj_id": None,
-                "seq_range": None,
-                "station_range_m": None,
-                "reason": _SOFT_CROSS_DISTANCE_GATE_REJECT,
-                "severity": "soft",
-                "hint": f"n_cross_distance_gate_reject={int(cross_result.n_cross_distance_gate_reject)}",
-            }
-        )
-
-    if not events_by_traj:
-        hard_breakpoints.append(
-            {
-                "road_id": "na",
-                "src_nodeid": None,
-                "dst_nodeid": None,
-                "reason": HARD_CENTER_EMPTY,
-                "severity": "hard",
-                "hint": "no_traj_crossing_events",
-            }
-        )
-        return _finalize_payloads(
-            run_id=run_id,
-            repo_root=repo_root,
-            patch_id=patch_inputs.patch_id,
-            roads=[],
-            road_lines_metric=[],
-            road_feature_props=[],
-            hard_breakpoints=hard_breakpoints,
-            soft_breakpoints=soft_breakpoints,
-            params=params,
-            overall_pass=False,
-            extra_metrics={
-                "crossing_raw_hit_count": int(cross_result.raw_hit_count),
-                "crossing_dedup_drop_count": int(cross_result.dedup_drop_count),
-                "n_cross_empty_skipped": int(cross_result.n_cross_empty_skipped),
-                "n_cross_geom_unexpected": int(cross_result.n_cross_geom_unexpected),
-                "n_cross_distance_gate_reject": int(cross_result.n_cross_distance_gate_reject),
-                "divstrip_missing": bool(divstrip_missing),
-            },
-        )
-
-    supports_seed_result = build_pair_supports(
-        patch_inputs.trajectories,
-        events_by_traj,
-        node_type_map=seed_type_map,
-        trj_sample_step_m=float(params["TRJ_SAMPLE_STEP_M"]),
-        stitch_tail_m=float(params["STITCH_TAIL_M"]),
-        stitch_max_dist_levels_m=_as_float_list(
-            params.get("STITCH_MAX_DIST_LEVELS_M"),
-            fallback=[float(params["STITCH_MAX_DIST_M"])],
-        ),
         stitch_max_dist_m=float(params["STITCH_MAX_DIST_M"]),
-        stitch_max_angle_deg=float(params["STITCH_MAX_ANGLE_DEG"]),
         stitch_forward_dot_min=float(params["STITCH_FORWARD_DOT_MIN"]),
-        stitch_min_advance_m=float(params["STITCH_MIN_ADVANCE_M"]),
-        stitch_penalty=float(params["STITCH_PENALTY"]),
-        stitch_topk=int(params["STITCH_TOPK"]),
         neighbor_max_dist_m=float(params["NEIGHBOR_MAX_DIST_M"]),
-        multi_road_sep_m=float(params["MULTI_ROAD_SEP_M"]),
-        multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
     )
-    supports_seed = supports_seed_result.supports
-    node_type_map, in_degree, out_degree = infer_node_types(
-        node_ids=node_ids,
-        pair_supports=supports_seed,
-        node_kind_map=patch_inputs.node_kind_map,
-    )
-    supports_result = build_pair_supports(
-        patch_inputs.trajectories,
-        events_by_traj,
-        node_type_map=node_type_map,
-        trj_sample_step_m=float(params["TRJ_SAMPLE_STEP_M"]),
-        stitch_tail_m=float(params["STITCH_TAIL_M"]),
-        stitch_max_dist_levels_m=_as_float_list(
-            params.get("STITCH_MAX_DIST_LEVELS_M"),
-            fallback=[float(params["STITCH_MAX_DIST_M"])],
-        ),
-        stitch_max_dist_m=float(params["STITCH_MAX_DIST_M"]),
-        stitch_max_angle_deg=float(params["STITCH_MAX_ANGLE_DEG"]),
-        stitch_forward_dot_min=float(params["STITCH_FORWARD_DOT_MIN"]),
-        stitch_min_advance_m=float(params["STITCH_MIN_ADVANCE_M"]),
-        stitch_penalty=float(params["STITCH_PENALTY"]),
-        stitch_topk=int(params["STITCH_TOPK"]),
-        neighbor_max_dist_m=float(params["NEIGHBOR_MAX_DIST_M"]),
-        multi_road_sep_m=float(params["MULTI_ROAD_SEP_M"]),
-        multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
-    )
+    neighbor_search_pass = 1
+    cross_result = pass1_cross
+    supports_result = pass1_supports
+    node_type_map = pass1_node_type_map
+    in_degree = pass1_in_degree
+    out_degree = pass1_out_degree
+
+    if not supports_result.supports:
+        pass2_cross, pass2_supports, pass2_node_type_map, pass2_in_degree, pass2_out_degree = _run_neighbor_pass(
+            hit_buffer_m=float(params["PASS2_TRAJ_XSEC_HIT_BUFFER_M"]),
+            stitch_max_dist_m=float(params["PASS2_STITCH_MAX_DIST_M"]),
+            stitch_forward_dot_min=float(params["PASS2_STITCH_FORWARD_DOT_MIN"]),
+            neighbor_max_dist_m=float(params["PASS2_NEIGHBOR_MAX_DIST_M"]),
+        )
+        neighbor_search_pass = 2
+        cross_result = pass2_cross
+        supports_result = pass2_supports
+        node_type_map = pass2_node_type_map
+        in_degree = pass2_in_degree
+        out_degree = pass2_out_degree
+
+    _append_cross_breakpoints(cross_result)
     supports = supports_result.supports
     for unresolved in supports_result.unresolved_events:
         soft_breakpoints.append(dict(unresolved))
@@ -395,9 +405,13 @@ def _run_patch_core(
                 "road_id": "na",
                 "src_nodeid": None,
                 "dst_nodeid": None,
-                "reason": HARD_CENTER_EMPTY,
+                "reason": _HARD_NO_ADJACENT_PAIR_AFTER_PASS2 if int(neighbor_search_pass) == 2 else HARD_CENTER_EMPTY,
                 "severity": "hard",
-                "hint": "no_adjacent_pair_from_crossings",
+                "hint": (
+                    "no_adjacent_pair_after_pass2"
+                    if int(neighbor_search_pass) == 2
+                    else "no_adjacent_pair_from_crossings"
+                ),
             }
         )
         return _finalize_payloads(
@@ -428,6 +442,8 @@ def _run_patch_core(
                 "stitch_reject_forward_count": int(supports_result.stitch_reject_forward_count),
                 "stitch_accept_count": int(supports_result.stitch_accept_count),
                 "stitch_levels_used_hist": dict(supports_result.stitch_levels_used_hist),
+                "neighbor_search_pass": int(neighbor_search_pass),
+                "neighbor_search_pass2_used": bool(int(neighbor_search_pass) == 2),
                 "divstrip_missing": bool(divstrip_missing),
             },
         )
@@ -456,6 +472,7 @@ def _run_patch_core(
                 support=support,
                 src_type=node_type_map.get(src, "unknown"),
                 dst_type=node_type_map.get(dst, "unknown"),
+                neighbor_search_pass=int(neighbor_search_pass),
             )
             road["hard_anomaly"] = True
             road["hard_reasons"] = [HARD_CENTER_EMPTY]
@@ -528,7 +545,14 @@ def _run_patch_core(
             stable_fallback_m=float(params["STABLE_FALLBACK_M"]),
         )
 
-        road = _make_base_road_record(src=src, dst=dst, support=support, src_type=src_type, dst_type=dst_type)
+        road = _make_base_road_record(
+            src=src,
+            dst=dst,
+            support=support,
+            src_type=src_type,
+            dst_type=dst_type,
+            neighbor_search_pass=int(neighbor_search_pass),
+        )
         road["stable_offset_m_src"] = center.stable_offset_m_src
         road["stable_offset_m_dst"] = center.stable_offset_m_dst
         road["center_sample_coverage"] = float(center.center_sample_coverage)
@@ -555,6 +579,7 @@ def _run_patch_core(
         road["endpoint_center_offset_m_dst"] = center.endpoint_center_offset_m_dst
         road["lb_path_found"] = bool(center.lb_path_found)
         road["lb_path_edge_count"] = int(center.lb_path_edge_count)
+        road["lb_path_length_m"] = center.lb_path_length_m
 
         soft_flags = set(center.soft_flags)
         hard_flags = set(center.hard_flags)
@@ -597,7 +622,12 @@ def _run_patch_core(
             hard_flags.add(HARD_BRIDGE_SEGMENT)
 
         if road_line is not None:
-            traj_surface_info, traj_surface_soft, traj_surface_breakpoints = _eval_traj_surface_gate(
+            (
+                traj_surface_info,
+                traj_surface_soft,
+                traj_surface_hard,
+                traj_surface_breakpoints,
+            ) = _eval_traj_surface_gate(
                 road=road,
                 road_line=road_line,
                 shape_ref_line=center.shape_ref_metric,
@@ -608,7 +638,12 @@ def _run_patch_core(
             )
             road.update(traj_surface_info)
             soft_flags.update(traj_surface_soft)
-            soft_breakpoints.extend(traj_surface_breakpoints)
+            hard_flags.update(traj_surface_hard)
+            for bp in traj_surface_breakpoints:
+                if str(bp.get("severity")) == "hard":
+                    hard_breakpoints.append(dict(bp))
+                else:
+                    soft_breakpoints.append(dict(bp))
 
         road["hard_anomaly"] = bool(hard_flags)
         road["hard_reasons"] = sorted(hard_flags)
@@ -629,7 +664,14 @@ def _run_patch_core(
             road_lines_metric.append(road_line)
             road_feature_props.append(_strip_internal_fields(road))
 
+        existing_hard_reasons = {
+            str(bp.get("reason"))
+            for bp in hard_breakpoints
+            if str(bp.get("road_id")) == str(road.get("road_id"))
+        }
         for reason in sorted(hard_flags):
+            if str(reason) in existing_hard_reasons:
+                continue
             hint = _reason_hint(reason)
             if reason == HARD_BRIDGE_SEGMENT:
                 hint = (
@@ -699,6 +741,7 @@ def _run_patch_core(
     traj_in_ratio_est_vals: list[float] = []
     traj_surface_enforced_count = 0
     traj_surface_insufficient_count = 0
+    road_outside_traj_surface_count = 0
     expanded_end_count = 0
     gore_tip_end_count = 0
     fallback_end_count = 0
@@ -765,6 +808,8 @@ def _run_patch_core(
             traj_surface_enforced_count += 1
         if SOFT_TRAJ_SURFACE_INSUFFICIENT in set(road.get("soft_issue_flags", [])):
             traj_surface_insufficient_count += 1
+        if SOFT_ROAD_OUTSIDE_TRAJ_SURFACE in set(road.get("hard_reasons", [])):
+            road_outside_traj_surface_count += 1
         if bool(road.get("src_is_expanded", False)):
             expanded_end_count += 1
         if bool(road.get("dst_is_expanded", False)):
@@ -857,6 +902,7 @@ def _run_patch_core(
             "max_segment_m_max": (float(np.max(max_segment_arr)) if max_segment_arr.size > 0 else None),
             "traj_surface_enforced_count": int(traj_surface_enforced_count),
             "traj_surface_insufficient_count": int(traj_surface_insufficient_count),
+            "road_outside_traj_surface_count": int(road_outside_traj_surface_count),
             "traj_in_ratio_p50": (float(np.percentile(traj_in_ratio_arr, 50.0)) if traj_in_ratio_arr.size > 0 else None),
             "traj_in_ratio_p90": (float(np.percentile(traj_in_ratio_arr, 90.0)) if traj_in_ratio_arr.size > 0 else None),
             "traj_in_ratio_est_p50": (
@@ -865,6 +911,8 @@ def _run_patch_core(
             "traj_in_ratio_est_p90": (
                 float(np.percentile(traj_in_ratio_est_arr, 90.0)) if traj_in_ratio_est_arr.size > 0 else None
             ),
+            "neighbor_search_pass": int(neighbor_search_pass),
+            "neighbor_search_pass2_used": bool(int(neighbor_search_pass) == 2),
         },
     )
 
@@ -1001,7 +1049,7 @@ def _eval_traj_surface_gate(
     patch_inputs: PatchInputs,
     gore_zone_metric: BaseGeometry | None,
     params: dict[str, Any],
-) -> tuple[dict[str, Any], set[str], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], set[str], set[str], list[dict[str, Any]]]:
     result: dict[str, Any] = {
         "traj_surface_enforced": False,
         "traj_in_ratio": None,
@@ -1010,6 +1058,7 @@ def _eval_traj_surface_gate(
         "endpoint_in_traj_surface_dst": None,
     }
     soft_flags: set[str] = set()
+    hard_flags: set[str] = set()
     breakpoints: list[dict[str, Any]] = []
 
     if road_line.is_empty or road_line.length <= 0:
@@ -1022,7 +1071,7 @@ def _eval_traj_surface_gate(
                 hint="road_geometry_empty",
             )
         )
-        return result, soft_flags, breakpoints
+        return result, soft_flags, hard_flags, breakpoints
 
     ref_line = shape_ref_line if isinstance(shape_ref_line, LineString) and not shape_ref_line.is_empty else road_line
     ref_len = float(ref_line.length)
@@ -1036,7 +1085,7 @@ def _eval_traj_surface_gate(
                 hint="shape_ref_too_short",
             )
         )
-        return result, soft_flags, breakpoints
+        return result, soft_flags, hard_flags, breakpoints
 
     traj_xy, unique_traj_count = _collect_support_traj_points(patch_inputs, support)
     if traj_xy.shape[0] < 8 or unique_traj_count <= 0:
@@ -1049,7 +1098,7 @@ def _eval_traj_surface_gate(
                 hint="traj_points_insufficient",
             )
         )
-        return result, soft_flags, breakpoints
+        return result, soft_flags, hard_flags, breakpoints
 
     step = max(1.0, float(params["SURF_SLICE_STEP_M"]))
     half_win = max(0.5, float(params["SURF_SLICE_HALF_WIN_M"]))
@@ -1073,7 +1122,7 @@ def _eval_traj_surface_gate(
                 hint="slice_count_insufficient",
             )
         )
-        return result, soft_flags, breakpoints
+        return result, soft_flags, hard_flags, breakpoints
 
     left_pts: list[tuple[float, float]] = []
     right_pts: list[tuple[float, float]] = []
@@ -1209,7 +1258,7 @@ def _eval_traj_surface_gate(
         bp["covered_length_ratio"] = float(covered_len_ratio)
         bp["unique_traj_count"] = int(unique_traj_count)
         breakpoints.append(bp)
-        return result, soft_flags, breakpoints
+        return result, soft_flags, hard_flags, breakpoints
 
     result["traj_surface_enforced"] = True
     result["traj_in_ratio"] = in_ratio_est
@@ -1221,11 +1270,11 @@ def _eval_traj_surface_gate(
         and bool(endpoint_in_dst)
     )
     if not pass_gate:
-        soft_flags.add(SOFT_ROAD_OUTSIDE_TRAJ_SURFACE)
+        hard_flags.add(SOFT_ROAD_OUTSIDE_TRAJ_SURFACE)
         bp = build_breakpoint(
             road=road,
             reason=SOFT_ROAD_OUTSIDE_TRAJ_SURFACE,
-            severity="soft",
+            severity="hard",
             hint=(
                 f"in_ratio={in_ratio_est if in_ratio_est is not None else 'na'};"
                 f"endpoint_src={endpoint_in_src};endpoint_dst={endpoint_in_dst};"
@@ -1236,7 +1285,7 @@ def _eval_traj_surface_gate(
         bp["traj_in_ratio"] = in_ratio_est
         breakpoints.append(bp)
 
-    return result, soft_flags, breakpoints
+    return result, soft_flags, hard_flags, breakpoints
 
 
 def _as_float_list(value: Any, *, fallback: Sequence[float]) -> list[float]:
@@ -1284,6 +1333,7 @@ def _make_base_road_record(
     support: PairSupport,
     src_type: str,
     dst_type: str,
+    neighbor_search_pass: int,
 ) -> dict[str, Any]:
     repr_ids = list(support.repr_traj_ids)[:5]
     stitch_p50, stitch_p90, stitch_max = _stitch_stats(support.stitch_hops)
@@ -1292,6 +1342,7 @@ def _make_base_road_record(
         "src_nodeid": int(src),
         "dst_nodeid": int(dst),
         "direction": f"{src}->{dst}",
+        "neighbor_search_pass": int(neighbor_search_pass),
         "length_m": 0.0,
         "support_traj_count": int(len(support.support_traj_ids)),
         "support_event_count": int(support.support_event_count),
@@ -1329,6 +1380,7 @@ def _make_base_road_record(
         "endpoint_in_traj_surface_dst": None,
         "lb_path_found": False,
         "lb_path_edge_count": 0,
+        "lb_path_length_m": None,
         "repr_traj_ids": repr_ids,
         "stitch_hops_p50": stitch_p50,
         "stitch_hops_p90": stitch_p90,
@@ -1361,6 +1413,7 @@ def _reason_hint(reason: str) -> str:
         HARD_CENTER_EMPTY: "centerline_generation_failed",
         HARD_ENDPOINT: "endpoints_not_on_intersection_l",
         HARD_BRIDGE_SEGMENT: "bridge_segment_too_long",
+        _HARD_NO_ADJACENT_PAIR_AFTER_PASS2: "no_adjacent_pair_after_pass2",
         SOFT_LOW_SUPPORT: "support_traj_count_below_threshold",
         SOFT_SPARSE_POINTS: "surface_points_coverage_low",
         SOFT_NO_LB: "lane_boundary_continuous_not_found",
@@ -1437,6 +1490,7 @@ def _finalize_payloads(
                 or sk.startswith("max_segment_")
                 or sk.startswith("traj_in_ratio")
                 or sk.startswith("traj_surface_")
+                or sk.startswith("neighbor_search_")
                 or sk.startswith("width_near_minus_base_")
                 or sk in {"expanded_end_count", "gore_tip_end_count", "fallback_end_count", "divstrip_missing"}
             ):

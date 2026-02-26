@@ -105,6 +105,7 @@ class CenterEstimate:
     shape_ref_metric: LineString | None
     lb_path_found: bool
     lb_path_edge_count: int
+    lb_path_length_m: float | None
     stable_offset_m_src: float | None
     stable_offset_m_dst: float | None
     center_sample_coverage: float
@@ -546,6 +547,7 @@ class _ShapeRefChoice:
     used_lane_boundary: bool
     lb_path_found: bool
     lb_path_edge_count: int
+    lb_path_length_m: float | None
 
 
 @dataclass(frozen=True)
@@ -1118,42 +1120,55 @@ def estimate_centerline(
     shape_ref = shape_choice.line
     used_lb = bool(shape_choice.used_lane_boundary)
     if shape_ref is None:
-        hard_flags.add(HARD_CENTER_EMPTY)
         soft_flags.add(SOFT_NO_LB_PATH)
-        return CenterEstimate(
-            centerline_metric=None,
-            shape_ref_metric=None,
-            lb_path_found=False,
-            lb_path_edge_count=0,
-            stable_offset_m_src=None,
-            stable_offset_m_dst=None,
-            center_sample_coverage=0.0,
-            width_med_m=None,
-            width_p90_m=None,
-            max_turn_deg_per_10m=None,
-            used_lane_boundary=False,
-            src_is_gore_tip=False,
-            dst_is_gore_tip=False,
-            src_is_expanded=False,
-            dst_is_expanded=False,
-            src_width_near_m=None,
-            dst_width_near_m=None,
-            src_width_base_m=None,
-            dst_width_base_m=None,
-            src_gore_overlap_near=None,
-            dst_gore_overlap_near=None,
-            src_stable_s_m=None,
-            dst_stable_s_m=None,
-            src_cut_mode="fallback_50m",
-            dst_cut_mode="fallback_50m",
-            endpoint_tangent_deviation_deg_src=None,
-            endpoint_tangent_deviation_deg_dst=None,
-            endpoint_center_offset_m_src=None,
-            endpoint_center_offset_m_dst=None,
-            soft_flags=soft_flags,
-            hard_flags=hard_flags,
-            diagnostics={"reason": "shape_ref_unavailable"},
+        fallback_shape = _build_shape_ref_from_surface_points(
+            src_xsec=src_xsec,
+            dst_xsec=dst_xsec,
+            points_xyz=surface_points_xyz,
+            gore_zone_metric=divstrip_zone_metric,
+            corridor_half_width_m=float(corridor_half_width_m),
+            sample_step_m=max(2.0, float(center_sample_step_m)),
         )
+        if fallback_shape is None:
+            hard_flags.add(HARD_CENTER_EMPTY)
+            return CenterEstimate(
+                centerline_metric=None,
+                shape_ref_metric=None,
+                lb_path_found=False,
+                lb_path_edge_count=0,
+                lb_path_length_m=None,
+                stable_offset_m_src=None,
+                stable_offset_m_dst=None,
+                center_sample_coverage=0.0,
+                width_med_m=None,
+                width_p90_m=None,
+                max_turn_deg_per_10m=None,
+                used_lane_boundary=False,
+                src_is_gore_tip=False,
+                dst_is_gore_tip=False,
+                src_is_expanded=False,
+                dst_is_expanded=False,
+                src_width_near_m=None,
+                dst_width_near_m=None,
+                src_width_base_m=None,
+                dst_width_base_m=None,
+                src_gore_overlap_near=None,
+                dst_gore_overlap_near=None,
+                src_stable_s_m=None,
+                dst_stable_s_m=None,
+                src_cut_mode="fallback_50m",
+                dst_cut_mode="fallback_50m",
+                endpoint_tangent_deviation_deg_src=None,
+                endpoint_tangent_deviation_deg_dst=None,
+                endpoint_center_offset_m_src=None,
+                endpoint_center_offset_m_dst=None,
+                soft_flags=soft_flags,
+                hard_flags=hard_flags,
+                diagnostics={"reason": "shape_ref_unavailable"},
+            )
+        shape_ref = fallback_shape
+        used_lb = False
+        diagnostics["shape_ref_fallback"] = "surface_skeleton"
 
     if not used_lb:
         soft_flags.add(SOFT_NO_LB)
@@ -1167,6 +1182,7 @@ def estimate_centerline(
             shape_ref_metric=shape_ref,
             lb_path_found=bool(shape_choice.lb_path_found),
             lb_path_edge_count=int(shape_choice.lb_path_edge_count),
+            lb_path_length_m=shape_choice.lb_path_length_m,
             stable_offset_m_src=None,
             stable_offset_m_dst=None,
             center_sample_coverage=0.0,
@@ -1232,6 +1248,7 @@ def estimate_centerline(
             shape_ref_metric=shape_ref,
             lb_path_found=bool(shape_choice.lb_path_found),
             lb_path_edge_count=int(shape_choice.lb_path_edge_count),
+            lb_path_length_m=shape_choice.lb_path_length_m,
             stable_offset_m_src=None,
             stable_offset_m_dst=None,
             center_sample_coverage=float(coverage),
@@ -1323,6 +1340,7 @@ def estimate_centerline(
             shape_ref_metric=shape_ref,
             lb_path_found=bool(shape_choice.lb_path_found),
             lb_path_edge_count=int(shape_choice.lb_path_edge_count),
+            lb_path_length_m=shape_choice.lb_path_length_m,
             stable_offset_m_src=stable_src,
             stable_offset_m_dst=stable_dst,
             center_sample_coverage=float(coverage),
@@ -1363,12 +1381,15 @@ def estimate_centerline(
 
     trend_line, trend_dev_src, trend_dev_dst, trend_reason = _apply_endpoint_trend_projection(
         base_line=centerline,
+        shape_ref_line=shape_ref,
         sample_stations=ss,
         sample_center_points=center_samples,
         src_decision=src_decision,
         dst_decision=dst_decision,
         src_xsec=src_xsec,
         dst_xsec=dst_xsec,
+        src_channel_points=support.src_cross_points,
+        dst_channel_points=support.dst_cross_points,
         trend_fit_win_m=float(trend_fit_win_m),
         gore_zone_metric=divstrip_zone_metric,
         endpoint_tol_m=float(endpoint_tol_m),
@@ -1394,6 +1415,7 @@ def estimate_centerline(
             shape_ref_metric=shape_ref,
             lb_path_found=bool(shape_choice.lb_path_found),
             lb_path_edge_count=int(shape_choice.lb_path_edge_count),
+            lb_path_length_m=shape_choice.lb_path_length_m,
             stable_offset_m_src=stable_src,
             stable_offset_m_dst=stable_dst,
             center_sample_coverage=float(coverage),
@@ -1465,6 +1487,7 @@ def estimate_centerline(
         shape_ref_metric=shape_ref,
         lb_path_found=bool(shape_choice.lb_path_found),
         lb_path_edge_count=int(shape_choice.lb_path_edge_count),
+        lb_path_length_m=shape_choice.lb_path_length_m,
         stable_offset_m_src=stable_src,
         stable_offset_m_dst=stable_dst,
         center_sample_coverage=float(coverage),
@@ -1537,12 +1560,15 @@ def clip_line_to_cross_sections(
 def _apply_endpoint_trend_projection(
     *,
     base_line: LineString,
+    shape_ref_line: LineString,
     sample_stations: np.ndarray,
     sample_center_points: np.ndarray,
     src_decision: _EndStableDecision,
     dst_decision: _EndStableDecision,
     src_xsec: LineString,
     dst_xsec: LineString,
+    src_channel_points: Sequence[Point],
+    dst_channel_points: Sequence[Point],
     trend_fit_win_m: float,
     gore_zone_metric: BaseGeometry | None,
     endpoint_tol_m: float,
@@ -1566,53 +1592,75 @@ def _apply_endpoint_trend_projection(
     src_anchor = sample_center_points[i_src, :]
     dst_anchor = sample_center_points[i_dst, :]
 
-    t_src = _fit_endpoint_trend(
-        stations=sample_stations,
-        points=sample_center_points,
-        anchor_idx=i_src,
-        from_src=True,
-        fit_win_m=max(5.0, float(trend_fit_win_m)),
-    )
-    t_dst = _fit_endpoint_trend(
-        stations=sample_stations,
-        points=sample_center_points,
-        anchor_idx=i_dst,
-        from_src=False,
-        fit_win_m=max(5.0, float(trend_fit_win_m)),
-    )
+    t_src = _shape_ref_tangent(shape_ref_line, station_m=float(src_decision.anchor_station_m))
+    if t_src is None:
+        t_src = _fit_endpoint_trend(
+            stations=sample_stations,
+            points=sample_center_points,
+            anchor_idx=i_src,
+            from_src=True,
+            fit_win_m=max(5.0, float(trend_fit_win_m)),
+        )
+    t_dst = _shape_ref_tangent(shape_ref_line, station_m=float(dst_decision.anchor_station_m))
+    if t_dst is None:
+        t_dst = _fit_endpoint_trend(
+            stations=sample_stations,
+            points=sample_center_points,
+            anchor_idx=i_dst,
+            from_src=False,
+            fit_win_m=max(5.0, float(trend_fit_win_m)),
+        )
     if t_src is None or t_dst is None:
         return None, None, None, HARD_CENTER_EMPTY
 
-    p_src = _project_trend_to_xsec(
+    p_src0 = _project_trend_to_xsec(
         anchor_xy=(float(src_anchor[0]), float(src_anchor[1])),
         trend_xy=t_src,
         xsec=src_xsec,
     )
-    p_dst = _project_trend_to_xsec(
+    p_dst0 = _project_trend_to_xsec(
         anchor_xy=(float(dst_anchor[0]), float(dst_anchor[1])),
         trend_xy=t_dst,
         xsec=dst_xsec,
     )
-    if p_src is None or p_dst is None:
+    if p_src0 is None or p_dst0 is None:
         return None, None, None, HARD_CENTER_EMPTY
 
-    p_src = _adjust_endpoint_on_xsec_gore(
-        endpoint_xy=p_src,
+    src_ref = _channel_ref_on_xsec(src_xsec=src_xsec, cross_points=src_channel_points)
+    dst_ref = _channel_ref_on_xsec(src_xsec=dst_xsec, cross_points=dst_channel_points)
+    p_src = _project_endpoint_to_valid_xsec(
+        endpoint_xy=p_src0,
         xsec=src_xsec,
         gore_zone_metric=gore_zone_metric,
+        channel_ref_xy=src_ref,
     )
-    p_dst = _adjust_endpoint_on_xsec_gore(
-        endpoint_xy=p_dst,
+    p_dst = _project_endpoint_to_valid_xsec(
+        endpoint_xy=p_dst0,
         xsec=dst_xsec,
         gore_zone_metric=gore_zone_metric,
+        channel_ref_xy=dst_ref,
     )
 
+    src_mid = _build_trend_midpoint(
+        endpoint_xy=p_src,
+        anchor_xy=(float(src_anchor[0]), float(src_anchor[1])),
+        trend_xy=t_src,
+        toward_start=True,
+    )
+    dst_mid = _build_trend_midpoint(
+        endpoint_xy=p_dst,
+        anchor_xy=(float(dst_anchor[0]), float(dst_anchor[1])),
+        trend_xy=t_dst,
+        toward_start=False,
+    )
     coords: list[tuple[float, float]] = []
     coords.append((float(p_src[0]), float(p_src[1])))
+    coords.append((float(src_mid[0]), float(src_mid[1])))
     coords.append((float(src_anchor[0]), float(src_anchor[1])))
     for i in range(i_src + 1, i_dst):
         coords.append((float(sample_center_points[i, 0]), float(sample_center_points[i, 1])))
     coords.append((float(dst_anchor[0]), float(dst_anchor[1])))
+    coords.append((float(dst_mid[0]), float(dst_mid[1])))
     coords.append((float(p_dst[0]), float(p_dst[1])))
     coords = _dedup_coords(coords, eps=1e-4)
     if len(coords) < 2:
@@ -1629,19 +1677,8 @@ def _apply_endpoint_trend_projection(
     if d0 > float(endpoint_tol_m) or d1 > float(endpoint_tol_m):
         return None, None, None, HARD_ENDPOINT
 
-    dev_src = None
-    dev_dst = None
-    if len(line.coords) >= 2:
-        sv = (
-            float(line.coords[1][0] - line.coords[0][0]),
-            float(line.coords[1][1] - line.coords[0][1]),
-        )
-        ev = (
-            float(line.coords[-1][0] - line.coords[-2][0]),
-            float(line.coords[-1][1] - line.coords[-2][1]),
-        )
-        dev_src = _angle_deg(_unit_vec(np.asarray([sv[0], sv[1]], dtype=np.float64)), _unit_vec(np.asarray(t_src)))
-        dev_dst = _angle_deg(_unit_vec(np.asarray([ev[0], ev[1]], dtype=np.float64)), _unit_vec(np.asarray(t_dst)))
+    dev_src = _endpoint_tangent_deviation(line, trend_xy=t_src, at_start=True)
+    dev_dst = _endpoint_tangent_deviation(line, trend_xy=t_dst, at_start=False)
 
     return line, dev_src, dev_dst, None
 
@@ -1696,6 +1733,169 @@ def _fit_endpoint_trend(
         vec_u = -vec_u
 
     return (float(vec_u[0]), float(vec_u[1]))
+
+
+def _shape_ref_tangent(shape_ref_line: LineString, *, station_m: float) -> tuple[float, float] | None:
+    if shape_ref_line is None or shape_ref_line.is_empty or shape_ref_line.length <= 0:
+        return None
+    L = float(shape_ref_line.length)
+    s = min(max(0.0, float(station_m)), L)
+    ds = min(2.0, max(0.5, 0.05 * L))
+    p0 = shape_ref_line.interpolate(max(0.0, s - ds))
+    p1 = shape_ref_line.interpolate(min(L, s + ds))
+    p0_xy = point_xy_safe(p0, context="shape_ref_tangent_p0")
+    p1_xy = point_xy_safe(p1, context="shape_ref_tangent_p1")
+    if p0_xy is None or p1_xy is None:
+        return None
+    v = np.asarray([float(p1_xy[0]) - float(p0_xy[0]), float(p1_xy[1]) - float(p0_xy[1])], dtype=np.float64)
+    if np.linalg.norm(v) <= 1e-9:
+        return None
+    u = _unit_vec(v)
+    return (float(u[0]), float(u[1]))
+
+
+def _channel_ref_on_xsec(*, src_xsec: LineString, cross_points: Sequence[Point]) -> tuple[float, float] | None:
+    if src_xsec.is_empty or src_xsec.length <= 0:
+        return None
+    refs: list[tuple[float, float]] = []
+    for pt in cross_points:
+        xy = point_xy_safe(pt, context="channel_ref_pt")
+        if xy is None:
+            continue
+        s = float(src_xsec.project(Point(float(xy[0]), float(xy[1]))))
+        p = src_xsec.interpolate(s)
+        p_xy = point_xy_safe(p, context="channel_ref_proj")
+        if p_xy is not None:
+            refs.append((float(p_xy[0]), float(p_xy[1])))
+    if not refs:
+        return None
+    arr = np.asarray(refs, dtype=np.float64)
+    return (float(np.median(arr[:, 0])), float(np.median(arr[:, 1])))
+
+
+def _iter_linestring_parts(geom: BaseGeometry | None) -> list[LineString]:
+    if geom is None or geom.is_empty:
+        return []
+    gtype = getattr(geom, "geom_type", "")
+    if gtype == "LineString":
+        ls = geom if isinstance(geom, LineString) else None
+        return [ls] if (ls is not None and not ls.is_empty and len(ls.coords) >= 2) else []
+    if gtype == "MultiLineString":
+        out = []
+        for g in getattr(geom, "geoms", []):
+            if isinstance(g, LineString) and not g.is_empty and len(g.coords) >= 2:
+                out.append(g)
+        return out
+    if gtype == "GeometryCollection":
+        out: list[LineString] = []
+        for g in getattr(geom, "geoms", []):
+            out.extend(_iter_linestring_parts(g))
+        return out
+    return []
+
+
+def _project_endpoint_to_valid_xsec(
+    *,
+    endpoint_xy: tuple[float, float],
+    xsec: LineString,
+    gore_zone_metric: BaseGeometry | None,
+    channel_ref_xy: tuple[float, float] | None,
+) -> tuple[float, float]:
+    if xsec.is_empty or xsec.length <= 0:
+        return (float(endpoint_xy[0]), float(endpoint_xy[1]))
+    valid_geom: BaseGeometry = xsec
+    if gore_zone_metric is not None:
+        try:
+            diff = xsec.difference(gore_zone_metric)
+            if diff is not None and not diff.is_empty:
+                valid_geom = diff
+        except Exception:
+            pass
+    parts = _iter_linestring_parts(valid_geom)
+    if not parts:
+        return _adjust_endpoint_on_xsec_gore(
+            endpoint_xy=endpoint_xy,
+            xsec=xsec,
+            gore_zone_metric=gore_zone_metric,
+        )
+
+    ref_pt = Point(float(endpoint_xy[0]), float(endpoint_xy[1]))
+    ch_pt = (
+        Point(float(channel_ref_xy[0]), float(channel_ref_xy[1]))
+        if channel_ref_xy is not None
+        else None
+    )
+    best_xy: tuple[float, float] | None = None
+    best_score = float("inf")
+    for part in parts:
+        try:
+            s = float(part.project(ref_pt))
+            p = part.interpolate(s)
+        except Exception:
+            continue
+        p_xy = point_xy_safe(p, context="project_valid_xsec_part")
+        if p_xy is None:
+            continue
+        d0 = float(math.hypot(float(p_xy[0]) - float(endpoint_xy[0]), float(p_xy[1]) - float(endpoint_xy[1])))
+        d1 = 0.0
+        if ch_pt is not None:
+            d1 = float(ch_pt.distance(Point(float(p_xy[0]), float(p_xy[1]))))
+        score = d0 + 0.7 * d1
+        if score < best_score:
+            best_score = score
+            best_xy = (float(p_xy[0]), float(p_xy[1]))
+    if best_xy is not None:
+        return best_xy
+    return _adjust_endpoint_on_xsec_gore(
+        endpoint_xy=endpoint_xy,
+        xsec=xsec,
+        gore_zone_metric=gore_zone_metric,
+    )
+
+
+def _build_trend_midpoint(
+    *,
+    endpoint_xy: tuple[float, float],
+    anchor_xy: tuple[float, float],
+    trend_xy: tuple[float, float],
+    toward_start: bool,
+) -> tuple[float, float]:
+    t = np.asarray(_unit_vec(np.asarray([float(trend_xy[0]), float(trend_xy[1])], dtype=np.float64)), dtype=np.float64)
+    a = np.asarray([float(anchor_xy[0]), float(anchor_xy[1])], dtype=np.float64)
+    e = np.asarray([float(endpoint_xy[0]), float(endpoint_xy[1])], dtype=np.float64)
+    d = float(np.linalg.norm(a - e))
+    step = min(10.0, max(3.0, 0.6 * d))
+    sign = -1.0 if bool(toward_start) else 1.0
+    m = a + sign * t * step
+    if float(np.linalg.norm(m - a)) > d:
+        m = 0.5 * (a + e)
+    return (float(m[0]), float(m[1]))
+
+
+def _endpoint_tangent_deviation(
+    line: LineString,
+    *,
+    trend_xy: tuple[float, float],
+    at_start: bool,
+) -> float | None:
+    if line.is_empty or line.length <= 0 or len(line.coords) < 2:
+        return None
+    L = float(line.length)
+    d = min(10.0, max(1.0, 0.2 * L))
+    if at_start:
+        p0 = line.interpolate(0.0)
+        p1 = line.interpolate(d)
+    else:
+        p0 = line.interpolate(max(0.0, L - d))
+        p1 = line.interpolate(L)
+    p0_xy = point_xy_safe(p0, context="endpoint_dev_p0")
+    p1_xy = point_xy_safe(p1, context="endpoint_dev_p1")
+    if p0_xy is None or p1_xy is None:
+        return None
+    lv = np.asarray([float(p1_xy[0]) - float(p0_xy[0]), float(p1_xy[1]) - float(p0_xy[1])], dtype=np.float64)
+    if np.linalg.norm(lv) <= 1e-9:
+        return None
+    return _angle_deg(_unit_vec(lv), _unit_vec(np.asarray([float(trend_xy[0]), float(trend_xy[1])], dtype=np.float64)))
 
 
 def _project_trend_to_xsec(
@@ -2277,20 +2477,13 @@ def _choose_shape_ref_with_graph(
         topk=max(1, int(lb_start_end_topk)),
     )
     if lb_path is not None and lb_path[0] is not None:
+        lb_line = _orient_line(lb_path[0], src_xsec, dst_xsec)
         return _ShapeRefChoice(
-            line=_orient_line(lb_path[0], src_xsec, dst_xsec),
+            line=lb_line,
             used_lane_boundary=True,
             lb_path_found=True,
             lb_path_edge_count=int(lb_path[1]),
-        )
-
-    if support.traj_segments:
-        best = max(support.traj_segments, key=lambda g: g.length)
-        return _ShapeRefChoice(
-            line=_orient_line(best, src_xsec, dst_xsec),
-            used_lane_boundary=False,
-            lb_path_found=False,
-            lb_path_edge_count=0,
+            lb_path_length_m=float(lb_line.length),
         )
 
     return _ShapeRefChoice(
@@ -2298,7 +2491,88 @@ def _choose_shape_ref_with_graph(
         used_lane_boundary=False,
         lb_path_found=False,
         lb_path_edge_count=0,
+        lb_path_length_m=None,
     )
+
+
+def _build_shape_ref_from_surface_points(
+    *,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    points_xyz: np.ndarray,
+    gore_zone_metric: BaseGeometry | None,
+    corridor_half_width_m: float,
+    sample_step_m: float,
+) -> LineString | None:
+    if points_xyz.size == 0 or points_xyz.shape[0] < 32:
+        return None
+    src_c = src_xsec.interpolate(0.5, normalized=True) if src_xsec.length > 0 else None
+    dst_c = dst_xsec.interpolate(0.5, normalized=True) if dst_xsec.length > 0 else None
+    src_xy = point_xy_safe(src_c, context="shape_ref_surface_src")
+    dst_xy = point_xy_safe(dst_c, context="shape_ref_surface_dst")
+    if src_xy is None or dst_xy is None:
+        return None
+    dx = float(dst_xy[0] - src_xy[0])
+    dy = float(dst_xy[1] - src_xy[1])
+    axis = np.asarray(_unit_vec(np.asarray([dx, dy], dtype=np.float64)), dtype=np.float64)
+    axis_len = float(math.hypot(dx, dy))
+    if axis_len <= 1.0:
+        return None
+    normal = np.asarray([-axis[1], axis[0]], dtype=np.float64)
+
+    xy = np.asarray(points_xyz[:, :2], dtype=np.float64)
+    finite = np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])
+    if np.count_nonzero(finite) < 32:
+        return None
+    xy = xy[finite, :]
+    if gore_zone_metric is not None and xy.shape[0] > 0:
+        try:
+            gore_mask = np.asarray(contains_xy(gore_zone_metric, xy[:, 0], xy[:, 1]), dtype=bool)
+            xy = xy[~gore_mask, :]
+        except Exception:
+            pass
+    if xy.shape[0] < 24:
+        return None
+
+    rel = xy - np.asarray([float(src_xy[0]), float(src_xy[1])], dtype=np.float64)[None, :]
+    along = rel @ axis
+    across = rel @ normal
+    keep = (
+        (along >= -10.0)
+        & (along <= axis_len + 10.0)
+        & (np.abs(across) <= max(10.0, float(corridor_half_width_m) * 1.5))
+    )
+    if np.count_nonzero(keep) < 24:
+        return None
+    along = along[keep]
+    across = across[keep]
+
+    step = max(3.0, float(sample_step_m))
+    stations = np.arange(0.0, axis_len + step * 0.5, step, dtype=np.float64)
+    if stations.size == 0 or abs(float(stations[-1]) - axis_len) > 1e-6:
+        stations = np.concatenate((stations, np.asarray([axis_len], dtype=np.float64)))
+    stations = np.unique(np.clip(stations, 0.0, axis_len))
+
+    centers: list[tuple[float, float]] = []
+    win = max(2.0, step * 0.75)
+    for s in stations:
+        mask = np.abs(along - float(s)) <= win
+        if np.count_nonzero(mask) < 8:
+            continue
+        ac = float(np.median(across[mask]))
+        px = float(src_xy[0] + axis[0] * float(s) + normal[0] * ac)
+        py = float(src_xy[1] + axis[1] * float(s) + normal[1] * ac)
+        centers.append((px, py))
+    if len(centers) < 3:
+        return None
+    line = LineString(_dedup_coords(centers, eps=1e-3))
+    if line.is_empty or line.length <= 1.0:
+        return None
+    line = _orient_line(line, src_xsec, dst_xsec)
+    line = _densify_line(line, step_m=5.0)
+    if line.length <= 1.0 or len(line.coords) < 2:
+        return None
+    return line
 
 
 def _build_lb_graph_path(
@@ -2395,6 +2669,13 @@ def _build_lb_graph_path(
     line = LineString(coords)
     if line.is_empty or line.length <= 0:
         return None
+    line = _densify_line(line, step_m=5.0)
+    try:
+        simp = line.simplify(0.8, preserve_topology=False)
+    except Exception:
+        simp = line
+    if isinstance(simp, LineString) and not simp.is_empty and len(simp.coords) >= 2:
+        line = _densify_line(simp, step_m=5.0)
     return line, int(len(path_edge_refs))
 
 
@@ -2487,6 +2768,28 @@ def _orient_line(line: LineString, src_xsec: LineString, dst_xsec: LineString) -
     if backward < forward:
         return LineString(list(line.coords)[::-1])
     return line
+
+
+def _densify_line(line: LineString, *, step_m: float) -> LineString:
+    if line.is_empty or line.length <= 0:
+        return line
+    step = max(0.5, float(step_m))
+    L = float(line.length)
+    ss = np.arange(0.0, L + step * 0.5, step, dtype=np.float64)
+    if ss.size == 0 or abs(float(ss[-1]) - L) > 1e-6:
+        ss = np.concatenate((ss, np.asarray([L], dtype=np.float64)))
+    ss = np.unique(np.clip(ss, 0.0, L))
+    coords: list[tuple[float, float]] = []
+    for s in ss:
+        p = line.interpolate(float(s))
+        p_xy = point_xy_safe(p, context="densify_line")
+        if p_xy is None:
+            continue
+        coords.append((float(p_xy[0]), float(p_xy[1])))
+    coords = _dedup_coords(coords, eps=1e-5)
+    if len(coords) < 2:
+        return line
+    return LineString(coords)
 
 
 def _sample_line(line: LineString, *, step_m: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
