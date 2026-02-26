@@ -17,6 +17,11 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
 
     p.add_argument("--xsec_min_points", type=int, default=int(DEFAULT_PARAMS["XSEC_MIN_POINTS"]))
     p.add_argument("--min_support_traj", type=int, default=int(DEFAULT_PARAMS["MIN_SUPPORT_TRAJ"]))
+    p.add_argument("--stitch_max_dist_m", type=float, default=float(DEFAULT_PARAMS["STITCH_MAX_DIST_M"]))
+    p.add_argument("--stitch_max_angle_deg", type=float, default=float(DEFAULT_PARAMS["STITCH_MAX_ANGLE_DEG"]))
+    p.add_argument("--stitch_topk", type=int, default=int(DEFAULT_PARAMS["STITCH_TOPK"]))
+    p.add_argument("--neighbor_max_dist_m", type=float, default=float(DEFAULT_PARAMS["NEIGHBOR_MAX_DIST_M"]))
+    p.add_argument("--point_class_fallback_any", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["POINT_CLASS_FALLBACK_ANY"]))
 
     return p.parse_args(list(argv) if argv is not None else None)
 
@@ -27,6 +32,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     params_override = {
         "XSEC_MIN_POINTS": int(args.xsec_min_points),
         "MIN_SUPPORT_TRAJ": int(args.min_support_traj),
+        "STITCH_MAX_DIST_M": float(args.stitch_max_dist_m),
+        "STITCH_MAX_ANGLE_DEG": float(args.stitch_max_angle_deg),
+        "STITCH_TOPK": int(args.stitch_topk),
+        "NEIGHBOR_MAX_DIST_M": float(args.neighbor_max_dist_m),
+        "POINT_CLASS_FALLBACK_ANY": int(args.point_class_fallback_any),
     }
 
     try:

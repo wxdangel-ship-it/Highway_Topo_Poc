@@ -16,6 +16,7 @@ from .geometry import (
     SOFT_NO_LB,
     SOFT_OPEN_END,
     SOFT_SPARSE_POINTS,
+    SOFT_UNRESOLVED_NEIGHBOR,
     SOFT_WIGGLY,
     PairSupport,
     build_pair_supports,
@@ -30,7 +31,6 @@ from .io import (
     load_patch_inputs,
     load_point_cloud_window,
     make_run_id,
-    metric_lines_to_input_crs,
     resolve_repo_root,
     write_geojson_lines,
     write_json,
@@ -45,13 +45,21 @@ from .metrics import (
     params_digest,
 )
 
-_ROAD_OUT_NAME = "RCSDRoad.geojson"
+_ROAD_OUT_NAME = "Road.geojson"
+_ROAD_COMPAT_OUT_NAME = "RCSDRoad.geojson"
 
 
 DEFAULT_PARAMS: dict[str, float | int] = {
     "TRAJ_XSEC_HIT_BUFFER_M": 0.5,
     "TRAJ_XSEC_DEDUP_GAP_M": 2.0,
     "MIN_SUPPORT_TRAJ": 2,
+    "STITCH_MAX_DIST_M": 12.0,
+    "STITCH_MAX_ANGLE_DEG": 35.0,
+    "STITCH_PENALTY": 2.0,
+    "STITCH_TOPK": 1,
+    "NEIGHBOR_MAX_DIST_M": 2000.0,
+    "MULTI_ROAD_SEP_M": 8.0,
+    "MULTI_ROAD_TOPN": 10,
     "STABLE_OFFSET_M": 50.0,
     "STABLE_OFFSET_MARGIN_M": 5.0,
     "CENTER_SAMPLE_STEP_M": 5.0,
@@ -69,10 +77,9 @@ DEFAULT_PARAMS: dict[str, float | int] = {
     "CONF_W2_COVERAGE": 0.4,
     "CONF_W3_SMOOTH": 0.2,
     "ROAD_MAX_VERTICES": 2000,
+    "POINT_CLASS_PRIMARY": 2,
+    "POINT_CLASS_FALLBACK_ANY": 0,
 }
-
-_POINT_CLOUD_ALLOWED_CLASSES = (2, 8, 9, 11)
-
 
 @dataclass(frozen=True)
 class RunResult:
@@ -114,12 +121,17 @@ def run_patch(
         repo_root=repo_root,
     )
 
-    road_lines_input = metric_lines_to_input_crs(artifacts["road_lines_metric"], patch_inputs.projection_to_input)
     write_geojson_lines(
         patch_out / _ROAD_OUT_NAME,
-        lines_input_crs=road_lines_input,
+        lines_input_crs=artifacts["road_lines_metric"],
         properties_list=artifacts["road_properties"],
-        crs_name=patch_inputs.projection.input_crs,
+        crs_name="EPSG:3857",
+    )
+    write_geojson_lines(
+        patch_out / _ROAD_COMPAT_OUT_NAME,
+        lines_input_crs=artifacts["road_lines_metric"],
+        properties_list=artifacts["road_properties"],
+        crs_name="EPSG:3857",
     )
 
     write_json(patch_out / "metrics.json", artifacts["metrics_payload"])
@@ -180,12 +192,13 @@ def _run_patch_core(
     # 先用 Node.Kind 建初值，再用图度数二次推断。
     seed_type_map = _seed_node_type_map(node_ids=node_ids, node_kind_map=patch_inputs.node_kind_map)
 
-    events_by_traj = extract_crossing_events(
+    cross_result = extract_crossing_events(
         patch_inputs.trajectories,
         list(xsec_map.values()),
         hit_buffer_m=float(params["TRAJ_XSEC_HIT_BUFFER_M"]),
         dedup_gap_m=float(params["TRAJ_XSEC_DEDUP_GAP_M"]),
     )
+    events_by_traj = cross_result.events_by_traj
 
     if not events_by_traj:
         hard_breakpoints.append(
@@ -211,21 +224,39 @@ def _run_patch_core(
             overall_pass=False,
         )
 
-    supports_seed = build_pair_supports(
+    supports_seed_result = build_pair_supports(
         patch_inputs.trajectories,
         events_by_traj,
         node_type_map=seed_type_map,
+        stitch_max_dist_m=float(params["STITCH_MAX_DIST_M"]),
+        stitch_max_angle_deg=float(params["STITCH_MAX_ANGLE_DEG"]),
+        stitch_penalty=float(params["STITCH_PENALTY"]),
+        stitch_topk=int(params["STITCH_TOPK"]),
+        neighbor_max_dist_m=float(params["NEIGHBOR_MAX_DIST_M"]),
+        multi_road_sep_m=float(params["MULTI_ROAD_SEP_M"]),
+        multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
     )
+    supports_seed = supports_seed_result.supports
     node_type_map, in_degree, out_degree = infer_node_types(
         node_ids=node_ids,
         pair_supports=supports_seed,
         node_kind_map=patch_inputs.node_kind_map,
     )
-    supports = build_pair_supports(
+    supports_result = build_pair_supports(
         patch_inputs.trajectories,
         events_by_traj,
         node_type_map=node_type_map,
+        stitch_max_dist_m=float(params["STITCH_MAX_DIST_M"]),
+        stitch_max_angle_deg=float(params["STITCH_MAX_ANGLE_DEG"]),
+        stitch_penalty=float(params["STITCH_PENALTY"]),
+        stitch_topk=int(params["STITCH_TOPK"]),
+        neighbor_max_dist_m=float(params["NEIGHBOR_MAX_DIST_M"]),
+        multi_road_sep_m=float(params["MULTI_ROAD_SEP_M"]),
+        multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
     )
+    supports = supports_result.supports
+    for unresolved in supports_result.unresolved_events:
+        soft_breakpoints.append(dict(unresolved))
 
     if not supports:
         hard_breakpoints.append(
@@ -249,6 +280,14 @@ def _run_patch_core(
             soft_breakpoints=soft_breakpoints,
             params=params,
             overall_pass=False,
+            extra_metrics={
+                "crossing_raw_hit_count": int(cross_result.raw_hit_count),
+                "crossing_dedup_drop_count": int(cross_result.dedup_drop_count),
+                "stitch_candidate_count": int(supports_result.stitch_candidate_count),
+                "stitch_edge_count": int(supports_result.stitch_edge_count),
+                "graph_node_count": int(supports_result.graph_node_count),
+                "graph_edge_count": int(supports_result.graph_edge_count),
+            },
         )
 
     points_xyz = _load_surface_points(patch_inputs, supports, params)
@@ -428,6 +467,14 @@ def _run_patch_core(
         soft_breakpoints=soft_breakpoints,
         params=params,
         overall_pass=overall_pass,
+        extra_metrics={
+            "crossing_raw_hit_count": int(cross_result.raw_hit_count),
+            "crossing_dedup_drop_count": int(cross_result.dedup_drop_count),
+            "stitch_candidate_count": int(supports_result.stitch_candidate_count),
+            "stitch_edge_count": int(supports_result.stitch_edge_count),
+            "graph_node_count": int(supports_result.graph_node_count),
+            "graph_edge_count": int(supports_result.graph_edge_count),
+        },
     )
 
 
@@ -444,11 +491,14 @@ def _load_surface_points(
         return np.empty((0, 3), dtype=np.float64)
 
     try:
+        primary_cls = int(params.get("POINT_CLASS_PRIMARY", 2))
+        allowed = (primary_cls,)
+        fallback_any = bool(int(params.get("POINT_CLASS_FALLBACK_ANY", 0)))
         window = load_point_cloud_window(
             patch_inputs.point_cloud_path,
             bbox_metric=bbox,
-            allowed_classes=_POINT_CLOUD_ALLOWED_CLASSES,
-            fallback_to_any_class=True,
+            allowed_classes=allowed,
+            fallback_to_any_class=fallback_any,
             max_points=900_000,
         )
         return window.xyz_metric
@@ -518,6 +568,7 @@ def _make_base_road_record(
     dst_type: str,
 ) -> dict[str, Any]:
     repr_ids = list(support.repr_traj_ids)[:5]
+    stitch_p50, stitch_p90, stitch_max = _stitch_stats(support.stitch_hops)
     return {
         "road_id": f"{src}_{dst}",
         "src_nodeid": int(src),
@@ -535,12 +586,25 @@ def _make_base_road_record(
         "width_p90_m": None,
         "max_turn_deg_per_10m": None,
         "repr_traj_ids": repr_ids,
+        "stitch_hops_p50": stitch_p50,
+        "stitch_hops_p90": stitch_p90,
+        "stitch_hops_max": stitch_max,
         "hard_anomaly": False,
         "hard_reasons": [],
         "soft_issue_flags": [],
         "conf": 0.0,
         "_geometry_metric": None,
     }
+
+
+def _stitch_stats(values: Sequence[int]) -> tuple[int, int, int]:
+    if not values:
+        return (0, 0, 0)
+    arr = np.asarray([int(v) for v in values], dtype=np.float64)
+    p50 = int(round(float(np.percentile(arr, 50.0))))
+    p90 = int(round(float(np.percentile(arr, 90.0))))
+    vmax = int(round(float(np.max(arr))))
+    return (p50, p90, vmax)
 
 
 def _reason_hint(reason: str) -> str:
@@ -554,6 +618,7 @@ def _reason_hint(reason: str) -> str:
         SOFT_NO_LB: "lane_boundary_continuous_not_found",
         SOFT_WIGGLY: "turn_rate_exceeds_limit",
         SOFT_OPEN_END: "patch_boundary_open_end",
+        SOFT_UNRESOLVED_NEIGHBOR: "stitch_graph_neighbor_unresolved",
     }
     return hints.get(reason, "")
 
@@ -574,6 +639,7 @@ def _finalize_payloads(
     soft_breakpoints: list[dict[str, Any]],
     params: dict[str, Any],
     overall_pass: bool,
+    extra_metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     git_sha = git_short_sha(repo_root)
     digest = params_digest(params)
@@ -585,6 +651,8 @@ def _finalize_payloads(
         soft_breakpoints=soft_breakpoints,
     )
     metrics_payload["params_digest"] = digest
+    if extra_metrics:
+        metrics_payload.update(extra_metrics)
 
     intervals_payload = build_intervals_payload(
         breakpoints=[*hard_breakpoints, *soft_breakpoints],

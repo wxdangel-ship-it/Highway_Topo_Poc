@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 import numpy as np
 from pyproj import CRS, Transformer
@@ -41,6 +41,7 @@ class TrajectoryData:
     seq: np.ndarray
     xyz_metric: np.ndarray
     source_path: Path
+    source_crs: str
 
 
 @dataclass(frozen=True)
@@ -237,12 +238,26 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
     trajectories = _load_trajectories(traj_dir)
     point_cloud_path = _pick_point_cloud_file(pointcloud_dir)
 
-    projection, projectors = _build_projection(inter_payload, lane_payload, trajectories)
+    dst_crs = "EPSG:3857"
+    inter_crs = _require_geojson_crs(inter_payload, path=intersection_path, allow_empty_if_no_features=False)
+    lane_crs = _require_geojson_crs(lane_payload, path=laneboundary_path, allow_empty_if_no_features=True) or inter_crs
+    inter_to_metric = _make_transformer(inter_crs, dst_crs)
+    lane_to_metric = _make_transformer(lane_crs, dst_crs)
 
-    intersections = _extract_intersections(inter_payload, projectors.to_metric)
-    lane_boundaries = _extract_linestrings(lane_payload, projectors.to_metric)
+    projection = ProjectionInfo(
+        input_crs=inter_crs,
+        metric_crs=dst_crs,
+        projected=inter_crs != dst_crs,
+    )
+    projectors = Projectors(
+        to_metric=inter_to_metric,
+        to_input=_make_transformer(dst_crs, inter_crs),
+    )
+
+    intersections = _extract_intersections(inter_payload, inter_to_metric)
+    lane_boundaries = _extract_linestrings(lane_payload, lane_to_metric)
     node_kind = _extract_node_kind_map(node_payload)
-    projected_traj = _project_trajectories(trajectories, projectors.to_metric)
+    projected_traj = _project_trajectories(trajectories, dst_crs=dst_crs)
 
     return PatchInputs(
         patch_id=patch_dir.name,
@@ -262,6 +277,9 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
             "has_tiles_dir": tiles_dir.is_dir(),
             "road_prior_name": road_path.name if road_path.is_file() else None,
             "tiles_layout": "xyz" if tiles_dir.is_dir() else None,
+            "dst_crs": dst_crs,
+            "intersection_src_crs": inter_crs,
+            "lane_src_crs": lane_crs,
         },
     )
 
@@ -463,12 +481,13 @@ def _load_trajectories(traj_dir: Path) -> list[TrajectoryData]:
             payload = _load_geojson(fp)
         except Exception:
             continue
+        src_crs = _require_geojson_crs(payload, path=fp, allow_empty_if_no_features=True)
 
         feats = payload.get("features", [])
         xs: list[float] = []
         ys: list[float] = []
         zs: list[float] = []
-        seq: list[float] = []
+        seq: list[int] = []
 
         for idx, feat in enumerate(feats):
             geom = feat.get("geometry") or {}
@@ -484,7 +503,7 @@ def _load_trajectories(traj_dir: Path) -> list[TrajectoryData]:
                 continue
 
             props = feat.get("properties") or {}
-            seq_val = _extract_seq(props, fallback_idx=idx)
+            seq_val = int(_extract_seq(props, fallback_idx=idx))
 
             xs.append(x)
             ys.append(y)
@@ -494,7 +513,7 @@ def _load_trajectories(traj_dir: Path) -> list[TrajectoryData]:
         if len(xs) < 2:
             continue
 
-        order = np.argsort(np.asarray(seq, dtype=np.float64))
+        order = np.argsort(np.asarray(seq, dtype=np.int64))
         xyz = np.column_stack(
             (
                 np.asarray(xs, dtype=np.float64)[order],
@@ -502,31 +521,42 @@ def _load_trajectories(traj_dir: Path) -> list[TrajectoryData]:
                 np.asarray(zs, dtype=np.float64)[order],
             )
         )
-        seq_arr = np.asarray(seq, dtype=np.float64)[order]
+        seq_arr = np.asarray(seq, dtype=np.int64)[order]
 
         traj_id = fp.parent.name
-        out.append(TrajectoryData(traj_id=traj_id, seq=seq_arr, xyz_metric=xyz, source_path=fp))
+        out.append(
+            TrajectoryData(
+                traj_id=traj_id,
+                seq=seq_arr,
+                xyz_metric=xyz,
+                source_path=fp,
+                source_crs=src_crs or "EPSG:3857",
+            )
+        )
 
     return out
 
 
-def _extract_seq(props: dict[str, Any], *, fallback_idx: int) -> float:
+def _extract_seq(props: dict[str, Any], *, fallback_idx: int) -> int:
     for key in ["seq", "frame_id", "idx", "index"]:
         if key in props:
+            iv = _safe_int(props.get(key))
+            if iv is not None:
+                return int(iv)
             v = _to_float(props.get(key))
             if math.isfinite(v):
-                return float(v)
+                return int(round(float(v)))
 
     ts = props.get("timestamp")
     if ts is not None:
         try:
             from datetime import datetime as dt
 
-            return float(dt.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp())
+            return int(round(float(dt.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp() * 1000.0)))
         except Exception:
             pass
 
-    return float(fallback_idx)
+    return int(fallback_idx)
 
 
 def _build_projection(
@@ -534,72 +564,17 @@ def _build_projection(
     lane_payload: dict[str, Any],
     trajectories: Sequence[TrajectoryData],
 ) -> tuple[ProjectionInfo, Projectors]:
-    declared = _extract_declared_crs(intersection_payload) or _extract_declared_crs(lane_payload)
-
-    sample_xy = _collect_sample_xy(intersection_payload, lane_payload, trajectories)
-    has_lonlat = _looks_like_lonlat(sample_xy)
-
-    if declared:
-        try:
-            in_crs = CRS.from_user_input(declared)
-        except Exception:
-            in_crs = CRS.from_epsg(4326) if has_lonlat else CRS.from_epsg(3857)
-    else:
-        in_crs = CRS.from_epsg(4326) if has_lonlat else CRS.from_epsg(3857)
-
-    if in_crs.is_geographic:
-        lon, lat = _centroid_lonlat(sample_xy)
-        metric_crs = _utm_crs_for_lonlat(lon, lat)
-        forward = Transformer.from_crs(in_crs, metric_crs, always_xy=True).transform
-        backward = Transformer.from_crs(metric_crs, in_crs, always_xy=True).transform
-        proj = ProjectionInfo(input_crs=str(in_crs.to_string()), metric_crs=str(metric_crs.to_string()), projected=True)
-        return proj, Projectors(to_metric=forward, to_input=backward)
-
-    proj = ProjectionInfo(input_crs=str(in_crs.to_string()), metric_crs=str(in_crs.to_string()), projected=False)
-    return proj, Projectors(to_metric=lambda x, y, z=None: (x, y), to_input=lambda x, y, z=None: (x, y))
-
-
-def _collect_sample_xy(
-    intersection_payload: dict[str, Any],
-    lane_payload: dict[str, Any],
-    trajectories: Sequence[TrajectoryData],
-) -> np.ndarray:
-    pts: list[tuple[float, float]] = []
-
-    for payload in [intersection_payload, lane_payload]:
-        for feat in payload.get("features", [])[:32]:
-            try:
-                geom = shape(feat.get("geometry"))
-            except Exception:
-                continue
-            if geom.is_empty:
-                continue
-            coords: Iterable[tuple[float, float]]
-            if isinstance(geom, LineString):
-                coords = geom.coords
-            else:
-                coords = []
-            for x, y, *_ in coords:
-                if math.isfinite(x) and math.isfinite(y):
-                    pts.append((float(x), float(y)))
-                    if len(pts) >= 256:
-                        break
-            if len(pts) >= 256:
-                break
-
-    for traj in trajectories[:4]:
-        for row in traj.xyz_metric[:64]:
-            x, y = float(row[0]), float(row[1])
-            if math.isfinite(x) and math.isfinite(y):
-                pts.append((x, y))
-                if len(pts) >= 256:
-                    break
-        if len(pts) >= 256:
-            break
-
-    if not pts:
-        return np.empty((0, 2), dtype=np.float64)
-    return np.asarray(pts, dtype=np.float64)
+    del lane_payload
+    del trajectories
+    src = _require_geojson_crs(intersection_payload, path=Path("intersection_l.geojson"), allow_empty_if_no_features=False)
+    dst = "EPSG:3857"
+    return (
+        ProjectionInfo(input_crs=src, metric_crs=dst, projected=src != dst),
+        Projectors(
+            to_metric=_make_transformer(src, dst),
+            to_input=_make_transformer(dst, src),
+        ),
+    )
 
 
 def _extract_declared_crs(payload: dict[str, Any]) -> str | None:
@@ -612,36 +587,6 @@ def _extract_declared_crs(payload: dict[str, Any]) -> str | None:
         if isinstance(name, str) and name.strip():
             return name.strip()
     return None
-
-
-def _looks_like_lonlat(xy: np.ndarray) -> bool:
-    if xy.size == 0:
-        return False
-    x = xy[:, 0]
-    y = xy[:, 1]
-    finite = np.isfinite(x) & np.isfinite(y)
-    if np.count_nonzero(finite) == 0:
-        return False
-    xs = x[finite]
-    ys = y[finite]
-    return bool(np.all(np.abs(xs) <= 180.0) and np.all(np.abs(ys) <= 90.0))
-
-
-def _centroid_lonlat(xy: np.ndarray) -> tuple[float, float]:
-    if xy.size == 0:
-        return (0.0, 0.0)
-    lon = float(np.nanmean(xy[:, 0]))
-    lat = float(np.nanmean(xy[:, 1]))
-    lon = min(179.0, max(-179.0, lon))
-    lat = min(84.0, max(-80.0, lat))
-    return (lon, lat)
-
-
-def _utm_crs_for_lonlat(lon: float, lat: float) -> CRS:
-    zone = int(math.floor((lon + 180.0) / 6.0) + 1)
-    zone = min(60, max(1, zone))
-    epsg = 32600 + zone if lat >= 0 else 32700 + zone
-    return CRS.from_epsg(epsg)
 
 
 def _extract_intersections(payload: dict[str, Any], to_metric: callable) -> list[CrossSection]:
@@ -716,13 +661,14 @@ def _extract_node_kind_map(payload: dict[str, Any]) -> dict[int, int]:
     return out
 
 
-def _project_trajectories(trajectories: Sequence[TrajectoryData], to_metric: callable) -> list[TrajectoryData]:
+def _project_trajectories(trajectories: Sequence[TrajectoryData], *, dst_crs: str) -> list[TrajectoryData]:
     out: list[TrajectoryData] = []
     for traj in trajectories:
         xyz = np.asarray(traj.xyz_metric, dtype=np.float64)
         if xyz.shape[0] < 2:
             continue
 
+        to_metric = _make_transformer(traj.source_crs, dst_crs)
         x, y = xyz[:, 0], xyz[:, 1]
         px, py = to_metric(x, y)
         pxyz = np.column_stack((np.asarray(px, dtype=np.float64), np.asarray(py, dtype=np.float64), xyz[:, 2]))
@@ -737,7 +683,15 @@ def _project_trajectories(trajectories: Sequence[TrajectoryData], to_metric: cal
         else:
             seq = traj.seq
 
-        out.append(TrajectoryData(traj_id=traj.traj_id, seq=np.asarray(seq, dtype=np.float64), xyz_metric=pxyz, source_path=traj.source_path))
+        out.append(
+            TrajectoryData(
+                traj_id=traj.traj_id,
+                seq=np.asarray(seq, dtype=np.int64),
+                xyz_metric=pxyz,
+                source_path=traj.source_path,
+                source_crs=dst_crs,
+            )
+        )
 
     return out
 
@@ -764,7 +718,62 @@ def _transform_linestring(line: LineString, fn: callable) -> LineString | None:
 
 def _pick_point_cloud_file(pointcloud_dir: Path) -> Path | None:
     files = list_point_cloud_files(pointcloud_dir)
+    prefer = [
+        "merged_cleaned_classified_3857.laz",
+        "merged_cleaned_classified_3857.las",
+    ]
+    by_name = {p.name.lower(): p for p in files}
+    for name in prefer:
+        cand = by_name.get(name.lower())
+        if cand is not None:
+            return cand
     return files[0] if files else None
+
+
+def _require_geojson_crs(
+    payload: dict[str, Any],
+    *,
+    path: Path,
+    allow_empty_if_no_features: bool,
+) -> str | None:
+    crs_raw = _extract_declared_crs(payload)
+    if crs_raw is None:
+        feats = payload.get("features")
+        if allow_empty_if_no_features and isinstance(feats, list) and len(feats) == 0:
+            return None
+        raise InputDataError(f"geojson_crs_missing: {path}")
+
+    norm = _normalize_epsg_name(crs_raw)
+    if norm is None:
+        raise InputDataError(f"geojson_crs_invalid: {path}: {crs_raw}")
+    return norm
+
+
+def _normalize_epsg_name(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    try:
+        crs = CRS.from_user_input(s)
+    except Exception:
+        return None
+    epsg = crs.to_epsg()
+    if epsg is None:
+        return None
+    return f"EPSG:{int(epsg)}"
+
+
+def _make_transformer(src_crs: str, dst_crs: str) -> callable:
+    src = _normalize_epsg_name(src_crs)
+    dst = _normalize_epsg_name(dst_crs)
+    if src is None or dst is None:
+        raise InputDataError(f"crs_invalid: src={src_crs} dst={dst_crs}")
+    if src == dst:
+        return lambda x, y, z=None: (x, y)
+    tf = Transformer.from_crs(src, dst, always_xy=True)
+    return tf.transform
 
 
 def _to_float(v: Any) -> float:

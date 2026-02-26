@@ -93,6 +93,12 @@ def build_intervals_payload(
             "severity": bp.get("severity"),
             "hint": bp.get("hint"),
         }
+        if "max_explored_dist_m" in bp:
+            item["max_explored_dist_m"] = bp.get("max_explored_dist_m")
+        if "last_node_ref" in bp:
+            item["last_node_ref"] = bp.get("last_node_ref")
+        if "stitch_candidate_count" in bp:
+            item["stitch_candidate_count"] = bp.get("stitch_candidate_count")
         intervals.append(item)
 
     return {"topk": intervals}
@@ -142,6 +148,16 @@ def build_summary_text(
     lines.append(f"road_count: {road_count}")
     lines.append(f"hard_anomaly_count: {hard_count}")
     lines.append(f"soft_issue_count: {soft_count}")
+    stitch_vals: list[float] = []
+    for road in roads:
+        v = _to_float(road.get("stitch_hops_p50"))
+        if math.isfinite(v):
+            stitch_vals.append(float(v))
+    if stitch_vals:
+        arr = np.asarray(stitch_vals, dtype=np.float64)
+        lines.append(f"stitch_hops_p50: {int(round(float(np.percentile(arr, 50.0))))}")
+        lines.append(f"stitch_hops_p90: {int(round(float(np.percentile(arr, 90.0))))}")
+        lines.append(f"stitch_hops_max: {int(round(float(np.max(arr))))}")
 
     lines.append("")
     lines.append("hard_breakpoints_topk:")
@@ -266,6 +282,7 @@ def _breakpoint_sort_key(bp: dict[str, Any]) -> tuple[int, int, float]:
         "NO_LB_CONTINUOUS": 12,
         "WIGGLY_CENTERLINE": 13,
         "OPEN_END": 14,
+        "UNRESOLVED_NEIGHBOR": 15,
     }
     r = order.get(reason, 99)
 

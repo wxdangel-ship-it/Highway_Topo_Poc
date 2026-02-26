@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
@@ -21,15 +22,27 @@ SOFT_SPARSE_POINTS = "SPARSE_SURFACE_POINTS"
 SOFT_NO_LB = "NO_LB_CONTINUOUS"
 SOFT_WIGGLY = "WIGGLY_CENTERLINE"
 SOFT_OPEN_END = "OPEN_END"
+SOFT_UNRESOLVED_NEIGHBOR = "UNRESOLVED_NEIGHBOR"
 
 
 @dataclass(frozen=True)
 class CrossingEvent:
     traj_id: str
     nodeid: int
-    seq: float
+    seq: int
     seg_idx: int
+    seq_idx: int
+    station_m: float
     cross_point: Point
+    heading_xy: tuple[float, float]
+    cross_dist_m: float
+
+
+@dataclass(frozen=True)
+class CrossingExtractResult:
+    events_by_traj: dict[str, list[CrossingEvent]]
+    raw_hit_count: int
+    dedup_drop_count: int
 
 
 @dataclass
@@ -45,6 +58,21 @@ class PairSupport:
     open_end: bool = False
     hard_anomalies: set[str] = field(default_factory=set)
     hints: list[str] = field(default_factory=list)
+    stitch_hops: list[int] = field(default_factory=list)
+    evidence_traj_ids: list[str] = field(default_factory=list)
+    evidence_lengths_m: list[float] = field(default_factory=list)
+    open_end_flags: list[bool] = field(default_factory=list)
+    unresolved_neighbor_count: int = 0
+
+
+@dataclass(frozen=True)
+class PairSupportBuildResult:
+    supports: dict[tuple[int, int], PairSupport]
+    unresolved_events: list[dict[str, Any]]
+    graph_node_count: int
+    graph_edge_count: int
+    stitch_candidate_count: int
+    stitch_edge_count: int
 
 
 @dataclass
@@ -69,24 +97,33 @@ def extract_crossing_events(
     *,
     hit_buffer_m: float,
     dedup_gap_m: float,
-) -> dict[str, list[CrossingEvent]]:
+) -> CrossingExtractResult:
     out: dict[str, list[CrossingEvent]] = {}
-    if not cross_sections:
-        return out
+    raw_hit_count = 0
+    dedup_drop_count = 0
 
-    xsecs: list[tuple[int, LineString, Any]] = []
+    if not cross_sections:
+        return CrossingExtractResult(
+            events_by_traj=out,
+            raw_hit_count=0,
+            dedup_drop_count=0,
+        )
+
+    xsecs: list[tuple[int, LineString, Any, Point]] = []
     for x in cross_sections:
         geom = x.geometry_metric
         if geom.is_empty or geom.length <= 0:
             continue
-        xsecs.append((x.nodeid, geom, geom.buffer(hit_buffer_m)))
+        center = geom.interpolate(0.5, normalized=True)
+        xsecs.append((x.nodeid, geom, geom.buffer(hit_buffer_m), center))
 
     for traj in trajectories:
         coords = np.asarray(traj.xyz_metric[:, :2], dtype=np.float64)
-        seq = np.asarray(traj.seq, dtype=np.float64)
+        seq = np.asarray(traj.seq, dtype=np.int64)
         if coords.shape[0] < 2:
             continue
 
+        station = _traj_station(coords)
         events: list[CrossingEvent] = []
         for i in range(coords.shape[0] - 1):
             p0 = coords[i]
@@ -97,7 +134,9 @@ def extract_crossing_events(
                 continue
 
             seg = LineString([tuple(p0), tuple(p1)])
-            for nodeid, xline, xbuf in xsecs:
+            seg_heading = _unit_vec(p1 - p0)
+            seg_len = float(np.linalg.norm(p1 - p0))
+            for nodeid, xline, xbuf, xcenter in xsecs:
                 if not seg.intersects(xbuf):
                     continue
 
@@ -106,22 +145,33 @@ def extract_crossing_events(
                     continue
 
                 frac = _segment_fraction(cp, p0, p1)
-                seq_val = float(seq[i] + frac * (seq[i + 1] - seq[i]))
+                seq_val = int(round(float(seq[i] + frac * (seq[i + 1] - seq[i]))))
+                station_m = float(station[i] + frac * seg_len)
                 events.append(
                     CrossingEvent(
                         traj_id=traj.traj_id,
                         nodeid=int(nodeid),
                         seq=seq_val,
                         seg_idx=int(i),
+                        seq_idx=int(i),
+                        station_m=station_m,
                         cross_point=cp,
+                        heading_xy=seg_heading,
+                        cross_dist_m=float(cp.distance(xcenter)),
                     )
                 )
+                raw_hit_count += 1
 
-        deduped = _dedup_events(events, dedup_gap_m=dedup_gap_m)
+        deduped, dropped = _dedup_events_by_node(events, dedup_gap_m=dedup_gap_m)
+        dedup_drop_count += int(dropped)
         if deduped:
             out[traj.traj_id] = deduped
 
-    return out
+    return CrossingExtractResult(
+        events_by_traj=out,
+        raw_hit_count=int(raw_hit_count),
+        dedup_drop_count=int(dedup_drop_count),
+    )
 
 
 def build_pair_supports(
@@ -129,51 +179,146 @@ def build_pair_supports(
     events_by_traj: dict[str, list[CrossingEvent]],
     *,
     node_type_map: dict[int, str],
-) -> dict[tuple[int, int], PairSupport]:
-    traj_map = {t.traj_id: t for t in trajectories}
+    stitch_max_dist_m: float = 12.0,
+    stitch_max_angle_deg: float = 35.0,
+    stitch_penalty: float = 2.0,
+    stitch_topk: int = 1,
+    neighbor_max_dist_m: float = 2000.0,
+    multi_road_sep_m: float = 8.0,
+    multi_road_topn: int = 10,
+) -> PairSupportBuildResult:
+    graph = _build_forward_graph(
+        trajectories=trajectories,
+        events_by_traj=events_by_traj,
+        stitch_max_dist_m=float(stitch_max_dist_m),
+        stitch_max_angle_deg=float(stitch_max_angle_deg),
+        stitch_penalty=float(stitch_penalty),
+        stitch_topk=max(1, int(stitch_topk)),
+    )
+
     supports: dict[tuple[int, int], PairSupport] = {}
+    unresolved_events: list[dict[str, Any]] = []
 
-    for traj_id, events in events_by_traj.items():
-        traj = traj_map.get(traj_id)
-        if traj is None or len(events) < 2:
-            continue
+    for traj_id, items in graph.event_keys_by_traj.items():
+        for ev, source_key in items:
+            search = _search_next_crossing(
+                source_key=source_key,
+                source_nodeid=int(ev.nodeid),
+                nodes=graph.nodes,
+                edges=graph.edges,
+                max_dist_m=float(neighbor_max_dist_m),
+            )
 
-        for i in range(len(events) - 1):
-            a = events[i]
-            b = events[i + 1]
-            if a.nodeid == b.nodeid:
+            target_key = search.target_key
+            if target_key is None:
+                last_stitch_candidates = _count_outgoing_stitch_edges(graph.edges.get(search.last_key, []))
+                unresolved_events.append(
+                    {
+                        "road_id": f"na_{ev.nodeid}_{traj_id}_{ev.seq_idx}",
+                        "src_nodeid": int(ev.nodeid),
+                        "dst_nodeid": None,
+                        "traj_id": str(traj_id),
+                        "seq_range": [int(ev.seq_idx), int(ev.seq_idx)],
+                        "station_range_m": [float(ev.station_m), float(ev.station_m)],
+                        "reason": SOFT_UNRESOLVED_NEIGHBOR,
+                        "severity": "soft",
+                        "hint": (
+                            f"max_dist_m={search.max_explored_dist_m:.1f};"
+                            f"last_node={search.last_key};"
+                            f"stitch_candidates={last_stitch_candidates}"
+                        ),
+                        "max_explored_dist_m": float(search.max_explored_dist_m),
+                        "last_node_ref": str(search.last_key),
+                        "stitch_candidate_count": int(last_stitch_candidates),
+                    }
+                )
                 continue
 
-            pair = (a.nodeid, b.nodeid)
+            target_node = graph.nodes.get(target_key)
+            if target_node is None or target_node.cross_nodeid is None:
+                continue
+
+            dst_nodeid = int(target_node.cross_nodeid)
+            if dst_nodeid == int(ev.nodeid):
+                continue
+
+            pair = (int(ev.nodeid), int(dst_nodeid))
             support = supports.get(pair)
             if support is None:
                 support = PairSupport(src_nodeid=pair[0], dst_nodeid=pair[1])
                 supports[pair] = support
 
-            support.support_traj_ids.add(traj_id)
+            path_keys = _reconstruct_path(source_key=source_key, target_key=target_key, prev=search.prev)
+            path_line = _build_path_linestring(
+                path_keys=path_keys,
+                nodes=graph.nodes,
+                prev_edge=search.prev_edge,
+                traj_line_map=graph.traj_line_map,
+            )
+            if path_line is None or path_line.length <= 0:
+                path_line = LineString(
+                    [
+                        (float(ev.cross_point.x), float(ev.cross_point.y)),
+                        (float(target_node.point.x), float(target_node.point.y)),
+                    ]
+                )
+
+            path_traj_ids = _extract_path_traj_ids(path_keys=path_keys, nodes=graph.nodes)
+            if not path_traj_ids:
+                path_traj_ids = {traj_id}
+
+            support.support_traj_ids.update(path_traj_ids)
             support.support_event_count += 1
-            support.src_cross_points.append(a.cross_point)
-            support.dst_cross_points.append(b.cross_point)
+            support.src_cross_points.append(ev.cross_point)
+            support.dst_cross_points.append(target_node.point)
+            support.traj_segments.append(path_line)
+            support.stitch_hops.append(int(search.stitch_hops))
+            support.evidence_traj_ids.append(str(traj_id))
+            support.evidence_lengths_m.append(float(search.distance_m))
+
+            edge_kinds = _path_edge_kinds(path_keys=path_keys, prev_edge=search.prev_edge)
+            is_open_end = ("start" in edge_kinds) or ("end" in edge_kinds)
+            support.open_end_flags.append(bool(is_open_end))
+            support.open_end = support.open_end or is_open_end
+
             if traj_id not in support.repr_traj_ids and len(support.repr_traj_ids) < 16:
-                support.repr_traj_ids.append(traj_id)
+                support.repr_traj_ids.append(str(traj_id))
 
-            seg = _extract_traj_segment(traj, a, b)
-            if seg is not None and seg.length > 0:
-                support.traj_segments.append(seg)
-
-            if i == 0 or (i + 1) == (len(events) - 1):
-                support.open_end = True
-
-            src_type = node_type_map.get(a.nodeid, "unknown")
-            dst_type = node_type_map.get(b.nodeid, "unknown")
-            if src_type == "non_rc" or dst_type == "non_rc":
+            non_rc_hit = _first_non_rc_in_path(
+                path_keys=path_keys,
+                nodes=graph.nodes,
+                node_type_map=node_type_map,
+                src_nodeid=int(ev.nodeid),
+            )
+            dst_type = node_type_map.get(dst_nodeid, "unknown")
+            if non_rc_hit is not None or dst_type == "non_rc":
                 support.hard_anomalies.add(HARD_NON_RC)
 
-    for support in supports.values():
-        if _detect_multi_road_channels(support):
+    for pair, support in list(supports.items()):
+        has_multi, keep_idx = _detect_multi_road_channels(
+            support,
+            sep_m=float(multi_road_sep_m),
+            topn=max(3, int(multi_road_topn)),
+        )
+        if has_multi:
             support.hard_anomalies.add(HARD_MULTI_ROAD)
+            if keep_idx:
+                _apply_support_subset(support, keep_idx)
 
-    return supports
+        if support.support_event_count <= 0:
+            supports.pop(pair, None)
+            continue
+
+        support.open_end = bool(any(support.open_end_flags))
+
+    return PairSupportBuildResult(
+        supports=supports,
+        unresolved_events=unresolved_events,
+        graph_node_count=int(len(graph.nodes)),
+        graph_edge_count=int(sum(len(v) for v in graph.edges.values())),
+        stitch_candidate_count=int(graph.stitch_candidate_count),
+        stitch_edge_count=int(graph.stitch_edge_count),
+    )
 
 
 def infer_node_types(
@@ -209,6 +354,426 @@ def infer_node_types(
             out[int(n)] = "unknown"
 
     return out, in_degree, out_degree
+
+
+@dataclass(frozen=True)
+class _GraphNode:
+    key: str
+    traj_id: str
+    kind: str
+    station_m: float
+    point: Point
+    heading_xy: tuple[float, float]
+    cross_nodeid: int | None
+    seq_idx: int | None
+
+
+@dataclass(frozen=True)
+class _GraphEdge:
+    to_key: str
+    weight: float
+    kind: str
+    traj_id: str | None
+    station_from: float | None
+    station_to: float | None
+
+
+@dataclass(frozen=True)
+class _GraphBuildResult:
+    nodes: dict[str, _GraphNode]
+    edges: dict[str, list[_GraphEdge]]
+    event_keys_by_traj: dict[str, list[tuple[CrossingEvent, str]]]
+    traj_line_map: dict[str, LineString]
+    stitch_candidate_count: int
+    stitch_edge_count: int
+
+
+@dataclass(frozen=True)
+class _SearchResult:
+    target_key: str | None
+    distance_m: float
+    stitch_hops: int
+    prev: dict[str, str]
+    prev_edge: dict[str, _GraphEdge]
+    max_explored_dist_m: float
+    last_key: str
+
+
+def _build_forward_graph(
+    *,
+    trajectories: Sequence[TrajectoryData],
+    events_by_traj: dict[str, list[CrossingEvent]],
+    stitch_max_dist_m: float,
+    stitch_max_angle_deg: float,
+    stitch_penalty: float,
+    stitch_topk: int,
+) -> _GraphBuildResult:
+    nodes: dict[str, _GraphNode] = {}
+    edges: dict[str, list[_GraphEdge]] = {}
+    event_keys_by_traj: dict[str, list[tuple[CrossingEvent, str]]] = {}
+    traj_line_map: dict[str, LineString] = {}
+
+    start_keys: list[str] = []
+    end_keys: list[str] = []
+
+    for traj in trajectories:
+        coords = np.asarray(traj.xyz_metric[:, :2], dtype=np.float64)
+        if coords.shape[0] < 2:
+            continue
+
+        line = LineString([(float(p[0]), float(p[1])) for p in coords])
+        if line.is_empty or line.length <= 0:
+            continue
+
+        traj_line_map[traj.traj_id] = line
+        station = _traj_station(coords)
+        start_heading = _unit_vec(coords[1] - coords[0])
+        end_heading = _unit_vec(coords[-1] - coords[-2])
+
+        start_key = f"{traj.traj_id}:start"
+        end_key = f"{traj.traj_id}:end"
+        start_node = _GraphNode(
+            key=start_key,
+            traj_id=traj.traj_id,
+            kind="start",
+            station_m=0.0,
+            point=Point(float(coords[0, 0]), float(coords[0, 1])),
+            heading_xy=start_heading,
+            cross_nodeid=None,
+            seq_idx=0,
+        )
+        end_node = _GraphNode(
+            key=end_key,
+            traj_id=traj.traj_id,
+            kind="end",
+            station_m=float(station[-1]),
+            point=Point(float(coords[-1, 0]), float(coords[-1, 1])),
+            heading_xy=end_heading,
+            cross_nodeid=None,
+            seq_idx=int(coords.shape[0] - 1),
+        )
+        nodes[start_key] = start_node
+        nodes[end_key] = end_node
+        start_keys.append(start_key)
+        end_keys.append(end_key)
+
+        sorted_events = sorted(events_by_traj.get(traj.traj_id, []), key=lambda e: (e.station_m, e.nodeid, e.seq_idx))
+        event_items: list[tuple[CrossingEvent, str]] = []
+        middle_keys: list[str] = []
+        for idx, ev in enumerate(sorted_events):
+            key = f"{traj.traj_id}:cross:{idx}:{ev.nodeid}"
+            node = _GraphNode(
+                key=key,
+                traj_id=traj.traj_id,
+                kind="cross",
+                station_m=float(ev.station_m),
+                point=ev.cross_point,
+                heading_xy=ev.heading_xy,
+                cross_nodeid=int(ev.nodeid),
+                seq_idx=int(ev.seq_idx),
+            )
+            nodes[key] = node
+            event_items.append((ev, key))
+            middle_keys.append(key)
+
+        event_keys_by_traj[traj.traj_id] = event_items
+        ordered = [start_key, *middle_keys, end_key]
+        for a, b in zip(ordered[:-1], ordered[1:]):
+            na = nodes[a]
+            nb = nodes[b]
+            w = max(0.0, float(nb.station_m - na.station_m))
+            if w <= 1e-6:
+                continue
+            edges.setdefault(a, []).append(
+                _GraphEdge(
+                    to_key=b,
+                    weight=w,
+                    kind="traj",
+                    traj_id=traj.traj_id,
+                    station_from=float(na.station_m),
+                    station_to=float(nb.station_m),
+                )
+            )
+
+    stitch_candidate_count = 0
+    stitch_edge_count = 0
+    if stitch_max_dist_m > 0 and start_keys and end_keys:
+        cell = max(0.1, float(stitch_max_dist_m))
+        start_grid: dict[tuple[int, int], list[str]] = {}
+        for sk in start_keys:
+            sn = nodes[sk]
+            key = _grid_key(sn.point.x, sn.point.y, cell)
+            start_grid.setdefault(key, []).append(sk)
+
+        for ek in end_keys:
+            en = nodes[ek]
+            gx, gy = _grid_key(en.point.x, en.point.y, cell)
+            cands: list[tuple[float, float, str, str]] = []
+            for ix in range(gx - 1, gx + 2):
+                for iy in range(gy - 1, gy + 2):
+                    for sk in start_grid.get((ix, iy), []):
+                        sn = nodes[sk]
+                        if sn.traj_id == en.traj_id:
+                            continue
+                        dist = float(en.point.distance(sn.point))
+                        if dist > stitch_max_dist_m:
+                            continue
+                        ang = _angle_deg(en.heading_xy, sn.heading_xy)
+                        if ang > stitch_max_angle_deg:
+                            continue
+                        cands.append((dist, ang, sn.traj_id, sk))
+
+            if not cands:
+                continue
+
+            cands.sort(key=lambda x: (x[0], x[1], x[2]))
+            stitch_candidate_count += int(len(cands))
+            for dist, _ang, _tid, sk in cands[: max(1, int(stitch_topk))]:
+                w = max(0.05, float(dist) * max(0.1, float(stitch_penalty)))
+                edges.setdefault(ek, []).append(
+                    _GraphEdge(
+                        to_key=sk,
+                        weight=w,
+                        kind="stitch",
+                        traj_id=None,
+                        station_from=None,
+                        station_to=None,
+                    )
+                )
+                stitch_edge_count += 1
+
+    for key, vals in edges.items():
+        vals.sort(key=lambda e: (e.weight, e.kind, e.to_key))
+        edges[key] = vals
+
+    return _GraphBuildResult(
+        nodes=nodes,
+        edges=edges,
+        event_keys_by_traj=event_keys_by_traj,
+        traj_line_map=traj_line_map,
+        stitch_candidate_count=int(stitch_candidate_count),
+        stitch_edge_count=int(stitch_edge_count),
+    )
+
+
+def _search_next_crossing(
+    *,
+    source_key: str,
+    source_nodeid: int,
+    nodes: dict[str, _GraphNode],
+    edges: dict[str, list[_GraphEdge]],
+    max_dist_m: float,
+) -> _SearchResult:
+    best: dict[str, tuple[float, int]] = {source_key: (0.0, 0)}
+    prev: dict[str, str] = {}
+    prev_edge: dict[str, _GraphEdge] = {}
+    heap: list[tuple[float, int, str]] = [(0.0, 0, source_key)]
+
+    max_explored = 0.0
+    last_key = source_key
+
+    while heap:
+        dist, hops, key = heapq.heappop(heap)
+        rec = best.get(key)
+        if rec is None:
+            continue
+        if dist > rec[0] + 1e-9:
+            continue
+        if abs(dist - rec[0]) <= 1e-9 and hops > rec[1]:
+            continue
+        if dist > max_dist_m + 1e-6:
+            continue
+
+        if dist >= max_explored:
+            max_explored = float(dist)
+            last_key = key
+
+        node = nodes.get(key)
+        if node is None:
+            continue
+        if node.kind == "cross" and node.cross_nodeid is not None and int(node.cross_nodeid) != int(source_nodeid):
+            return _SearchResult(
+                target_key=key,
+                distance_m=float(dist),
+                stitch_hops=int(hops),
+                prev=prev,
+                prev_edge=prev_edge,
+                max_explored_dist_m=float(max_explored),
+                last_key=str(last_key),
+            )
+
+        for edge in edges.get(key, []):
+            nd = float(dist + edge.weight)
+            if nd > max_dist_m + 1e-6:
+                continue
+            nh = int(hops + (1 if edge.kind == "stitch" else 0))
+            old = best.get(edge.to_key)
+            if old is not None:
+                if nd > old[0] + 1e-9:
+                    continue
+                if abs(nd - old[0]) <= 1e-9 and nh >= old[1]:
+                    continue
+            best[edge.to_key] = (nd, nh)
+            prev[edge.to_key] = key
+            prev_edge[edge.to_key] = edge
+            heapq.heappush(heap, (nd, nh, edge.to_key))
+
+    return _SearchResult(
+        target_key=None,
+        distance_m=float(max_explored),
+        stitch_hops=0,
+        prev=prev,
+        prev_edge=prev_edge,
+        max_explored_dist_m=float(max_explored),
+        last_key=str(last_key),
+    )
+
+
+def _reconstruct_path(*, source_key: str, target_key: str, prev: dict[str, str]) -> list[str]:
+    out: list[str] = [target_key]
+    cur = target_key
+    while cur != source_key:
+        p = prev.get(cur)
+        if p is None:
+            break
+        out.append(p)
+        cur = p
+    out.reverse()
+    if not out or out[0] != source_key:
+        return [source_key, target_key]
+    return out
+
+
+def _build_path_linestring(
+    *,
+    path_keys: list[str],
+    nodes: dict[str, _GraphNode],
+    prev_edge: dict[str, _GraphEdge],
+    traj_line_map: dict[str, LineString],
+) -> LineString | None:
+    if len(path_keys) < 2:
+        return None
+
+    coords: list[tuple[float, float]] = []
+    for idx in range(1, len(path_keys)):
+        to_key = path_keys[idx]
+        edge = prev_edge.get(to_key)
+        if edge is None:
+            continue
+        from_key = path_keys[idx - 1]
+        from_node = nodes.get(from_key)
+        to_node = nodes.get(to_key)
+        if from_node is None or to_node is None:
+            continue
+
+        seg: LineString | None = None
+        if edge.kind == "traj" and edge.traj_id is not None:
+            line = traj_line_map.get(edge.traj_id)
+            s0 = 0.0 if edge.station_from is None else float(edge.station_from)
+            s1 = 0.0 if edge.station_to is None else float(edge.station_to)
+            if line is not None and s1 > s0 + 1e-6:
+                try:
+                    part = substring(line, s0, s1)
+                except Exception:
+                    part = None
+                if isinstance(part, LineString) and not part.is_empty and len(part.coords) >= 2:
+                    seg = part
+        if seg is None:
+            seg = LineString([(float(from_node.point.x), float(from_node.point.y)), (float(to_node.point.x), float(to_node.point.y))])
+        _append_coords(coords, list(seg.coords))
+
+    coords = _dedup_coords(coords, eps=1e-4)
+    if len(coords) < 2:
+        return None
+    line = LineString(coords)
+    if line.is_empty or line.length <= 0:
+        return None
+    return line
+
+
+def _extract_path_traj_ids(*, path_keys: list[str], nodes: dict[str, _GraphNode]) -> set[str]:
+    out: set[str] = set()
+    for key in path_keys:
+        node = nodes.get(key)
+        if node is not None and node.traj_id:
+            out.add(str(node.traj_id))
+    return out
+
+
+def _path_edge_kinds(*, path_keys: list[str], prev_edge: dict[str, _GraphEdge]) -> set[str]:
+    kinds: set[str] = set()
+    for idx in range(1, len(path_keys)):
+        to_key = path_keys[idx]
+        edge = prev_edge.get(to_key)
+        if edge is not None:
+            kinds.add(edge.kind)
+        for k in [path_keys[idx - 1], path_keys[idx]]:
+            if ":start" in k:
+                kinds.add("start")
+            elif ":end" in k:
+                kinds.add("end")
+    return kinds
+
+
+def _first_non_rc_in_path(
+    *,
+    path_keys: list[str],
+    nodes: dict[str, _GraphNode],
+    node_type_map: dict[int, str],
+    src_nodeid: int,
+) -> int | None:
+    for key in path_keys:
+        node = nodes.get(key)
+        if node is None or node.cross_nodeid is None:
+            continue
+        nid = int(node.cross_nodeid)
+        if nid == int(src_nodeid):
+            continue
+        if node_type_map.get(nid, "unknown") == "non_rc":
+            return nid
+    return None
+
+
+def _count_outgoing_stitch_edges(edges: Sequence[_GraphEdge]) -> int:
+    return int(sum(1 for e in edges if e.kind == "stitch"))
+
+
+def _apply_support_subset(support: PairSupport, keep_idx: list[int]) -> None:
+    if not keep_idx:
+        support.support_event_count = 0
+        support.traj_segments = []
+        support.src_cross_points = []
+        support.dst_cross_points = []
+        support.stitch_hops = []
+        support.evidence_traj_ids = []
+        support.evidence_lengths_m = []
+        support.open_end_flags = []
+        support.support_traj_ids = set()
+        support.repr_traj_ids = []
+        support.open_end = False
+        return
+
+    idx = sorted(set(int(i) for i in keep_idx if 0 <= int(i) < support.support_event_count))
+    if not idx:
+        _apply_support_subset(support, [])
+        return
+
+    support.traj_segments = [support.traj_segments[i] for i in idx]
+    support.src_cross_points = [support.src_cross_points[i] for i in idx]
+    support.dst_cross_points = [support.dst_cross_points[i] for i in idx]
+    support.stitch_hops = [support.stitch_hops[i] for i in idx]
+    support.evidence_traj_ids = [support.evidence_traj_ids[i] for i in idx]
+    support.evidence_lengths_m = [support.evidence_lengths_m[i] for i in idx]
+    support.open_end_flags = [support.open_end_flags[i] for i in idx]
+    support.support_event_count = int(len(idx))
+    support.support_traj_ids = set(support.evidence_traj_ids)
+    support.repr_traj_ids = []
+    for tid in support.evidence_traj_ids:
+        if tid not in support.repr_traj_ids:
+            support.repr_traj_ids.append(tid)
+            if len(support.repr_traj_ids) >= 16:
+                break
+    support.open_end = bool(any(support.open_end_flags))
 
 
 def estimate_centerline(
@@ -466,26 +1031,141 @@ def _kind_to_node_type(kind: int) -> str:
     return "non_rc"
 
 
-def _detect_multi_road_channels(support: PairSupport) -> bool:
-    if len(support.support_traj_ids) < 3:
-        return False
+def _detect_multi_road_channels(
+    support: PairSupport,
+    *,
+    sep_m: float,
+    topn: int,
+) -> tuple[bool, list[int] | None]:
+    n = min(
+        len(support.traj_segments),
+        len(support.src_cross_points),
+        len(support.dst_cross_points),
+    )
+    if n < 4:
+        return False, None
 
-    src_xy = np.asarray([[p.x, p.y] for p in support.src_cross_points], dtype=np.float64)
-    dst_xy = np.asarray([[p.x, p.y] for p in support.dst_cross_points], dtype=np.float64)
-    if src_xy.shape[0] < 3 or dst_xy.shape[0] < 3:
-        return False
+    use_n = min(n, max(3, int(topn)))
+    mids = np.zeros((use_n, 2), dtype=np.float64)
+    for i in range(use_n):
+        line = support.traj_segments[i]
+        if line is not None and not line.is_empty and line.length > 0:
+            p = line.interpolate(0.5, normalized=True)
+            mids[i, :] = [float(p.x), float(p.y)]
+        else:
+            sp = support.src_cross_points[i]
+            dp = support.dst_cross_points[i]
+            mids[i, :] = [0.5 * (float(sp.x) + float(dp.x)), 0.5 * (float(sp.y) + float(dp.y))]
 
-    src_spread = _spread_m(src_xy)
-    dst_spread = _spread_m(dst_xy)
-    return bool(src_spread > 12.0 or dst_spread > 12.0)
+    if mids.shape[0] < 4:
+        return False, None
+
+    dm = np.linalg.norm(mids[:, None, :] - mids[None, :, :], axis=2)
+    medoid_idx = int(np.argmin(np.sum(dm, axis=1)))
+    ref = mids[medoid_idx]
+    radial = np.linalg.norm(mids - ref[None, :], axis=1)
+
+    labels, centers = _cluster_1d(radial, tol=max(1.0, float(sep_m) * 0.45))
+    if len(centers) < 2:
+        return False, None
+
+    max_sep = float(max(centers) - min(centers))
+    if max_sep <= float(sep_m):
+        return False, None
+
+    radial_all = np.zeros((n,), dtype=np.float64)
+    for i in range(n):
+        line = support.traj_segments[i]
+        if line is not None and not line.is_empty and line.length > 0:
+            p = line.interpolate(0.5, normalized=True)
+            mid = np.asarray([float(p.x), float(p.y)], dtype=np.float64)
+        else:
+            sp = support.src_cross_points[i]
+            dp = support.dst_cross_points[i]
+            mid = np.asarray([0.5 * (float(sp.x) + float(dp.x)), 0.5 * (float(sp.y) + float(dp.y))], dtype=np.float64)
+        radial_all[i] = float(np.linalg.norm(mid - ref))
+
+    cluster_counts = [0 for _ in centers]
+    labels_all: list[int] = []
+    for v in radial_all:
+        dif = [abs(float(v) - float(c)) for c in centers]
+        cidx = int(np.argmin(np.asarray(dif, dtype=np.float64)))
+        labels_all.append(cidx)
+        cluster_counts[cidx] += 1
+
+    major = int(np.argmax(np.asarray(cluster_counts, dtype=np.int64)))
+    keep_idx = [i for i, lab in enumerate(labels_all) if int(lab) == major]
+    if not keep_idx:
+        return False, None
+    return True, keep_idx
 
 
-def _spread_m(xy: np.ndarray) -> float:
-    center = np.nanmedian(xy, axis=0)
-    d = np.linalg.norm(xy - center[None, :], axis=1)
-    if d.size == 0:
-        return 0.0
-    return float(np.nanpercentile(d, 95.0))
+def _cluster_1d(values: np.ndarray, *, tol: float) -> tuple[list[int], list[float]]:
+    if values.size == 0:
+        return [], []
+    order = np.argsort(values)
+    labels = [-1 for _ in range(values.size)]
+    centers: list[float] = []
+    counts: list[int] = []
+    for idx in order:
+        v = float(values[int(idx)])
+        assigned = False
+        for cid, c in enumerate(centers):
+            if abs(v - c) <= float(tol):
+                labels[int(idx)] = cid
+                counts[cid] += 1
+                centers[cid] = centers[cid] + (v - centers[cid]) / float(counts[cid])
+                assigned = True
+                break
+        if not assigned:
+            labels[int(idx)] = len(centers)
+            centers.append(v)
+            counts.append(1)
+    return labels, centers
+
+
+def _traj_station(coords: np.ndarray) -> np.ndarray:
+    if coords.shape[0] <= 1:
+        return np.zeros((coords.shape[0],), dtype=np.float64)
+    d = np.linalg.norm(coords[1:, :] - coords[:-1, :], axis=1)
+    return np.concatenate((np.asarray([0.0], dtype=np.float64), np.cumsum(np.asarray(d, dtype=np.float64))))
+
+
+def _unit_vec(v: np.ndarray) -> tuple[float, float]:
+    x = float(v[0])
+    y = float(v[1])
+    n = math.hypot(x, y)
+    if n <= 1e-12:
+        return (1.0, 0.0)
+    return (x / n, y / n)
+
+
+def _angle_deg(a: tuple[float, float], b: tuple[float, float]) -> float:
+    ax, ay = float(a[0]), float(a[1])
+    bx, by = float(b[0]), float(b[1])
+    an = math.hypot(ax, ay)
+    bn = math.hypot(bx, by)
+    if an <= 1e-12 or bn <= 1e-12:
+        return 180.0
+    cosv = (ax * bx + ay * by) / max(1e-12, an * bn)
+    cosv = min(1.0, max(-1.0, float(cosv)))
+    return float(math.degrees(math.acos(cosv)))
+
+
+def _grid_key(x: float, y: float, cell: float) -> tuple[int, int]:
+    return (int(math.floor(float(x) / float(cell))), int(math.floor(float(y) / float(cell))))
+
+
+def _append_coords(dst: list[tuple[float, float]], src: list[tuple[float, float]]) -> None:
+    if not src:
+        return
+    if not dst:
+        dst.extend([(float(x), float(y)) for x, y in src])
+        return
+    first = (float(src[0][0]), float(src[0][1]))
+    if math.hypot(first[0] - dst[-1][0], first[1] - dst[-1][1]) <= 1e-6:
+        src = src[1:]
+    dst.extend([(float(x), float(y)) for x, y in src])
 
 
 def _segment_cross_point(seg: LineString, xline: LineString) -> Point | None:
@@ -539,26 +1219,25 @@ def _segment_fraction(cp: Point, p0: np.ndarray, p1: np.ndarray) -> float:
     return min(1.0, max(0.0, t))
 
 
-def _dedup_events(events: list[CrossingEvent], *, dedup_gap_m: float) -> list[CrossingEvent]:
+def _dedup_events_by_node(events: list[CrossingEvent], *, dedup_gap_m: float) -> tuple[list[CrossingEvent], int]:
+    del dedup_gap_m
     if not events:
-        return []
+        return [], 0
 
-    events = sorted(events, key=lambda e: (e.seq, e.seg_idx, e.nodeid))
-    out: list[CrossingEvent] = []
-    last_by_node: dict[int, CrossingEvent] = {}
-
+    best_by_node: dict[int, CrossingEvent] = {}
     for ev in events:
-        prev = last_by_node.get(ev.nodeid)
-        if prev is not None:
-            if ev.cross_point.distance(prev.cross_point) < dedup_gap_m:
-                continue
-            if abs(ev.seq - prev.seq) < 1e-6:
-                continue
+        prev = best_by_node.get(int(ev.nodeid))
+        if prev is None:
+            best_by_node[int(ev.nodeid)] = ev
+            continue
+        key_prev = (float(prev.cross_dist_m), float(prev.station_m), int(prev.seq_idx))
+        key_curr = (float(ev.cross_dist_m), float(ev.station_m), int(ev.seq_idx))
+        if key_curr < key_prev:
+            best_by_node[int(ev.nodeid)] = ev
 
-        out.append(ev)
-        last_by_node[ev.nodeid] = ev
-
-    return out
+    out = sorted(best_by_node.values(), key=lambda e: (float(e.station_m), int(e.nodeid), int(e.seq_idx)))
+    dropped = int(len(events) - len(out))
+    return out, dropped
 
 
 def _extract_traj_segment(traj: TrajectoryData, a: CrossingEvent, b: CrossingEvent) -> LineString | None:
@@ -928,15 +1607,18 @@ def _nanpercentile(x: np.ndarray, q: float) -> float | None:
 __all__ = [
     "CenterEstimate",
     "CrossingEvent",
+    "CrossingExtractResult",
     "HARD_CENTER_EMPTY",
     "HARD_ENDPOINT",
     "HARD_MULTI_ROAD",
     "HARD_NON_RC",
     "PairSupport",
+    "PairSupportBuildResult",
     "SOFT_LOW_SUPPORT",
     "SOFT_NO_LB",
     "SOFT_OPEN_END",
     "SOFT_SPARSE_POINTS",
+    "SOFT_UNRESOLVED_NEIGHBOR",
     "SOFT_WIGGLY",
     "build_pair_supports",
     "clip_line_to_cross_sections",
