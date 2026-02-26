@@ -72,6 +72,7 @@ class PairSupport:
     hints: list[str] = field(default_factory=list)
     stitch_hops: list[int] = field(default_factory=list)
     evidence_traj_ids: list[str] = field(default_factory=list)
+    evidence_cluster_ids: list[int] = field(default_factory=list)
     evidence_lengths_m: list[float] = field(default_factory=list)
     open_end_flags: list[bool] = field(default_factory=list)
     unresolved_neighbor_count: int = 0
@@ -371,6 +372,7 @@ def build_pair_supports(
             support.traj_segments.append(path_line)
             support.stitch_hops.append(int(search.stitch_hops))
             support.evidence_traj_ids.append(str(traj_id))
+            support.evidence_cluster_ids.append(0)
             support.evidence_lengths_m.append(float(search.distance_m))
 
             is_open_end = ("start" in edge_kinds) or ("end" in edge_kinds)
@@ -401,11 +403,21 @@ def build_pair_supports(
         support.main_cluster_ratio = float(multi.main_cluster_ratio)
         support.cluster_sep_m_est = multi.cluster_sep_m_est
         support.cluster_sizes = [int(v) for v in multi.cluster_sizes]
+        if multi.labels_all:
+            labels_norm = [int(v) for v in multi.labels_all]
+            if len(labels_norm) == support.support_event_count:
+                support.evidence_cluster_ids = labels_norm
+            else:
+                support.evidence_cluster_ids = labels_norm[: support.support_event_count]
+                if len(support.evidence_cluster_ids) < support.support_event_count:
+                    support.evidence_cluster_ids.extend(
+                        [int(multi.main_cluster_id)] * (support.support_event_count - len(support.evidence_cluster_ids))
+                    )
+        elif support.support_event_count > 0:
+            support.evidence_cluster_ids = [int(multi.main_cluster_id)] * support.support_event_count
 
         if multi.has_multi:
             support.hard_anomalies.add(HARD_MULTI_ROAD)
-            if multi.keep_idx:
-                _apply_support_subset(support, multi.keep_idx)
 
         if support.support_event_count <= 0:
             supports.pop(pair, None)
@@ -519,6 +531,7 @@ class _SearchResult:
 class _MultiRoadDetectResult:
     has_multi: bool
     keep_idx: list[int] | None
+    labels_all: list[int]
     cluster_count: int
     cluster_sizes: list[int]
     main_cluster_id: int
@@ -555,6 +568,8 @@ class _LbGraphEdge:
     u: int
     v: int
     length: float
+    cost: float
+    outside_len: float
     coords: tuple[tuple[float, float], tuple[float, float]]
 
 
@@ -1029,6 +1044,7 @@ def _apply_support_subset(support: PairSupport, keep_idx: list[int]) -> None:
         support.dst_cross_points = []
         support.stitch_hops = []
         support.evidence_traj_ids = []
+        support.evidence_cluster_ids = []
         support.evidence_lengths_m = []
         support.open_end_flags = []
         support.support_traj_ids = set()
@@ -1046,6 +1062,10 @@ def _apply_support_subset(support: PairSupport, keep_idx: list[int]) -> None:
     support.dst_cross_points = [support.dst_cross_points[i] for i in idx]
     support.stitch_hops = [support.stitch_hops[i] for i in idx]
     support.evidence_traj_ids = [support.evidence_traj_ids[i] for i in idx]
+    if support.evidence_cluster_ids:
+        support.evidence_cluster_ids = [support.evidence_cluster_ids[i] for i in idx]
+    else:
+        support.evidence_cluster_ids = [0 for _ in idx]
     support.evidence_lengths_m = [support.evidence_lengths_m[i] for i in idx]
     support.open_end_flags = [support.open_end_flags[i] for i in idx]
     support.support_event_count = int(len(idx))
@@ -1089,7 +1109,10 @@ def estimate_centerline(
     road_max_vertices: int,
     lb_snap_m: float,
     lb_start_end_topk: int,
+    lb_outside_lambda: float,
     trend_fit_win_m: float,
+    traj_surface_metric: BaseGeometry | None,
+    traj_surface_enforced: bool,
     divstrip_zone_metric: BaseGeometry | None,
     d_min: float,
     d_max: float,
@@ -1116,6 +1139,8 @@ def estimate_centerline(
         lane_boundaries_metric=lane_boundaries_metric,
         lb_snap_m=float(lb_snap_m),
         lb_start_end_topk=int(lb_start_end_topk),
+        traj_surface_metric=traj_surface_metric,
+        lb_outside_lambda=float(lb_outside_lambda),
     )
     shape_ref = shape_choice.line
     used_lb = bool(shape_choice.used_lane_boundary)
@@ -1391,6 +1416,8 @@ def estimate_centerline(
         src_channel_points=support.src_cross_points,
         dst_channel_points=support.dst_cross_points,
         trend_fit_win_m=float(trend_fit_win_m),
+        traj_surface_metric=traj_surface_metric,
+        traj_surface_enforced=bool(traj_surface_enforced),
         gore_zone_metric=divstrip_zone_metric,
         endpoint_tol_m=float(endpoint_tol_m),
         road_max_vertices=int(road_max_vertices),
@@ -1570,6 +1597,8 @@ def _apply_endpoint_trend_projection(
     src_channel_points: Sequence[Point],
     dst_channel_points: Sequence[Point],
     trend_fit_win_m: float,
+    traj_surface_metric: BaseGeometry | None,
+    traj_surface_enforced: bool,
     gore_zone_metric: BaseGeometry | None,
     endpoint_tol_m: float,
     road_max_vertices: int,
@@ -1628,17 +1657,31 @@ def _apply_endpoint_trend_projection(
 
     src_ref = _channel_ref_on_xsec(src_xsec=src_xsec, cross_points=src_channel_points)
     dst_ref = _channel_ref_on_xsec(src_xsec=dst_xsec, cross_points=dst_channel_points)
+    src_support = _xsec_surface_support(
+        xsec=src_xsec,
+        gore_zone_metric=gore_zone_metric,
+        traj_surface_metric=traj_surface_metric,
+        enforced=bool(traj_surface_enforced),
+    )
+    dst_support = _xsec_surface_support(
+        xsec=dst_xsec,
+        gore_zone_metric=gore_zone_metric,
+        traj_surface_metric=traj_surface_metric,
+        enforced=bool(traj_surface_enforced),
+    )
     p_src = _project_endpoint_to_valid_xsec(
         endpoint_xy=p_src0,
         xsec=src_xsec,
         gore_zone_metric=gore_zone_metric,
         channel_ref_xy=src_ref,
+        xsec_support_geom=src_support,
     )
     p_dst = _project_endpoint_to_valid_xsec(
         endpoint_xy=p_dst0,
         xsec=dst_xsec,
         gore_zone_metric=gore_zone_metric,
         channel_ref_xy=dst_ref,
+        xsec_support_geom=dst_support,
     )
 
     src_mid = _build_trend_midpoint(
@@ -1800,6 +1843,7 @@ def _project_endpoint_to_valid_xsec(
     xsec: LineString,
     gore_zone_metric: BaseGeometry | None,
     channel_ref_xy: tuple[float, float] | None,
+    xsec_support_geom: BaseGeometry | None = None,
 ) -> tuple[float, float]:
     if xsec.is_empty or xsec.length <= 0:
         return (float(endpoint_xy[0]), float(endpoint_xy[1]))
@@ -1811,7 +1855,8 @@ def _project_endpoint_to_valid_xsec(
                 valid_geom = diff
         except Exception:
             pass
-    parts = _iter_linestring_parts(valid_geom)
+    support_parts = _iter_linestring_parts(xsec_support_geom)
+    parts = support_parts if support_parts else _iter_linestring_parts(valid_geom)
     if not parts:
         return _adjust_endpoint_on_xsec_gore(
             endpoint_xy=endpoint_xy,
@@ -1851,6 +1896,34 @@ def _project_endpoint_to_valid_xsec(
         xsec=xsec,
         gore_zone_metric=gore_zone_metric,
     )
+
+
+def _xsec_surface_support(
+    *,
+    xsec: LineString,
+    gore_zone_metric: BaseGeometry | None,
+    traj_surface_metric: BaseGeometry | None,
+    enforced: bool,
+) -> BaseGeometry | None:
+    if xsec.is_empty or xsec.length <= 0:
+        return None
+    valid_geom: BaseGeometry = xsec
+    if gore_zone_metric is not None:
+        try:
+            diff = xsec.difference(gore_zone_metric)
+            if diff is not None and not diff.is_empty:
+                valid_geom = diff
+        except Exception:
+            pass
+    if not enforced or traj_surface_metric is None or traj_surface_metric.is_empty:
+        return None
+    try:
+        inter = valid_geom.intersection(traj_surface_metric)
+    except Exception:
+        return None
+    if inter is None or inter.is_empty:
+        return None
+    return inter
 
 
 def _build_trend_midpoint(
@@ -2066,6 +2139,7 @@ def _detect_multi_road_channels(
         return _MultiRoadDetectResult(
             has_multi=False,
             keep_idx=None,
+            labels_all=[0 for _ in range(int(n))],
             cluster_count=1,
             cluster_sizes=[int(n)] if n > 0 else [],
             main_cluster_id=0,
@@ -2085,6 +2159,7 @@ def _detect_multi_road_channels(
             return _MultiRoadDetectResult(
                 has_multi=False,
                 keep_idx=None,
+                labels_all=[0 for _ in range(int(n))],
                 cluster_count=1,
                 cluster_sizes=[int(n)] if n > 0 else [],
                 main_cluster_id=0,
@@ -2097,6 +2172,7 @@ def _detect_multi_road_channels(
         return _MultiRoadDetectResult(
             has_multi=False,
             keep_idx=None,
+            labels_all=[0 for _ in range(int(n))],
             cluster_count=1,
             cluster_sizes=[int(n)] if n > 0 else [],
             main_cluster_id=0,
@@ -2114,6 +2190,7 @@ def _detect_multi_road_channels(
         return _MultiRoadDetectResult(
             has_multi=False,
             keep_idx=None,
+            labels_all=[0 for _ in range(int(n))],
             cluster_count=1,
             cluster_sizes=[int(n)] if n > 0 else [],
             main_cluster_id=0,
@@ -2134,6 +2211,7 @@ def _detect_multi_road_channels(
             return _MultiRoadDetectResult(
                 has_multi=False,
                 keep_idx=None,
+                labels_all=[0 for _ in range(int(n))],
                 cluster_count=1,
                 cluster_sizes=[int(n)] if n > 0 else [],
                 main_cluster_id=0,
@@ -2157,6 +2235,7 @@ def _detect_multi_road_channels(
         return _MultiRoadDetectResult(
             has_multi=False,
             keep_idx=None,
+            labels_all=[int(v) for v in labels_all],
             cluster_count=max(1, int(len(centers))),
             cluster_sizes=[int(v) for v in cluster_counts],
             main_cluster_id=major,
@@ -2167,6 +2246,7 @@ def _detect_multi_road_channels(
     return _MultiRoadDetectResult(
         has_multi=multi,
         keep_idx=keep_idx if multi else None,
+        labels_all=[int(v) for v in labels_all],
         cluster_count=max(1, int(len(centers))),
         cluster_sizes=[int(v) for v in cluster_counts],
         main_cluster_id=int(major),
@@ -2468,6 +2548,8 @@ def _choose_shape_ref_with_graph(
     lane_boundaries_metric: Sequence[LineString],
     lb_snap_m: float,
     lb_start_end_topk: int,
+    traj_surface_metric: BaseGeometry | None = None,
+    lb_outside_lambda: float = 0.0,
 ) -> _ShapeRefChoice:
     lb_path = _build_lb_graph_path(
         src_xsec=src_xsec,
@@ -2475,6 +2557,8 @@ def _choose_shape_ref_with_graph(
         lane_boundaries_metric=lane_boundaries_metric,
         snap_m=max(0.1, float(lb_snap_m)),
         topk=max(1, int(lb_start_end_topk)),
+        traj_surface_metric=traj_surface_metric,
+        outside_lambda=max(0.0, float(lb_outside_lambda)),
     )
     if lb_path is not None and lb_path[0] is not None:
         lb_line = _orient_line(lb_path[0], src_xsec, dst_xsec)
@@ -2582,6 +2666,8 @@ def _build_lb_graph_path(
     lane_boundaries_metric: Sequence[LineString],
     snap_m: float,
     topk: int,
+    traj_surface_metric: BaseGeometry | None = None,
+    outside_lambda: float = 0.0,
 ) -> tuple[LineString, int] | None:
     if not lane_boundaries_metric:
         return None
@@ -2618,12 +2704,33 @@ def _build_lb_graph_path(
             seg_len = float(math.hypot(p1[0] - p0[0], p1[1] - p0[1]))
             if seg_len <= 1e-6:
                 continue
+            outside_len = 0.0
+            if (
+                traj_surface_metric is not None
+                and (not traj_surface_metric.is_empty)
+                and float(outside_lambda) > 0.0
+            ):
+                try:
+                    seg_geom = LineString([p0, p1])
+                    outside_len = float(seg_geom.difference(traj_surface_metric).length)
+                except Exception:
+                    outside_len = 0.0
+            seg_cost = float(seg_len + max(0.0, float(outside_lambda)) * max(0.0, outside_len))
             u = _snap_node(p0)
             v = _snap_node(p1)
             if u == v:
                 continue
             eidx = len(edges)
-            edges.append(_LbGraphEdge(u=u, v=v, length=seg_len, coords=(p0, p1)))
+            edges.append(
+                _LbGraphEdge(
+                    u=u,
+                    v=v,
+                    length=seg_len,
+                    cost=seg_cost,
+                    outside_len=float(outside_len),
+                    coords=(p0, p1),
+                )
+            )
             adj.setdefault(u, []).append((v, eidx, True))
             adj.setdefault(v, []).append((u, eidx, False))
 
@@ -2729,7 +2836,7 @@ def _dijkstra_lb_path(
             end_hit = int(node)
             break
         for nei, eidx, forward in adj.get(node, []):
-            w = float(edges[eidx].length)
+            w = float(edges[eidx].cost)
             nd = float(dist + w)
             old = best.get(int(nei))
             if old is not None and nd >= old - 1e-9:
