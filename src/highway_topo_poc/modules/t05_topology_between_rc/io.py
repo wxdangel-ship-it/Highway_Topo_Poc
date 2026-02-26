@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -749,12 +750,38 @@ def _require_geojson_crs(
     return norm
 
 
+def normalize_geojson_crs_name(name: str) -> str:
+    raw = str(name).strip()
+    if not raw:
+        return raw
+    upper = raw.upper()
+
+    crs84_aliases = {
+        "CRS84",
+        "OGC:1.3:CRS84",
+        "URN:OGC:DEF:CRS:OGC:1.3:CRS84",
+    }
+    if upper in crs84_aliases:
+        return "EPSG:4326"
+
+    epsg_urn = re.search(r"EPSG[^0-9]*([0-9]{4,5})$", upper)
+    if epsg_urn:
+        return f"EPSG:{int(epsg_urn.group(1))}"
+
+    return raw
+
+
 def _normalize_epsg_name(raw: str | None) -> str | None:
     if raw is None:
         return None
-    s = str(raw).strip()
+    s = normalize_geojson_crs_name(str(raw))
+    s = str(s).strip()
     if not s:
         return None
+    s_upper = s.upper()
+    m = re.fullmatch(r"EPSG:([0-9]{4,5})", s_upper)
+    if m:
+        return f"EPSG:{int(m.group(1))}"
     try:
         crs = CRS.from_user_input(s)
     except Exception:
@@ -835,6 +862,7 @@ __all__ = [
     "load_point_cloud_window",
     "make_run_id",
     "metric_lines_to_input_crs",
+    "normalize_geojson_crs_name",
     "probe_patch",
     "resolve_repo_root",
     "write_geojson_lines",
