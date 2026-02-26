@@ -6,7 +6,9 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
 import numpy as np
+from shapely import contains_xy
 from shapely.geometry import LineString, Point
+from shapely.geometry.base import BaseGeometry
 from shapely.ops import nearest_points, substring
 
 from .io import CrossSection, TrajectoryData
@@ -23,6 +25,8 @@ SOFT_NO_LB = "NO_LB_CONTINUOUS"
 SOFT_WIGGLY = "WIGGLY_CENTERLINE"
 SOFT_OPEN_END = "OPEN_END"
 SOFT_UNRESOLVED_NEIGHBOR = "UNRESOLVED_NEIGHBOR"
+SOFT_NO_STABLE_SECTION = "NO_STABLE_SECTION"
+SOFT_DIVSTRIP_MISSING = "DIVSTRIP_MISSING"
 
 
 @dataclass(frozen=True)
@@ -101,6 +105,20 @@ class CenterEstimate:
     width_p90_m: float | None
     max_turn_deg_per_10m: float | None
     used_lane_boundary: bool
+    src_is_gore_tip: bool
+    dst_is_gore_tip: bool
+    src_is_expanded: bool
+    dst_is_expanded: bool
+    src_width_near_m: float | None
+    dst_width_near_m: float | None
+    src_width_base_m: float | None
+    dst_width_base_m: float | None
+    src_gore_overlap_near: float | None
+    dst_gore_overlap_near: float | None
+    src_stable_s_m: float | None
+    dst_stable_s_m: float | None
+    src_cut_mode: str
+    dst_cut_mode: str
     endpoint_center_offset_m_src: float | None
     endpoint_center_offset_m_dst: float | None
     soft_flags: set[str]
@@ -493,6 +511,21 @@ class _MultiRoadDetectResult:
     main_cluster_id: int
     main_cluster_ratio: float
     cluster_sep_m_est: float | None
+
+
+@dataclass(frozen=True)
+class _EndStableDecision:
+    is_gore_tip: bool
+    is_expanded: bool
+    width_near_m: float | None
+    width_base_m: float | None
+    gore_overlap_near: float | None
+    stable_s_m: float | None
+    anchor_station_m: float | None
+    anchor_offset_m: float | None
+    cut_mode: str
+    used_fallback: bool
+    short_base_proxy: bool
 
 
 def _build_forward_graph(
@@ -1000,7 +1033,21 @@ def estimate_centerline(
     stable_margin_m: float,
     endpoint_tol_m: float,
     road_max_vertices: int,
+    divstrip_zone_metric: BaseGeometry | None,
+    d_min: float,
+    d_max: float,
+    near_len: float,
+    base_from: float,
+    base_to: float,
+    l_stable: float,
+    ratio_tol: float,
+    w_tol: float,
+    r_gore: float,
+    transition_m: float,
+    stable_fallback_m: float,
 ) -> CenterEstimate:
+    del stable_offset_m
+    del stable_margin_m
     soft_flags: set[str] = set()
     hard_flags: set[str] = set(support.hard_anomalies)
     diagnostics: dict[str, Any] = {}
@@ -1018,6 +1065,20 @@ def estimate_centerline(
             width_p90_m=None,
             max_turn_deg_per_10m=None,
             used_lane_boundary=False,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="fallback_50m",
+            dst_cut_mode="fallback_50m",
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
@@ -1041,6 +1102,20 @@ def estimate_centerline(
             width_p90_m=None,
             max_turn_deg_per_10m=None,
             used_lane_boundary=used_lb,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="fallback_50m",
+            dst_cut_mode="fallback_50m",
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
@@ -1048,11 +1123,12 @@ def estimate_centerline(
             diagnostics={"reason": "shape_ref_sampling_failed"},
         )
 
-    offsets, widths, coverage = _estimate_offsets_from_surface(
+    offsets, widths, gore_overlap, coverage = _estimate_offsets_from_surface(
         sample_points=sp,
         tangents=tv,
         normals=nv,
         points_xyz=surface_points_xyz,
+        gore_zone_metric=divstrip_zone_metric,
         along_half_window_m=xsec_along_half_window_m,
         across_half_window_m=xsec_across_half_window_m,
         corridor_half_width_m=corridor_half_width_m,
@@ -1063,6 +1139,7 @@ def estimate_centerline(
 
     diagnostics["surface_points_in_window"] = int(surface_points_xyz.shape[0])
     diagnostics["raw_coverage"] = float(coverage)
+    diagnostics["divstrip_enabled"] = bool(divstrip_zone_metric is not None)
 
     if coverage < float(min_center_coverage):
         soft_flags.add(SOFT_SPARSE_POINTS)
@@ -1086,6 +1163,20 @@ def estimate_centerline(
             width_p90_m=_nanpercentile(widths, 90.0),
             max_turn_deg_per_10m=None,
             used_lane_boundary=used_lb,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="fallback_50m",
+            dst_cut_mode="fallback_50m",
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
@@ -1093,20 +1184,59 @@ def estimate_centerline(
             diagnostics=diagnostics,
         )
 
-    head_stable = src_type == "diverge" and src_out_degree > 1
-    tail_stable = dst_type == "merge" and dst_in_degree > 1
-
-    stable_src, stable_dst = _apply_stable_zone(
+    length_m = float(shape_ref.length)
+    src_decision = _select_stable_section_for_end(
+        stations=ss,
+        widths=widths,
+        gore_overlap=gore_overlap,
+        offsets=smoothed,
+        length_m=length_m,
+        from_src=True,
+        d_min=float(d_min),
+        d_max=float(d_max),
+        near_len=float(near_len),
+        base_from=float(base_from),
+        base_to=float(base_to),
+        l_stable=float(l_stable),
+        ratio_tol=float(ratio_tol),
+        w_tol=float(w_tol),
+        r_gore=float(r_gore),
+        stable_fallback_m=float(stable_fallback_m),
+    )
+    dst_decision = _select_stable_section_for_end(
+        stations=ss,
+        widths=widths,
+        gore_overlap=gore_overlap,
+        offsets=smoothed,
+        length_m=length_m,
+        from_src=False,
+        d_min=float(d_min),
+        d_max=float(d_max),
+        near_len=float(near_len),
+        base_from=float(base_from),
+        base_to=float(base_to),
+        l_stable=float(l_stable),
+        ratio_tol=float(ratio_tol),
+        w_tol=float(w_tol),
+        r_gore=float(r_gore),
+        stable_fallback_m=float(stable_fallback_m),
+    )
+    smoothed_clamped = _apply_endpoint_stable_clamp(
         offsets=smoothed,
         stations=ss,
+        src_decision=src_decision,
+        dst_decision=dst_decision,
+        transition_m=float(transition_m),
         length_m=float(shape_ref.length),
-        apply_head=head_stable,
-        apply_tail=tail_stable,
-        stable_offset_m=stable_offset_m,
-        margin_m=stable_margin_m,
     )
+    stable_src = src_decision.anchor_offset_m
+    stable_dst = dst_decision.anchor_offset_m
+    if src_decision.used_fallback or dst_decision.used_fallback:
+        soft_flags.add(SOFT_NO_STABLE_SECTION)
+    if src_decision.short_base_proxy or dst_decision.short_base_proxy:
+        diagnostics["short_road_base_proxy"] = True
 
-    centerline = _offset_line(sample_points=sp, normals=nv, offsets=smoothed)
+    centerline = _offset_line(sample_points=sp, normals=nv, offsets=smoothed_clamped)
     if centerline is None or centerline.length <= 0:
         hard_flags.add(HARD_CENTER_EMPTY)
         return CenterEstimate(
@@ -1119,6 +1249,20 @@ def estimate_centerline(
             width_p90_m=_nanpercentile(widths, 90.0),
             max_turn_deg_per_10m=None,
             used_lane_boundary=used_lb,
+            src_is_gore_tip=bool(src_decision.is_gore_tip),
+            dst_is_gore_tip=bool(dst_decision.is_gore_tip),
+            src_is_expanded=bool(src_decision.is_expanded),
+            dst_is_expanded=bool(dst_decision.is_expanded),
+            src_width_near_m=src_decision.width_near_m,
+            dst_width_near_m=dst_decision.width_near_m,
+            src_width_base_m=src_decision.width_base_m,
+            dst_width_base_m=dst_decision.width_base_m,
+            src_gore_overlap_near=src_decision.gore_overlap_near,
+            dst_gore_overlap_near=dst_decision.gore_overlap_near,
+            src_stable_s_m=src_decision.stable_s_m,
+            dst_stable_s_m=dst_decision.stable_s_m,
+            src_cut_mode=src_decision.cut_mode,
+            dst_cut_mode=dst_decision.cut_mode,
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
@@ -1153,6 +1297,20 @@ def estimate_centerline(
             width_p90_m=_nanpercentile(widths, 90.0),
             max_turn_deg_per_10m=None,
             used_lane_boundary=used_lb,
+            src_is_gore_tip=bool(src_decision.is_gore_tip),
+            dst_is_gore_tip=bool(dst_decision.is_gore_tip),
+            src_is_expanded=bool(src_decision.is_expanded),
+            dst_is_expanded=bool(dst_decision.is_expanded),
+            src_width_near_m=src_decision.width_near_m,
+            dst_width_near_m=dst_decision.width_near_m,
+            src_width_base_m=src_decision.width_base_m,
+            dst_width_base_m=dst_decision.width_base_m,
+            src_gore_overlap_near=src_decision.gore_overlap_near,
+            dst_gore_overlap_near=dst_decision.gore_overlap_near,
+            src_stable_s_m=src_decision.stable_s_m,
+            dst_stable_s_m=dst_decision.stable_s_m,
+            src_cut_mode=src_decision.cut_mode,
+            dst_cut_mode=dst_decision.cut_mode,
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
@@ -1169,6 +1327,7 @@ def estimate_centerline(
         line=clipped,
         at_start=True,
         points_xyz=surface_points_xyz,
+        gore_zone_metric=divstrip_zone_metric,
         along_half_window_m=xsec_along_half_window_m,
         across_half_window_m=xsec_across_half_window_m,
         corridor_half_width_m=corridor_half_width_m,
@@ -1180,6 +1339,7 @@ def estimate_centerline(
         line=clipped,
         at_start=False,
         points_xyz=surface_points_xyz,
+        gore_zone_metric=divstrip_zone_metric,
         along_half_window_m=xsec_along_half_window_m,
         across_half_window_m=xsec_across_half_window_m,
         corridor_half_width_m=corridor_half_width_m,
@@ -1189,6 +1349,8 @@ def estimate_centerline(
     )
     diagnostics["endpoint_center_offset_m_src"] = endpoint_src
     diagnostics["endpoint_center_offset_m_dst"] = endpoint_dst
+    diagnostics["src_cut_mode"] = src_decision.cut_mode
+    diagnostics["dst_cut_mode"] = dst_decision.cut_mode
 
     return CenterEstimate(
         centerline_metric=clipped,
@@ -1200,6 +1362,20 @@ def estimate_centerline(
         width_p90_m=_nanpercentile(widths, 90.0),
         max_turn_deg_per_10m=turn,
         used_lane_boundary=used_lb,
+        src_is_gore_tip=bool(src_decision.is_gore_tip),
+        dst_is_gore_tip=bool(dst_decision.is_gore_tip),
+        src_is_expanded=bool(src_decision.is_expanded),
+        dst_is_expanded=bool(dst_decision.is_expanded),
+        src_width_near_m=src_decision.width_near_m,
+        dst_width_near_m=dst_decision.width_near_m,
+        src_width_base_m=src_decision.width_base_m,
+        dst_width_base_m=dst_decision.width_base_m,
+        src_gore_overlap_near=src_decision.gore_overlap_near,
+        dst_gore_overlap_near=dst_decision.gore_overlap_near,
+        src_stable_s_m=src_decision.stable_s_m,
+        dst_stable_s_m=dst_decision.stable_s_m,
+        src_cut_mode=src_decision.cut_mode,
+        dst_cut_mode=dst_decision.cut_mode,
         endpoint_center_offset_m_src=endpoint_src,
         endpoint_center_offset_m_dst=endpoint_dst,
         soft_flags=soft_flags,
@@ -1779,19 +1955,21 @@ def _estimate_offsets_from_surface(
     tangents: np.ndarray,
     normals: np.ndarray,
     points_xyz: np.ndarray,
+    gore_zone_metric: BaseGeometry | None,
     along_half_window_m: float,
     across_half_window_m: float,
     corridor_half_width_m: float,
     min_points: int,
     width_pct_low: float,
     width_pct_high: float,
-) -> tuple[np.ndarray, np.ndarray, float]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     n = sample_points.shape[0]
     offsets = np.full((n,), np.nan, dtype=np.float64)
     widths = np.full((n,), np.nan, dtype=np.float64)
+    gore_overlap = np.full((n,), np.nan, dtype=np.float64)
 
     if points_xyz.size == 0 or points_xyz.shape[0] < 8:
-        return offsets, widths, 0.0
+        return offsets, widths, gore_overlap, 0.0
 
     xy = np.asarray(points_xyz[:, :2], dtype=np.float64)
     grid = _build_grid_index(xy, cell_size=max(2.0, across_half_window_m / 3.0))
@@ -1813,9 +1991,25 @@ def _estimate_offsets_from_surface(
         rel = xy[idx, :] - c[None, :]
         along = rel @ t
         across = rel @ no
+        keep_window = (np.abs(along) <= along_half_window_m) & (np.abs(across) <= across_half_window_m)
+        if np.count_nonzero(keep_window) < 1:
+            continue
+        gore_mask_local = np.zeros((idx.size,), dtype=bool)
+        if gore_zone_metric is not None:
+            try:
+                gore_mask_local = np.asarray(
+                    contains_xy(gore_zone_metric, xy[idx, 0], xy[idx, 1]),
+                    dtype=bool,
+                )
+            except Exception:
+                gore_mask_local = np.zeros((idx.size,), dtype=bool)
+        total_ground = int(np.count_nonzero(keep_window))
+        gore_cut = int(np.count_nonzero(keep_window & gore_mask_local))
+        if total_ground > 0:
+            gore_overlap[i] = float(gore_cut / float(total_ground))
         keep = (
-            (np.abs(along) <= along_half_window_m)
-            & (np.abs(across) <= across_half_window_m)
+            keep_window
+            & (~gore_mask_local)
             & (np.abs(across) <= max(0.1, float(corridor_half_width_m)))
         )
         if np.count_nonzero(keep) < int(min_points):
@@ -1830,7 +2024,7 @@ def _estimate_offsets_from_surface(
         widths[i] = max(0.0, hi - lo)
 
     coverage = float(np.count_nonzero(np.isfinite(offsets)) / max(1, n))
-    return offsets, widths, coverage
+    return offsets, widths, gore_overlap, coverage
 
 
 def _build_grid_index(xy: np.ndarray, *, cell_size: float) -> dict[str, Any]:
@@ -1927,6 +2121,236 @@ def _smooth_offsets_two_stage(
     return out
 
 
+def _select_stable_section_for_end(
+    *,
+    stations: np.ndarray,
+    widths: np.ndarray,
+    gore_overlap: np.ndarray,
+    offsets: np.ndarray,
+    length_m: float,
+    from_src: bool,
+    d_min: float,
+    d_max: float,
+    near_len: float,
+    base_from: float,
+    base_to: float,
+    l_stable: float,
+    ratio_tol: float,
+    w_tol: float,
+    r_gore: float,
+    stable_fallback_m: float,
+) -> _EndStableDecision:
+    if stations.size == 0:
+        return _EndStableDecision(
+            is_gore_tip=False,
+            is_expanded=False,
+            width_near_m=None,
+            width_base_m=None,
+            gore_overlap_near=None,
+            stable_s_m=None,
+            anchor_station_m=None,
+            anchor_offset_m=None,
+            cut_mode="fallback_50m",
+            used_fallback=True,
+            short_base_proxy=False,
+        )
+    dist = np.asarray(stations, dtype=np.float64) if from_src else (float(length_m) - np.asarray(stations, dtype=np.float64))
+    width_arr = np.asarray(widths, dtype=np.float64)
+    gore_arr = np.asarray(gore_overlap, dtype=np.float64)
+    offset_arr = np.asarray(offsets, dtype=np.float64)
+    finite_mask = np.isfinite(width_arr) & np.isfinite(offset_arr) & np.isfinite(dist)
+    if np.count_nonzero(finite_mask) == 0:
+        return _EndStableDecision(
+            is_gore_tip=False,
+            is_expanded=False,
+            width_near_m=None,
+            width_base_m=None,
+            gore_overlap_near=None,
+            stable_s_m=None,
+            anchor_station_m=None,
+            anchor_offset_m=None,
+            cut_mode="fallback_50m",
+            used_fallback=True,
+            short_base_proxy=False,
+        )
+
+    d_min_v = max(0.0, float(d_min))
+    d_max_v = min(float(d_max), max(0.0, float(length_m) - 1e-3))
+    if d_max_v < d_min_v:
+        d_min_v = max(0.0, min(d_min_v, d_max_v))
+    near_to = min(d_max_v, d_min_v + max(0.0, float(near_len)))
+
+    near_mask = finite_mask & (dist >= d_min_v - 1e-9) & (dist <= near_to + 1e-9)
+    width_near = _nanmedian(width_arr[near_mask]) if np.any(near_mask) else None
+    gore_near = _nanmedian(gore_arr[near_mask]) if np.any(np.isfinite(gore_arr[near_mask])) else 0.0
+    if gore_near is None:
+        gore_near = 0.0
+
+    base_from_v, base_to_v, short_proxy = _choose_base_window(
+        length_m=float(length_m),
+        d_min=float(d_min_v),
+        near_len=float(near_len),
+        base_from=float(base_from),
+        base_to=float(base_to),
+        d_max=float(d_max_v),
+    )
+    base_mask = finite_mask & (dist >= base_from_v - 1e-9) & (dist <= base_to_v + 1e-9)
+    width_base = _nanmedian(width_arr[base_mask]) if np.any(base_mask) else None
+    if width_base is None:
+        width_base = _nanmedian(width_arr[finite_mask])
+
+    is_gore_tip = float(gore_near) > float(r_gore)
+    is_expanded = False
+    if width_near is not None and width_base is not None:
+        is_expanded = float(width_near) > float(width_base) * (1.0 + float(ratio_tol))
+
+    cands = np.flatnonzero(finite_mask & (dist >= d_min_v - 1e-9) & (dist <= d_max_v + 1e-9))
+    cands = cands[np.argsort(dist[cands])]
+    chosen_idx: int | None = None
+    stable_win = max(float(l_stable), 5.0)
+    for idx in cands:
+        g = gore_arr[idx]
+        if np.isfinite(g) and float(g) > float(r_gore):
+            continue
+        d = float(dist[idx])
+        seg_mask = finite_mask & (dist >= d - 1e-9) & (dist <= min(d_max_v, d + stable_win) + 1e-9)
+        if np.count_nonzero(seg_mask) < 3:
+            continue
+        wv = width_arr[seg_mask]
+        if wv.size < 3:
+            continue
+        span = float(np.max(wv) - np.min(wv))
+        if width_base is not None and np.isfinite(width_base):
+            span_lim = max(float(w_tol), float(width_base) * float(ratio_tol))
+        else:
+            span_lim = float(w_tol)
+        if span > span_lim + 1e-9:
+            continue
+        if is_expanded and width_base is not None and np.isfinite(width_base):
+            if float(width_arr[idx]) > float(width_base) * (1.0 + float(ratio_tol)):
+                continue
+        chosen_idx = int(idx)
+        break
+
+    used_fallback = False
+    cut_mode = "stable_section" if (is_expanded or is_gore_tip) else "simple_near"
+    if chosen_idx is None:
+        used_fallback = True
+        cut_mode = "fallback_50m"
+        d_fb = min(max(0.0, float(stable_fallback_m)), d_max_v if d_max_v > 0 else float(length_m))
+        if cands.size > 0:
+            chosen_idx = int(cands[int(np.argmin(np.abs(dist[cands] - d_fb)))])
+        else:
+            any_idx = np.flatnonzero(np.isfinite(offset_arr) & np.isfinite(dist))
+            if any_idx.size > 0:
+                chosen_idx = int(any_idx[int(np.argmin(np.abs(dist[any_idx] - d_fb)))])
+    if chosen_idx is None:
+        return _EndStableDecision(
+            is_gore_tip=bool(is_gore_tip),
+            is_expanded=bool(is_expanded),
+            width_near_m=width_near,
+            width_base_m=width_base,
+            gore_overlap_near=float(gore_near),
+            stable_s_m=None,
+            anchor_station_m=None,
+            anchor_offset_m=None,
+            cut_mode=cut_mode,
+            used_fallback=used_fallback,
+            short_base_proxy=short_proxy,
+        )
+
+    return _EndStableDecision(
+        is_gore_tip=bool(is_gore_tip),
+        is_expanded=bool(is_expanded),
+        width_near_m=width_near,
+        width_base_m=width_base,
+        gore_overlap_near=float(gore_near),
+        stable_s_m=float(dist[chosen_idx]),
+        anchor_station_m=float(stations[chosen_idx]),
+        anchor_offset_m=float(offset_arr[chosen_idx]),
+        cut_mode=cut_mode,
+        used_fallback=used_fallback,
+        short_base_proxy=bool(short_proxy),
+    )
+
+
+def _choose_base_window(
+    *,
+    length_m: float,
+    d_min: float,
+    near_len: float,
+    base_from: float,
+    base_to: float,
+    d_max: float,
+) -> tuple[float, float, bool]:
+    short_proxy = False
+    d_cap = max(0.0, float(d_max))
+    b0 = max(0.0, float(base_from))
+    b1 = max(b0 + 1e-3, float(base_to))
+    if b1 <= d_cap + 1e-6:
+        return b0, b1, short_proxy
+    if float(length_m) >= float(d_min + near_len + 20.0):
+        b0 = min(0.5 * float(length_m), max(0.0, float(length_m) - 40.0))
+        b1 = min(0.8 * float(length_m), max(0.0, float(length_m) - 10.0))
+        b1 = min(b1, d_cap)
+        if b1 > b0 + 1e-3:
+            return b0, b1, short_proxy
+    short_proxy = float(length_m) < 60.0
+    b0 = max(float(d_min), max(0.0, d_cap - max(20.0, 0.3 * float(length_m))))
+    b1 = d_cap
+    if b1 <= b0 + 1e-3:
+        b0 = max(0.0, min(float(d_min), d_cap))
+        b1 = d_cap
+    return b0, max(b0 + 1e-3, b1), short_proxy
+
+
+def _apply_endpoint_stable_clamp(
+    *,
+    offsets: np.ndarray,
+    stations: np.ndarray,
+    src_decision: _EndStableDecision,
+    dst_decision: _EndStableDecision,
+    transition_m: float,
+    length_m: float,
+) -> np.ndarray:
+    out = np.asarray(offsets, dtype=np.float64).copy()
+    raw = np.asarray(offsets, dtype=np.float64)
+    tr = max(0.0, float(transition_m))
+
+    if src_decision.anchor_station_m is not None and src_decision.anchor_offset_m is not None:
+        anchor_s = float(src_decision.anchor_station_m)
+        target = float(src_decision.anchor_offset_m)
+        if tr <= 1e-6:
+            out[stations <= anchor_s + 1e-9] = target
+        else:
+            hard_until = max(0.0, anchor_s - tr)
+            mask_hard = stations <= hard_until + 1e-9
+            out[mask_hard] = target
+            mask_tr = (stations > hard_until + 1e-9) & (stations <= anchor_s + 1e-9)
+            idxs = np.flatnonzero(mask_tr)
+            span = max(1e-6, anchor_s - hard_until)
+            for i in idxs:
+                w = float((stations[i] - hard_until) / span)
+                out[i] = (1.0 - w) * target + w * float(raw[i])
+
+    if dst_decision.anchor_station_m is not None and dst_decision.anchor_offset_m is not None:
+        anchor_s = float(dst_decision.anchor_station_m)
+        target = float(dst_decision.anchor_offset_m)
+        if tr <= 1e-6:
+            out[stations >= anchor_s - 1e-9] = target
+        else:
+            hard_from = min(float(length_m), anchor_s + tr)
+            mask_hard = stations >= hard_from - 1e-9
+            out[mask_hard] = target
+            mask_tr = (stations >= anchor_s - 1e-9) & (stations < hard_from - 1e-9)
+            idxs = np.flatnonzero(mask_tr)
+            span = max(1e-6, hard_from - anchor_s)
+            for i in idxs:
+                w = float((stations[i] - anchor_s) / span)
+                out[i] = (1.0 - w) * float(raw[i]) + w * target
+    return out
+
+
 def _fill_nan_linear(x: np.ndarray) -> np.ndarray:
     idx = np.arange(x.size)
     mask = np.isfinite(x)
@@ -1996,6 +2420,7 @@ def _estimate_endpoint_center_offset(
     line: LineString,
     at_start: bool,
     points_xyz: np.ndarray,
+    gore_zone_metric: BaseGeometry | None,
     along_half_window_m: float,
     across_half_window_m: float,
     corridor_half_width_m: float,
@@ -2033,10 +2458,20 @@ def _estimate_endpoint_center_offset(
     rel = xy[idx, :] - c[None, :]
     along = rel @ t
     across = rel @ no
+    gore_mask_local = np.zeros((idx.size,), dtype=bool)
+    if gore_zone_metric is not None:
+        try:
+            gore_mask_local = np.asarray(
+                contains_xy(gore_zone_metric, xy[idx, 0], xy[idx, 1]),
+                dtype=bool,
+            )
+        except Exception:
+            gore_mask_local = np.zeros((idx.size,), dtype=bool)
     keep = (
         (np.abs(along) <= float(along_half_window_m))
         & (np.abs(across) <= float(across_half_window_m))
         & (np.abs(across) <= max(0.1, float(corridor_half_width_m)))
+        & (~gore_mask_local)
     )
     if np.count_nonzero(keep) < int(min_points):
         return None
@@ -2119,7 +2554,9 @@ __all__ = [
     "PairSupport",
     "PairSupportBuildResult",
     "SOFT_LOW_SUPPORT",
+    "SOFT_DIVSTRIP_MISSING",
     "SOFT_NO_LB",
+    "SOFT_NO_STABLE_SECTION",
     "SOFT_OPEN_END",
     "SOFT_SPARSE_POINTS",
     "SOFT_UNRESOLVED_NEIGHBOR",

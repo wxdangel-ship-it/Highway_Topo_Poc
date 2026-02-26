@@ -12,7 +12,8 @@ from typing import Any, Sequence
 import numpy as np
 from pyproj import CRS, Transformer
 from shapely.geometry import LineString, Point, shape
-from shapely.ops import transform
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import transform, unary_union
 
 
 _TRAJ_FILE_NAME = "raw_dat_pose.geojson"
@@ -56,6 +57,8 @@ class PatchInputs:
     lane_boundaries_metric: list[LineString]
     node_kind_map: dict[int, int]
     trajectories: list[TrajectoryData]
+    divstrip_zone_metric: BaseGeometry | None
+    divstrip_source_path: Path | None
     point_cloud_path: Path | None
     road_prior_path: Path | None
     tiles_dir: Path | None
@@ -161,6 +164,7 @@ def probe_patch(patch_dir: Path) -> PatchProbe:
 
     intersection_path = vector_dir / "intersection_l.geojson"
     laneboundary_path = vector_dir / "LaneBoundary.geojson"
+    divstrip_path = vector_dir / "DivStripZone.geojson"
     node_path = _resolve_vector_file(
         vector_dir=vector_dir,
         primary_name=_NODE_PRIMARY_NAME,
@@ -217,6 +221,7 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
 
     intersection_path = vector_dir / "intersection_l.geojson"
     laneboundary_path = vector_dir / "LaneBoundary.geojson"
+    divstrip_path = vector_dir / "DivStripZone.geojson"
     node_path = _resolve_vector_file(
         vector_dir=vector_dir,
         primary_name=_NODE_PRIMARY_NAME,
@@ -234,6 +239,7 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
 
     inter_payload = _load_geojson(intersection_path)
     lane_payload = _load_geojson(laneboundary_path) if laneboundary_path.is_file() else {"type": "FeatureCollection", "features": []}
+    div_payload = _load_geojson(divstrip_path) if divstrip_path.is_file() else {"type": "FeatureCollection", "features": []}
     node_payload = _load_geojson(node_path) if node_path.is_file() else {"type": "FeatureCollection", "features": []}
 
     trajectories = _load_trajectories(traj_dir)
@@ -242,8 +248,10 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
     dst_crs = "EPSG:3857"
     inter_crs = _require_geojson_crs(inter_payload, path=intersection_path, allow_empty_if_no_features=False)
     lane_crs = _require_geojson_crs(lane_payload, path=laneboundary_path, allow_empty_if_no_features=True) or inter_crs
+    div_crs = _require_geojson_crs(div_payload, path=divstrip_path, allow_empty_if_no_features=True) or inter_crs
     inter_to_metric = _make_transformer(inter_crs, dst_crs)
     lane_to_metric = _make_transformer(lane_crs, dst_crs)
+    div_to_metric = _make_transformer(div_crs, dst_crs)
 
     projection = ProjectionInfo(
         input_crs=inter_crs,
@@ -257,6 +265,7 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
 
     intersections = _extract_intersections(inter_payload, inter_to_metric)
     lane_boundaries = _extract_linestrings(lane_payload, lane_to_metric)
+    divstrip_zone = _extract_polygon_union(div_payload, div_to_metric)
     node_kind = _extract_node_kind_map(node_payload)
     projected_traj = _project_trajectories(trajectories, dst_crs=dst_crs)
 
@@ -270,6 +279,8 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
         lane_boundaries_metric=lane_boundaries,
         node_kind_map=node_kind,
         trajectories=projected_traj,
+        divstrip_zone_metric=divstrip_zone,
+        divstrip_source_path=(divstrip_path if divstrip_path.is_file() else None),
         point_cloud_path=point_cloud_path,
         road_prior_path=road_path if road_path.is_file() else None,
         tiles_dir=tiles_dir if tiles_dir.is_dir() else None,
@@ -281,6 +292,9 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
             "dst_crs": dst_crs,
             "intersection_src_crs": inter_crs,
             "lane_src_crs": lane_crs,
+            "divstrip_src_crs": div_crs if divstrip_path.is_file() else None,
+            "has_divstrip_file": divstrip_path.is_file(),
+            "divstrip_feature_count": int(len(div_payload.get("features", []))),
         },
     )
 
@@ -650,6 +664,37 @@ def _extract_linestrings(payload: dict[str, Any], to_metric: callable) -> list[L
     return out
 
 
+def _extract_polygon_union(payload: dict[str, Any], to_metric: callable) -> BaseGeometry | None:
+    geoms: list[BaseGeometry] = []
+    for feat in payload.get("features", []):
+        try:
+            geom = shape(feat.get("geometry"))
+        except Exception:
+            continue
+        if geom.is_empty:
+            continue
+        projected = _transform_geometry(geom, to_metric)
+        if projected is None or projected.is_empty:
+            continue
+        gtype = getattr(projected, "geom_type", "")
+        if gtype in {"Polygon", "MultiPolygon"}:
+            geoms.append(projected)
+        elif gtype == "GeometryCollection":
+            for sub in projected.geoms:
+                stype = getattr(sub, "geom_type", "")
+                if stype in {"Polygon", "MultiPolygon"} and not sub.is_empty:
+                    geoms.append(sub)
+    if not geoms:
+        return None
+    try:
+        merged = unary_union(geoms)
+    except Exception:
+        merged = geoms[0]
+    if merged is None or merged.is_empty:
+        return None
+    return merged
+
+
 def _extract_node_kind_map(payload: dict[str, Any]) -> dict[int, int]:
     out: dict[int, int] = {}
     for feat in payload.get("features", []):
@@ -713,6 +758,16 @@ def _transform_linestring(line: LineString, fn: callable) -> LineString | None:
     except Exception:
         return None
     if not isinstance(transformed, LineString):
+        return None
+    return transformed
+
+
+def _transform_geometry(geom: BaseGeometry, fn: callable) -> BaseGeometry | None:
+    try:
+        transformed = transform(fn, geom)
+    except Exception:
+        return None
+    if transformed is None:
         return None
     return transformed
 

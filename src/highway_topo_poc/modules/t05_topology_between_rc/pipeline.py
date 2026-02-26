@@ -13,6 +13,8 @@ from .geometry import (
     HARD_MULTI_ROAD,
     HARD_NON_RC,
     SOFT_LOW_SUPPORT,
+    SOFT_NO_STABLE_SECTION,
+    SOFT_DIVSTRIP_MISSING,
     SOFT_NO_LB,
     SOFT_OPEN_END,
     SOFT_SPARSE_POINTS,
@@ -83,6 +85,18 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "OFFSET_SMOOTH_WIN_M_2": 100.0,
     "MAX_OFFSET_DELTA_PER_STEP_M": 1.0,
     "SIMPLIFY_TOL_M": 0.8,
+    "D_MIN": 20.0,
+    "D_MAX": 200.0,
+    "NEAR_LEN": 20.0,
+    "BASE_FROM": 80.0,
+    "BASE_TO": 150.0,
+    "L_STABLE": 30.0,
+    "RATIO_TOL": 0.10,
+    "W_TOL": 1.5,
+    "R_GORE": 0.02,
+    "GORE_BUFFER_M": 0.8,
+    "TRANSITION_M": 10.0,
+    "STABLE_FALLBACK_M": 50.0,
     "TURN_LIMIT_DEG_PER_10M": 30.0,
     "ENDPOINT_ON_XSEC_TOL_M": 1.0,
     "TOPK_INTERVALS": 20,
@@ -175,6 +189,21 @@ def _run_patch_core(
 
     hard_breakpoints: list[dict[str, Any]] = []
     soft_breakpoints: list[dict[str, Any]] = []
+    divstrip_missing = patch_inputs.divstrip_source_path is None
+    if divstrip_missing:
+        soft_breakpoints.append(
+            {
+                "road_id": "na",
+                "src_nodeid": None,
+                "dst_nodeid": None,
+                "traj_id": None,
+                "seq_range": None,
+                "station_range_m": None,
+                "reason": SOFT_DIVSTRIP_MISSING,
+                "severity": "soft",
+                "hint": "DivStripZone.geojson_missing",
+            }
+        )
 
     if not node_ids:
         road_lines_metric: list[LineString] = []
@@ -284,6 +313,7 @@ def _run_patch_core(
                 "n_cross_empty_skipped": int(cross_result.n_cross_empty_skipped),
                 "n_cross_geom_unexpected": int(cross_result.n_cross_geom_unexpected),
                 "n_cross_distance_gate_reject": int(cross_result.n_cross_distance_gate_reject),
+                "divstrip_missing": bool(divstrip_missing),
             },
         )
 
@@ -376,10 +406,17 @@ def _run_patch_core(
                 "stitch_reject_forward_count": int(supports_result.stitch_reject_forward_count),
                 "stitch_accept_count": int(supports_result.stitch_accept_count),
                 "stitch_levels_used_hist": dict(supports_result.stitch_levels_used_hist),
+                "divstrip_missing": bool(divstrip_missing),
             },
         )
 
     points_xyz = _load_surface_points(patch_inputs, supports, params)
+    gore_zone_metric = patch_inputs.divstrip_zone_metric
+    if gore_zone_metric is not None:
+        try:
+            gore_zone_metric = gore_zone_metric.buffer(float(params["GORE_BUFFER_M"]))
+        except Exception:
+            gore_zone_metric = patch_inputs.divstrip_zone_metric
 
     road_lines_metric: list[LineString] = []
     road_feature_props: list[dict[str, Any]] = []
@@ -452,6 +489,18 @@ def _run_patch_core(
             stable_margin_m=float(params["STABLE_OFFSET_MARGIN_M"]),
             endpoint_tol_m=float(params["ENDPOINT_ON_XSEC_TOL_M"]),
             road_max_vertices=int(params["ROAD_MAX_VERTICES"]),
+            divstrip_zone_metric=gore_zone_metric,
+            d_min=float(params["D_MIN"]),
+            d_max=float(params["D_MAX"]),
+            near_len=float(params["NEAR_LEN"]),
+            base_from=float(params["BASE_FROM"]),
+            base_to=float(params["BASE_TO"]),
+            l_stable=float(params["L_STABLE"]),
+            ratio_tol=float(params["RATIO_TOL"]),
+            w_tol=float(params["W_TOL"]),
+            r_gore=float(params["R_GORE"]),
+            transition_m=float(params["TRANSITION_M"]),
+            stable_fallback_m=float(params["STABLE_FALLBACK_M"]),
         )
 
         road = _make_base_road_record(src=src, dst=dst, support=support, src_type=src_type, dst_type=dst_type)
@@ -461,6 +510,20 @@ def _run_patch_core(
         road["width_med_m"] = center.width_med_m
         road["width_p90_m"] = center.width_p90_m
         road["max_turn_deg_per_10m"] = center.max_turn_deg_per_10m
+        road["src_is_gore_tip"] = bool(center.src_is_gore_tip)
+        road["dst_is_gore_tip"] = bool(center.dst_is_gore_tip)
+        road["src_is_expanded"] = bool(center.src_is_expanded)
+        road["dst_is_expanded"] = bool(center.dst_is_expanded)
+        road["src_width_near_m"] = center.src_width_near_m
+        road["dst_width_near_m"] = center.dst_width_near_m
+        road["src_width_base_m"] = center.src_width_base_m
+        road["dst_width_base_m"] = center.dst_width_base_m
+        road["src_gore_overlap_near"] = center.src_gore_overlap_near
+        road["dst_gore_overlap_near"] = center.dst_gore_overlap_near
+        road["src_stable_s_m"] = center.src_stable_s_m
+        road["dst_stable_s_m"] = center.dst_stable_s_m
+        road["src_cut_mode"] = center.src_cut_mode
+        road["dst_cut_mode"] = center.dst_cut_mode
         road["endpoint_center_offset_m_src"] = center.endpoint_center_offset_m_src
         road["endpoint_center_offset_m_dst"] = center.endpoint_center_offset_m_dst
 
@@ -553,6 +616,11 @@ def _run_patch_core(
             overall_pass = False
 
     endpoint_vals: list[float] = []
+    gore_near_vals: list[float] = []
+    width_near_minus_base_vals: list[float] = []
+    expanded_end_count = 0
+    gore_tip_end_count = 0
+    fallback_end_count = 0
     for road in road_records:
         for k in ("endpoint_center_offset_m_src", "endpoint_center_offset_m_dst"):
             v = road.get(k)
@@ -562,7 +630,46 @@ def _run_patch_core(
                 continue
             if np.isfinite(fv):
                 endpoint_vals.append(float(fv))
+        for k in ("src_gore_overlap_near", "dst_gore_overlap_near"):
+            v = road.get(k)
+            try:
+                fv = float(v)
+            except Exception:
+                continue
+            if np.isfinite(fv):
+                gore_near_vals.append(float(fv))
+        for near_k, base_k in (
+            ("src_width_near_m", "src_width_base_m"),
+            ("dst_width_near_m", "dst_width_base_m"),
+        ):
+            near_v = road.get(near_k)
+            base_v = road.get(base_k)
+            try:
+                near_f = float(near_v)
+                base_f = float(base_v)
+            except Exception:
+                continue
+            if np.isfinite(near_f) and np.isfinite(base_f):
+                width_near_minus_base_vals.append(float(near_f - base_f))
+        if bool(road.get("src_is_expanded", False)):
+            expanded_end_count += 1
+        if bool(road.get("dst_is_expanded", False)):
+            expanded_end_count += 1
+        if bool(road.get("src_is_gore_tip", False)):
+            gore_tip_end_count += 1
+        if bool(road.get("dst_is_gore_tip", False)):
+            gore_tip_end_count += 1
+        if str(road.get("src_cut_mode", "")) == "fallback_50m":
+            fallback_end_count += 1
+        if str(road.get("dst_cut_mode", "")) == "fallback_50m":
+            fallback_end_count += 1
     endpoint_arr = np.asarray(endpoint_vals, dtype=np.float64) if endpoint_vals else np.empty((0,), dtype=np.float64)
+    gore_near_arr = np.asarray(gore_near_vals, dtype=np.float64) if gore_near_vals else np.empty((0,), dtype=np.float64)
+    width_delta_arr = (
+        np.asarray(width_near_minus_base_vals, dtype=np.float64)
+        if width_near_minus_base_vals
+        else np.empty((0,), dtype=np.float64)
+    )
 
     return _finalize_payloads(
         run_id=run_id,
@@ -592,6 +699,10 @@ def _run_patch_core(
             "stitch_reject_forward_count": int(supports_result.stitch_reject_forward_count),
             "stitch_accept_count": int(supports_result.stitch_accept_count),
             "stitch_levels_used_hist": dict(supports_result.stitch_levels_used_hist),
+            "expanded_end_count": int(expanded_end_count),
+            "gore_tip_end_count": int(gore_tip_end_count),
+            "fallback_end_count": int(fallback_end_count),
+            "divstrip_missing": bool(divstrip_missing),
             "endpoint_center_offset_p50": (
                 float(np.percentile(endpoint_arr, 50.0)) if endpoint_arr.size > 0 else None
             ),
@@ -599,6 +710,15 @@ def _run_patch_core(
                 float(np.percentile(endpoint_arr, 90.0)) if endpoint_arr.size > 0 else None
             ),
             "endpoint_center_offset_max": (float(np.max(endpoint_arr)) if endpoint_arr.size > 0 else None),
+            "gore_overlap_near_p50": (float(np.percentile(gore_near_arr, 50.0)) if gore_near_arr.size > 0 else None),
+            "gore_overlap_near_p90": (float(np.percentile(gore_near_arr, 90.0)) if gore_near_arr.size > 0 else None),
+            "gore_overlap_near_max": (float(np.max(gore_near_arr)) if gore_near_arr.size > 0 else None),
+            "width_near_minus_base_p50": (
+                float(np.percentile(width_delta_arr, 50.0)) if width_delta_arr.size > 0 else None
+            ),
+            "width_near_minus_base_p90": (
+                float(np.percentile(width_delta_arr, 90.0)) if width_delta_arr.size > 0 else None
+            ),
         },
     )
 
@@ -727,6 +847,20 @@ def _make_base_road_record(
         "width_med_m": None,
         "width_p90_m": None,
         "max_turn_deg_per_10m": None,
+        "src_is_gore_tip": False,
+        "dst_is_gore_tip": False,
+        "src_is_expanded": False,
+        "dst_is_expanded": False,
+        "src_width_near_m": None,
+        "dst_width_near_m": None,
+        "src_width_base_m": None,
+        "dst_width_base_m": None,
+        "src_gore_overlap_near": None,
+        "dst_gore_overlap_near": None,
+        "src_stable_s_m": None,
+        "dst_stable_s_m": None,
+        "src_cut_mode": "fallback_50m",
+        "dst_cut_mode": "fallback_50m",
         "repr_traj_ids": repr_ids,
         "stitch_hops_p50": stitch_p50,
         "stitch_hops_p90": stitch_p90,
@@ -764,6 +898,8 @@ def _reason_hint(reason: str) -> str:
         SOFT_WIGGLY: "turn_rate_exceeds_limit",
         SOFT_OPEN_END: "patch_boundary_open_end",
         SOFT_UNRESOLVED_NEIGHBOR: "stitch_graph_neighbor_unresolved",
+        SOFT_NO_STABLE_SECTION: "stable_section_not_found_use_fallback",
+        SOFT_DIVSTRIP_MISSING: "divstripzone_missing_gore_disabled",
         _SOFT_CROSS_EMPTY_SKIPPED: "cross_point_empty_skipped",
         _SOFT_CROSS_GEOM_UNEXPECTED: "cross_geometry_unexpected",
         _SOFT_CROSS_DISTANCE_GATE_REJECT: "cross_distance_gate_reject",
@@ -823,6 +959,9 @@ def _finalize_payloads(
                 or sk.startswith("crossing_")
                 or sk.startswith("stitch_")
                 or sk.startswith("endpoint_center_offset_")
+                or sk.startswith("gore_overlap_")
+                or sk.startswith("width_near_minus_base_")
+                or sk in {"expanded_end_count", "gore_tip_end_count", "fallback_end_count", "divstrip_missing"}
             ):
                 summary_params[str(k)] = v
 

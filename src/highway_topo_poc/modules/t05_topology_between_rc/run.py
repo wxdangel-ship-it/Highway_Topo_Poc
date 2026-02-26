@@ -34,6 +34,18 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--offset_smooth_win_m_2", type=float, default=float(DEFAULT_PARAMS["OFFSET_SMOOTH_WIN_M_2"]))
     p.add_argument("--max_offset_delta_per_step_m", type=float, default=float(DEFAULT_PARAMS["MAX_OFFSET_DELTA_PER_STEP_M"]))
     p.add_argument("--simplify_tol_m", type=float, default=float(DEFAULT_PARAMS["SIMPLIFY_TOL_M"]))
+    p.add_argument("--d_min", type=float, default=float(DEFAULT_PARAMS["D_MIN"]))
+    p.add_argument("--d_max", type=float, default=float(DEFAULT_PARAMS["D_MAX"]))
+    p.add_argument("--near_len", type=float, default=float(DEFAULT_PARAMS["NEAR_LEN"]))
+    p.add_argument("--base_from", type=float, default=float(DEFAULT_PARAMS["BASE_FROM"]))
+    p.add_argument("--base_to", type=float, default=float(DEFAULT_PARAMS["BASE_TO"]))
+    p.add_argument("--l_stable", type=float, default=float(DEFAULT_PARAMS["L_STABLE"]))
+    p.add_argument("--ratio_tol", type=float, default=float(DEFAULT_PARAMS["RATIO_TOL"]))
+    p.add_argument("--w_tol", type=float, default=float(DEFAULT_PARAMS["W_TOL"]))
+    p.add_argument("--r_gore", type=float, default=float(DEFAULT_PARAMS["R_GORE"]))
+    p.add_argument("--gore_buffer_m", type=float, default=float(DEFAULT_PARAMS["GORE_BUFFER_M"]))
+    p.add_argument("--transition_m", type=float, default=float(DEFAULT_PARAMS["TRANSITION_M"]))
+    p.add_argument("--stable_fallback_m", type=float, default=float(DEFAULT_PARAMS["STABLE_FALLBACK_M"]))
     p.add_argument("--point_class_fallback_any", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["POINT_CLASS_FALLBACK_ANY"]))
 
     return p.parse_args(list(argv) if argv is not None else None)
@@ -67,6 +79,18 @@ def main(argv: Iterable[str] | None = None) -> int:
         "OFFSET_SMOOTH_WIN_M_2": float(args.offset_smooth_win_m_2),
         "MAX_OFFSET_DELTA_PER_STEP_M": float(args.max_offset_delta_per_step_m),
         "SIMPLIFY_TOL_M": float(args.simplify_tol_m),
+        "D_MIN": float(args.d_min),
+        "D_MAX": float(args.d_max),
+        "NEAR_LEN": float(args.near_len),
+        "BASE_FROM": float(args.base_from),
+        "BASE_TO": float(args.base_to),
+        "L_STABLE": float(args.l_stable),
+        "RATIO_TOL": float(args.ratio_tol),
+        "W_TOL": float(args.w_tol),
+        "R_GORE": float(args.r_gore),
+        "GORE_BUFFER_M": float(args.gore_buffer_m),
+        "TRANSITION_M": float(args.transition_m),
+        "STABLE_FALLBACK_M": float(args.stable_fallback_m),
         "POINT_CLASS_FALLBACK_ANY": int(args.point_class_fallback_any),
     }
     levels = list(DEFAULT_PARAMS.get("STITCH_MAX_DIST_LEVELS_M", [float(args.stitch_max_dist_m)]))
