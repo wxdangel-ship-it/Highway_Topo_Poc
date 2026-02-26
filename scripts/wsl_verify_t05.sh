@@ -46,6 +46,7 @@ for PATCH_ID in "${PATCH_IDS[@]}"; do
   METRICS="$OUT_DIR/metrics.json"
   GATE="$OUT_DIR/gate.json"
   INTERVALS="$OUT_DIR/intervals.json"
+  ROAD="$OUT_DIR/Road.geojson"
 
   echo "out_dir=$OUT_DIR"
   if [ -f "$SUMMARY" ]; then
@@ -109,6 +110,32 @@ PY
     echo "WARN: metrics missing: $METRICS"
   fi
 
+  if [ -f "$ROAD" ]; then
+    echo "--- road cluster/surface fields ---"
+    "$PY" - "$ROAD" <<'PY'
+import json, sys
+p = sys.argv[1]
+with open(p, "r", encoding="utf-8") as f:
+    fc = json.load(f)
+features = fc.get("features") or []
+print(f"road_count={len(features)}")
+for feat in features[:5]:
+    props = feat.get("properties") or {}
+    print(
+        "road_id={rid} chosen_cluster_id={cid} traj_surface_enforced={enf} traj_in_ratio={ratio} endpoint_in_surface_src={es} endpoint_in_surface_dst={ed}".format(
+            rid=props.get("road_id"),
+            cid=props.get("chosen_cluster_id"),
+            enf=props.get("traj_surface_enforced"),
+            ratio=props.get("traj_in_ratio"),
+            es=props.get("endpoint_in_traj_surface_src"),
+            ed=props.get("endpoint_in_traj_surface_dst"),
+        )
+    )
+PY
+  else
+    echo "WARN: road output missing: $ROAD"
+  fi
+
   if [ -f "$INTERVALS" ]; then
     echo "--- intervals focus ---"
     "$PY" - "$INTERVALS" <<'PY'
@@ -131,6 +158,8 @@ for bp in items:
     )
 PY
   fi
+
+  echo "debug_dir=$OUT_DIR/debug"
 
 done
 

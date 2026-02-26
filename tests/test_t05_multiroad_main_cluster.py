@@ -72,6 +72,9 @@ def test_multi_road_keeps_major_cluster_for_geometry() -> None:
     assert HARD_MULTI_ROAD in support.hard_anomalies
     assert support.cluster_count >= 2
     assert support.main_cluster_ratio > 0.5
-    # 主簇裁剪后应只剩多数通道支持，而不是全部轨迹都保留。
-    assert support.support_event_count < len(trajectories)
-    assert len(support.support_traj_ids) < len(trajectories)
+    # v4: 保留全部候选簇供后续“按簇评分选 k*”，不在 build_pair_supports 阶段直接裁剪。
+    assert support.support_event_count == len(trajectories)
+    assert len(support.evidence_cluster_ids) == support.support_event_count
+    main_cnt = sum(1 for c in support.evidence_cluster_ids if int(c) == int(support.main_cluster_id))
+    assert main_cnt >= 4
+    assert main_cnt < support.support_event_count
