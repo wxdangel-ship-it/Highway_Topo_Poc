@@ -51,6 +51,15 @@ def build_metrics_payload(
 
     coverage = np.asarray([_to_float(r.get("center_sample_coverage")) for r in roads], dtype=np.float64)
     coverage = coverage[np.isfinite(coverage)]
+    endpoint_offsets = np.asarray(
+        [
+            _to_float(v)
+            for r in roads
+            for v in (r.get("endpoint_center_offset_m_src"), r.get("endpoint_center_offset_m_dst"))
+        ],
+        dtype=np.float64,
+    )
+    endpoint_offsets = endpoint_offsets[np.isfinite(endpoint_offsets)]
 
     hard_count = sum(1 for r in roads if bool(r.get("hard_anomaly", False)))
     soft_count = sum(len(list(r.get("soft_issue_flags", []))) for r in roads)
@@ -69,6 +78,9 @@ def build_metrics_payload(
         "p10_conf": _safe_percentile(confs, 10.0),
         "p50_conf": _safe_percentile(confs, 50.0),
         "center_coverage_avg": _safe_stat(coverage, np.mean),
+        "endpoint_center_offset_p50": _safe_percentile(endpoint_offsets, 50.0),
+        "endpoint_center_offset_p90": _safe_percentile(endpoint_offsets, 90.0),
+        "endpoint_center_offset_max": _safe_stat(endpoint_offsets, np.max),
         "hard_breakpoint_count": int(len(hard_breakpoints)),
         "soft_breakpoint_count": int(len(soft_breakpoints)),
     }

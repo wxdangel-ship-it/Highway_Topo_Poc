@@ -66,6 +66,11 @@ class PairSupport:
     evidence_lengths_m: list[float] = field(default_factory=list)
     open_end_flags: list[bool] = field(default_factory=list)
     unresolved_neighbor_count: int = 0
+    cluster_count: int = 1
+    main_cluster_id: int = 0
+    main_cluster_ratio: float = 1.0
+    cluster_sep_m_est: float | None = None
+    cluster_sizes: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -76,6 +81,13 @@ class PairSupportBuildResult:
     graph_edge_count: int
     stitch_candidate_count: int
     stitch_edge_count: int
+    stitch_query_count: int
+    stitch_candidates_total: int
+    stitch_reject_dist_count: int
+    stitch_reject_angle_count: int
+    stitch_reject_forward_count: int
+    stitch_accept_count: int
+    stitch_levels_used_hist: dict[str, int]
 
 
 @dataclass
@@ -89,6 +101,8 @@ class CenterEstimate:
     width_p90_m: float | None
     max_turn_deg_per_10m: float | None
     used_lane_boundary: bool
+    endpoint_center_offset_m_src: float | None
+    endpoint_center_offset_m_dst: float | None
     soft_flags: set[str]
     hard_flags: set[str]
     diagnostics: dict[str, Any]
@@ -213,19 +227,32 @@ def build_pair_supports(
     events_by_traj: dict[str, list[CrossingEvent]],
     *,
     node_type_map: dict[int, str],
+    trj_sample_step_m: float = 2.0,
+    stitch_tail_m: float = 30.0,
+    stitch_max_dist_levels_m: Sequence[float] | None = None,
     stitch_max_dist_m: float = 12.0,
     stitch_max_angle_deg: float = 35.0,
+    stitch_forward_dot_min: float = 0.0,
+    stitch_min_advance_m: float = 5.0,
     stitch_penalty: float = 2.0,
-    stitch_topk: int = 1,
+    stitch_topk: int = 3,
     neighbor_max_dist_m: float = 2000.0,
     multi_road_sep_m: float = 8.0,
     multi_road_topn: int = 10,
 ) -> PairSupportBuildResult:
+    levels = _normalize_stitch_levels(
+        stitch_max_dist_levels_m=stitch_max_dist_levels_m,
+        stitch_max_dist_m=stitch_max_dist_m,
+    )
     graph = _build_forward_graph(
         trajectories=trajectories,
         events_by_traj=events_by_traj,
-        stitch_max_dist_m=float(stitch_max_dist_m),
+        trj_sample_step_m=float(trj_sample_step_m),
+        stitch_tail_m=float(stitch_tail_m),
+        stitch_max_dist_levels_m=levels,
         stitch_max_angle_deg=float(stitch_max_angle_deg),
+        stitch_forward_dot_min=float(stitch_forward_dot_min),
+        stitch_min_advance_m=float(stitch_min_advance_m),
         stitch_penalty=float(stitch_penalty),
         stitch_topk=max(1, int(stitch_topk)),
     )
@@ -333,15 +360,21 @@ def build_pair_supports(
                 support.hard_anomalies.add(HARD_NON_RC)
 
     for pair, support in list(supports.items()):
-        has_multi, keep_idx = _detect_multi_road_channels(
+        multi = _detect_multi_road_channels(
             support,
             sep_m=float(multi_road_sep_m),
             topn=max(3, int(multi_road_topn)),
         )
-        if has_multi:
+        support.cluster_count = int(multi.cluster_count)
+        support.main_cluster_id = int(multi.main_cluster_id)
+        support.main_cluster_ratio = float(multi.main_cluster_ratio)
+        support.cluster_sep_m_est = multi.cluster_sep_m_est
+        support.cluster_sizes = [int(v) for v in multi.cluster_sizes]
+
+        if multi.has_multi:
             support.hard_anomalies.add(HARD_MULTI_ROAD)
-            if keep_idx:
-                _apply_support_subset(support, keep_idx)
+            if multi.keep_idx:
+                _apply_support_subset(support, multi.keep_idx)
 
         if support.support_event_count <= 0:
             supports.pop(pair, None)
@@ -356,6 +389,13 @@ def build_pair_supports(
         graph_edge_count=int(sum(len(v) for v in graph.edges.values())),
         stitch_candidate_count=int(graph.stitch_candidate_count),
         stitch_edge_count=int(graph.stitch_edge_count),
+        stitch_query_count=int(graph.stitch_query_count),
+        stitch_candidates_total=int(graph.stitch_candidates_total),
+        stitch_reject_dist_count=int(graph.stitch_reject_dist_count),
+        stitch_reject_angle_count=int(graph.stitch_reject_angle_count),
+        stitch_reject_forward_count=int(graph.stitch_reject_forward_count),
+        stitch_accept_count=int(graph.stitch_accept_count),
+        stitch_levels_used_hist=dict(graph.stitch_levels_used_hist),
     )
 
 
@@ -424,6 +464,13 @@ class _GraphBuildResult:
     traj_line_map: dict[str, LineString]
     stitch_candidate_count: int
     stitch_edge_count: int
+    stitch_query_count: int
+    stitch_candidates_total: int
+    stitch_reject_dist_count: int
+    stitch_reject_angle_count: int
+    stitch_reject_forward_count: int
+    stitch_accept_count: int
+    stitch_levels_used_hist: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -437,12 +484,27 @@ class _SearchResult:
     last_key: str
 
 
+@dataclass(frozen=True)
+class _MultiRoadDetectResult:
+    has_multi: bool
+    keep_idx: list[int] | None
+    cluster_count: int
+    cluster_sizes: list[int]
+    main_cluster_id: int
+    main_cluster_ratio: float
+    cluster_sep_m_est: float | None
+
+
 def _build_forward_graph(
     *,
     trajectories: Sequence[TrajectoryData],
     events_by_traj: dict[str, list[CrossingEvent]],
-    stitch_max_dist_m: float,
+    trj_sample_step_m: float,
+    stitch_tail_m: float,
+    stitch_max_dist_levels_m: Sequence[float],
     stitch_max_angle_deg: float,
+    stitch_forward_dot_min: float,
+    stitch_min_advance_m: float,
     stitch_penalty: float,
     stitch_topk: int,
 ) -> _GraphBuildResult:
@@ -450,9 +512,8 @@ def _build_forward_graph(
     edges: dict[str, list[_GraphEdge]] = {}
     event_keys_by_traj: dict[str, list[tuple[CrossingEvent, str]]] = {}
     traj_line_map: dict[str, LineString] = {}
-
-    start_keys: list[str] = []
-    end_keys: list[str] = []
+    traj_sample_keys: dict[str, list[str]] = {}
+    traj_length_by_id: dict[str, float] = {}
 
     for traj in trajectories:
         coords = np.asarray(traj.xyz_metric[:, :2], dtype=np.float64)
@@ -464,40 +525,61 @@ def _build_forward_graph(
             continue
 
         traj_line_map[traj.traj_id] = line
-        station = _traj_station(coords)
-        start_heading = _unit_vec(coords[1] - coords[0])
-        end_heading = _unit_vec(coords[-1] - coords[-2])
+        traj_len = float(line.length)
+        traj_length_by_id[traj.traj_id] = traj_len
 
-        start_key = f"{traj.traj_id}:start"
-        end_key = f"{traj.traj_id}:end"
-        start_node = _GraphNode(
-            key=start_key,
-            traj_id=traj.traj_id,
-            kind="start",
-            station_m=0.0,
-            point=Point(float(coords[0, 0]), float(coords[0, 1])),
-            heading_xy=start_heading,
-            cross_nodeid=None,
-            seq_idx=0,
-        )
-        end_node = _GraphNode(
-            key=end_key,
-            traj_id=traj.traj_id,
-            kind="end",
-            station_m=float(station[-1]),
-            point=Point(float(coords[-1, 0]), float(coords[-1, 1])),
-            heading_xy=end_heading,
-            cross_nodeid=None,
-            seq_idx=int(coords.shape[0] - 1),
-        )
-        nodes[start_key] = start_node
-        nodes[end_key] = end_node
-        start_keys.append(start_key)
-        end_keys.append(end_key)
+        sample_step = max(0.5, float(trj_sample_step_m))
+        sample_ss = np.arange(0.0, traj_len + sample_step, sample_step, dtype=np.float64)
+        if sample_ss.size == 0 or abs(float(sample_ss[-1]) - traj_len) > 1e-6:
+            sample_ss = np.concatenate((sample_ss, np.asarray([traj_len], dtype=np.float64)))
+        sample_ss = np.clip(sample_ss, 0.0, traj_len)
+        sample_ss = np.unique(sample_ss)
+        if sample_ss.size < 2:
+            sample_ss = np.asarray([0.0, traj_len], dtype=np.float64)
+
+        sample_pts = np.zeros((sample_ss.size, 2), dtype=np.float64)
+        for i, s in enumerate(sample_ss):
+            p = line.interpolate(float(s))
+            p_xy = point_xy_safe(p, context="traj_sample_point")
+            if p_xy is None:
+                if i > 0:
+                    sample_pts[i, :] = sample_pts[i - 1, :]
+                else:
+                    sample_pts[i, :] = coords[0, :]
+            else:
+                sample_pts[i, :] = [float(p_xy[0]), float(p_xy[1])]
+        sample_heading = _sample_heading_by_points(sample_pts)
+
+        node_entries: list[tuple[float, int, str]] = []
+        sample_keys: list[str] = []
+        n_samples = int(sample_ss.size)
+        for i in range(n_samples):
+            if i == 0:
+                kind = "start"
+                key = f"{traj.traj_id}:start"
+            elif i == n_samples - 1:
+                kind = "end"
+                key = f"{traj.traj_id}:end"
+            else:
+                kind = "sample"
+                key = f"{traj.traj_id}:sample:{i}"
+            node = _GraphNode(
+                key=key,
+                traj_id=traj.traj_id,
+                kind=kind,
+                station_m=float(sample_ss[i]),
+                point=Point(float(sample_pts[i, 0]), float(sample_pts[i, 1])),
+                heading_xy=(float(sample_heading[i, 0]), float(sample_heading[i, 1])),
+                cross_nodeid=None,
+                seq_idx=None,
+            )
+            nodes[key] = node
+            sample_keys.append(key)
+            node_entries.append((float(sample_ss[i]), 10, key))
+        traj_sample_keys[traj.traj_id] = sample_keys
 
         sorted_events = sorted(events_by_traj.get(traj.traj_id, []), key=lambda e: (e.station_m, e.nodeid, e.seq_idx))
         event_items: list[tuple[CrossingEvent, str]] = []
-        middle_keys: list[str] = []
         for idx, ev in enumerate(sorted_events):
             key = f"{traj.traj_id}:cross:{idx}:{ev.nodeid}"
             node = _GraphNode(
@@ -512,16 +594,19 @@ def _build_forward_graph(
             )
             nodes[key] = node
             event_items.append((ev, key))
-            middle_keys.append(key)
+            node_entries.append((float(ev.station_m), 20, key))
 
         event_keys_by_traj[traj.traj_id] = event_items
-        ordered = [start_key, *middle_keys, end_key]
+        node_entries.sort(key=lambda it: (it[0], it[1], it[2]))
+        ordered = [k for _, _, k in node_entries]
         for a, b in zip(ordered[:-1], ordered[1:]):
             na = nodes[a]
             nb = nodes[b]
-            w = max(0.0, float(nb.station_m - na.station_m))
-            if w <= 1e-6:
+            w = float(nb.station_m - na.station_m)
+            if w < -1e-6:
                 continue
+            if w <= 1e-6:
+                w = 0.05
             edges.setdefault(a, []).append(
                 _GraphEdge(
                     to_key=b,
@@ -533,58 +618,114 @@ def _build_forward_graph(
                 )
             )
 
+    levels = [float(v) for v in stitch_max_dist_levels_m if float(v) > 0.0]
+    levels = sorted(set(levels))
     stitch_candidate_count = 0
     stitch_edge_count = 0
-    if stitch_max_dist_m > 0 and start_keys and end_keys:
-        cell = max(0.1, float(stitch_max_dist_m))
-        start_grid: dict[tuple[int, int], list[str]] = {}
-        for sk in start_keys:
-            sn = nodes[sk]
-            sn_xy = point_xy_safe(sn.point, context="stitch_start_grid")
-            if sn_xy is None:
+    stitch_query_count = 0
+    stitch_candidates_total = 0
+    stitch_reject_dist_count = 0
+    stitch_reject_angle_count = 0
+    stitch_reject_forward_count = 0
+    stitch_accept_count = 0
+    stitch_levels_used_hist: dict[str, int] = {}
+    if levels:
+        cell = 10.0 if levels[-1] <= 60.0 else 20.0
+        sample_grid: dict[tuple[int, int], list[str]] = {}
+        for key, node in nodes.items():
+            if node.kind not in {"start", "end", "sample"}:
                 continue
-            key = _grid_key(float(sn_xy[0]), float(sn_xy[1]), cell)
-            start_grid.setdefault(key, []).append(sk)
-
-        for ek in end_keys:
-            en = nodes[ek]
-            en_xy = point_xy_safe(en.point, context="stitch_end_grid")
-            if en_xy is None:
+            n_xy = point_xy_safe(node.point, context="stitch_sample_grid")
+            if n_xy is None:
                 continue
-            gx, gy = _grid_key(float(en_xy[0]), float(en_xy[1]), cell)
-            cands: list[tuple[float, float, str, str]] = []
-            for ix in range(gx - 1, gx + 2):
-                for iy in range(gy - 1, gy + 2):
-                    for sk in start_grid.get((ix, iy), []):
-                        sn = nodes[sk]
-                        if sn.traj_id == en.traj_id:
-                            continue
-                        dist = float(en.point.distance(sn.point))
-                        if dist > stitch_max_dist_m:
-                            continue
-                        ang = _angle_deg(en.heading_xy, sn.heading_xy)
-                        if ang > stitch_max_angle_deg:
-                            continue
-                        cands.append((dist, ang, sn.traj_id, sk))
+            gk = _grid_key(float(n_xy[0]), float(n_xy[1]), cell)
+            sample_grid.setdefault(gk, []).append(key)
 
-            if not cands:
+        topk_val = max(1, int(stitch_topk))
+        for traj_id, sample_keys in traj_sample_keys.items():
+            traj_len = float(traj_length_by_id.get(traj_id, 0.0))
+            if traj_len <= 0:
                 continue
-
-            cands.sort(key=lambda x: (x[0], x[1], x[2]))
-            stitch_candidate_count += int(len(cands))
-            for dist, _ang, _tid, sk in cands[: max(1, int(stitch_topk))]:
-                w = max(0.05, float(dist) * max(0.1, float(stitch_penalty)))
-                edges.setdefault(ek, []).append(
-                    _GraphEdge(
-                        to_key=sk,
-                        weight=w,
-                        kind="stitch",
-                        traj_id=None,
-                        station_from=None,
-                        station_to=None,
+            tail_keys = [
+                k
+                for k in sample_keys
+                if (traj_len - float(nodes[k].station_m)) <= max(0.0, float(stitch_tail_m)) + 1e-6
+            ]
+            for tail_key in tail_keys:
+                tail_node = nodes.get(tail_key)
+                if tail_node is None:
+                    continue
+                tail_xy = point_xy_safe(tail_node.point, context="stitch_tail")
+                if tail_xy is None:
+                    continue
+                stitch_query_count += 1
+                used_level: float | None = None
+                accepted_cands: list[tuple[float, float, str, str]] = []
+                for level in levels:
+                    radius = float(level)
+                    raw_keys = _query_stitch_grid_keys(
+                        sample_grid,
+                        center_xy=np.asarray([float(tail_xy[0]), float(tail_xy[1])], dtype=np.float64),
+                        radius_m=radius,
+                        cell_size=cell,
                     )
-                )
-                stitch_edge_count += 1
+                    if not raw_keys:
+                        continue
+                    cands: list[tuple[float, float, str, str]] = []
+                    for cand_key in raw_keys:
+                        cand_node = nodes.get(cand_key)
+                        if cand_node is None:
+                            continue
+                        if cand_node.traj_id == tail_node.traj_id:
+                            continue
+                        cand_xy = point_xy_safe(cand_node.point, context="stitch_cand")
+                        if cand_xy is None:
+                            continue
+                        dx = float(cand_xy[0] - tail_xy[0])
+                        dy = float(cand_xy[1] - tail_xy[1])
+                        dist = float(math.hypot(dx, dy))
+                        if dist > radius + 1e-6:
+                            stitch_reject_dist_count += 1
+                            continue
+                        cand_len = float(traj_length_by_id.get(cand_node.traj_id, cand_node.station_m))
+                        if cand_len - float(cand_node.station_m) < float(stitch_min_advance_m):
+                            stitch_reject_forward_count += 1
+                            continue
+                        dot = float(dx * tail_node.heading_xy[0] + dy * tail_node.heading_xy[1])
+                        if dot <= float(stitch_forward_dot_min):
+                            stitch_reject_forward_count += 1
+                            continue
+                        ang = _angle_deg(tail_node.heading_xy, cand_node.heading_xy)
+                        if ang > float(stitch_max_angle_deg):
+                            stitch_reject_angle_count += 1
+                            continue
+                        cands.append((dist, float(ang), str(cand_node.traj_id), cand_key))
+                    if cands:
+                        cands.sort(key=lambda it: (it[0], it[1], it[2], it[3]))
+                        used_level = radius
+                        accepted_cands = cands
+                        break
+                if not accepted_cands:
+                    continue
+                stitch_candidates_total += int(len(accepted_cands))
+                stitch_candidate_count += int(len(accepted_cands))
+                if used_level is not None:
+                    lk = _format_level_key(used_level)
+                    stitch_levels_used_hist[lk] = int(stitch_levels_used_hist.get(lk, 0) + 1)
+                for dist, _ang, _tid, cand_key in accepted_cands[:topk_val]:
+                    w = max(0.05, float(dist) * max(0.1, float(stitch_penalty)))
+                    edges.setdefault(tail_key, []).append(
+                        _GraphEdge(
+                            to_key=cand_key,
+                            weight=w,
+                            kind="stitch",
+                            traj_id=None,
+                            station_from=None,
+                            station_to=None,
+                        )
+                    )
+                    stitch_edge_count += 1
+                    stitch_accept_count += 1
 
     for key, vals in edges.items():
         vals.sort(key=lambda e: (e.weight, e.kind, e.to_key))
@@ -597,6 +738,13 @@ def _build_forward_graph(
         traj_line_map=traj_line_map,
         stitch_candidate_count=int(stitch_candidate_count),
         stitch_edge_count=int(stitch_edge_count),
+        stitch_query_count=int(stitch_query_count),
+        stitch_candidates_total=int(stitch_candidates_total),
+        stitch_reject_dist_count=int(stitch_reject_dist_count),
+        stitch_reject_angle_count=int(stitch_reject_angle_count),
+        stitch_reject_forward_count=int(stitch_reject_forward_count),
+        stitch_accept_count=int(stitch_accept_count),
+        stitch_levels_used_hist=dict(stitch_levels_used_hist),
     )
 
 
@@ -843,6 +991,11 @@ def estimate_centerline(
     width_pct_high: float,
     min_center_coverage: float,
     smooth_window_m: float,
+    corridor_half_width_m: float,
+    offset_smooth_win_m_1: float,
+    offset_smooth_win_m_2: float,
+    max_offset_delta_per_step_m: float,
+    simplify_tol_m: float,
     stable_offset_m: float,
     stable_margin_m: float,
     endpoint_tol_m: float,
@@ -865,6 +1018,8 @@ def estimate_centerline(
             width_p90_m=None,
             max_turn_deg_per_10m=None,
             used_lane_boundary=False,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
             hard_flags=hard_flags,
             diagnostics={"reason": "shape_ref_unavailable"},
@@ -886,6 +1041,8 @@ def estimate_centerline(
             width_p90_m=None,
             max_turn_deg_per_10m=None,
             used_lane_boundary=used_lb,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
             hard_flags=hard_flags,
             diagnostics={"reason": "shape_ref_sampling_failed"},
@@ -898,6 +1055,7 @@ def estimate_centerline(
         points_xyz=surface_points_xyz,
         along_half_window_m=xsec_along_half_window_m,
         across_half_window_m=xsec_across_half_window_m,
+        corridor_half_width_m=corridor_half_width_m,
         min_points=xsec_min_points,
         width_pct_low=width_pct_low,
         width_pct_high=width_pct_high,
@@ -909,7 +1067,13 @@ def estimate_centerline(
     if coverage < float(min_center_coverage):
         soft_flags.add(SOFT_SPARSE_POINTS)
 
-    smoothed = _smooth_offsets(offsets, step_m=center_sample_step_m, window_m=smooth_window_m)
+    smoothed = _smooth_offsets_two_stage(
+        offsets,
+        step_m=center_sample_step_m,
+        window_m_1=offset_smooth_win_m_1 if offset_smooth_win_m_1 > 0 else smooth_window_m,
+        window_m_2=offset_smooth_win_m_2 if offset_smooth_win_m_2 > 0 else max(smooth_window_m, offset_smooth_win_m_1),
+        max_delta_per_step_m=max_offset_delta_per_step_m,
+    )
     if np.count_nonzero(np.isfinite(smoothed)) < 2:
         hard_flags.add(HARD_CENTER_EMPTY)
         return CenterEstimate(
@@ -922,6 +1086,8 @@ def estimate_centerline(
             width_p90_m=_nanpercentile(widths, 90.0),
             max_turn_deg_per_10m=None,
             used_lane_boundary=used_lb,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
             hard_flags=hard_flags,
             diagnostics=diagnostics,
@@ -953,10 +1119,20 @@ def estimate_centerline(
             width_p90_m=_nanpercentile(widths, 90.0),
             max_turn_deg_per_10m=None,
             used_lane_boundary=used_lb,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
             hard_flags=hard_flags,
             diagnostics=diagnostics,
         )
+
+    if simplify_tol_m > 0.0:
+        try:
+            simp = centerline.simplify(float(simplify_tol_m), preserve_topology=False)
+        except Exception:
+            simp = centerline
+        if isinstance(simp, LineString) and not simp.is_empty and len(simp.coords) >= 2:
+            centerline = simp
 
     clipped, clip_reason = clip_line_to_cross_sections(
         centerline,
@@ -977,6 +1153,8 @@ def estimate_centerline(
             width_p90_m=_nanpercentile(widths, 90.0),
             max_turn_deg_per_10m=None,
             used_lane_boundary=used_lb,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
             soft_flags=soft_flags,
             hard_flags=hard_flags,
             diagnostics=diagnostics,
@@ -987,6 +1165,30 @@ def estimate_centerline(
     turn = compute_max_turn_deg_per_10m(clipped)
     if turn is not None:
         diagnostics["max_turn_deg_per_10m"] = float(turn)
+    endpoint_src = _estimate_endpoint_center_offset(
+        line=clipped,
+        at_start=True,
+        points_xyz=surface_points_xyz,
+        along_half_window_m=xsec_along_half_window_m,
+        across_half_window_m=xsec_across_half_window_m,
+        corridor_half_width_m=corridor_half_width_m,
+        min_points=max(20, int(xsec_min_points // 4)),
+        width_pct_low=width_pct_low,
+        width_pct_high=width_pct_high,
+    )
+    endpoint_dst = _estimate_endpoint_center_offset(
+        line=clipped,
+        at_start=False,
+        points_xyz=surface_points_xyz,
+        along_half_window_m=xsec_along_half_window_m,
+        across_half_window_m=xsec_across_half_window_m,
+        corridor_half_width_m=corridor_half_width_m,
+        min_points=max(20, int(xsec_min_points // 4)),
+        width_pct_low=width_pct_low,
+        width_pct_high=width_pct_high,
+    )
+    diagnostics["endpoint_center_offset_m_src"] = endpoint_src
+    diagnostics["endpoint_center_offset_m_dst"] = endpoint_dst
 
     return CenterEstimate(
         centerline_metric=clipped,
@@ -998,6 +1200,8 @@ def estimate_centerline(
         width_p90_m=_nanpercentile(widths, 90.0),
         max_turn_deg_per_10m=turn,
         used_lane_boundary=used_lb,
+        endpoint_center_offset_m_src=endpoint_src,
+        endpoint_center_offset_m_dst=endpoint_dst,
         soft_flags=soft_flags,
         hard_flags=hard_flags,
         diagnostics=diagnostics,
@@ -1084,14 +1288,22 @@ def _detect_multi_road_channels(
     *,
     sep_m: float,
     topn: int,
-) -> tuple[bool, list[int] | None]:
+) -> _MultiRoadDetectResult:
     n = min(
         len(support.traj_segments),
         len(support.src_cross_points),
         len(support.dst_cross_points),
     )
     if n < 4:
-        return False, None
+        return _MultiRoadDetectResult(
+            has_multi=False,
+            keep_idx=None,
+            cluster_count=1,
+            cluster_sizes=[int(n)] if n > 0 else [],
+            main_cluster_id=0,
+            main_cluster_ratio=1.0 if n > 0 else 0.0,
+            cluster_sep_m_est=None,
+        )
 
     use_n = min(n, max(3, int(topn)))
     mids = np.zeros((use_n, 2), dtype=np.float64)
@@ -1102,11 +1314,27 @@ def _detect_multi_road_channels(
             support.dst_cross_points[i],
         )
         if mid_xy is None:
-            return False, None
+            return _MultiRoadDetectResult(
+                has_multi=False,
+                keep_idx=None,
+                cluster_count=1,
+                cluster_sizes=[int(n)] if n > 0 else [],
+                main_cluster_id=0,
+                main_cluster_ratio=1.0 if n > 0 else 0.0,
+                cluster_sep_m_est=None,
+            )
         mids[i, :] = [float(mid_xy[0]), float(mid_xy[1])]
 
     if mids.shape[0] < 4:
-        return False, None
+        return _MultiRoadDetectResult(
+            has_multi=False,
+            keep_idx=None,
+            cluster_count=1,
+            cluster_sizes=[int(n)] if n > 0 else [],
+            main_cluster_id=0,
+            main_cluster_ratio=1.0 if n > 0 else 0.0,
+            cluster_sep_m_est=None,
+        )
 
     dm = np.linalg.norm(mids[:, None, :] - mids[None, :, :], axis=2)
     medoid_idx = int(np.argmin(np.sum(dm, axis=1)))
@@ -1115,11 +1343,17 @@ def _detect_multi_road_channels(
 
     labels, centers = _cluster_1d(radial, tol=max(1.0, float(sep_m) * 0.45))
     if len(centers) < 2:
-        return False, None
+        return _MultiRoadDetectResult(
+            has_multi=False,
+            keep_idx=None,
+            cluster_count=1,
+            cluster_sizes=[int(n)] if n > 0 else [],
+            main_cluster_id=0,
+            main_cluster_ratio=1.0 if n > 0 else 0.0,
+            cluster_sep_m_est=None,
+        )
 
     max_sep = float(max(centers) - min(centers))
-    if max_sep <= float(sep_m):
-        return False, None
 
     radial_all = np.zeros((n,), dtype=np.float64)
     for i in range(n):
@@ -1129,23 +1363,48 @@ def _detect_multi_road_channels(
             support.dst_cross_points[i],
         )
         if mid_xy is None:
-            return False, None
+            return _MultiRoadDetectResult(
+                has_multi=False,
+                keep_idx=None,
+                cluster_count=1,
+                cluster_sizes=[int(n)] if n > 0 else [],
+                main_cluster_id=0,
+                main_cluster_ratio=1.0 if n > 0 else 0.0,
+                cluster_sep_m_est=None,
+            )
         mid = np.asarray([float(mid_xy[0]), float(mid_xy[1])], dtype=np.float64)
         radial_all[i] = float(np.linalg.norm(mid - ref))
 
     cluster_counts = [0 for _ in centers]
-    labels_all: list[int] = []
-    for v in radial_all:
+    labels_all = [-1 for _ in range(n)]
+    for i, v in enumerate(radial_all):
         dif = [abs(float(v) - float(c)) for c in centers]
         cidx = int(np.argmin(np.asarray(dif, dtype=np.float64)))
-        labels_all.append(cidx)
+        labels_all[i] = cidx
         cluster_counts[cidx] += 1
 
     major = int(np.argmax(np.asarray(cluster_counts, dtype=np.int64)))
     keep_idx = [i for i, lab in enumerate(labels_all) if int(lab) == major]
     if not keep_idx:
-        return False, None
-    return True, keep_idx
+        return _MultiRoadDetectResult(
+            has_multi=False,
+            keep_idx=None,
+            cluster_count=max(1, int(len(centers))),
+            cluster_sizes=[int(v) for v in cluster_counts],
+            main_cluster_id=major,
+            main_cluster_ratio=0.0,
+            cluster_sep_m_est=max_sep,
+        )
+    multi = bool(max_sep > float(sep_m))
+    return _MultiRoadDetectResult(
+        has_multi=multi,
+        keep_idx=keep_idx if multi else None,
+        cluster_count=max(1, int(len(centers))),
+        cluster_sizes=[int(v) for v in cluster_counts],
+        main_cluster_id=int(major),
+        main_cluster_ratio=float(len(keep_idx) / max(1, n)),
+        cluster_sep_m_est=max_sep,
+    )
 
 
 def _safe_midpoint_xy(
@@ -1190,6 +1449,62 @@ def _cluster_1d(values: np.ndarray, *, tol: float) -> tuple[list[int], list[floa
             centers.append(v)
             counts.append(1)
     return labels, centers
+
+
+def _normalize_stitch_levels(
+    *,
+    stitch_max_dist_levels_m: Sequence[float] | None,
+    stitch_max_dist_m: float,
+) -> list[float]:
+    if stitch_max_dist_levels_m:
+        vals = [float(v) for v in stitch_max_dist_levels_m if float(v) > 0.0]
+        if vals:
+            return sorted(set(vals))
+    if float(stitch_max_dist_m) > 0:
+        return [float(stitch_max_dist_m)]
+    return []
+
+
+def _sample_heading_by_points(pts: np.ndarray) -> np.ndarray:
+    n = int(pts.shape[0])
+    out = np.zeros((n, 2), dtype=np.float64)
+    if n <= 1:
+        out[:, 0] = 1.0
+        return out
+    for i in range(n):
+        if i == 0:
+            v = pts[1, :] - pts[0, :]
+        elif i == n - 1:
+            v = pts[-1, :] - pts[-2, :]
+        else:
+            v = pts[i + 1, :] - pts[i - 1, :]
+        out[i, :] = np.asarray(_unit_vec(v), dtype=np.float64)
+    return out
+
+
+def _query_stitch_grid_keys(
+    grid: dict[tuple[int, int], list[str]],
+    *,
+    center_xy: np.ndarray,
+    radius_m: float,
+    cell_size: float,
+) -> list[str]:
+    if radius_m <= 0.0:
+        return []
+    gx, gy = _grid_key(float(center_xy[0]), float(center_xy[1]), float(cell_size))
+    dr = int(math.ceil(float(radius_m) / max(1e-6, float(cell_size))))
+    out: list[str] = []
+    for ix in range(gx - dr, gx + dr + 1):
+        for iy in range(gy - dr, gy + dr + 1):
+            out.extend(grid.get((ix, iy), []))
+    return out
+
+
+def _format_level_key(v: float) -> str:
+    f = float(v)
+    if abs(f - round(f)) <= 1e-6:
+        return str(int(round(f)))
+    return f"{f:.3f}"
 
 
 def _traj_station(coords: np.ndarray) -> np.ndarray:
@@ -1466,6 +1781,7 @@ def _estimate_offsets_from_surface(
     points_xyz: np.ndarray,
     along_half_window_m: float,
     across_half_window_m: float,
+    corridor_half_width_m: float,
     min_points: int,
     width_pct_low: float,
     width_pct_high: float,
@@ -1497,7 +1813,11 @@ def _estimate_offsets_from_surface(
         rel = xy[idx, :] - c[None, :]
         along = rel @ t
         across = rel @ no
-        keep = (np.abs(along) <= along_half_window_m) & (np.abs(across) <= across_half_window_m)
+        keep = (
+            (np.abs(along) <= along_half_window_m)
+            & (np.abs(across) <= across_half_window_m)
+            & (np.abs(across) <= max(0.1, float(corridor_half_width_m)))
+        )
         if np.count_nonzero(keep) < int(min_points):
             continue
 
@@ -1580,6 +1900,33 @@ def _smooth_offsets(offsets: np.ndarray, *, step_m: float, window_m: float) -> n
     return smoothed.astype(np.float64)
 
 
+def _smooth_offsets_two_stage(
+    offsets: np.ndarray,
+    *,
+    step_m: float,
+    window_m_1: float,
+    window_m_2: float,
+    max_delta_per_step_m: float,
+) -> np.ndarray:
+    x = np.asarray(offsets, dtype=np.float64).copy()
+    if np.count_nonzero(np.isfinite(x)) == 0:
+        return x
+    x = _fill_nan_linear(x)
+    x = _smooth_offsets(x, step_m=step_m, window_m=max(0.0, float(window_m_1)))
+    x = _smooth_offsets(x, step_m=step_m, window_m=max(0.0, float(window_m_2)))
+    lim = max(0.0, float(max_delta_per_step_m))
+    if lim <= 0.0 or x.size <= 1:
+        return x
+    out = x.copy()
+    for i in range(1, out.size):
+        d = float(out[i] - out[i - 1])
+        if d > lim:
+            out[i] = out[i - 1] + lim
+        elif d < -lim:
+            out[i] = out[i - 1] - lim
+    return out
+
+
 def _fill_nan_linear(x: np.ndarray) -> np.ndarray:
     idx = np.arange(x.size)
     mask = np.isfinite(x)
@@ -1642,6 +1989,62 @@ def _offset_line(*, sample_points: np.ndarray, normals: np.ndarray, offsets: np.
     if line.is_empty or line.length <= 0:
         return None
     return line
+
+
+def _estimate_endpoint_center_offset(
+    *,
+    line: LineString,
+    at_start: bool,
+    points_xyz: np.ndarray,
+    along_half_window_m: float,
+    across_half_window_m: float,
+    corridor_half_width_m: float,
+    min_points: int,
+    width_pct_low: float,
+    width_pct_high: float,
+) -> float | None:
+    if line.is_empty or line.length <= 0:
+        return None
+    if points_xyz.size == 0 or points_xyz.shape[0] < max(8, int(min_points)):
+        return None
+    coords = np.asarray(line.coords, dtype=np.float64)
+    if coords.shape[0] < 2:
+        return None
+
+    if bool(at_start):
+        c = coords[0]
+        v = coords[min(1, coords.shape[0] - 1)] - coords[0]
+    else:
+        c = coords[-1]
+        v = coords[-1] - coords[max(0, coords.shape[0] - 2)]
+    t = np.asarray(_unit_vec(v), dtype=np.float64)
+    no = np.asarray([-t[1], t[0]], dtype=np.float64)
+
+    xy = np.asarray(points_xyz[:, :2], dtype=np.float64)
+    grid = _build_grid_index(xy, cell_size=max(2.0, float(across_half_window_m) / 3.0))
+    idx = _query_grid_indices(
+        grid,
+        center_xy=np.asarray([float(c[0]), float(c[1])], dtype=np.float64),
+        half_dx=float(along_half_window_m + across_half_window_m),
+        half_dy=float(along_half_window_m + across_half_window_m),
+    )
+    if idx.size == 0:
+        return None
+    rel = xy[idx, :] - c[None, :]
+    along = rel @ t
+    across = rel @ no
+    keep = (
+        (np.abs(along) <= float(along_half_window_m))
+        & (np.abs(across) <= float(across_half_window_m))
+        & (np.abs(across) <= max(0.1, float(corridor_half_width_m)))
+    )
+    if np.count_nonzero(keep) < int(min_points):
+        return None
+    vals = across[keep]
+    lo = float(np.percentile(vals, width_pct_low))
+    hi = float(np.percentile(vals, width_pct_high))
+    center = 0.5 * (lo + hi)
+    return float(abs(center))
 
 
 def _locate_on_line(line: LineString, xsec: LineString, *, tol: float) -> float | None:
