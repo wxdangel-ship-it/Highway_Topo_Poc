@@ -306,6 +306,7 @@ def _breakpoint_sort_key(bp: dict[str, Any]) -> tuple[int, int, float]:
         "CENTER_ESTIMATE_EMPTY": 2,
         "ENDPOINT_NOT_ON_XSEC": 3,
         "BRIDGE_SEGMENT_TOO_LONG": 4,
+        "NO_ADJACENT_PAIR_AFTER_PASS2": 5,
         "LOW_SUPPORT": 10,
         "SPARSE_SURFACE_POINTS": 11,
         "NO_LB_CONTINUOUS": 12,
