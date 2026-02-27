@@ -755,11 +755,13 @@ def _run_patch_core(
         ranked_candidates = sorted(candidate_roads, key=_candidate_sort_key, reverse=True)
         selected = ranked_candidates[0]
         selected["chosen_cluster_id"] = int(selected.get("candidate_cluster_id", 0))
+        selected["no_geometry_candidate"] = False
         selected["cluster_score_top2"] = [
             {
                 "cluster_id": int(c.get("candidate_cluster_id", -1)),
                 "score": float(c.get("_candidate_score", -1e9)),
                 "feasible": bool(c.get("_candidate_feasible", False)),
+                "has_geometry": bool(c.get("_candidate_has_geometry", False)),
                 "in_ratio": _to_finite_float(c.get("_candidate_in_ratio"), 0.0),
                 "max_segment_m": c.get("max_segment_m"),
                 "endpoint_in_src": c.get("endpoint_in_traj_surface_src"),
@@ -769,6 +771,12 @@ def _run_patch_core(
             for c in ranked_candidates[:2]
         ]
         road_line = selected.get("_geometry_metric")
+        if not (isinstance(road_line, LineString) and (not road_line.is_empty)):
+            selected["no_geometry_candidate"] = True
+            sel_hard = set(selected.get("hard_reasons", []))
+            sel_hard.add(HARD_CENTER_EMPTY)
+            selected["hard_reasons"] = sorted(sel_hard)
+            selected["hard_anomaly"] = True
         road_records.append(selected)
         if isinstance(road_line, LineString) and (not road_line.is_empty):
             road_lines_metric.append(road_line)
@@ -3103,6 +3111,8 @@ def _evaluate_candidate_road(
         w3=float(params["CONF_W3_SMOOTH"]),
     )
 
+    has_geometry = bool(isinstance(road_line, LineString) and (not road_line.is_empty))
+    road["_candidate_has_geometry"] = bool(has_geometry)
     in_ratio = _to_finite_float(road.get("traj_in_ratio"), float("nan"))
     if not np.isfinite(in_ratio):
         in_ratio = _to_finite_float(road.get("traj_in_ratio_est"), 0.0)
@@ -3112,21 +3122,22 @@ def _evaluate_candidate_road(
     score = 10.0 * float(in_ratio) - 0.01 * _to_finite_float(road.get("max_segment_m"), 1e6) - 0.1 * float(
         bridge_count
     ) - 0.1 * float(outside_count) - 0.1 * float(divstrip_count)
-    feasible = (bridge_count <= 0) and (outside_count <= 0) and (divstrip_count <= 0)
+    feasible = bool(has_geometry) and (bridge_count <= 0) and (outside_count <= 0) and (divstrip_count <= 0)
     road["_candidate_score"] = float(score)
     road["_candidate_feasible"] = bool(feasible)
     road["_candidate_in_ratio"] = float(in_ratio)
     return road
 
 
-def _candidate_sort_key(road: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
+def _candidate_sort_key(road: dict[str, Any]) -> tuple[float, float, float, float, float, float, float]:
+    has_geometry = 1.0 if bool(road.get("_candidate_has_geometry", False)) else 0.0
     feasible = 1.0 if bool(road.get("_candidate_feasible", False)) else 0.0
     score = _to_finite_float(road.get("_candidate_score"), -1e9)
     in_ratio = _to_finite_float(road.get("_candidate_in_ratio"), 0.0)
     max_seg = _to_finite_float(road.get("max_segment_m"), 1e6)
     support_n = float(int(road.get("support_traj_count", 0)))
     cluster_id = float(int(road.get("candidate_cluster_id", 0)))
-    return (feasible, score, in_ratio, -max_seg, support_n, -cluster_id)
+    return (has_geometry, feasible, score, in_ratio, -max_seg, support_n, -cluster_id)
 
 
 def _iter_line_parts(geom: BaseGeometry | None) -> list[LineString]:
@@ -3490,6 +3501,7 @@ def _make_base_road_record(
         "cluster_count": int(support.cluster_count),
         "main_cluster_ratio": float(support.main_cluster_ratio),
         "cluster_sep_m_est": support.cluster_sep_m_est,
+        "no_geometry_candidate": None,
         "hard_anomaly": False,
         "hard_reasons": [],
         "soft_issue_flags": [],
@@ -3559,13 +3571,26 @@ def _finalize_payloads(
 ) -> dict[str, Any]:
     git_sha = git_short_sha(repo_root)
     digest = params_digest(params)
+    road_candidate_count = int(len(roads))
+    written_roads: list[dict[str, Any]] = []
+    for road in roads:
+        geom = road.get("_geometry_metric")
+        if isinstance(geom, LineString) and (not geom.is_empty):
+            written_roads.append(road)
+    road_features_count = int(len(road_feature_props))
+    no_geometry_candidate_count = int(max(0, road_candidate_count - road_features_count))
 
     metrics_payload = build_metrics_payload(
         patch_id=patch_id,
-        roads=roads,
+        roads=written_roads,
         hard_breakpoints=hard_breakpoints,
         soft_breakpoints=soft_breakpoints,
     )
+    metrics_payload["road_candidate_count"] = int(road_candidate_count)
+    metrics_payload["road_features_count"] = int(road_features_count)
+    metrics_payload["road_count"] = int(road_features_count)
+    metrics_payload["no_geometry_candidate_count"] = int(no_geometry_candidate_count)
+    metrics_payload["no_geometry_candidate"] = bool(road_candidate_count > 0 and road_features_count == 0)
     metrics_payload["params_digest"] = digest
     if extra_metrics:
         metrics_payload.update(extra_metrics)
@@ -3583,6 +3608,10 @@ def _finalize_payloads(
     )
 
     summary_params = {**params, "params_digest": digest}
+    summary_params["road_features_count"] = int(road_features_count)
+    summary_params["road_candidate_count"] = int(road_candidate_count)
+    summary_params["no_geometry_candidate_count"] = int(no_geometry_candidate_count)
+    summary_params["no_geometry_candidate"] = bool(road_candidate_count > 0 and road_features_count == 0)
     if extra_metrics:
         for k, v in extra_metrics.items():
             sk = str(k)
@@ -3618,7 +3647,9 @@ def _finalize_payloads(
         git_sha=git_sha,
         patch_id=patch_id,
         overall_pass=overall_pass,
-        roads=roads,
+        roads=written_roads,
+        road_features_count=int(road_features_count),
+        road_candidate_count=int(road_candidate_count),
         hard_breakpoints=hard_breakpoints,
         soft_breakpoints=soft_breakpoints,
         params=summary_params,

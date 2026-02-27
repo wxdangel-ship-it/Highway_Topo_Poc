@@ -644,3 +644,62 @@ def test_finalize_payloads_emits_empty_xsec_support_layers(tmp_path: Path) -> No
     assert "debug/xsec_support_dst.geojson" in debug_fc
     assert debug_fc["debug/xsec_support_src.geojson"]["features"] == []
     assert debug_fc["debug/xsec_support_dst.geojson"]["features"] == []
+
+
+def test_candidate_sort_prefers_geometry_even_if_feasible_lower() -> None:
+    no_geom = {
+        "_candidate_has_geometry": False,
+        "_candidate_feasible": True,
+        "_candidate_score": 99.0,
+        "_candidate_in_ratio": 0.0,
+        "max_segment_m": None,
+        "support_traj_count": 5,
+        "candidate_cluster_id": 1,
+    }
+    with_geom = {
+        "_candidate_has_geometry": True,
+        "_candidate_feasible": False,
+        "_candidate_score": -50.0,
+        "_candidate_in_ratio": 0.2,
+        "max_segment_m": 50.0,
+        "support_traj_count": 1,
+        "candidate_cluster_id": 0,
+    }
+    ranked = sorted([no_geom, with_geom], key=pipeline._candidate_sort_key, reverse=True)
+    assert ranked[0] is with_geom
+
+
+def test_finalize_payloads_road_count_matches_written_features(tmp_path: Path) -> None:
+    roads = [
+        {
+            "road_id": "1_2",
+            "src_nodeid": 1,
+            "dst_nodeid": 2,
+            "conf": 0.0,
+            "center_sample_coverage": 0.0,
+            "soft_issue_flags": [],
+            "hard_anomaly": True,
+            "_geometry_metric": None,
+        }
+    ]
+    payload = pipeline._finalize_payloads(
+        run_id="unit_run",
+        repo_root=tmp_path,
+        patch_id="unit_patch",
+        roads=roads,
+        road_lines_metric=[],
+        road_feature_props=[],
+        hard_breakpoints=[],
+        soft_breakpoints=[],
+        params=dict(pipeline.DEFAULT_PARAMS),
+        overall_pass=False,
+    )
+    metrics = payload["metrics_payload"]
+    assert metrics.get("road_count") == 0
+    assert metrics.get("road_features_count") == 0
+    assert metrics.get("road_candidate_count") == 1
+    assert metrics.get("no_geometry_candidate") is True
+    summary = str(payload.get("summary_text") or "")
+    assert "road_features_count: 0" in summary
+    assert "road_candidate_count: 1" in summary
+    assert "no_geometry_candidate: true" in summary
