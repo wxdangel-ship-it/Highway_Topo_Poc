@@ -24,7 +24,7 @@ if [ ! -x "$PY" ]; then
   exit 1
 fi
 
-RUN_ID="t05_v4speed_$(date +%Y%m%d_%H%M%S)"
+RUN_ID="t05_v6_2_$(date +%Y%m%d_%H%M%S)"
 OUT_ROOT="$REPO_ROOT/outputs/_work/t05_topology_between_rc"
 
 cd "$REPO_ROOT"
@@ -136,6 +136,8 @@ keys = [
     "xsec_support_disabled_dst_count",
     "xsec_support_empty_reason_src_hist",
     "xsec_support_empty_reason_dst_hist",
+    "xsec_truncated_count",
+    "xsec_truncated_fallback_count",
     "endpoint_fallback_mode_src_hist",
     "endpoint_fallback_mode_dst_hist",
     "offset_clamp_hit_ratio_p50",
