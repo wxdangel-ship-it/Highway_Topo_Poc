@@ -9,8 +9,11 @@ from highway_topo_poc.modules.t05_topology_between_rc import pipeline
 from highway_topo_poc.modules.t05_topology_between_rc.geometry import (
     CenterEstimate,
     CrossingExtractResult,
+    HARD_ENDPOINT_LOCAL,
     PairSupport,
     PairSupportBuildResult,
+    _EndStableDecision,
+    _apply_endpoint_trend_projection,
     _project_endpoint_to_valid_xsec,
 )
 from highway_topo_poc.modules.t05_topology_between_rc.io import (
@@ -116,6 +119,64 @@ def test_endpoint_projection_marks_out_local_when_far_from_xsec() -> None:
     out_pt = Point(float(out_xy[0]), float(out_xy[1]))
     assert out_pt.distance(xsec) <= 1e-6
     assert str(mode).endswith("_out_local")
+
+
+def test_endpoint_trend_projection_rejects_far_core_connector() -> None:
+    base_line = LineString([(0.0, 0.0), (100.0, 0.0)])
+    sample_stations = np.asarray([0.0, 50.0, 100.0], dtype=np.float64)
+    sample_center_points = np.asarray([[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]], dtype=np.float64)
+    src_decision = _EndStableDecision(
+        is_gore_tip=False,
+        is_expanded=False,
+        width_near_m=8.0,
+        width_base_m=8.0,
+        gore_overlap_near=0.0,
+        stable_s_m=20.0,
+        anchor_station_m=0.0,
+        anchor_offset_m=0.0,
+        cut_mode="simple_near",
+        used_fallback=False,
+        short_base_proxy=False,
+    )
+    dst_decision = _EndStableDecision(
+        is_gore_tip=False,
+        is_expanded=False,
+        width_near_m=8.0,
+        width_base_m=8.0,
+        gore_overlap_near=0.0,
+        stable_s_m=80.0,
+        anchor_station_m=100.0,
+        anchor_offset_m=0.0,
+        cut_mode="simple_near",
+        used_fallback=False,
+        short_base_proxy=False,
+    )
+    src_xsec = LineString([(-200.0, -10.0), (-200.0, 10.0)])
+    dst_xsec = LineString([(100.0, -10.0), (100.0, 10.0)])
+
+    out_line, _dev_src, _dev_dst, hard_reason, _proj_src, _proj_dst, _meta = _apply_endpoint_trend_projection(
+        base_line=base_line,
+        shape_ref_line=base_line,
+        sample_stations=sample_stations,
+        sample_center_points=sample_center_points,
+        src_decision=src_decision,
+        dst_decision=dst_decision,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_channel_points=[],
+        dst_channel_points=[],
+        trend_fit_win_m=20.0,
+        traj_surface_metric=None,
+        traj_surface_enforced=False,
+        gore_zone_metric=None,
+        endpoint_tol_m=1.0,
+        anchor_window_m=15.0,
+        endpoint_local_max_dist_m=20.0,
+        road_max_vertices=2000,
+    )
+
+    assert out_line is None
+    assert hard_reason == HARD_ENDPOINT_LOCAL
 
 
 def test_traj_surface_enforced_endpoint_outside_is_hard(tmp_path: Path) -> None:
@@ -271,6 +332,120 @@ def test_neighbor_pass2_is_triggered_when_no_supports(tmp_path: Path) -> None:
     assert "NO_ADJACENT_PAIR_AFTER_PASS2" in reasons
     assert out["metrics_payload"].get("neighbor_search_pass") == 2
     assert out["metrics_payload"].get("neighbor_search_pass2_used") is True
+
+
+def test_neighbor_pass2_is_triggered_when_unresolved_high_and_stitch_zero(tmp_path: Path, monkeypatch) -> None:
+    xsecs = [
+        CrossSection(nodeid=1, geometry_metric=LineString([(0.0, -2.0), (0.0, 2.0)]), properties={"nodeid": 1}),
+        CrossSection(nodeid=2, geometry_metric=LineString([(120.0, -2.0), (120.0, 2.0)]), properties={"nodeid": 2}),
+    ]
+    patch_inputs = _mk_patch_inputs(tmp_path=tmp_path, intersection_lines=xsecs, trajectories=[])
+
+    pass1_support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t1"},
+        support_event_count=1,
+        repr_traj_ids=["t1"],
+    )
+    pass2_support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t1", "t2", "t3"},
+        support_event_count=3,
+        repr_traj_ids=["t1", "t2", "t3"],
+    )
+    unresolved = [
+        {"reason": "UNRESOLVED_NEIGHBOR", "traj_id": f"t{i}", "src_nodeid": 1, "dst_nodeid": None}
+        for i in range(24)
+    ]
+    pass1_result = PairSupportBuildResult(
+        supports={(1, 2): pass1_support},
+        unresolved_events=unresolved,
+        graph_node_count=100,
+        graph_edge_count=120,
+        stitch_candidate_count=0,
+        stitch_edge_count=0,
+        stitch_query_count=40,
+        stitch_candidates_total=0,
+        stitch_reject_dist_count=0,
+        stitch_reject_angle_count=0,
+        stitch_reject_forward_count=0,
+        stitch_accept_count=0,
+        stitch_levels_used_hist={},
+    )
+    pass2_result = PairSupportBuildResult(
+        supports={(1, 2): pass2_support},
+        unresolved_events=[],
+        graph_node_count=120,
+        graph_edge_count=200,
+        stitch_candidate_count=5,
+        stitch_edge_count=5,
+        stitch_query_count=40,
+        stitch_candidates_total=5,
+        stitch_reject_dist_count=0,
+        stitch_reject_angle_count=0,
+        stitch_reject_forward_count=0,
+        stitch_accept_count=5,
+        stitch_levels_used_hist={"25": 3},
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "extract_crossing_events",
+        lambda *args, **kwargs: CrossingExtractResult(
+            events_by_traj={},
+            raw_hit_count=0,
+            dedup_drop_count=0,
+            n_cross_empty_skipped=0,
+            n_cross_geom_unexpected=0,
+            n_cross_distance_gate_reject=0,
+        ),
+    )
+    calls = {"n": 0}
+
+    def _fake_build_pair_supports(*args, **kwargs):
+        calls["n"] += 1
+        return pass1_result if calls["n"] <= 2 else pass2_result
+
+    monkeypatch.setattr(pipeline, "build_pair_supports", _fake_build_pair_supports)
+    monkeypatch.setattr(
+        pipeline,
+        "infer_node_types",
+        lambda **kwargs: ({1: "unknown", 2: "unknown"}, {1: 0, 2: 0}, {1: 0, 2: 0}),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: _mk_center(LineString([(0.0, 0.0), (120.0, 0.0)])),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: (
+            {
+                "traj_surface_enforced": False,
+                "traj_in_ratio": None,
+                "traj_in_ratio_est": None,
+                "endpoint_in_traj_surface_src": None,
+                "endpoint_in_traj_surface_dst": None,
+            },
+            set(),
+            set(),
+            [],
+        ),
+    )
+
+    out = pipeline._run_patch_core(
+        patch_inputs,
+        params=dict(pipeline.DEFAULT_PARAMS),
+        run_id="unit_run",
+        repo_root=tmp_path,
+    )
+    assert calls["n"] >= 4
+    assert out["metrics_payload"].get("neighbor_search_pass2_attempted") is True
+    assert out["metrics_payload"].get("neighbor_search_pass2_used") is True
+    assert out["metrics_payload"].get("neighbor_search_pass") == 2
 
 
 def test_surface_point_cache_skips_second_laz_read(tmp_path: Path, monkeypatch) -> None:
