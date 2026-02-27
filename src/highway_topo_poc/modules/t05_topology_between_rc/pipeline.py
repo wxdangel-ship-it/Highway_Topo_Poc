@@ -12,7 +12,7 @@ import numpy as np
 from shapely import contains_xy, get_x, get_y, line_interpolate_point, line_locate_point, points
 from shapely.geometry import LineString, MultiLineString, Point, Polygon, mapping
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import polygonize, unary_union
+from shapely.ops import nearest_points, polygonize, substring, unary_union
 
 from .geometry import (
     HARD_BRIDGE_SEGMENT,
@@ -41,8 +41,10 @@ from .geometry import (
     estimate_centerline,
     extract_crossing_events,
     infer_node_types,
+    point_xy_safe,
 )
 from .io import (
+    CrossSection,
     InputDataError,
     PatchInputs,
     git_short_sha,
@@ -149,6 +151,10 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "TRAJ_SURF_MIN_UNIQUE_TRAJ": 2,
     "XSEC_ANCHOR_WINDOW_M": 15.0,
     "XSEC_ENDPOINT_MAX_DIST_M": 20.0,
+    "XSEC_TRUNC_LMAX_M": 80.0,
+    "XSEC_TRUNC_STEP_M": 1.0,
+    "XSEC_TRUNC_NONPASS_K": 6,
+    "XSEC_TRUNC_EVIDENCE_RADIUS_M": 1.0,
     "ENDPOINT_ON_XSEC_TOL_M": 1.0,
     "TOPK_INTERVALS": 20,
     "CONF_W1_SUPPORT": 0.4,
@@ -330,6 +336,25 @@ def _run_patch_core(
                 "hint": "DivStripZone.geojson_missing",
             }
         )
+    gore_zone_buffered_metric = patch_inputs.divstrip_zone_metric
+    if gore_zone_buffered_metric is not None and (not gore_zone_buffered_metric.is_empty):
+        try:
+            gore_zone_buffered_metric = gore_zone_buffered_metric.buffer(float(params["GORE_BUFFER_M"]))
+        except Exception:
+            gore_zone_buffered_metric = patch_inputs.divstrip_zone_metric
+
+    (
+        xsec_cross_map,
+        xsec_anchor_debug_items,
+        xsec_trunc_debug_items,
+        xsec_cross_stats,
+    ) = _truncate_cross_sections_for_crossing(
+        xsec_map=xsec_map,
+        lane_boundaries_metric=patch_inputs.lane_boundaries_metric,
+        trajectories=patch_inputs.trajectories,
+        gore_zone_metric=gore_zone_buffered_metric,
+        params=params,
+    )
 
     def _timing_extra_metrics() -> dict[str, Any]:
         required = (
@@ -351,6 +376,7 @@ def _run_patch_core(
         payload["traj_surface_cache_hit_count"] = int(surface_cache_hit_count)
         payload["traj_surface_cache_miss_count"] = int(surface_cache_miss_count)
         payload.update(pointcloud_stats)
+        payload.update(xsec_cross_stats)
         return payload
 
     if not node_ids:
@@ -435,7 +461,7 @@ def _run_patch_core(
     ) -> tuple[Any, Any, dict[int, str], dict[int, int], dict[int, int]]:
         cross_obj = extract_crossing_events(
             patch_inputs.trajectories,
-            list(xsec_map.values()),
+            list(xsec_cross_map.values()),
             hit_buffer_m=float(hit_buffer_m),
             dedup_gap_m=float(params["TRAJ_XSEC_DEDUP_GAP_M"]),
         )
@@ -609,21 +635,19 @@ def _run_patch_core(
 
     with stage_timer.scope("t_load_pointcloud"):
         points_xyz, pointcloud_stats = _load_surface_points(patch_inputs, supports, params)
-    gore_zone_metric = patch_inputs.divstrip_zone_metric
-    if gore_zone_metric is not None:
-        try:
-            gore_zone_metric = gore_zone_metric.buffer(float(params["GORE_BUFFER_M"]))
-        except Exception:
-            gore_zone_metric = patch_inputs.divstrip_zone_metric
+    gore_zone_metric = gore_zone_buffered_metric
 
     road_lines_metric: list[LineString] = []
     road_feature_props: list[dict[str, Any]] = []
     road_records: list[dict[str, Any]] = []
+    debug_enabled = bool(int(params.get("DEBUG_DUMP", 0)))
     debug_layers: dict[str, list[dict[str, Any]]] = {
         "traj_surface_best_polygon": [],
         "traj_surface_best_boundary": [],
         "lb_path_best": [],
         "ref_axis_best": [],
+        "xsec_anchor_points": list(xsec_anchor_debug_items) if debug_enabled else [],
+        "xsec_truncated": list(xsec_trunc_debug_items) if debug_enabled else [],
         "xsec_valid_src": [],
         "xsec_valid_dst": [],
         "xsec_support_src": [],
@@ -872,7 +896,7 @@ def _run_patch_core(
                 )
             )
 
-        if bool(int(params.get("DEBUG_DUMP", 0))):
+        if debug_enabled:
             with stage_timer.scope("t_debug_dump"):
                 _collect_debug_layers_for_selected(
                     debug_layers=debug_layers,
@@ -1534,6 +1558,38 @@ def _max_segment_detail(line: LineString) -> tuple[int | None, float | None]:
         return None, None
     idx = int(np.argmax(d))
     return idx, float(d[idx])
+
+
+def _fallback_geometry_from_shape_ref(
+    *,
+    shape_ref_line: LineString | None,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+) -> LineString | None:
+    if not isinstance(shape_ref_line, LineString) or shape_ref_line.is_empty or shape_ref_line.length <= 1e-6:
+        return None
+    line = _orient_axis_line(shape_ref_line, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    try:
+        src_on_line, _ = nearest_points(line, src_xsec)
+        dst_on_line, _ = nearest_points(line, dst_xsec)
+        s0 = float(line.project(src_on_line))
+        s1 = float(line.project(dst_on_line))
+    except Exception:
+        s0 = 0.0
+        s1 = float(line.length)
+    if not np.isfinite(s0) or not np.isfinite(s1):
+        s0 = 0.0
+        s1 = float(line.length)
+    if abs(s1 - s0) < 1e-3:
+        core = line
+    else:
+        try:
+            core = substring(line, min(s0, s1), max(s0, s1))
+        except Exception:
+            core = line
+    if core is None or core.is_empty or not isinstance(core, LineString) or len(core.coords) < 2:
+        return line if len(line.coords) >= 2 else None
+    return _orient_axis_line(core, src_xsec=src_xsec, dst_xsec=dst_xsec)
 
 
 def _collect_support_traj_points(
@@ -3046,6 +3102,20 @@ def _evaluate_candidate_road(
         soft_flags.add(SOFT_TRAJ_SURFACE_INSUFFICIENT)
 
     road_line = center.centerline_metric
+    centerline_fallback_used = False
+    if not (isinstance(road_line, LineString) and (not road_line.is_empty)):
+        fallback_line = _fallback_geometry_from_shape_ref(
+            shape_ref_line=center.shape_ref_metric,
+            src_xsec=src_xsec,
+            dst_xsec=dst_xsec,
+        )
+        if isinstance(fallback_line, LineString) and (not fallback_line.is_empty):
+            road_line = fallback_line
+            centerline_fallback_used = True
+            hard_flags.add(HARD_CENTER_EMPTY)
+            road["endpoint_fallback_mode_src"] = str(road.get("endpoint_fallback_mode_src") or "shape_ref_substring_fallback")
+            road["endpoint_fallback_mode_dst"] = str(road.get("endpoint_fallback_mode_dst") or "shape_ref_substring_fallback")
+    road["centerline_fallback_geometry_used"] = bool(centerline_fallback_used)
     if road_line is not None:
         road["length_m"] = float(road_line.length)
         seg_idx, seg_len = _max_segment_detail(road_line)
@@ -3422,6 +3492,208 @@ def _build_cross_section_map(patch_inputs: PatchInputs) -> dict[int, Any]:
     return out
 
 
+def _build_traj_union_for_crossing(trajectories: Sequence[Any]) -> BaseGeometry | None:
+    lines: list[LineString] = []
+    for traj in trajectories:
+        xyz = np.asarray(getattr(traj, "xyz_metric", np.empty((0, 3), dtype=np.float64)), dtype=np.float64)
+        if xyz.ndim != 2 or xyz.shape[0] < 2:
+            continue
+        xy = np.asarray(xyz[:, :2], dtype=np.float64)
+        finite = np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])
+        if np.count_nonzero(finite) < 2:
+            continue
+        xy = xy[finite, :]
+        try:
+            ls = LineString([(float(x), float(y)) for x, y in xy])
+        except Exception:
+            continue
+        if ls.is_empty or ls.length <= 1e-6:
+            continue
+        lines.append(ls)
+    if not lines:
+        return None
+    try:
+        merged = unary_union(lines)
+    except Exception:
+        merged = lines[0]
+    if merged is None or merged.is_empty:
+        return None
+    return merged
+
+
+def _estimate_cross_normal_from_lb(
+    *,
+    anchor_xy: tuple[float, float],
+    source_xsec: LineString,
+    lane_boundaries_metric: Sequence[LineString],
+) -> tuple[float, float]:
+    anchor_pt = Point(float(anchor_xy[0]), float(anchor_xy[1]))
+    best_dist = float("inf")
+    best_normal: tuple[float, float] | None = None
+    for lb in lane_boundaries_metric:
+        if lb is None or lb.is_empty or lb.length <= 1e-6:
+            continue
+        try:
+            d = float(lb.distance(anchor_pt))
+        except Exception:
+            continue
+        if not np.isfinite(d):
+            continue
+        if d > 80.0:
+            continue
+        try:
+            s = float(lb.project(anchor_pt))
+            ds = min(3.0, max(0.8, 0.05 * float(lb.length)))
+            p0 = lb.interpolate(max(0.0, s - ds))
+            p1 = lb.interpolate(min(float(lb.length), s + ds))
+        except Exception:
+            continue
+        p0_xy = point_xy_safe(p0, context="xsec_trunc_lb_tan_p0")
+        p1_xy = point_xy_safe(p1, context="xsec_trunc_lb_tan_p1")
+        if p0_xy is None or p1_xy is None:
+            continue
+        tx, ty = _unit_xy(float(p1_xy[0] - p0_xy[0]), float(p1_xy[1] - p0_xy[1]))
+        nx, ny = float(-ty), float(tx)
+        if d < best_dist:
+            best_dist = d
+            best_normal = (nx, ny)
+    if best_normal is not None:
+        return best_normal
+    coords = list(source_xsec.coords)
+    if len(coords) >= 2:
+        vx = float(coords[-1][0] - coords[0][0])
+        vy = float(coords[-1][1] - coords[0][1])
+        return _unit_xy(vx, vy)
+    return (1.0, 0.0)
+
+
+def _truncate_cross_sections_for_crossing(
+    *,
+    xsec_map: dict[int, Any],
+    lane_boundaries_metric: Sequence[LineString],
+    trajectories: Sequence[Any],
+    gore_zone_metric: BaseGeometry | None,
+    params: dict[str, Any],
+) -> tuple[dict[int, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    traj_union = _build_traj_union_for_crossing(trajectories)
+    out: dict[int, Any] = {}
+    anchor_feats: list[dict[str, Any]] = []
+    trunc_feats: list[dict[str, Any]] = []
+    used_trunc = 0
+    fallback_orig = 0
+    lmax = float(max(10.0, params.get("XSEC_TRUNC_LMAX_M", 80.0)))
+    step = float(max(0.5, params.get("XSEC_TRUNC_STEP_M", 1.0)))
+    nonpass_k = int(max(2, params.get("XSEC_TRUNC_NONPASS_K", 6)))
+    evidence_radius = float(max(0.5, params.get("XSEC_TRUNC_EVIDENCE_RADIUS_M", 1.0)))
+    n_steps = int(max(1, round(lmax / step)))
+
+    for nodeid, cs in xsec_map.items():
+        geom = cs.geometry_metric
+        if geom is None or geom.is_empty or geom.length <= 1e-6:
+            out[int(nodeid)] = cs
+            fallback_orig += 1
+            continue
+        center = geom.interpolate(0.5, normalized=True)
+        c_xy = point_xy_safe(center, context="xsec_trunc_anchor")
+        if c_xy is None:
+            out[int(nodeid)] = cs
+            fallback_orig += 1
+            continue
+        ax = float(c_xy[0])
+        ay = float(c_xy[1])
+        nx, ny = _estimate_cross_normal_from_lb(
+            anchor_xy=(ax, ay),
+            source_xsec=geom,
+            lane_boundaries_metric=lane_boundaries_metric,
+        )
+        blocked_left = False
+        blocked_right = False
+        left_extent = 0.0
+        right_extent = 0.0
+        for sign in (-1.0, 1.0):
+            best = 0.0
+            fail_run = 0
+            cut_by_divstrip = False
+            for i in range(1, n_steps + 1):
+                d = float(i) * step
+                px = ax + sign * nx * d
+                py = ay + sign * ny * d
+                p = Point(px, py)
+                blocked = False
+                if gore_zone_metric is not None and (not gore_zone_metric.is_empty):
+                    try:
+                        blocked = bool(gore_zone_metric.buffer(1e-6).covers(p))
+                    except Exception:
+                        blocked = False
+                if blocked:
+                    passable = False
+                    cut_by_divstrip = True
+                else:
+                    passable = False
+                    if traj_union is not None and (not traj_union.is_empty):
+                        try:
+                            passable = float(p.distance(traj_union)) <= evidence_radius
+                        except Exception:
+                            passable = False
+                if passable:
+                    best = d
+                    fail_run = 0
+                else:
+                    fail_run += 1
+                if fail_run >= nonpass_k:
+                    break
+            if sign < 0:
+                left_extent = best
+                blocked_left = cut_by_divstrip
+            else:
+                right_extent = best
+                blocked_right = cut_by_divstrip
+
+        if traj_union is None or (left_extent < step and right_extent < step):
+            half = min(lmax, max(step, 0.5 * float(geom.length)))
+            left_extent = max(left_extent, half)
+            right_extent = max(right_extent, half)
+        p0 = (ax - nx * left_extent, ay - ny * left_extent)
+        p1 = (ax + nx * right_extent, ay + ny * right_extent)
+        trunc_line = LineString([p0, p1])
+        if trunc_line.is_empty or trunc_line.length <= 1.0:
+            trunc_line = geom
+            fallback_orig += 1
+        else:
+            used_trunc += 1
+        out[int(nodeid)] = CrossSection(
+            nodeid=int(cs.nodeid),
+            geometry_metric=trunc_line,
+            properties=dict(cs.properties),
+        )
+        anchor_feats.append(
+            {
+                "geometry": Point(ax, ay),
+                "properties": {
+                    "nodeid": int(nodeid),
+                },
+            }
+        )
+        trunc_feats.append(
+            {
+                "geometry": trunc_line,
+                "properties": {
+                    "nodeid": int(nodeid),
+                    "left_extent_m": float(left_extent),
+                    "right_extent_m": float(right_extent),
+                    "cut_by_divstrip_left": bool(blocked_left),
+                    "cut_by_divstrip_right": bool(blocked_right),
+                    "used_trunc": bool(trunc_line is not geom),
+                },
+            }
+        )
+    stats = {
+        "xsec_truncated_count": int(used_trunc),
+        "xsec_truncated_fallback_count": int(fallback_orig),
+    }
+    return out, anchor_feats, trunc_feats, stats
+
+
 def _seed_node_type_map(*, node_ids: Sequence[int], node_kind_map: dict[int, int]) -> dict[int, str]:
     out: dict[int, str] = {int(n): "unknown" for n in node_ids}
     for nid, kind in node_kind_map.items():
@@ -3664,6 +3936,8 @@ def _finalize_payloads(
                 or sk.startswith("max_segment_")
                 or sk.startswith("seg_index0_")
                 or sk.startswith("xsec_support_")
+                or sk.startswith("xsec_trunc")
+                or sk.startswith("xsec_truncated")
                 or sk.startswith("offset_clamp_")
                 or sk.startswith("endpoint_fallback_mode_")
                 or sk.startswith("traj_in_ratio")

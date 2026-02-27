@@ -1488,17 +1488,20 @@ def estimate_centerline(
         road_max_vertices=int(road_max_vertices),
     )
     if trend_line is None:
-        clipped, clip_reason = clip_line_to_cross_sections(
-            centerline,
-            src_xsec,
-            dst_xsec,
-            endpoint_tol_m=endpoint_tol_m,
+        clipped = _fallback_line_by_anchor_window(
+            base_line=centerline,
+            src_xsec=src_xsec,
+            dst_xsec=dst_xsec,
+            anchor_window_m=float(xsec_anchor_window_m),
         )
+        clip_reason = trend_reason if clipped is None else None
         trend_dev_src = None
         trend_dev_dst = None
         proj_dist_src = None
         proj_dist_dst = None
-        trend_meta = {}
+        if isinstance(trend_meta, dict):
+            trend_meta.setdefault("endpoint_fallback_mode_src", "anchor_window_fallback")
+            trend_meta.setdefault("endpoint_fallback_mode_dst", "anchor_window_fallback")
     else:
         clipped = trend_line
         clip_reason = trend_reason
@@ -2152,7 +2155,31 @@ def _project_endpoint_to_valid_xsec(
         if channel_ref_xy is not None
         else None
     )
-    lb_line = lb_ref_line if isinstance(lb_ref_line, LineString) and (not lb_ref_line.is_empty) and lb_ref_line.length > 0 else None
+    lb_line = (
+        lb_ref_line
+        if isinstance(lb_ref_line, LineString) and (not lb_ref_line.is_empty) and lb_ref_line.length > 0
+        else None
+    )
+    if lb_line is not None and len(parts) > 1:
+        best_part = None
+        best_part_dist = float("inf")
+        for part in parts:
+            try:
+                mid = part.interpolate(0.5, normalized=True)
+            except Exception:
+                continue
+            mid_xy = point_xy_safe(mid, context="xsec_part_mid")
+            if mid_xy is None:
+                continue
+            try:
+                d_mid = float(lb_line.distance(Point(float(mid_xy[0]), float(mid_xy[1]))))
+            except Exception:
+                continue
+            if d_mid < best_part_dist:
+                best_part_dist = d_mid
+                best_part = part
+        if best_part is not None:
+            parts = [best_part]
     best_xy: tuple[float, float] | None = None
     best_score = float("inf")
     best_d0 = float("inf")
@@ -2192,6 +2219,47 @@ def _project_endpoint_to_valid_xsec(
         return best_xy, mode, support_len
     out = _adjust_endpoint_on_xsec_gore(endpoint_xy=endpoint_xy, xsec=xsec, gore_zone_metric=gore_zone_metric)
     return out, f"{mode}_adjust_gore", support_len
+
+
+def _fallback_line_by_anchor_window(
+    *,
+    base_line: LineString,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    anchor_window_m: float,
+) -> LineString | None:
+    if base_line.is_empty or base_line.length <= 0:
+        return None
+    L = float(base_line.length)
+    if L <= 1e-6:
+        return None
+    s_src_anchor = _xsec_anchor_station(base_line, src_xsec)
+    s_dst_anchor = _xsec_anchor_station(base_line, dst_xsec)
+    s_src = float(s_src_anchor) if s_src_anchor is not None else 0.0
+    s_dst = float(s_dst_anchor) if s_dst_anchor is not None else L
+    aw = float(max(0.0, anchor_window_m))
+    if s_src_anchor is not None and aw > 0.0:
+        lo = max(0.0, float(s_src_anchor) - aw)
+        hi = min(L, float(s_src_anchor) + aw)
+        s_src = min(max(s_src, lo), hi)
+    if s_dst_anchor is not None and aw > 0.0:
+        lo = max(0.0, float(s_dst_anchor) - aw)
+        hi = min(L, float(s_dst_anchor) + aw)
+        s_dst = min(max(s_dst, lo), hi)
+    if abs(s_dst - s_src) < 1e-3:
+        return None
+    s0 = min(s_src, s_dst)
+    s1 = max(s_src, s_dst)
+    try:
+        core = substring(base_line, s0, s1)
+    except Exception:
+        return None
+    if core is None or core.is_empty or not isinstance(core, LineString) or len(core.coords) < 2:
+        return None
+    out = _orient_line(core, src_xsec, dst_xsec)
+    if out.is_empty or len(out.coords) < 2:
+        return None
+    return out
 
 
 def _xsec_surface_support(
