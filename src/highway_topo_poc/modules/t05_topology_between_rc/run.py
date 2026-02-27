@@ -50,6 +50,55 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
         default=float(DEFAULT_PARAMS["PASS2_NEIGHBOR_MAX_DIST_M"]),
     )
     p.add_argument("--xsec_across_half_window_m", type=float, default=float(DEFAULT_PARAMS["XSEC_ACROSS_HALF_WINDOW_M"]))
+    p.add_argument("--xsec_core_band_m", type=float, default=float(DEFAULT_PARAMS["XSEC_CORE_BAND_M"]))
+    p.add_argument("--xsec_shift_step_m", type=float, default=float(DEFAULT_PARAMS["XSEC_SHIFT_STEP_M"]))
+    p.add_argument(
+        "--xsec_fallback_short_half_len_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["XSEC_FALLBACK_SHORT_HALF_LEN_M"]),
+    )
+    p.add_argument(
+        "--xsec_barrier_min_ng_count",
+        type=int,
+        default=int(DEFAULT_PARAMS["XSEC_BARRIER_MIN_NG_COUNT"]),
+    )
+    p.add_argument(
+        "--xsec_barrier_min_len_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["XSEC_BARRIER_MIN_LEN_M"]),
+    )
+    p.add_argument(
+        "--xsec_barrier_along_len_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["XSEC_BARRIER_ALONG_LEN_M"]),
+    )
+    p.add_argument(
+        "--xsec_barrier_along_width_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["XSEC_BARRIER_ALONG_WIDTH_M"]),
+    )
+    p.add_argument(
+        "--xsec_barrier_bin_step_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["XSEC_BARRIER_BIN_STEP_M"]),
+    )
+    p.add_argument(
+        "--xsec_barrier_occ_ratio_min",
+        type=float,
+        default=float(DEFAULT_PARAMS["XSEC_BARRIER_OCC_RATIO_MIN"]),
+    )
+    p.add_argument("--xsec_endcap_window_m", type=float, default=float(DEFAULT_PARAMS["XSEC_ENDCAP_WINDOW_M"]))
+    p.add_argument("--xsec_caseb_pre_m", type=float, default=float(DEFAULT_PARAMS["XSEC_CASEB_PRE_M"]))
+    p.add_argument(
+        "--step1_multi_corridor_dist_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["STEP1_MULTI_CORRIDOR_DIST_M"]),
+    )
+    p.add_argument(
+        "--step1_multi_corridor_min_ratio",
+        type=float,
+        default=float(DEFAULT_PARAMS["STEP1_MULTI_CORRIDOR_MIN_RATIO"]),
+    )
     p.add_argument("--corridor_half_width_m", type=float, default=float(DEFAULT_PARAMS["CORRIDOR_HALF_WIDTH_M"]))
     p.add_argument("--offset_smooth_win_m_1", type=float, default=float(DEFAULT_PARAMS["OFFSET_SMOOTH_WIN_M_1"]))
     p.add_argument("--offset_smooth_win_m_2", type=float, default=float(DEFAULT_PARAMS["OFFSET_SMOOTH_WIN_M_2"]))
@@ -198,6 +247,19 @@ def main(argv: Iterable[str] | None = None) -> int:
         "PASS2_STITCH_FORWARD_DOT_MIN": float(args.pass2_stitch_forward_dot_min),
         "PASS2_NEIGHBOR_MAX_DIST_M": float(args.pass2_neighbor_max_dist_m),
         "XSEC_ACROSS_HALF_WINDOW_M": float(args.xsec_across_half_window_m),
+        "XSEC_CORE_BAND_M": float(args.xsec_core_band_m),
+        "XSEC_SHIFT_STEP_M": float(args.xsec_shift_step_m),
+        "XSEC_FALLBACK_SHORT_HALF_LEN_M": float(args.xsec_fallback_short_half_len_m),
+        "XSEC_BARRIER_MIN_NG_COUNT": int(args.xsec_barrier_min_ng_count),
+        "XSEC_BARRIER_MIN_LEN_M": float(args.xsec_barrier_min_len_m),
+        "XSEC_BARRIER_ALONG_LEN_M": float(args.xsec_barrier_along_len_m),
+        "XSEC_BARRIER_ALONG_WIDTH_M": float(args.xsec_barrier_along_width_m),
+        "XSEC_BARRIER_BIN_STEP_M": float(args.xsec_barrier_bin_step_m),
+        "XSEC_BARRIER_OCC_RATIO_MIN": float(args.xsec_barrier_occ_ratio_min),
+        "XSEC_ENDCAP_WINDOW_M": float(args.xsec_endcap_window_m),
+        "XSEC_CASEB_PRE_M": float(args.xsec_caseb_pre_m),
+        "STEP1_MULTI_CORRIDOR_DIST_M": float(args.step1_multi_corridor_dist_m),
+        "STEP1_MULTI_CORRIDOR_MIN_RATIO": float(args.step1_multi_corridor_min_ratio),
         "CORRIDOR_HALF_WIDTH_M": float(args.corridor_half_width_m),
         "OFFSET_SMOOTH_WIN_M_1": float(args.offset_smooth_win_m_1),
         "OFFSET_SMOOTH_WIN_M_2": float(args.offset_smooth_win_m_2),

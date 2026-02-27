@@ -313,7 +313,9 @@ def _breakpoint_sort_key(bp: dict[str, Any]) -> tuple[int, int, float]:
 
     reason = str(bp.get("reason", ""))
     order = {
+        "MULTI_CORRIDOR": 0,
         "MULTI_ROAD_SAME_PAIR": 0,
+        "NO_STRATEGY_MERGE_TO_DIVERGE": 1,
         "NON_RC_IN_BETWEEN": 1,
         "CENTER_ESTIMATE_EMPTY": 2,
         "ENDPOINT_NOT_ON_XSEC": 3,

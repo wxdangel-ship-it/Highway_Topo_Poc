@@ -15,6 +15,8 @@ from shapely.geometry import LineString, Point, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform, unary_union
 
+from .step_utils import normalize_fields
+
 
 _TRAJ_FILE_NAME = "raw_dat_pose.geojson"
 _NODE_PRIMARY_NAME = "RCSDNode.geojson"
@@ -607,7 +609,8 @@ def _extract_declared_crs(payload: dict[str, Any]) -> str | None:
 def _extract_intersections(payload: dict[str, Any], to_metric: callable) -> list[CrossSection]:
     out: list[CrossSection] = []
     for feat in payload.get("features", []):
-        props = feat.get("properties") or {}
+        props_raw = feat.get("properties") or {}
+        props = normalize_fields(props_raw)
         nodeid_raw = props.get("nodeid", props.get("id", props.get("mainid")))
         nodeid = _safe_int(nodeid_raw)
         if nodeid is None:
@@ -634,7 +637,7 @@ def _extract_intersections(payload: dict[str, Any], to_metric: callable) -> list
         if projected is None or projected.is_empty or len(projected.coords) < 2:
             continue
 
-        out.append(CrossSection(nodeid=int(nodeid), geometry_metric=projected, properties=dict(props)))
+        out.append(CrossSection(nodeid=int(np.int64(nodeid)), geometry_metric=projected, properties=dict(props)))
 
     return out
 
@@ -698,12 +701,12 @@ def _extract_polygon_union(payload: dict[str, Any], to_metric: callable) -> Base
 def _extract_node_kind_map(payload: dict[str, Any]) -> dict[int, int]:
     out: dict[int, int] = {}
     for feat in payload.get("features", []):
-        props = feat.get("properties") or {}
-        nodeid = _safe_int(props.get("mainid", props.get("nodeid", props.get("id"))))
-        kind = _safe_int(props.get("Kind", props.get("kind")))
+        props = normalize_fields(feat.get("properties") or {})
+        nodeid = _safe_int(props.get("nodeid", props.get("mainid", props.get("id"))))
+        kind = _safe_int(props.get("kind", props.get("Kind")))
         if nodeid is None or kind is None:
             continue
-        out[int(nodeid)] = int(kind)
+        out[int(np.int64(nodeid))] = int(np.int32(kind))
     return out
 
 
