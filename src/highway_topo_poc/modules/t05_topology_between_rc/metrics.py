@@ -158,6 +158,8 @@ def build_summary_text(
     patch_id: str,
     overall_pass: bool,
     roads: Sequence[dict[str, Any]],
+    road_features_count: int | None = None,
+    road_candidate_count: int | None = None,
     hard_breakpoints: Sequence[dict[str, Any]],
     soft_breakpoints: Sequence[dict[str, Any]],
     params: dict[str, Any],
@@ -172,10 +174,18 @@ def build_summary_text(
     lines.append(f"overall_pass: {str(bool(overall_pass)).lower()}")
     lines.append("")
 
-    road_count = len(roads)
+    candidate_count = int(road_candidate_count) if road_candidate_count is not None else int(len(roads))
+    road_count = int(road_features_count) if road_features_count is not None else int(len(roads))
     hard_count = sum(1 for r in roads if bool(r.get("hard_anomaly", False)))
     soft_count = sum(len(list(r.get("soft_issue_flags", []))) for r in roads)
     lines.append(f"road_count: {road_count}")
+    lines.append(f"road_features_count: {road_count}")
+    lines.append(f"road_candidate_count: {candidate_count}")
+    if candidate_count > road_count:
+        lines.append("no_geometry_candidate: true")
+        lines.append(f"no_geometry_candidate_count: {candidate_count - road_count}")
+    else:
+        lines.append("no_geometry_candidate: false")
     lines.append(f"hard_anomaly_count: {hard_count}")
     lines.append(f"soft_issue_count: {soft_count}")
     stitch_vals: list[float] = []
