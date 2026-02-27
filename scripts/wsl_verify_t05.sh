@@ -24,7 +24,7 @@ if [ ! -x "$PY" ]; then
   exit 1
 fi
 
-RUN_ID="t05_v6_3_$(date +%Y%m%d_%H%M%S)"
+RUN_ID="t05_v6_4_$(date +%Y%m%d_%H%M%S)"
 OUT_ROOT="$REPO_ROOT/outputs/_work/t05_topology_between_rc"
 
 cd "$REPO_ROOT"
@@ -109,6 +109,8 @@ keys = [
     "endpoint_center_offset_p90",
     "endpoint_snap_dist_before_p90",
     "endpoint_snap_dist_after_p90",
+    "endpoint_dist_to_xsec_p90",
+    "endpoint_dist_to_xsec_max",
     "endpoint_tangent_deviation_deg_p90",
     "max_segment_m_max",
     "max_segment_m_p90",
@@ -181,7 +183,7 @@ print(f"road_count={len(features)}")
 for feat in features[:5]:
     props = feat.get("properties") or {}
     print(
-        "road_id={rid} chosen_cluster_id={cid} traj_surface_enforced={enf} traj_surface_geom_type={gt} traj_surface_area_m2={ga} covered_len_ratio={cov} valid_slices_ratio={vr} endcap_valid_src={evs} endcap_valid_dst={evd} endcap_width_src_before={ewsb} endcap_width_src_after={ewsa} endcap_width_dst_before={ewdb} endcap_width_dst_after={ewda} xsec_support_len_src={xss} xsec_support_len_dst={xsd} xsec_support_empty_reason_src={xrs} xsec_support_empty_reason_dst={xrd} xsec_target_mode_src={xts} xsec_target_mode_dst={xtd} endpoint_fallback_mode_src={fms} endpoint_fallback_mode_dst={fmd} endpoint_snap_src_after={ssa} endpoint_snap_dst_after={sda} offset_clamp_hit_ratio={chr} offset_clamp_fallback_count={cfc} traj_in_ratio={ratio} endpoint_in_surface_src={es} endpoint_in_surface_dst={ed} seg_index0_len_m={seg0} bridge_seg_outside_ratio={bor} bridge_seg_intersects_divstrip={bid} divstrip_intersect_len_m={dlen}".format(
+        "road_id={rid} chosen_cluster_id={cid} traj_surface_enforced={enf} traj_surface_geom_type={gt} traj_surface_area_m2={ga} covered_len_ratio={cov} valid_slices_ratio={vr} endcap_valid_src={evs} endcap_valid_dst={evd} endcap_width_src_before={ewsb} endcap_width_src_after={ewsa} endcap_width_dst_before={ewdb} endcap_width_dst_after={ewda} xsec_support_len_src={xss} xsec_support_len_dst={xsd} xsec_support_empty_reason_src={xrs} xsec_support_empty_reason_dst={xrd} xsec_target_mode_src={xts} xsec_target_mode_dst={xtd} xsec_road_selected_by_src={xrbys} xsec_road_selected_by_dst={xrbyd} xsec_road_selected_len_src_m={xrls} xsec_road_selected_len_dst_m={xrld} xsec_road_all_geom_type_src={xrgts} xsec_road_all_geom_type_dst={xrgtd} endpoint_dist_to_xsec_src_m={exs} endpoint_dist_to_xsec_dst_m={exd} endpoint_fallback_mode_src={fms} endpoint_fallback_mode_dst={fmd} endpoint_snap_src_after={ssa} endpoint_snap_dst_after={sda} offset_clamp_hit_ratio={chr} offset_clamp_fallback_count={cfc} traj_in_ratio={ratio} endpoint_in_surface_src={es} endpoint_in_surface_dst={ed} seg_index0_len_m={seg0} bridge_seg_outside_ratio={bor} bridge_seg_intersects_divstrip={bid} divstrip_intersect_len_m={dlen}".format(
             rid=props.get("road_id"),
             cid=props.get("chosen_cluster_id"),
             enf=props.get("traj_surface_enforced"),
@@ -201,6 +203,14 @@ for feat in features[:5]:
             xrd=props.get("xsec_support_empty_reason_dst"),
             xts=props.get("xsec_target_mode_src"),
             xtd=props.get("xsec_target_mode_dst"),
+            xrbys=props.get("xsec_road_selected_by_src"),
+            xrbyd=props.get("xsec_road_selected_by_dst"),
+            xrls=props.get("xsec_road_selected_len_src_m"),
+            xrld=props.get("xsec_road_selected_len_dst_m"),
+            xrgts=props.get("xsec_road_all_geom_type_src"),
+            xrgtd=props.get("xsec_road_all_geom_type_dst"),
+            exs=props.get("endpoint_dist_to_xsec_src_m"),
+            exd=props.get("endpoint_dist_to_xsec_dst_m"),
             fms=props.get("endpoint_fallback_mode_src"),
             fmd=props.get("endpoint_fallback_mode_dst"),
             ssa=props.get("endpoint_snap_dist_src_after_m"),

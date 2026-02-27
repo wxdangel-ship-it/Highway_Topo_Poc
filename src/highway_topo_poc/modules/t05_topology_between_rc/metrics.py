@@ -317,7 +317,7 @@ def _breakpoint_sort_key(bp: dict[str, Any]) -> tuple[int, int, float]:
         "NON_RC_IN_BETWEEN": 1,
         "CENTER_ESTIMATE_EMPTY": 2,
         "ENDPOINT_NOT_ON_XSEC": 3,
-        "ENDPOINT_OFF_ANCHOR": 4,
+        "ENDPOINT_OFF_XSEC_ROAD": 4,
         "BRIDGE_SEGMENT_TOO_LONG": 5,
         "ROAD_INTERSECTS_DIVSTRIP": 6,
         "NO_ADJACENT_PAIR_AFTER_PASS2": 7,

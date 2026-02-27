@@ -156,6 +156,12 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "XSEC_TRUNC_STEP_M": 1.0,
     "XSEC_TRUNC_NONPASS_K": 6,
     "XSEC_TRUNC_EVIDENCE_RADIUS_M": 1.0,
+    "XSEC_REF_HALF_LEN_M": 80.0,
+    "XSEC_ROAD_SAMPLE_STEP_M": 1.0,
+    "XSEC_ROAD_NONPASS_K": 6,
+    "XSEC_ROAD_EVIDENCE_RADIUS_M": 1.0,
+    "XSEC_ROAD_MIN_GROUND_PTS": 1,
+    "XSEC_ROAD_MIN_TRAJ_PTS": 1,
     "ENDPOINT_ON_XSEC_TOL_M": 1.0,
     "TOPK_INTERVALS": 20,
     "CONF_W1_SUPPORT": 0.4,
@@ -653,8 +659,18 @@ def _run_patch_core(
         "xsec_valid_dst": [],
         "xsec_support_src": [],
         "xsec_support_dst": [],
+        "xsec_ref_src": [],
+        "xsec_ref_dst": [],
+        "xsec_road_all_src": [],
+        "xsec_road_all_dst": [],
+        "xsec_road_selected_src": [],
+        "xsec_road_selected_dst": [],
+        "xsec_anchor_mid_src": [],
+        "xsec_anchor_mid_dst": [],
         "xsec_target_selected_src": [],
         "xsec_target_selected_dst": [],
+        "xsec_target_used_src": [],
+        "xsec_target_used_dst": [],
         "endpoint_before_after": [],
         "road_outside_segments": [],
         "road_bridge_segments": [],
@@ -955,6 +971,7 @@ def _run_patch_core(
     endpoint_vals: list[float] = []
     endpoint_snap_before_vals: list[float] = []
     endpoint_snap_after_vals: list[float] = []
+    endpoint_xsec_dist_vals: list[float] = []
     endpoint_tangent_vals: list[float] = []
     gore_near_vals: list[float] = []
     width_near_minus_base_vals: list[float] = []
@@ -1021,6 +1038,17 @@ def _run_patch_core(
                 continue
             if np.isfinite(fv):
                 endpoint_snap_after_vals.append(float(fv))
+        for k in (
+            "endpoint_dist_to_xsec_src_m",
+            "endpoint_dist_to_xsec_dst_m",
+        ):
+            v = road.get(k)
+            try:
+                fv = float(v)
+            except Exception:
+                continue
+            if np.isfinite(fv):
+                endpoint_xsec_dist_vals.append(float(fv))
         for k in ("endpoint_tangent_deviation_deg_src", "endpoint_tangent_deviation_deg_dst"):
             v = road.get(k)
             try:
@@ -1194,6 +1222,11 @@ def _run_patch_core(
         if endpoint_snap_after_vals
         else np.empty((0,), dtype=np.float64)
     )
+    endpoint_xsec_dist_arr = (
+        np.asarray(endpoint_xsec_dist_vals, dtype=np.float64)
+        if endpoint_xsec_dist_vals
+        else np.empty((0,), dtype=np.float64)
+    )
     endpoint_tangent_arr = (
         np.asarray(endpoint_tangent_vals, dtype=np.float64) if endpoint_tangent_vals else np.empty((0,), dtype=np.float64)
     )
@@ -1343,6 +1376,14 @@ def _run_patch_core(
                 float(np.percentile(endpoint_snap_after_arr, 90.0))
                 if endpoint_snap_after_arr.size > 0
                 else None
+            ),
+            "endpoint_dist_to_xsec_p90": (
+                float(np.percentile(endpoint_xsec_dist_arr, 90.0))
+                if endpoint_xsec_dist_arr.size > 0
+                else None
+            ),
+            "endpoint_dist_to_xsec_max": (
+                float(np.max(endpoint_xsec_dist_arr)) if endpoint_xsec_dist_arr.size > 0 else None
             ),
             "gore_overlap_near_p50": (float(np.percentile(gore_near_arr, 50.0)) if gore_near_arr.size > 0 else None),
             "gore_overlap_near_p90": (float(np.percentile(gore_near_arr, 90.0)) if gore_near_arr.size > 0 else None),
@@ -3150,6 +3191,12 @@ def _evaluate_candidate_road(
         divstrip_zone_metric=gore_zone_metric,
         xsec_anchor_window_m=float(params.get("XSEC_ANCHOR_WINDOW_M", 15.0)),
         xsec_endpoint_max_dist_m=float(params.get("XSEC_ENDPOINT_MAX_DIST_M", 20.0)),
+        xsec_ref_half_len_m=float(params.get("XSEC_REF_HALF_LEN_M", 80.0)),
+        xsec_road_sample_step_m=float(params.get("XSEC_ROAD_SAMPLE_STEP_M", 1.0)),
+        xsec_road_nonpass_k=int(params.get("XSEC_ROAD_NONPASS_K", 6)),
+        xsec_road_evidence_radius_m=float(params.get("XSEC_ROAD_EVIDENCE_RADIUS_M", 1.0)),
+        xsec_road_min_ground_pts=int(params.get("XSEC_ROAD_MIN_GROUND_PTS", 1)),
+        xsec_road_min_traj_pts=int(params.get("XSEC_ROAD_MIN_TRAJ_PTS", 1)),
         d_min=float(params["D_MIN"]),
         d_max=float(params["D_MAX"]),
         near_len=float(params["NEAR_LEN"]),
@@ -3208,8 +3255,20 @@ def _evaluate_candidate_road(
     road["endpoint_snap_dist_src_after_m"] = center.diagnostics.get("endpoint_snap_dist_src_after_m")
     road["endpoint_snap_dist_dst_before_m"] = center.diagnostics.get("endpoint_snap_dist_dst_before_m")
     road["endpoint_snap_dist_dst_after_m"] = center.diagnostics.get("endpoint_snap_dist_dst_after_m")
+    road["endpoint_dist_to_xsec_src_m"] = center.diagnostics.get("endpoint_dist_to_xsec_src_m")
+    road["endpoint_dist_to_xsec_dst_m"] = center.diagnostics.get("endpoint_dist_to_xsec_dst_m")
     road["xsec_target_mode_src"] = center.diagnostics.get("xsec_target_mode_src")
     road["xsec_target_mode_dst"] = center.diagnostics.get("xsec_target_mode_dst")
+    road["xsec_road_selected_by_src"] = center.diagnostics.get("xsec_road_selected_by_src")
+    road["xsec_road_selected_by_dst"] = center.diagnostics.get("xsec_road_selected_by_dst")
+    road["xsec_road_selected_len_src_m"] = center.diagnostics.get("xsec_road_selected_len_src_m")
+    road["xsec_road_selected_len_dst_m"] = center.diagnostics.get("xsec_road_selected_len_dst_m")
+    road["xsec_road_all_geom_type_src"] = center.diagnostics.get("xsec_road_all_geom_type_src")
+    road["xsec_road_all_geom_type_dst"] = center.diagnostics.get("xsec_road_all_geom_type_dst")
+    road["xsec_road_left_extent_src_m"] = center.diagnostics.get("xsec_road_left_extent_src_m")
+    road["xsec_road_right_extent_src_m"] = center.diagnostics.get("xsec_road_right_extent_src_m")
+    road["xsec_road_left_extent_dst_m"] = center.diagnostics.get("xsec_road_left_extent_dst_m")
+    road["xsec_road_right_extent_dst_m"] = center.diagnostics.get("xsec_road_right_extent_dst_m")
     road["lb_path_found"] = bool(center.lb_path_found)
     road["lb_path_edge_count"] = int(center.lb_path_edge_count)
     road["lb_path_length_m"] = center.lb_path_length_m
@@ -3236,6 +3295,12 @@ def _evaluate_candidate_road(
     road["offset_clamp_fallback_count"] = center.diagnostics.get("offset_clamp_fallback_count")
     road["_xsec_target_selected_src_metric"] = center.diagnostics.get("_xsec_target_selected_src_metric")
     road["_xsec_target_selected_dst_metric"] = center.diagnostics.get("_xsec_target_selected_dst_metric")
+    road["_xsec_ref_src_metric"] = center.diagnostics.get("_xsec_ref_src_metric")
+    road["_xsec_ref_dst_metric"] = center.diagnostics.get("_xsec_ref_dst_metric")
+    road["_xsec_road_all_src_metric"] = center.diagnostics.get("_xsec_road_all_src_metric")
+    road["_xsec_road_all_dst_metric"] = center.diagnostics.get("_xsec_road_all_dst_metric")
+    road["_xsec_road_selected_src_metric"] = center.diagnostics.get("_xsec_road_selected_src_metric")
+    road["_xsec_road_selected_dst_metric"] = center.diagnostics.get("_xsec_road_selected_dst_metric")
     road["_endpoint_before_src_metric"] = center.diagnostics.get("_endpoint_before_src_metric")
     road["_endpoint_before_dst_metric"] = center.diagnostics.get("_endpoint_before_dst_metric")
     road["_endpoint_after_src_metric"] = center.diagnostics.get("_endpoint_after_src_metric")
@@ -3600,6 +3665,73 @@ def _collect_debug_layers_for_selected(
     for ls in _iter_line_parts(dst_valid):
         debug_layers["xsec_valid_dst"].append({"geometry": ls, "properties": {"road_id": road_id}})
 
+    xsec_ref_src = road.get("_xsec_ref_src_metric")
+    xsec_ref_dst = road.get("_xsec_ref_dst_metric")
+    xsec_road_all_src = road.get("_xsec_road_all_src_metric")
+    xsec_road_all_dst = road.get("_xsec_road_all_dst_metric")
+    xsec_road_sel_src = road.get("_xsec_road_selected_src_metric")
+    xsec_road_sel_dst = road.get("_xsec_road_selected_dst_metric")
+
+    for ls in _iter_line_parts(xsec_ref_src):
+        debug_layers["xsec_ref_src"].append({"geometry": ls, "properties": {"road_id": road_id}})
+        try:
+            mid = ls.interpolate(0.5, normalized=True)
+        except Exception:
+            mid = None
+        if isinstance(mid, Point) and not mid.is_empty:
+            debug_layers["xsec_anchor_mid_src"].append({"geometry": mid, "properties": {"road_id": road_id}})
+    for ls in _iter_line_parts(xsec_ref_dst):
+        debug_layers["xsec_ref_dst"].append({"geometry": ls, "properties": {"road_id": road_id}})
+        try:
+            mid = ls.interpolate(0.5, normalized=True)
+        except Exception:
+            mid = None
+        if isinstance(mid, Point) and not mid.is_empty:
+            debug_layers["xsec_anchor_mid_dst"].append({"geometry": mid, "properties": {"road_id": road_id}})
+
+    for ls in _iter_line_parts(xsec_road_all_src):
+        debug_layers["xsec_road_all_src"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "selected_by": road.get("xsec_road_selected_by_src"),
+                    "geom_type": road.get("xsec_road_all_geom_type_src"),
+                },
+            }
+        )
+    for ls in _iter_line_parts(xsec_road_all_dst):
+        debug_layers["xsec_road_all_dst"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "selected_by": road.get("xsec_road_selected_by_dst"),
+                    "geom_type": road.get("xsec_road_all_geom_type_dst"),
+                },
+            }
+        )
+    for ls in _iter_line_parts(xsec_road_sel_src):
+        debug_layers["xsec_road_selected_src"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "selected_by": road.get("xsec_road_selected_by_src"),
+                },
+            }
+        )
+    for ls in _iter_line_parts(xsec_road_sel_dst):
+        debug_layers["xsec_road_selected_dst"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "selected_by": road.get("xsec_road_selected_by_dst"),
+                },
+            }
+        )
+
     src_support = None
     dst_support = None
     if surface is not None and (not surface.is_empty):
@@ -3636,8 +3768,26 @@ def _collect_debug_layers_for_selected(
                 },
             }
         )
+        debug_layers["xsec_target_used_src"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "target_mode": road.get("xsec_target_mode_src"),
+                },
+            }
+        )
     for ls in _iter_line_parts(target_dst):
         debug_layers["xsec_target_selected_dst"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "target_mode": road.get("xsec_target_mode_dst"),
+                },
+            }
+        )
+        debug_layers["xsec_target_used_dst"].append(
             {
                 "geometry": ls,
                 "properties": {
@@ -3998,6 +4148,8 @@ def _make_base_road_record(
         "endpoint_snap_dist_src_after_m": None,
         "endpoint_snap_dist_dst_before_m": None,
         "endpoint_snap_dist_dst_after_m": None,
+        "endpoint_dist_to_xsec_src_m": None,
+        "endpoint_dist_to_xsec_dst_m": None,
         "width_med_m": None,
         "width_p90_m": None,
         "max_turn_deg_per_10m": None,
@@ -4046,6 +4198,16 @@ def _make_base_road_record(
         "xsec_support_empty_reason_dst": None,
         "xsec_target_mode_src": None,
         "xsec_target_mode_dst": None,
+        "xsec_road_selected_by_src": None,
+        "xsec_road_selected_by_dst": None,
+        "xsec_road_selected_len_src_m": None,
+        "xsec_road_selected_len_dst_m": None,
+        "xsec_road_all_geom_type_src": None,
+        "xsec_road_all_geom_type_dst": None,
+        "xsec_road_left_extent_src_m": None,
+        "xsec_road_right_extent_src_m": None,
+        "xsec_road_left_extent_dst_m": None,
+        "xsec_road_right_extent_dst_m": None,
         "offset_clamp_hit_ratio": None,
         "offset_clamp_fallback_count": None,
         "s_anchor_src_m": None,
@@ -4102,7 +4264,7 @@ def _reason_hint(reason: str) -> str:
         HARD_CENTER_EMPTY: "centerline_generation_failed",
         HARD_ENDPOINT: "endpoints_not_on_intersection_l",
         HARD_ENDPOINT_LOCAL: "endpoint_out_of_local_xsec_neighborhood",
-        HARD_ENDPOINT_OFF_ANCHOR: "endpoint_off_anchor_after_snap",
+        HARD_ENDPOINT_OFF_ANCHOR: "endpoint_off_xsec_road_after_snap",
         HARD_BRIDGE_SEGMENT: "bridge_segment_too_long",
         HARD_DIVSTRIP_INTERSECT: "road_intersects_divstrip_forbidden",
         _HARD_NO_ADJACENT_PAIR_AFTER_PASS2: "no_adjacent_pair_after_pass2",
@@ -4199,12 +4361,14 @@ def _finalize_payloads(
                 or sk.startswith("endpoint_center_offset_")
                 or sk.startswith("endpoint_tangent_deviation_")
                 or sk.startswith("endpoint_anchor_")
+                or sk.startswith("endpoint_dist_to_xsec_")
                 or sk.startswith("gore_overlap_")
                 or sk.startswith("endcap_")
                 or sk.startswith("max_segment_")
                 or sk.startswith("seg_index0_")
                 or sk.startswith("xsec_support_")
                 or sk.startswith("xsec_target_")
+                or sk.startswith("xsec_road_")
                 or sk.startswith("xsec_trunc")
                 or sk.startswith("xsec_truncated")
                 or sk.startswith("offset_clamp_")
@@ -4240,8 +4404,18 @@ def _finalize_payloads(
         always_emit_empty = {
             "xsec_support_src",
             "xsec_support_dst",
+            "xsec_ref_src",
+            "xsec_ref_dst",
+            "xsec_road_all_src",
+            "xsec_road_all_dst",
+            "xsec_road_selected_src",
+            "xsec_road_selected_dst",
+            "xsec_anchor_mid_src",
+            "xsec_anchor_mid_dst",
             "xsec_target_selected_src",
             "xsec_target_selected_dst",
+            "xsec_target_used_src",
+            "xsec_target_used_dst",
             "endpoint_before_after",
         }
         for layer_name, items in debug_layers.items():
