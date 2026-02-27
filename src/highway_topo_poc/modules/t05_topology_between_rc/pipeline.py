@@ -19,6 +19,7 @@ from .geometry import (
     HARD_CENTER_EMPTY,
     HARD_DIVSTRIP_INTERSECT,
     HARD_ENDPOINT,
+    HARD_ENDPOINT_OFF_ANCHOR,
     HARD_ENDPOINT_LOCAL,
     HARD_MULTI_ROAD,
     HARD_NON_RC,
@@ -652,6 +653,9 @@ def _run_patch_core(
         "xsec_valid_dst": [],
         "xsec_support_src": [],
         "xsec_support_dst": [],
+        "xsec_target_selected_src": [],
+        "xsec_target_selected_dst": [],
+        "endpoint_before_after": [],
         "road_outside_segments": [],
         "road_bridge_segments": [],
         "road_divstrip_intersections": [],
@@ -861,10 +865,17 @@ def _run_patch_core(
                 hint = (
                     f"max_segment_m={selected.get('max_segment_m')};"
                     f"seg_index={selected.get('max_segment_idx')};"
-                    f"threshold={float(params['BRIDGE_MAX_SEG_M']):.1f}"
+                    f"threshold={float(params['BRIDGE_MAX_SEG_M']):.1f};"
+                    f"outside_ratio={selected.get('bridge_seg_outside_ratio')};"
+                    f"intersects_divstrip={selected.get('bridge_seg_intersects_divstrip')}"
                 )
             if reason == HARD_DIVSTRIP_INTERSECT:
                 hint = f"divstrip_intersect_len_m={selected.get('divstrip_intersect_len_m')}"
+            if reason == HARD_ENDPOINT_OFF_ANCHOR:
+                hint = (
+                    f"src_after={selected.get('endpoint_snap_dist_src_after_m')};"
+                    f"dst_after={selected.get('endpoint_snap_dist_dst_after_m')}"
+                )
             bp = build_breakpoint(
                 road=selected,
                 reason=reason,
@@ -877,6 +888,9 @@ def _run_patch_core(
                 bp["max_segment_m"] = selected.get("max_segment_m")
             if reason == HARD_DIVSTRIP_INTERSECT:
                 bp["divstrip_intersect_len_m"] = selected.get("divstrip_intersect_len_m")
+            if reason == HARD_ENDPOINT_OFF_ANCHOR:
+                bp["endpoint_snap_dist_src_after_m"] = selected.get("endpoint_snap_dist_src_after_m")
+                bp["endpoint_snap_dist_dst_after_m"] = selected.get("endpoint_snap_dist_dst_after_m")
             hard_breakpoints.append(bp)
 
         existing_soft_reasons = {
@@ -939,6 +953,8 @@ def _run_patch_core(
             overall_pass = False
 
     endpoint_vals: list[float] = []
+    endpoint_snap_before_vals: list[float] = []
+    endpoint_snap_after_vals: list[float] = []
     endpoint_tangent_vals: list[float] = []
     gore_near_vals: list[float] = []
     width_near_minus_base_vals: list[float] = []
@@ -983,6 +999,28 @@ def _run_patch_core(
                 continue
             if np.isfinite(fv):
                 endpoint_vals.append(float(fv))
+        for k in (
+            "endpoint_snap_dist_src_before_m",
+            "endpoint_snap_dist_dst_before_m",
+        ):
+            v = road.get(k)
+            try:
+                fv = float(v)
+            except Exception:
+                continue
+            if np.isfinite(fv):
+                endpoint_snap_before_vals.append(float(fv))
+        for k in (
+            "endpoint_snap_dist_src_after_m",
+            "endpoint_snap_dist_dst_after_m",
+        ):
+            v = road.get(k)
+            try:
+                fv = float(v)
+            except Exception:
+                continue
+            if np.isfinite(fv):
+                endpoint_snap_after_vals.append(float(fv))
         for k in ("endpoint_tangent_deviation_deg_src", "endpoint_tangent_deviation_deg_dst"):
             v = road.get(k)
             try:
@@ -1146,6 +1184,16 @@ def _run_patch_core(
         if str(road.get("dst_cut_mode", "")) == "fallback_50m":
             fallback_end_count += 1
     endpoint_arr = np.asarray(endpoint_vals, dtype=np.float64) if endpoint_vals else np.empty((0,), dtype=np.float64)
+    endpoint_snap_before_arr = (
+        np.asarray(endpoint_snap_before_vals, dtype=np.float64)
+        if endpoint_snap_before_vals
+        else np.empty((0,), dtype=np.float64)
+    )
+    endpoint_snap_after_arr = (
+        np.asarray(endpoint_snap_after_vals, dtype=np.float64)
+        if endpoint_snap_after_vals
+        else np.empty((0,), dtype=np.float64)
+    )
     endpoint_tangent_arr = (
         np.asarray(endpoint_tangent_vals, dtype=np.float64) if endpoint_tangent_vals else np.empty((0,), dtype=np.float64)
     )
@@ -1286,6 +1334,16 @@ def _run_patch_core(
                 float(np.percentile(endpoint_arr, 90.0)) if endpoint_arr.size > 0 else None
             ),
             "endpoint_center_offset_max": (float(np.max(endpoint_arr)) if endpoint_arr.size > 0 else None),
+            "endpoint_snap_dist_before_p90": (
+                float(np.percentile(endpoint_snap_before_arr, 90.0))
+                if endpoint_snap_before_arr.size > 0
+                else None
+            ),
+            "endpoint_snap_dist_after_p90": (
+                float(np.percentile(endpoint_snap_after_arr, 90.0))
+                if endpoint_snap_after_arr.size > 0
+                else None
+            ),
             "gore_overlap_near_p50": (float(np.percentile(gore_near_arr, 50.0)) if gore_near_arr.size > 0 else None),
             "gore_overlap_near_p90": (float(np.percentile(gore_near_arr, 90.0)) if gore_near_arr.size > 0 else None),
             "gore_overlap_near_max": (float(np.max(gore_near_arr)) if gore_near_arr.size > 0 else None),
@@ -1590,6 +1648,102 @@ def _fallback_geometry_from_shape_ref(
     if core is None or core.is_empty or not isinstance(core, LineString) or len(core.coords) < 2:
         return line if len(line.coords) >= 2 else None
     return _orient_axis_line(core, src_xsec=src_xsec, dst_xsec=dst_xsec)
+
+
+def _bridge_segment_diagnostics(
+    *,
+    road_line: LineString | None,
+    max_segment_idx: int | None,
+    traj_surface_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+    lb_shape_ref_metric: LineString | None,
+) -> tuple[float | None, bool, float | None]:
+    if not isinstance(road_line, LineString) or road_line.is_empty or len(road_line.coords) < 2:
+        return (None, False, None)
+    coords = np.asarray(road_line.coords, dtype=np.float64)
+    if coords.shape[0] < 2:
+        return (None, False, None)
+    if max_segment_idx is None or int(max_segment_idx) < 0 or int(max_segment_idx) >= coords.shape[0] - 1:
+        idx = int(np.argmax(np.linalg.norm(coords[1:, :] - coords[:-1, :], axis=1)))
+    else:
+        idx = int(max_segment_idx)
+    seg = LineString([tuple(coords[idx, :]), tuple(coords[idx + 1, :])])
+    seg_len = float(seg.length)
+    if seg_len <= 1e-9:
+        return (0.0, False, 0.0)
+    outside_ratio: float | None = None
+    if traj_surface_metric is not None and (not traj_surface_metric.is_empty):
+        try:
+            outside_len = float(seg.difference(traj_surface_metric).length)
+        except Exception:
+            outside_len = seg_len
+        outside_ratio = float(max(0.0, min(1.0, outside_len / max(1e-6, seg_len))))
+    inter_divstrip = False
+    if gore_zone_metric is not None and (not gore_zone_metric.is_empty):
+        try:
+            inter_divstrip = float(seg.intersection(gore_zone_metric).length) > 1e-6
+        except Exception:
+            inter_divstrip = False
+    dist_to_lb: float | None = None
+    if isinstance(lb_shape_ref_metric, LineString) and (not lb_shape_ref_metric.is_empty):
+        try:
+            dist_to_lb = float(seg.distance(lb_shape_ref_metric))
+        except Exception:
+            dist_to_lb = None
+    return (outside_ratio, bool(inter_divstrip), dist_to_lb)
+
+
+def _enforce_gore_free_geometry(
+    *,
+    road_line: LineString | None,
+    gore_zone_metric: BaseGeometry | None,
+    shape_ref_line: LineString | None,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+) -> tuple[LineString | None, float, str | None]:
+    if not isinstance(road_line, LineString) or road_line.is_empty:
+        return (road_line, 0.0, None)
+    if gore_zone_metric is None or gore_zone_metric.is_empty:
+        return (road_line, 0.0, None)
+    try:
+        inter_len = float(road_line.intersection(gore_zone_metric).length)
+    except Exception:
+        inter_len = 0.0
+    if inter_len <= 1e-6:
+        return (road_line, 0.0, None)
+
+    shape_fb = _fallback_geometry_from_shape_ref(
+        shape_ref_line=shape_ref_line,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+    )
+    if isinstance(shape_fb, LineString) and not shape_fb.is_empty:
+        try:
+            fb_inter = float(shape_fb.intersection(gore_zone_metric).length)
+        except Exception:
+            fb_inter = inter_len
+        if fb_inter <= 1e-6:
+            return (shape_fb, 0.0, "shape_ref_substring_gore_free")
+
+    try:
+        diff = road_line.difference(gore_zone_metric)
+    except Exception:
+        diff = None
+    parts = _iter_line_parts(diff)
+    if parts:
+        parts_sorted = sorted(parts, key=lambda g: float(g.length), reverse=True)
+        for part in parts_sorted:
+            if part.is_empty or part.length <= 1e-6 or len(part.coords) < 2:
+                continue
+            cand = _orient_axis_line(part, src_xsec=src_xsec, dst_xsec=dst_xsec)
+            try:
+                cand_inter = float(cand.intersection(gore_zone_metric).length)
+            except Exception:
+                cand_inter = 0.0
+            if cand_inter <= 1e-6:
+                return (cand, 0.0, "line_difference_gore_free")
+
+    return (None, float(max(0.0, inter_len)), "gore_free_fallback_failed")
 
 
 def _collect_support_traj_points(
@@ -3050,6 +3204,12 @@ def _evaluate_candidate_road(
     road["endpoint_center_offset_m_dst"] = center.endpoint_center_offset_m_dst
     road["endpoint_proj_dist_to_core_m_src"] = center.endpoint_proj_dist_to_core_m_src
     road["endpoint_proj_dist_to_core_m_dst"] = center.endpoint_proj_dist_to_core_m_dst
+    road["endpoint_snap_dist_src_before_m"] = center.diagnostics.get("endpoint_snap_dist_src_before_m")
+    road["endpoint_snap_dist_src_after_m"] = center.diagnostics.get("endpoint_snap_dist_src_after_m")
+    road["endpoint_snap_dist_dst_before_m"] = center.diagnostics.get("endpoint_snap_dist_dst_before_m")
+    road["endpoint_snap_dist_dst_after_m"] = center.diagnostics.get("endpoint_snap_dist_dst_after_m")
+    road["xsec_target_mode_src"] = center.diagnostics.get("xsec_target_mode_src")
+    road["xsec_target_mode_dst"] = center.diagnostics.get("xsec_target_mode_dst")
     road["lb_path_found"] = bool(center.lb_path_found)
     road["lb_path_edge_count"] = int(center.lb_path_edge_count)
     road["lb_path_length_m"] = center.lb_path_length_m
@@ -3074,6 +3234,12 @@ def _evaluate_candidate_road(
     road["anchor_window_m"] = center.diagnostics.get("anchor_window_m")
     road["offset_clamp_hit_ratio"] = center.diagnostics.get("offset_clamp_hit_ratio")
     road["offset_clamp_fallback_count"] = center.diagnostics.get("offset_clamp_fallback_count")
+    road["_xsec_target_selected_src_metric"] = center.diagnostics.get("_xsec_target_selected_src_metric")
+    road["_xsec_target_selected_dst_metric"] = center.diagnostics.get("_xsec_target_selected_dst_metric")
+    road["_endpoint_before_src_metric"] = center.diagnostics.get("_endpoint_before_src_metric")
+    road["_endpoint_before_dst_metric"] = center.diagnostics.get("_endpoint_before_dst_metric")
+    road["_endpoint_after_src_metric"] = center.diagnostics.get("_endpoint_after_src_metric")
+    road["_endpoint_after_dst_metric"] = center.diagnostics.get("_endpoint_after_dst_metric")
     road["traj_surface_hint_enforced"] = bool(traj_surface_hint.get("traj_surface_enforced", False))
     road["traj_surface_hint_axis_source"] = traj_surface_hint.get("axis_source")
     road["traj_surface_hint_reason"] = traj_surface_hint.get("reason")
@@ -3083,6 +3249,7 @@ def _evaluate_candidate_road(
     road["traj_surface_hint_covered_length_ratio"] = _to_finite_float(
         traj_surface_hint.get("covered_length_ratio"), 0.0
     )
+    road["_traj_surface_geom_metric"] = traj_surface_hint.get("surface_metric")
 
     soft_flags = set(center.soft_flags)
     hard_flags = set(center.hard_flags)
@@ -3098,6 +3265,10 @@ def _evaluate_candidate_road(
         soft_flags.add(SOFT_WIGGLY)
     if src == dst:
         hard_flags.add(HARD_CENTER_EMPTY)
+    if bool(center.diagnostics.get("endpoint_off_anchor_src", False)) or bool(
+        center.diagnostics.get("endpoint_off_anchor_dst", False)
+    ):
+        hard_flags.add(HARD_ENDPOINT_OFF_ANCHOR)
     if not bool(traj_surface_hint.get("traj_surface_enforced", False)):
         soft_flags.add(SOFT_TRAJ_SURFACE_INSUFFICIENT)
 
@@ -3133,9 +3304,54 @@ def _evaluate_candidate_road(
         road["max_segment_idx"] = None
         road["seg_index0_len_m"] = None
 
+    road_line, divstrip_inter_retry_len, divstrip_retry_mode = _enforce_gore_free_geometry(
+        road_line=road_line,
+        gore_zone_metric=gore_zone_metric,
+        shape_ref_line=center.shape_ref_metric,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+    )
+    road["divstrip_constructor_retry_mode"] = divstrip_retry_mode
+    if isinstance(road_line, LineString) and not road_line.is_empty:
+        road["_geometry_metric"] = road_line
+        road["length_m"] = float(road_line.length)
+        seg_idx, seg_len = _max_segment_detail(road_line)
+        road["max_segment_idx"] = seg_idx
+        road["max_segment_m"] = float(seg_len) if seg_len is not None else compute_max_segment_m(road_line)
+        if len(road_line.coords) >= 2:
+            c0 = np.asarray(road_line.coords[0], dtype=np.float64)
+            c1 = np.asarray(road_line.coords[1], dtype=np.float64)
+            road["seg_index0_len_m"] = float(np.linalg.norm(c1 - c0))
+        else:
+            road["seg_index0_len_m"] = None
+    else:
+        road_line = None
+        road["length_m"] = 0.0
+        road["max_segment_m"] = None
+        road["max_segment_idx"] = None
+        road["seg_index0_len_m"] = None
+        hard_flags.add(HARD_DIVSTRIP_INTERSECT)
+
+    bridge_outside_ratio, bridge_intersects_divstrip, bridge_dist_to_lb = _bridge_segment_diagnostics(
+        road_line=road_line,
+        max_segment_idx=road.get("max_segment_idx"),
+        traj_surface_metric=road.get("_traj_surface_geom_metric"),
+        gore_zone_metric=gore_zone_metric,
+        lb_shape_ref_metric=center.shape_ref_metric,
+    )
+    road["bridge_seg_outside_ratio"] = bridge_outside_ratio
+    road["bridge_seg_intersects_divstrip"] = bool(bridge_intersects_divstrip)
+    road["bridge_seg_dist_to_lb_m"] = bridge_dist_to_lb
+
     max_seg_f = _to_finite_float(road.get("max_segment_m"), float("nan"))
     if np.isfinite(max_seg_f) and max_seg_f > float(params["BRIDGE_MAX_SEG_M"]):
-        hard_flags.add(HARD_BRIDGE_SEGMENT)
+        bridge_bad = bool(bridge_intersects_divstrip)
+        if bridge_outside_ratio is not None and float(bridge_outside_ratio) > 0.30:
+            bridge_bad = True
+        if bridge_dist_to_lb is not None and float(bridge_dist_to_lb) > 20.0:
+            bridge_bad = True
+        if bridge_bad:
+            hard_flags.add(HARD_BRIDGE_SEGMENT)
 
     divstrip_inter_len = 0.0
     if road_line is not None and gore_zone_metric is not None and (not gore_zone_metric.is_empty):
@@ -3145,6 +3361,7 @@ def _evaluate_candidate_road(
             divstrip_inter_len = 0.0
         if divstrip_inter_len > 1e-6:
             hard_flags.add(HARD_DIVSTRIP_INTERSECT)
+    divstrip_inter_len = max(float(divstrip_inter_len), float(divstrip_inter_retry_len))
     road["divstrip_intersect_len_m"] = float(max(0.0, divstrip_inter_len))
 
     candidate_hard_breakpoints: list[dict[str, Any]] = []
@@ -3406,6 +3623,46 @@ def _collect_debug_layers_for_selected(
                 },
             }
         )
+
+    target_src = road.get("_xsec_target_selected_src_metric")
+    target_dst = road.get("_xsec_target_selected_dst_metric")
+    for ls in _iter_line_parts(target_src):
+        debug_layers["xsec_target_selected_src"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "target_mode": road.get("xsec_target_mode_src"),
+                },
+            }
+        )
+    for ls in _iter_line_parts(target_dst):
+        debug_layers["xsec_target_selected_dst"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "target_mode": road.get("xsec_target_mode_dst"),
+                },
+            }
+        )
+
+    for tag, geom in (
+        ("src_before", road.get("_endpoint_before_src_metric")),
+        ("src_after", road.get("_endpoint_after_src_metric")),
+        ("dst_before", road.get("_endpoint_before_dst_metric")),
+        ("dst_after", road.get("_endpoint_after_dst_metric")),
+    ):
+        if isinstance(geom, Point) and not geom.is_empty:
+            debug_layers["endpoint_before_after"].append(
+                {
+                    "geometry": geom,
+                    "properties": {
+                        "road_id": road_id,
+                        "tag": tag,
+                    },
+                }
+            )
     for ls in _iter_line_parts(dst_support):
         debug_layers["xsec_support_dst"].append(
             {
@@ -3737,6 +3994,10 @@ def _make_base_road_record(
         "endpoint_center_offset_m_dst": None,
         "endpoint_proj_dist_to_core_m_src": None,
         "endpoint_proj_dist_to_core_m_dst": None,
+        "endpoint_snap_dist_src_before_m": None,
+        "endpoint_snap_dist_src_after_m": None,
+        "endpoint_snap_dist_dst_before_m": None,
+        "endpoint_snap_dist_dst_after_m": None,
         "width_med_m": None,
         "width_p90_m": None,
         "max_turn_deg_per_10m": None,
@@ -3783,6 +4044,8 @@ def _make_base_road_record(
         "xsec_support_disabled_due_to_insufficient_dst": None,
         "xsec_support_empty_reason_src": None,
         "xsec_support_empty_reason_dst": None,
+        "xsec_target_mode_src": None,
+        "xsec_target_mode_dst": None,
         "offset_clamp_hit_ratio": None,
         "offset_clamp_fallback_count": None,
         "s_anchor_src_m": None,
@@ -3797,6 +4060,10 @@ def _make_base_road_record(
         "endpoint_in_traj_surface_src": None,
         "endpoint_in_traj_surface_dst": None,
         "divstrip_intersect_len_m": 0.0,
+        "divstrip_constructor_retry_mode": None,
+        "bridge_seg_outside_ratio": None,
+        "bridge_seg_intersects_divstrip": False,
+        "bridge_seg_dist_to_lb_m": None,
         "lb_path_found": False,
         "lb_path_edge_count": 0,
         "lb_path_length_m": None,
@@ -3835,6 +4102,7 @@ def _reason_hint(reason: str) -> str:
         HARD_CENTER_EMPTY: "centerline_generation_failed",
         HARD_ENDPOINT: "endpoints_not_on_intersection_l",
         HARD_ENDPOINT_LOCAL: "endpoint_out_of_local_xsec_neighborhood",
+        HARD_ENDPOINT_OFF_ANCHOR: "endpoint_off_anchor_after_snap",
         HARD_BRIDGE_SEGMENT: "bridge_segment_too_long",
         HARD_DIVSTRIP_INTERSECT: "road_intersects_divstrip_forbidden",
         _HARD_NO_ADJACENT_PAIR_AFTER_PASS2: "no_adjacent_pair_after_pass2",
@@ -3936,10 +4204,12 @@ def _finalize_payloads(
                 or sk.startswith("max_segment_")
                 or sk.startswith("seg_index0_")
                 or sk.startswith("xsec_support_")
+                or sk.startswith("xsec_target_")
                 or sk.startswith("xsec_trunc")
                 or sk.startswith("xsec_truncated")
                 or sk.startswith("offset_clamp_")
                 or sk.startswith("endpoint_fallback_mode_")
+                or sk.startswith("bridge_seg_")
                 or sk.startswith("traj_in_ratio")
                 or sk.startswith("traj_surface_")
                 or sk.startswith("divstrip_")
@@ -3967,7 +4237,13 @@ def _finalize_payloads(
 
     debug_feature_collections: dict[str, dict[str, Any]] = {}
     if debug_layers:
-        always_emit_empty = {"xsec_support_src", "xsec_support_dst"}
+        always_emit_empty = {
+            "xsec_support_src",
+            "xsec_support_dst",
+            "xsec_target_selected_src",
+            "xsec_target_selected_dst",
+            "endpoint_before_after",
+        }
         for layer_name, items in debug_layers.items():
             feats: list[dict[str, Any]] = []
             for item in items:

@@ -24,7 +24,7 @@ if [ ! -x "$PY" ]; then
   exit 1
 fi
 
-RUN_ID="t05_v6_2_$(date +%Y%m%d_%H%M%S)"
+RUN_ID="t05_v6_3_$(date +%Y%m%d_%H%M%S)"
 OUT_ROOT="$REPO_ROOT/outputs/_work/t05_topology_between_rc"
 
 cd "$REPO_ROOT"
@@ -107,6 +107,8 @@ keys = [
     "hard_anomaly_count",
     "soft_issue_count",
     "endpoint_center_offset_p90",
+    "endpoint_snap_dist_before_p90",
+    "endpoint_snap_dist_after_p90",
     "endpoint_tangent_deviation_deg_p90",
     "max_segment_m_max",
     "max_segment_m_p90",
@@ -179,7 +181,7 @@ print(f"road_count={len(features)}")
 for feat in features[:5]:
     props = feat.get("properties") or {}
     print(
-        "road_id={rid} chosen_cluster_id={cid} traj_surface_enforced={enf} traj_surface_geom_type={gt} traj_surface_area_m2={ga} covered_len_ratio={cov} valid_slices_ratio={vr} endcap_valid_src={evs} endcap_valid_dst={evd} endcap_width_src_before={ewsb} endcap_width_src_after={ewsa} endcap_width_dst_before={ewdb} endcap_width_dst_after={ewda} xsec_support_len_src={xss} xsec_support_len_dst={xsd} xsec_support_empty_reason_src={xrs} xsec_support_empty_reason_dst={xrd} endpoint_fallback_mode_src={fms} endpoint_fallback_mode_dst={fmd} offset_clamp_hit_ratio={chr} offset_clamp_fallback_count={cfc} traj_in_ratio={ratio} endpoint_in_surface_src={es} endpoint_in_surface_dst={ed} seg_index0_len_m={seg0} divstrip_intersect_len_m={dlen}".format(
+        "road_id={rid} chosen_cluster_id={cid} traj_surface_enforced={enf} traj_surface_geom_type={gt} traj_surface_area_m2={ga} covered_len_ratio={cov} valid_slices_ratio={vr} endcap_valid_src={evs} endcap_valid_dst={evd} endcap_width_src_before={ewsb} endcap_width_src_after={ewsa} endcap_width_dst_before={ewdb} endcap_width_dst_after={ewda} xsec_support_len_src={xss} xsec_support_len_dst={xsd} xsec_support_empty_reason_src={xrs} xsec_support_empty_reason_dst={xrd} xsec_target_mode_src={xts} xsec_target_mode_dst={xtd} endpoint_fallback_mode_src={fms} endpoint_fallback_mode_dst={fmd} endpoint_snap_src_after={ssa} endpoint_snap_dst_after={sda} offset_clamp_hit_ratio={chr} offset_clamp_fallback_count={cfc} traj_in_ratio={ratio} endpoint_in_surface_src={es} endpoint_in_surface_dst={ed} seg_index0_len_m={seg0} bridge_seg_outside_ratio={bor} bridge_seg_intersects_divstrip={bid} divstrip_intersect_len_m={dlen}".format(
             rid=props.get("road_id"),
             cid=props.get("chosen_cluster_id"),
             enf=props.get("traj_surface_enforced"),
@@ -197,14 +199,20 @@ for feat in features[:5]:
             xsd=props.get("xsec_support_len_dst"),
             xrs=props.get("xsec_support_empty_reason_src"),
             xrd=props.get("xsec_support_empty_reason_dst"),
+            xts=props.get("xsec_target_mode_src"),
+            xtd=props.get("xsec_target_mode_dst"),
             fms=props.get("endpoint_fallback_mode_src"),
             fmd=props.get("endpoint_fallback_mode_dst"),
+            ssa=props.get("endpoint_snap_dist_src_after_m"),
+            sda=props.get("endpoint_snap_dist_dst_after_m"),
             chr=props.get("offset_clamp_hit_ratio"),
             cfc=props.get("offset_clamp_fallback_count"),
             ratio=props.get("traj_in_ratio"),
             es=props.get("endpoint_in_traj_surface_src"),
             ed=props.get("endpoint_in_traj_surface_dst"),
             seg0=props.get("seg_index0_len_m"),
+            bor=props.get("bridge_seg_outside_ratio"),
+            bid=props.get("bridge_seg_intersects_divstrip"),
             dlen=props.get("divstrip_intersect_len_m"),
         )
     )
@@ -243,6 +251,9 @@ PY
     echo "debug_ref_axis=$OUT_DIR/debug/ref_axis_best.geojson"
     echo "debug_xsec_support_src=$OUT_DIR/debug/xsec_support_src.geojson"
     echo "debug_xsec_support_dst=$OUT_DIR/debug/xsec_support_dst.geojson"
+    echo "debug_xsec_target_selected_src=$OUT_DIR/debug/xsec_target_selected_src.geojson"
+    echo "debug_xsec_target_selected_dst=$OUT_DIR/debug/xsec_target_selected_dst.geojson"
+    echo "debug_endpoint_before_after=$OUT_DIR/debug/endpoint_before_after.geojson"
   fi
 
 done

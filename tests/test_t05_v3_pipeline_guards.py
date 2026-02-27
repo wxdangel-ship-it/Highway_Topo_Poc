@@ -229,7 +229,7 @@ def test_traj_surface_enforced_endpoint_outside_is_hard(tmp_path: Path) -> None:
     assert any(str(bp.get("severity")) == "hard" for bp in breakpoints)
 
 
-def test_bridge_guard_marks_hard_for_long_segment(tmp_path: Path, monkeypatch) -> None:
+def test_bridge_guard_skips_clean_long_segment_without_violation(tmp_path: Path, monkeypatch) -> None:
     xsecs = [
         CrossSection(nodeid=1, geometry_metric=LineString([(0.0, -5.0), (0.0, 5.0)]), properties={"nodeid": 1}),
         CrossSection(nodeid=2, geometry_metric=LineString([(210.0, -5.0), (210.0, 5.0)]), properties={"nodeid": 2}),
@@ -305,7 +305,7 @@ def test_bridge_guard_marks_hard_for_long_segment(tmp_path: Path, monkeypatch) -
         repo_root=tmp_path,
     )
     reasons = {str(bp.get("reason")) for bp in out["hard_breakpoints"]}
-    assert "BRIDGE_SEGMENT_TOO_LONG" in reasons
+    assert "BRIDGE_SEGMENT_TOO_LONG" not in reasons
 
 
 def test_neighbor_pass2_is_triggered_when_no_supports(tmp_path: Path) -> None:
@@ -500,7 +500,7 @@ def test_surface_point_cache_skips_second_laz_read(tmp_path: Path, monkeypatch) 
     assert stats_2.get("pointcloud_cache_hit") is True
 
 
-def test_divstrip_intersection_is_hard(tmp_path: Path, monkeypatch) -> None:
+def test_divstrip_intersection_prefers_gore_free_fallback(tmp_path: Path, monkeypatch) -> None:
     xsecs = [
         CrossSection(nodeid=1, geometry_metric=LineString([(0.0, -5.0), (0.0, 5.0)]), properties={"nodeid": 1}),
         CrossSection(nodeid=2, geometry_metric=LineString([(210.0, -5.0), (210.0, 5.0)]), properties={"nodeid": 2}),
@@ -595,7 +595,8 @@ def test_divstrip_intersection_is_hard(tmp_path: Path, monkeypatch) -> None:
         repo_root=tmp_path,
     )
     reasons = {str(bp.get("reason")) for bp in out["hard_breakpoints"]}
-    assert "ROAD_INTERSECTS_DIVSTRIP" in reasons
+    assert "ROAD_INTERSECTS_DIVSTRIP" not in reasons
+    assert out["road_count"] >= 1
 
 
 def test_metrics_collect_offset_clamp_and_support_reason_stats(tmp_path: Path, monkeypatch) -> None:
@@ -819,6 +820,104 @@ def test_finalize_payloads_emits_empty_xsec_support_layers(tmp_path: Path) -> No
     assert "debug/xsec_support_dst.geojson" in debug_fc
     assert debug_fc["debug/xsec_support_src.geojson"]["features"] == []
     assert debug_fc["debug/xsec_support_dst.geojson"]["features"] == []
+
+
+def test_divstrip_intersection_hard_when_no_gore_free_fallback(tmp_path: Path, monkeypatch) -> None:
+    xsecs = [
+        CrossSection(nodeid=1, geometry_metric=LineString([(0.0, -5.0), (0.0, 5.0)]), properties={"nodeid": 1}),
+        CrossSection(nodeid=2, geometry_metric=LineString([(10.0, -5.0), (10.0, 5.0)]), properties={"nodeid": 2}),
+    ]
+    patch_inputs = PatchInputs(
+        patch_id="unit_patch",
+        patch_dir=tmp_path,
+        projection=ProjectionInfo(input_crs="EPSG:3857", metric_crs="EPSG:3857", projected=False),
+        projection_to_metric=lambda geom: geom,
+        projection_to_input=lambda geom: geom,
+        intersection_lines=xsecs,
+        lane_boundaries_metric=[],
+        node_kind_map={},
+        trajectories=[],
+        divstrip_zone_metric=Polygon([(-50.0, -30.0), (80.0, -30.0), (80.0, 30.0), (-50.0, 30.0)]),
+        divstrip_source_path=tmp_path / "DivStripZone.geojson",
+        point_cloud_path=None,
+        road_prior_path=None,
+        tiles_dir=None,
+        input_summary={},
+    )
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t1"},
+        support_event_count=1,
+        repr_traj_ids=["t1"],
+    )
+    build_result = PairSupportBuildResult(
+        supports={(1, 2): support},
+        unresolved_events=[],
+        graph_node_count=0,
+        graph_edge_count=0,
+        stitch_candidate_count=0,
+        stitch_edge_count=0,
+        stitch_query_count=0,
+        stitch_candidates_total=0,
+        stitch_reject_dist_count=0,
+        stitch_reject_angle_count=0,
+        stitch_reject_forward_count=0,
+        stitch_accept_count=0,
+        stitch_levels_used_hist={},
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "extract_crossing_events",
+        lambda *args, **kwargs: CrossingExtractResult(
+            events_by_traj={},
+            raw_hit_count=0,
+            dedup_drop_count=0,
+            n_cross_empty_skipped=0,
+            n_cross_geom_unexpected=0,
+            n_cross_distance_gate_reject=0,
+        ),
+    )
+    monkeypatch.setattr(pipeline, "build_pair_supports", lambda *args, **kwargs: build_result)
+    monkeypatch.setattr(
+        pipeline,
+        "infer_node_types",
+        lambda **kwargs: ({1: "unknown", 2: "unknown"}, {1: 0, 2: 0}, {1: 0, 2: 0}),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: _mk_center(LineString([(0.0, 0.0), (10.0, 0.0)])),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: (
+            {
+                "traj_surface_enforced": False,
+                "traj_in_ratio": None,
+                "traj_in_ratio_est": None,
+                "endpoint_in_traj_surface_src": None,
+                "endpoint_in_traj_surface_dst": None,
+                "traj_surface_geom_type": None,
+                "traj_surface_area_m2": None,
+                "traj_surface_component_count": 0,
+            },
+            set(),
+            set(),
+            [],
+        ),
+    )
+
+    out = pipeline._run_patch_core(
+        patch_inputs,
+        params=dict(pipeline.DEFAULT_PARAMS),
+        run_id="unit_run",
+        repo_root=tmp_path,
+    )
+    reasons = {str(bp.get("reason")) for bp in out["hard_breakpoints"]}
+    assert "ROAD_INTERSECTS_DIVSTRIP" in reasons
 
 
 def test_candidate_sort_prefers_geometry_even_if_feasible_lower() -> None:
