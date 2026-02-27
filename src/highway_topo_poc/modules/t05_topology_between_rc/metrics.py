@@ -117,6 +117,8 @@ def build_intervals_payload(
             item["seg_length_m"] = bp.get("seg_length_m")
         if "max_segment_m" in bp:
             item["max_segment_m"] = bp.get("max_segment_m")
+        if "divstrip_intersect_len_m" in bp:
+            item["divstrip_intersect_len_m"] = bp.get("divstrip_intersect_len_m")
         if "traj_surface_enforced" in bp:
             item["traj_surface_enforced"] = bp.get("traj_surface_enforced")
         if "traj_in_ratio" in bp:
@@ -306,7 +308,8 @@ def _breakpoint_sort_key(bp: dict[str, Any]) -> tuple[int, int, float]:
         "CENTER_ESTIMATE_EMPTY": 2,
         "ENDPOINT_NOT_ON_XSEC": 3,
         "BRIDGE_SEGMENT_TOO_LONG": 4,
-        "NO_ADJACENT_PAIR_AFTER_PASS2": 5,
+        "ROAD_INTERSECTS_DIVSTRIP": 5,
+        "NO_ADJACENT_PAIR_AFTER_PASS2": 6,
         "LOW_SUPPORT": 10,
         "SPARSE_SURFACE_POINTS": 11,
         "NO_LB_CONTINUOUS": 12,

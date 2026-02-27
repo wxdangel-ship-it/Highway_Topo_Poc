@@ -1,0 +1,23 @@
+{
+  "patch_id": "2855832875697813",
+  "status": "run_failed",
+  "source_patch_dir": "/mnt/e/Work/Highway_Topo_Poc/outputs/_work/t05_topology_between_rc/t05_v2_smoke_20260226_174611/patches/2855832875697813",
+  "all_candidate_patch_dirs": [
+    "/mnt/c/Users/admin/outputs/_work/t05_topology_between_rc/t05_v2_20260226_174810/patches/2855832875697813",
+    "/mnt/e/Work/Highway_Topo_Poc/outputs/_work/t05_topology_between_rc/t05_v2_20260226_174826/patches/2855832875697813",
+    "/mnt/e/Work/Highway_Topo_Poc/outputs/_work/t05_topology_between_rc/t05_v2_smoke_20260226_174611/patches/2855832875697813"
+  ],
+  "traj_surface_count": 0,
+  "traj_surface_bbox": null,
+  "traj_surface_area_m2": null,
+  "surf_covered_length_est_m": null,
+  "valid_slices": null,
+  "total_slices": null,
+  "slice_valid_ratio": null,
+  "covered_length_ratio": null,
+  "notes": [
+    "patch_id_not_found: 2855832875697813",
+    "road_features_empty_or_missing",
+    "traj_surface_debug_missing"
+  ]
+}

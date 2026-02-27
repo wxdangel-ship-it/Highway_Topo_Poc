@@ -145,6 +145,29 @@ def test_lb_graph_path_enforced_surface_blocks_wrong_channel() -> None:
     assert max(abs(v) for v in ys) < 2.0
 
 
+def test_lb_graph_path_forbids_divstrip_intersections() -> None:
+    lane_boundaries = [
+        LineString([(0.0, 0.0), (100.0, 0.0)]),
+        LineString([(0.0, 20.0), (100.0, 20.0)]),
+    ]
+    src_xsec = LineString([(0.0, -30.0), (0.0, 30.0)])
+    dst_xsec = LineString([(100.0, -30.0), (100.0, 30.0)])
+    divstrip = Polygon([(-5.0, -5.0), (105.0, -5.0), (105.0, 5.0), (-5.0, 5.0)])
+
+    out = _build_lb_graph_path(
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        lane_boundaries_metric=lane_boundaries,
+        snap_m=1.0,
+        topk=5,
+        divstrip_barrier_metric=divstrip,
+    )
+    assert out is not None
+    line, _ = out
+    ys = [float(y) for _, y in line.coords]
+    assert min(ys) > 10.0
+
+
 def test_shape_ref_substring_clips_to_src_dst_cross_sections() -> None:
     raw = LineString([(-200.0, 0.0), (0.0, 0.0), (100.0, 0.0), (350.0, 0.0)])
     src_xsec = LineString([(0.0, -10.0), (0.0, 10.0)])

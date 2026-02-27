@@ -1,0 +1,13 @@
+{
+  "patch_id": "2855832875697813",
+  "status": "run_failed",
+  "source_patch_dir": "/mnt/e/Work/Highway_Topo_Poc/outputs/_work/t05_topology_between_rc/t05_v2_smoke_20260226_174611/patches/2855832875697813",
+  "used_traj_point_count": null,
+  "unique_traj_count": null,
+  "used_traj_station_range": null,
+  "notes": [
+    "patch_id_not_found: 2855832875697813",
+    "road_features_empty_or_missing",
+    "traj_surface_debug_missing"
+  ]
+}

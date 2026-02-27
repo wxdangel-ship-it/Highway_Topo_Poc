@@ -1,0 +1,27 @@
+{
+  "repo_root": "/mnt/e/Work/Highway_Topo_Poc",
+  "git_sha": "96e0bb7738f6e6e626a14288d15ad450206fb057",
+  "branch": "main",
+  "call_chain": [
+    {"fn": "run.main", "file": "src/highway_topo_poc/modules/t05_topology_between_rc/run.py", "line": 118},
+    {"fn": "pipeline.run_patch", "file": "src/highway_topo_poc/modules/t05_topology_between_rc/pipeline.py", "line": 190},
+    {"fn": "io.load_patch_inputs", "file": "src/highway_topo_poc/modules/t05_topology_between_rc/io.py", "line": 212},
+    {"fn": "pipeline._run_patch_core", "file": "src/highway_topo_poc/modules/t05_topology_between_rc/pipeline.py", "line": 255},
+    {"fn": "pipeline._build_traj_surface_hint_for_cluster", "file": "src/highway_topo_poc/modules/t05_topology_between_rc/pipeline.py", "line": 1434},
+    {"fn": "geometry.estimate_centerline", "file": "src/highway_topo_poc/modules/t05_topology_between_rc/geometry.py", "line": 1087},
+    {"fn": "pipeline._eval_traj_surface_gate", "file": "src/highway_topo_poc/modules/t05_topology_between_rc/pipeline.py", "line": 1574},
+    {"fn": "pipeline._collect_debug_layers_for_selected", "file": "src/highway_topo_poc/modules/t05_topology_between_rc/pipeline.py", "line": 2105}
+  ],
+  "crs": {
+    "normalize_fn": "io.normalize_geojson_crs_name",
+    "normalize_line": 808,
+    "divstrip_read_line": 251,
+    "divstrip_project_line": 254
+  },
+  "surfaces": {
+    "traj_surface_build": "pipeline._build_traj_surface_from_refline",
+    "traj_surface_build_line": 1262,
+    "traj_surface_gate_line": 1697,
+    "debug_surface_dump_line": 2119
+  }
+}

@@ -75,6 +75,7 @@ with open(p, "r", encoding="utf-8") as f:
 print(f"overall_pass={g.get('overall_pass')}")
 hard = g.get("hard_breakpoints") or []
 focus = {"BRIDGE_SEGMENT_TOO_LONG", "ROAD_OUTSIDE_TRAJ_SURFACE", "MULTI_ROAD_SAME_PAIR"}
+focus.add("ROAD_INTERSECTS_DIVSTRIP")
 picked = [bp for bp in hard if str(bp.get("reason")) in focus]
 for bp in (picked[:5] if picked else hard[:5]):
     print(
@@ -109,6 +110,16 @@ keys = [
     "endpoint_tangent_deviation_deg_p90",
     "max_segment_m_max",
     "max_segment_m_p90",
+    "seg_index0_len_m_p90",
+    "seg_index0_len_m_max",
+    "divstrip_intersect_len_m_p90",
+    "divstrip_intersect_len_m_max",
+    "traj_surface_area_m2_p50",
+    "traj_surface_area_m2_p90",
+    "traj_surface_covered_length_ratio_p50",
+    "traj_surface_covered_length_ratio_p90",
+    "traj_surface_valid_slices_ratio_p50",
+    "traj_surface_valid_slices_ratio_p90",
     "traj_surface_enforced_count",
     "traj_surface_insufficient_count",
     "traj_in_ratio_p50",
@@ -142,13 +153,19 @@ print(f"road_count={len(features)}")
 for feat in features[:5]:
     props = feat.get("properties") or {}
     print(
-        "road_id={rid} chosen_cluster_id={cid} traj_surface_enforced={enf} traj_in_ratio={ratio} endpoint_in_surface_src={es} endpoint_in_surface_dst={ed}".format(
+        "road_id={rid} chosen_cluster_id={cid} traj_surface_enforced={enf} traj_surface_geom_type={gt} traj_surface_area_m2={ga} covered_len_ratio={cov} valid_slices_ratio={vr} traj_in_ratio={ratio} endpoint_in_surface_src={es} endpoint_in_surface_dst={ed} seg_index0_len_m={seg0} divstrip_intersect_len_m={dlen}".format(
             rid=props.get("road_id"),
             cid=props.get("chosen_cluster_id"),
             enf=props.get("traj_surface_enforced"),
+            gt=props.get("traj_surface_geom_type"),
+            ga=props.get("traj_surface_area_m2"),
+            cov=props.get("traj_surface_covered_length_ratio"),
+            vr=props.get("traj_surface_valid_slices_ratio"),
             ratio=props.get("traj_in_ratio"),
             es=props.get("endpoint_in_traj_surface_src"),
             ed=props.get("endpoint_in_traj_surface_dst"),
+            seg0=props.get("seg_index0_len_m"),
+            dlen=props.get("divstrip_intersect_len_m"),
         )
     )
 PY
@@ -164,7 +181,7 @@ p = sys.argv[1]
 with open(p, "r", encoding="utf-8") as f:
     it = json.load(f)
 items = it.get("topk") or it.get("items") or []
-focus = {"BRIDGE_SEGMENT_TOO_LONG", "ROAD_OUTSIDE_TRAJ_SURFACE", "MULTI_ROAD_SAME_PAIR"}
+focus = {"BRIDGE_SEGMENT_TOO_LONG", "ROAD_OUTSIDE_TRAJ_SURFACE", "MULTI_ROAD_SAME_PAIR", "ROAD_INTERSECTS_DIVSTRIP"}
 for bp in items:
     if str(bp.get("reason")) not in focus:
         continue
@@ -180,6 +197,10 @@ PY
   fi
 
   echo "debug_dir=$OUT_DIR/debug (enabled=$DEBUG_DUMP)"
+  if [ "$DEBUG_DUMP" = "1" ]; then
+    echo "debug_surface_polygon=$OUT_DIR/debug/traj_surface_best_polygon.geojson"
+    echo "debug_surface_boundary=$OUT_DIR/debug/traj_surface_best_boundary.geojson"
+  fi
 
 done
 

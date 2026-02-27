@@ -79,6 +79,8 @@ def _mk_center(line: LineString) -> CenterEstimate:
         endpoint_tangent_deviation_deg_dst=0.0,
         endpoint_center_offset_m_src=0.5,
         endpoint_center_offset_m_dst=0.6,
+        endpoint_proj_dist_to_core_m_src=0.2,
+        endpoint_proj_dist_to_core_m_dst=0.3,
         soft_flags=set(),
         hard_flags=set(),
         diagnostics={},
@@ -307,3 +309,166 @@ def test_surface_point_cache_skips_second_laz_read(tmp_path: Path, monkeypatch) 
     assert call_count["n"] == 1
     assert stats_1.get("pointcloud_cache_hit") is False
     assert stats_2.get("pointcloud_cache_hit") is True
+
+
+def test_divstrip_intersection_is_hard(tmp_path: Path, monkeypatch) -> None:
+    xsecs = [
+        CrossSection(nodeid=1, geometry_metric=LineString([(0.0, -5.0), (0.0, 5.0)]), properties={"nodeid": 1}),
+        CrossSection(nodeid=2, geometry_metric=LineString([(210.0, -5.0), (210.0, 5.0)]), properties={"nodeid": 2}),
+    ]
+    patch_inputs = PatchInputs(
+        patch_id="unit_patch",
+        patch_dir=tmp_path,
+        projection=ProjectionInfo(input_crs="EPSG:3857", metric_crs="EPSG:3857", projected=False),
+        projection_to_metric=lambda geom: geom,
+        projection_to_input=lambda geom: geom,
+        intersection_lines=xsecs,
+        lane_boundaries_metric=[],
+        node_kind_map={},
+        trajectories=[],
+        divstrip_zone_metric=Polygon([(90.0, -20.0), (120.0, -20.0), (120.0, 20.0), (90.0, 20.0)]),
+        divstrip_source_path=tmp_path / "DivStripZone.geojson",
+        point_cloud_path=None,
+        road_prior_path=None,
+        tiles_dir=None,
+        input_summary={},
+    )
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t1"},
+        support_event_count=1,
+        repr_traj_ids=["t1"],
+    )
+    build_result = PairSupportBuildResult(
+        supports={(1, 2): support},
+        unresolved_events=[],
+        graph_node_count=0,
+        graph_edge_count=0,
+        stitch_candidate_count=0,
+        stitch_edge_count=0,
+        stitch_query_count=0,
+        stitch_candidates_total=0,
+        stitch_reject_dist_count=0,
+        stitch_reject_angle_count=0,
+        stitch_reject_forward_count=0,
+        stitch_accept_count=0,
+        stitch_levels_used_hist={},
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "extract_crossing_events",
+        lambda *args, **kwargs: CrossingExtractResult(
+            events_by_traj={},
+            raw_hit_count=0,
+            dedup_drop_count=0,
+            n_cross_empty_skipped=0,
+            n_cross_geom_unexpected=0,
+            n_cross_distance_gate_reject=0,
+        ),
+    )
+    monkeypatch.setattr(pipeline, "build_pair_supports", lambda *args, **kwargs: build_result)
+    monkeypatch.setattr(
+        pipeline,
+        "infer_node_types",
+        lambda **kwargs: ({1: "unknown", 2: "unknown"}, {1: 0, 2: 0}, {1: 0, 2: 0}),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: _mk_center(LineString([(0.0, 0.0), (210.0, 0.0)])),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: (
+            {
+                "traj_surface_enforced": False,
+                "traj_in_ratio": None,
+                "traj_in_ratio_est": None,
+                "endpoint_in_traj_surface_src": None,
+                "endpoint_in_traj_surface_dst": None,
+                "traj_surface_geom_type": None,
+                "traj_surface_area_m2": None,
+                "traj_surface_component_count": 0,
+            },
+            set(),
+            set(),
+            [],
+        ),
+    )
+
+    out = pipeline._run_patch_core(
+        patch_inputs,
+        params=dict(pipeline.DEFAULT_PARAMS),
+        run_id="unit_run",
+        repo_root=tmp_path,
+    )
+    reasons = {str(bp.get("reason")) for bp in out["hard_breakpoints"]}
+    assert "ROAD_INTERSECTS_DIVSTRIP" in reasons
+
+
+def test_debug_surface_dump_keeps_polygon_geometry() -> None:
+    debug_layers = {
+        "traj_surface_best_polygon": [],
+        "traj_surface_best_boundary": [],
+        "lb_path_best": [],
+        "xsec_valid_src": [],
+        "xsec_valid_dst": [],
+        "xsec_support_src": [],
+        "xsec_support_dst": [],
+        "road_outside_segments": [],
+        "road_bridge_segments": [],
+        "road_divstrip_intersections": [],
+    }
+    road = {
+        "road_id": "1_2",
+        "_traj_surface_geom_metric": Polygon([(0.0, -2.0), (10.0, -2.0), (10.0, 2.0), (0.0, 2.0)]),
+        "_shape_ref_metric": LineString([(0.0, 0.0), (10.0, 0.0)]),
+        "_geometry_metric": LineString([(0.0, 0.0), (10.0, 0.0)]),
+        "lb_path_found": True,
+        "traj_surface_enforced": True,
+    }
+    pipeline._collect_debug_layers_for_selected(
+        debug_layers=debug_layers,
+        road=road,
+        src_xsec=LineString([(0.0, -5.0), (0.0, 5.0)]),
+        dst_xsec=LineString([(10.0, -5.0), (10.0, 5.0)]),
+        gore_zone_metric=None,
+        bridge_max_seg_m=100.0,
+    )
+    assert len(debug_layers["traj_surface_best_polygon"]) == 1
+    assert len(debug_layers["traj_surface_best_boundary"]) >= 1
+
+
+def test_traj_surface_builder_outputs_polygon_and_histogram() -> None:
+    ref_line = LineString([(0.0, 0.0), (100.0, 0.0)])
+    xs = np.linspace(0.0, 100.0, 120)
+    left = np.column_stack((xs, np.full_like(xs, -1.5)))
+    right = np.column_stack((xs, np.full_like(xs, 1.5)))
+    traj_xy = np.vstack((left, right)).astype(np.float64)
+
+    params = dict(pipeline.DEFAULT_PARAMS)
+    params.update(
+        {
+            "SURF_SLICE_STEP_M": 5.0,
+            "SURF_SLICE_HALF_WIN_M": 2.0,
+            "SURF_SLICE_HALF_WIN_LEVELS_M": [2.0, 5.0, 10.0],
+            "TRAJ_SURF_MIN_POINTS_PER_SLICE": 5,
+        }
+    )
+    built = pipeline._build_traj_surface_from_refline(
+        ref_line=ref_line,
+        traj_xy=traj_xy,
+        gore_zone_metric=None,
+        params=params,
+    )
+
+    surf = built.get("surface")
+    assert surf is not None
+    assert str(getattr(surf, "geom_type", "")) in {"Polygon", "MultiPolygon"}
+    assert float(surf.area) > 0.0
+    assert float(built.get("covered_length_ratio", 0.0)) > 0.9
+    hist = dict(built.get("slice_half_win_used_hist") or {})
+    assert len(hist) >= 1

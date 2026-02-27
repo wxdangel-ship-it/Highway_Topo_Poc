@@ -84,6 +84,11 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--trend_fit_win_m", type=float, default=float(DEFAULT_PARAMS["TREND_FIT_WIN_M"]))
     p.add_argument("--surf_slice_step_m", type=float, default=float(DEFAULT_PARAMS["SURF_SLICE_STEP_M"]))
     p.add_argument("--surf_slice_half_win_m", type=float, default=float(DEFAULT_PARAMS["SURF_SLICE_HALF_WIN_M"]))
+    p.add_argument(
+        "--surf_slice_half_win_levels_m",
+        type=str,
+        default=",".join(str(v) for v in DEFAULT_PARAMS.get("SURF_SLICE_HALF_WIN_LEVELS_M", [2.0, 5.0, 10.0])),
+    )
     p.add_argument("--surf_quant_low", type=float, default=float(DEFAULT_PARAMS["SURF_QUANT_LOW"]))
     p.add_argument("--surf_quant_high", type=float, default=float(DEFAULT_PARAMS["SURF_QUANT_HIGH"]))
     p.add_argument("--surf_buf_m", type=float, default=float(DEFAULT_PARAMS["SURF_BUF_M"]))
@@ -102,6 +107,11 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
         "--traj_surf_min_covered_len_ratio",
         type=float,
         default=float(DEFAULT_PARAMS["TRAJ_SURF_MIN_COVERED_LEN_RATIO"]),
+    )
+    p.add_argument(
+        "--traj_surf_enforce_min_covered_len_ratio",
+        type=float,
+        default=float(DEFAULT_PARAMS["TRAJ_SURF_ENFORCE_MIN_COVERED_LEN_RATIO"]),
     )
     p.add_argument(
         "--traj_surf_min_unique_traj",
@@ -125,6 +135,20 @@ def main(argv: Iterable[str] | None = None) -> int:
     run_dir = out_root / run_id_val
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+
+    level_tokens = [tok.strip() for tok in str(args.surf_slice_half_win_levels_m).split(",")]
+    level_values: list[float] = []
+    for tok in level_tokens:
+        if not tok:
+            continue
+        try:
+            v = float(tok)
+        except Exception:
+            continue
+        if v > 0:
+            level_values.append(float(v))
+    if not level_values:
+        level_values = [float(args.surf_slice_half_win_m), 5.0, 10.0]
 
     params_override = {
         "TRAJ_XSEC_HIT_BUFFER_M": float(args.traj_xsec_hit_buffer_m),
@@ -169,6 +193,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "TREND_FIT_WIN_M": float(args.trend_fit_win_m),
         "SURF_SLICE_STEP_M": float(args.surf_slice_step_m),
         "SURF_SLICE_HALF_WIN_M": float(args.surf_slice_half_win_m),
+        "SURF_SLICE_HALF_WIN_LEVELS_M": [float(v) for v in level_values],
         "SURF_QUANT_LOW": float(args.surf_quant_low),
         "SURF_QUANT_HIGH": float(args.surf_quant_high),
         "SURF_BUF_M": float(args.surf_buf_m),
@@ -176,6 +201,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "TRAJ_SURF_MIN_POINTS_PER_SLICE": int(args.traj_surf_min_points_per_slice),
         "TRAJ_SURF_MIN_SLICE_VALID_RATIO": float(args.traj_surf_min_slice_valid_ratio),
         "TRAJ_SURF_MIN_COVERED_LEN_RATIO": float(args.traj_surf_min_covered_len_ratio),
+        "TRAJ_SURF_ENFORCE_MIN_COVERED_LEN_RATIO": float(args.traj_surf_enforce_min_covered_len_ratio),
         "TRAJ_SURF_MIN_UNIQUE_TRAJ": int(args.traj_surf_min_unique_traj),
         "POINT_CLASS_FALLBACK_ANY": int(args.point_class_fallback_any),
         "CACHE_ENABLED": int(args.cache_enabled),

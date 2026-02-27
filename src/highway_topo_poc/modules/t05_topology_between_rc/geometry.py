@@ -20,6 +20,7 @@ HARD_NON_RC = "NON_RC_IN_BETWEEN"
 HARD_CENTER_EMPTY = "CENTER_ESTIMATE_EMPTY"
 HARD_ENDPOINT = "ENDPOINT_NOT_ON_XSEC"
 HARD_BRIDGE_SEGMENT = "BRIDGE_SEGMENT_TOO_LONG"
+HARD_DIVSTRIP_INTERSECT = "ROAD_INTERSECTS_DIVSTRIP"
 
 SOFT_LOW_SUPPORT = "LOW_SUPPORT"
 SOFT_SPARSE_POINTS = "SPARSE_SURFACE_POINTS"
@@ -133,6 +134,8 @@ class CenterEstimate:
     endpoint_tangent_deviation_deg_dst: float | None
     endpoint_center_offset_m_src: float | None
     endpoint_center_offset_m_dst: float | None
+    endpoint_proj_dist_to_core_m_src: float | None
+    endpoint_proj_dist_to_core_m_dst: float | None
     soft_flags: set[str]
     hard_flags: set[str]
     diagnostics: dict[str, Any]
@@ -1151,6 +1154,7 @@ def estimate_centerline(
         traj_surface_enforced=bool(traj_surface_enforced),
         outside_edge_ratio_max=float(lb_outside_edge_ratio_max),
         surface_node_buffer_m=float(lb_surface_node_buffer_m),
+        divstrip_barrier_metric=divstrip_zone_metric,
     )
     shape_ref = shape_choice.line
     used_lb = bool(shape_choice.used_lane_boundary)
@@ -1197,6 +1201,8 @@ def estimate_centerline(
                 endpoint_tangent_deviation_deg_dst=None,
                 endpoint_center_offset_m_src=None,
                 endpoint_center_offset_m_dst=None,
+                endpoint_proj_dist_to_core_m_src=None,
+                endpoint_proj_dist_to_core_m_dst=None,
                 soft_flags=soft_flags,
                 hard_flags=hard_flags,
                 diagnostics={"reason": "shape_ref_unavailable"},
@@ -1254,6 +1260,8 @@ def estimate_centerline(
             endpoint_tangent_deviation_deg_dst=None,
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
             soft_flags=soft_flags,
             hard_flags=hard_flags,
             diagnostics={"reason": "shape_ref_sampling_failed"},
@@ -1320,6 +1328,8 @@ def estimate_centerline(
             endpoint_tangent_deviation_deg_dst=None,
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
             soft_flags=soft_flags,
             hard_flags=hard_flags,
             diagnostics=diagnostics,
@@ -1412,6 +1422,8 @@ def estimate_centerline(
             endpoint_tangent_deviation_deg_dst=None,
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
             soft_flags=soft_flags,
             hard_flags=hard_flags,
             diagnostics=diagnostics,
@@ -1425,7 +1437,14 @@ def estimate_centerline(
         if isinstance(simp, LineString) and not simp.is_empty and len(simp.coords) >= 2:
             centerline = simp
 
-    trend_line, trend_dev_src, trend_dev_dst, trend_reason = _apply_endpoint_trend_projection(
+    (
+        trend_line,
+        trend_dev_src,
+        trend_dev_dst,
+        trend_reason,
+        proj_dist_src,
+        proj_dist_dst,
+    ) = _apply_endpoint_trend_projection(
         base_line=centerline,
         shape_ref_line=shape_ref,
         sample_stations=ss,
@@ -1452,6 +1471,8 @@ def estimate_centerline(
         )
         trend_dev_src = None
         trend_dev_dst = None
+        proj_dist_src = None
+        proj_dist_dst = None
     else:
         clipped = trend_line
         clip_reason = trend_reason
@@ -1489,6 +1510,8 @@ def estimate_centerline(
             endpoint_tangent_deviation_deg_dst=trend_dev_dst,
             endpoint_center_offset_m_src=None,
             endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=proj_dist_src,
+            endpoint_proj_dist_to_core_m_dst=proj_dist_dst,
             soft_flags=soft_flags,
             hard_flags=hard_flags,
             diagnostics=diagnostics,
@@ -1527,6 +1550,8 @@ def estimate_centerline(
     diagnostics["endpoint_center_offset_m_dst"] = endpoint_dst
     diagnostics["endpoint_tangent_deviation_deg_src"] = trend_dev_src
     diagnostics["endpoint_tangent_deviation_deg_dst"] = trend_dev_dst
+    diagnostics["endpoint_proj_dist_to_core_m_src"] = proj_dist_src
+    diagnostics["endpoint_proj_dist_to_core_m_dst"] = proj_dist_dst
     diagnostics["src_cut_mode"] = src_decision.cut_mode
     diagnostics["dst_cut_mode"] = dst_decision.cut_mode
 
@@ -1561,6 +1586,8 @@ def estimate_centerline(
         endpoint_tangent_deviation_deg_dst=trend_dev_dst,
         endpoint_center_offset_m_src=endpoint_src,
         endpoint_center_offset_m_dst=endpoint_dst,
+        endpoint_proj_dist_to_core_m_src=proj_dist_src,
+        endpoint_proj_dist_to_core_m_dst=proj_dist_dst,
         soft_flags=soft_flags,
         hard_flags=hard_flags,
         diagnostics=diagnostics,
@@ -1623,21 +1650,21 @@ def _apply_endpoint_trend_projection(
     gore_zone_metric: BaseGeometry | None,
     endpoint_tol_m: float,
     road_max_vertices: int,
-) -> tuple[LineString | None, float | None, float | None, str | None]:
+) -> tuple[LineString | None, float | None, float | None, str | None, float | None, float | None]:
     if base_line.is_empty or base_line.length <= 0:
-        return None, None, None, HARD_CENTER_EMPTY
+        return None, None, None, HARD_CENTER_EMPTY, None, None
     if sample_center_points.shape[0] < 2 or sample_stations.size != sample_center_points.shape[0]:
-        return None, None, None, HARD_CENTER_EMPTY
+        return None, None, None, HARD_CENTER_EMPTY, None, None
 
     n = int(sample_center_points.shape[0])
     if src_decision.anchor_station_m is None or dst_decision.anchor_station_m is None:
-        return None, None, None, HARD_CENTER_EMPTY
+        return None, None, None, HARD_CENTER_EMPTY, None, None
     i_src = int(np.argmin(np.abs(sample_stations - float(src_decision.anchor_station_m))))
     i_dst = int(np.argmin(np.abs(sample_stations - float(dst_decision.anchor_station_m))))
     i_src = max(0, min(n - 1, i_src))
     i_dst = max(0, min(n - 1, i_dst))
     if i_dst <= i_src:
-        return None, None, None, HARD_CENTER_EMPTY
+        return None, None, None, HARD_CENTER_EMPTY, None, None
 
     src_anchor = sample_center_points[i_src, :]
     dst_anchor = sample_center_points[i_dst, :]
@@ -1661,7 +1688,7 @@ def _apply_endpoint_trend_projection(
             fit_win_m=max(5.0, float(trend_fit_win_m)),
         )
     if t_src is None or t_dst is None:
-        return None, None, None, HARD_CENTER_EMPTY
+        return None, None, None, HARD_CENTER_EMPTY, None, None
 
     p_src0 = _project_trend_to_xsec(
         anchor_xy=(float(src_anchor[0]), float(src_anchor[1])),
@@ -1674,7 +1701,7 @@ def _apply_endpoint_trend_projection(
         xsec=dst_xsec,
     )
     if p_src0 is None or p_dst0 is None:
-        return None, None, None, HARD_CENTER_EMPTY
+        return None, None, None, HARD_CENTER_EMPTY, None, None
 
     src_ref = _channel_ref_on_xsec(src_xsec=src_xsec, cross_points=src_channel_points)
     dst_ref = _channel_ref_on_xsec(src_xsec=dst_xsec, cross_points=dst_channel_points)
@@ -1705,33 +1732,60 @@ def _apply_endpoint_trend_projection(
         xsec_support_geom=dst_support,
     )
 
+    q_src = _nearest_point_on_line_xy(base_line, p_src)
+    q_dst = _nearest_point_on_line_xy(base_line, p_dst)
+    if q_src is None or q_dst is None:
+        return None, None, None, HARD_CENTER_EMPTY, None, None
+    proj_dist_src = float(math.hypot(float(p_src[0]) - float(q_src[0]), float(p_src[1]) - float(q_src[1])))
+    proj_dist_dst = float(math.hypot(float(p_dst[0]) - float(q_dst[0]), float(p_dst[1]) - float(q_dst[1])))
+
+    try:
+        s_src = float(base_line.project(Point(float(q_src[0]), float(q_src[1]))))
+        s_dst = float(base_line.project(Point(float(q_dst[0]), float(q_dst[1]))))
+    except Exception:
+        return None, None, None, HARD_CENTER_EMPTY, None, None
+    if abs(s_dst - s_src) < 1e-3:
+        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst
+    s0 = min(s_src, s_dst)
+    s1 = max(s_src, s_dst)
+    try:
+        core = substring(base_line, s0, s1)
+    except Exception:
+        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst
+    if core is None or core.is_empty or (not isinstance(core, LineString)) or len(core.coords) < 2:
+        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst
+    core = _orient_line(core, src_xsec, dst_xsec)
+    core_coords = list(core.coords)
+    if len(core_coords) < 2:
+        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst
+
     src_mid = _build_trend_midpoint(
         endpoint_xy=p_src,
-        anchor_xy=(float(src_anchor[0]), float(src_anchor[1])),
+        anchor_xy=(float(q_src[0]), float(q_src[1])),
         trend_xy=t_src,
         toward_start=True,
     )
     dst_mid = _build_trend_midpoint(
         endpoint_xy=p_dst,
-        anchor_xy=(float(dst_anchor[0]), float(dst_anchor[1])),
+        anchor_xy=(float(q_dst[0]), float(q_dst[1])),
         trend_xy=t_dst,
         toward_start=False,
     )
     coords: list[tuple[float, float]] = []
     coords.append((float(p_src[0]), float(p_src[1])))
     coords.append((float(src_mid[0]), float(src_mid[1])))
-    coords.append((float(src_anchor[0]), float(src_anchor[1])))
-    for i in range(i_src + 1, i_dst):
-        coords.append((float(sample_center_points[i, 0]), float(sample_center_points[i, 1])))
-    coords.append((float(dst_anchor[0]), float(dst_anchor[1])))
+    coords.append((float(q_src[0]), float(q_src[1])))
+    for c in core_coords[1:-1]:
+        coords.append((float(c[0]), float(c[1])))
+    coords.append((float(q_dst[0]), float(q_dst[1])))
     coords.append((float(dst_mid[0]), float(dst_mid[1])))
     coords.append((float(p_dst[0]), float(p_dst[1])))
     coords = _dedup_coords(coords, eps=1e-4)
     if len(coords) < 2:
-        return None, None, None, HARD_CENTER_EMPTY
+        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst
     line = LineString(coords)
     if line.is_empty or line.length <= 0:
-        return None, None, None, HARD_CENTER_EMPTY
+        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst
     line = _limit_vertices(line, road_max_vertices)
 
     p0 = Point(line.coords[0])
@@ -1739,12 +1793,12 @@ def _apply_endpoint_trend_projection(
     d0 = float(p0.distance(src_xsec))
     d1 = float(p1.distance(dst_xsec))
     if d0 > float(endpoint_tol_m) or d1 > float(endpoint_tol_m):
-        return None, None, None, HARD_ENDPOINT
+        return None, None, None, HARD_ENDPOINT, proj_dist_src, proj_dist_dst
 
     dev_src = _endpoint_tangent_deviation(line, trend_xy=t_src, at_start=True)
     dev_dst = _endpoint_tangent_deviation(line, trend_xy=t_dst, at_start=False)
 
-    return line, dev_src, dev_dst, None
+    return line, dev_src, dev_dst, None, proj_dist_src, proj_dist_dst
 
 
 def _fit_endpoint_trend(
@@ -2024,6 +2078,26 @@ def _project_trend_to_xsec(
     if xp_xy is None:
         return None
     return (float(xp_xy[0]), float(xp_xy[1]))
+
+
+def _nearest_point_on_line_xy(
+    line: LineString,
+    xy: tuple[float, float],
+) -> tuple[float, float] | None:
+    if line.is_empty or line.length <= 0:
+        return None
+    try:
+        s = float(line.project(Point(float(xy[0]), float(xy[1]))))
+    except Exception:
+        return None
+    try:
+        p = line.interpolate(s)
+    except Exception:
+        return None
+    p_xy = point_xy_safe(p, context="nearest_point_on_core")
+    if p_xy is None:
+        return None
+    return (float(p_xy[0]), float(p_xy[1]))
 
 
 def _pick_nearest_point_xy(geom: Any, *, ref_xy: tuple[float, float]) -> tuple[float, float] | None:
@@ -2584,6 +2658,7 @@ def _choose_shape_ref_with_graph(
     traj_surface_enforced: bool = False,
     outside_edge_ratio_max: float = 1.0,
     surface_node_buffer_m: float = 2.0,
+    divstrip_barrier_metric: BaseGeometry | None = None,
 ) -> _ShapeRefChoice:
     lb_diag: dict[str, Any] = {}
     lb_path = _build_lb_graph_path(
@@ -2597,6 +2672,7 @@ def _choose_shape_ref_with_graph(
         enforce_surface=bool(traj_surface_enforced),
         outside_edge_ratio_max=float(outside_edge_ratio_max),
         surface_node_buffer_m=float(surface_node_buffer_m),
+        divstrip_barrier_metric=divstrip_barrier_metric,
         diag_out=lb_diag,
     )
     if lb_path is not None and lb_path[0] is not None:
@@ -2718,6 +2794,7 @@ def _build_lb_graph_path(
     enforce_surface: bool = False,
     outside_edge_ratio_max: float = 1.0,
     surface_node_buffer_m: float = 2.0,
+    divstrip_barrier_metric: BaseGeometry | None = None,
     diag_out: dict[str, Any] | None = None,
 ) -> tuple[LineString, int] | None:
     if not lane_boundaries_metric:
@@ -2741,6 +2818,8 @@ def _build_lb_graph_path(
             surface_metric = traj_surface_metric.buffer(float(surface_node_buffer_m))
         except Exception:
             surface_metric = traj_surface_metric
+
+    barrier_metric = divstrip_barrier_metric
 
     def _snap_node(xy: tuple[float, float]) -> int:
         if not nodes_xy:
@@ -2771,6 +2850,14 @@ def _build_lb_graph_path(
             if seg_len <= 1e-6:
                 continue
             edge_total += 1
+            seg_geom = LineString([p0, p1])
+            if barrier_metric is not None and (not barrier_metric.is_empty):
+                try:
+                    if bool(seg_geom.intersects(barrier_metric)):
+                        edge_filtered += 1
+                        continue
+                except Exception:
+                    pass
             outside_len = 0.0
             if (
                 surface_metric is not None
@@ -2778,7 +2865,6 @@ def _build_lb_graph_path(
                 and (float(outside_lambda) > 0.0 or bool(enforce_surface))
             ):
                 try:
-                    seg_geom = LineString([p0, p1])
                     outside_len = float(seg_geom.difference(surface_metric).length)
                 except Exception:
                     outside_len = 0.0
@@ -3711,6 +3797,7 @@ __all__ = [
     "HARD_CENTER_EMPTY",
     "HARD_ENDPOINT",
     "HARD_BRIDGE_SEGMENT",
+    "HARD_DIVSTRIP_INTERSECT",
     "HARD_MULTI_ROAD",
     "HARD_NON_RC",
     "PairSupport",

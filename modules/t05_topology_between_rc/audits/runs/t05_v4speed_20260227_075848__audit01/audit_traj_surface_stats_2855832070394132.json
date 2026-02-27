@@ -1,0 +1,17 @@
+{
+  "patch_id": "2855832070394132",
+  "status": "missing_patch_output",
+  "source_patch_dir": null,
+  "all_candidate_patch_dirs": [],
+  "traj_surface_count": 0,
+  "traj_surface_bbox": null,
+  "traj_surface_area_m2": null,
+  "surf_covered_length_est_m": null,
+  "valid_slices": null,
+  "total_slices": null,
+  "slice_valid_ratio": null,
+  "covered_length_ratio": null,
+  "notes": [
+    "no_patch_output_dir_found"
+  ]
+}
