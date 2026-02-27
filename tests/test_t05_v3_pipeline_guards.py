@@ -47,7 +47,7 @@ def _mk_patch_inputs(
     )
 
 
-def _mk_center(line: LineString) -> CenterEstimate:
+def _mk_center(line: LineString, *, diagnostics: dict | None = None) -> CenterEstimate:
     return CenterEstimate(
         centerline_metric=line,
         shape_ref_metric=LineString([(0.0, 0.0), (210.0, 0.0)]),
@@ -83,7 +83,7 @@ def _mk_center(line: LineString) -> CenterEstimate:
         endpoint_proj_dist_to_core_m_dst=0.3,
         soft_flags=set(),
         hard_flags=set(),
-        diagnostics={},
+        diagnostics=dict(diagnostics or {}),
     )
 
 
@@ -102,6 +102,20 @@ def test_endpoint_projection_prefers_gore_free_xsec_piece() -> None:
     assert out_pt.distance(xsec) <= 1e-6
     assert not gore.contains(out_pt)
     assert out_xy[1] >= 2.0
+
+
+def test_endpoint_projection_marks_out_local_when_far_from_xsec() -> None:
+    xsec = LineString([(0.0, -8.0), (0.0, 8.0)])
+    out_xy, mode, _support_len = _project_endpoint_to_valid_xsec(
+        endpoint_xy=(0.0, 60.0),
+        xsec=xsec,
+        gore_zone_metric=None,
+        channel_ref_xy=None,
+        local_max_dist_m=10.0,
+    )
+    out_pt = Point(float(out_xy[0]), float(out_xy[1]))
+    assert out_pt.distance(xsec) <= 1e-6
+    assert str(mode).endswith("_out_local")
 
 
 def test_traj_surface_enforced_endpoint_outside_is_hard(tmp_path: Path) -> None:
@@ -407,6 +421,99 @@ def test_divstrip_intersection_is_hard(tmp_path: Path, monkeypatch) -> None:
     )
     reasons = {str(bp.get("reason")) for bp in out["hard_breakpoints"]}
     assert "ROAD_INTERSECTS_DIVSTRIP" in reasons
+
+
+def test_metrics_collect_offset_clamp_and_support_reason_stats(tmp_path: Path, monkeypatch) -> None:
+    xsecs = [
+        CrossSection(nodeid=1, geometry_metric=LineString([(0.0, -5.0), (0.0, 5.0)]), properties={"nodeid": 1}),
+        CrossSection(nodeid=2, geometry_metric=LineString([(60.0, -5.0), (60.0, 5.0)]), properties={"nodeid": 2}),
+    ]
+    patch_inputs = _mk_patch_inputs(tmp_path=tmp_path, intersection_lines=xsecs, trajectories=[])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t1"},
+        support_event_count=1,
+        repr_traj_ids=["t1"],
+    )
+    build_result = PairSupportBuildResult(
+        supports={(1, 2): support},
+        unresolved_events=[],
+        graph_node_count=0,
+        graph_edge_count=0,
+        stitch_candidate_count=0,
+        stitch_edge_count=0,
+        stitch_query_count=0,
+        stitch_candidates_total=0,
+        stitch_reject_dist_count=0,
+        stitch_reject_angle_count=0,
+        stitch_reject_forward_count=0,
+        stitch_accept_count=0,
+        stitch_levels_used_hist={},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "extract_crossing_events",
+        lambda *args, **kwargs: CrossingExtractResult(
+            events_by_traj={},
+            raw_hit_count=0,
+            dedup_drop_count=0,
+            n_cross_empty_skipped=0,
+            n_cross_geom_unexpected=0,
+            n_cross_distance_gate_reject=0,
+        ),
+    )
+    monkeypatch.setattr(pipeline, "build_pair_supports", lambda *args, **kwargs: build_result)
+    monkeypatch.setattr(
+        pipeline,
+        "infer_node_types",
+        lambda **kwargs: ({1: "unknown", 2: "unknown"}, {1: 0, 2: 0}, {1: 0, 2: 0}),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: _mk_center(
+            LineString([(0.0, 0.0), (30.0, 0.0), (60.0, 0.0)]),
+            diagnostics={
+                "offset_clamp_hit_ratio": 0.6,
+                "offset_clamp_fallback_count": 2,
+                "xsec_support_empty_reason_src": "xsec_support_empty",
+                "xsec_support_empty_reason_dst": "support_disabled_due_to_insufficient",
+                "endpoint_fallback_mode_src": "lb_path_guarded_fallback",
+                "endpoint_fallback_mode_dst": "channel_fallback",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: (
+            {
+                "traj_surface_enforced": False,
+                "traj_in_ratio": None,
+                "traj_in_ratio_est": None,
+                "endpoint_in_traj_surface_src": None,
+                "endpoint_in_traj_surface_dst": None,
+            },
+            set(),
+            set(),
+            [],
+        ),
+    )
+
+    out = pipeline._run_patch_core(
+        patch_inputs,
+        params=dict(pipeline.DEFAULT_PARAMS),
+        run_id="unit_run",
+        repo_root=tmp_path,
+    )
+    m = out["metrics_payload"]
+    assert m.get("offset_clamp_hit_ratio_p90") == 0.6
+    assert m.get("offset_clamp_fallback_count") == 2
+    assert m.get("xsec_support_empty_src_count") == 1
+    assert m.get("xsec_support_disabled_dst_count") == 1
+    src_hist = dict(m.get("endpoint_fallback_mode_src_hist") or {})
+    assert src_hist.get("lb_path_guarded_fallback") == 1
 
 
 def test_debug_surface_dump_keeps_polygon_geometry() -> None:
