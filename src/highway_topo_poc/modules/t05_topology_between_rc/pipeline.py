@@ -21,7 +21,9 @@ from .geometry import (
     HARD_ENDPOINT,
     HARD_ENDPOINT_OFF_ANCHOR,
     HARD_ENDPOINT_LOCAL,
+    HARD_MULTI_CORRIDOR,
     HARD_MULTI_ROAD,
+    HARD_NO_STRATEGY_MERGE_TO_DIVERGE,
     HARD_NON_RC,
     SOFT_LOW_SUPPORT,
     SOFT_NO_STABLE_SECTION,
@@ -65,6 +67,7 @@ from .metrics import (
     compute_confidence,
     params_digest,
 )
+from .step_utils import load_divstrip_buffer
 
 _ROAD_OUT_NAME = "Road.geojson"
 _ROAD_COMPAT_OUT_NAME = "RCSDRoad.geojson"
@@ -162,6 +165,19 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "XSEC_ROAD_EVIDENCE_RADIUS_M": 1.0,
     "XSEC_ROAD_MIN_GROUND_PTS": 1,
     "XSEC_ROAD_MIN_TRAJ_PTS": 1,
+    "XSEC_CORE_BAND_M": 20.0,
+    "XSEC_SHIFT_STEP_M": 5.0,
+    "XSEC_FALLBACK_SHORT_HALF_LEN_M": 15.0,
+    "XSEC_BARRIER_MIN_NG_COUNT": 2,
+    "XSEC_BARRIER_MIN_LEN_M": 4.0,
+    "XSEC_BARRIER_ALONG_LEN_M": 60.0,
+    "XSEC_BARRIER_ALONG_WIDTH_M": 2.5,
+    "XSEC_BARRIER_BIN_STEP_M": 2.0,
+    "XSEC_BARRIER_OCC_RATIO_MIN": 0.65,
+    "XSEC_ENDCAP_WINDOW_M": 60.0,
+    "XSEC_CASEB_PRE_M": 3.0,
+    "STEP1_MULTI_CORRIDOR_DIST_M": 8.0,
+    "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.60,
     "ENDPOINT_ON_XSEC_TOL_M": 1.0,
     "TOPK_INTERVALS": 20,
     "CONF_W1_SUPPORT": 0.4,
@@ -343,12 +359,10 @@ def _run_patch_core(
                 "hint": "DivStripZone.geojson_missing",
             }
         )
-    gore_zone_buffered_metric = patch_inputs.divstrip_zone_metric
-    if gore_zone_buffered_metric is not None and (not gore_zone_buffered_metric.is_empty):
-        try:
-            gore_zone_buffered_metric = gore_zone_buffered_metric.buffer(float(params["GORE_BUFFER_M"]))
-        except Exception:
-            gore_zone_buffered_metric = patch_inputs.divstrip_zone_metric
+    gore_zone_buffered_metric = load_divstrip_buffer(
+        patch_inputs.divstrip_zone_metric,
+        float(params["GORE_BUFFER_M"]),
+    )
 
     (
         xsec_cross_map,
@@ -641,7 +655,12 @@ def _run_patch_core(
         )
 
     with stage_timer.scope("t_load_pointcloud"):
-        points_xyz, pointcloud_stats = _load_surface_points(patch_inputs, supports, params)
+        points_xyz, non_ground_xy, pointcloud_stats = _load_surface_points(
+            patch_inputs,
+            supports,
+            params,
+            with_non_ground=True,
+        )
     gore_zone_metric = gore_zone_buffered_metric
 
     road_lines_metric: list[LineString] = []
@@ -653,6 +672,20 @@ def _run_patch_core(
         "traj_surface_best_boundary": [],
         "lb_path_best": [],
         "ref_axis_best": [],
+        "step1_corridor_centerline": [],
+        "step1_support_trajs": [],
+        "step1_seed_selected": [],
+        "step2_xsec_ref_src": [],
+        "step2_xsec_ref_dst": [],
+        "step2_xsec_ref_shifted_candidates_src": [],
+        "step2_xsec_ref_shifted_candidates_dst": [],
+        "step2_xsec_road_all_src": [],
+        "step2_xsec_road_all_dst": [],
+        "step2_xsec_road_selected_src": [],
+        "step2_xsec_road_selected_dst": [],
+        "step2_xsec_barrier_samples_src": [],
+        "step2_xsec_barrier_samples_dst": [],
+        "step3_endpoint_src_dst": [],
         "xsec_anchor_points": list(xsec_anchor_debug_items) if debug_enabled else [],
         "xsec_truncated": list(xsec_trunc_debug_items) if debug_enabled else [],
         "xsec_valid_src": [],
@@ -717,6 +750,87 @@ def _run_patch_core(
 
         src_type = node_type_map.get(src, "unknown")
         dst_type = node_type_map.get(dst, "unknown")
+        step1_corridor = _build_step1_corridor_for_pair(
+            support=support,
+            src_type=src_type,
+            dst_type=dst_type,
+            src_xsec=src_xsec.geometry_metric,
+            dst_xsec=dst_xsec.geometry_metric,
+            gore_zone_metric=gore_zone_metric,
+            params=params,
+        )
+        if debug_enabled:
+            shape_ref_dbg = step1_corridor.get("shape_ref_line")
+            if isinstance(shape_ref_dbg, LineString) and (not shape_ref_dbg.is_empty):
+                debug_layers["step1_corridor_centerline"].append(
+                    {
+                        "geometry": shape_ref_dbg,
+                        "properties": {
+                            "road_id": f"{src}_{dst}",
+                            "src_nodeid": int(src),
+                            "dst_nodeid": int(dst),
+                            "strategy": step1_corridor.get("strategy"),
+                        },
+                    }
+                )
+            for i, seg in enumerate(support.traj_segments):
+                if not isinstance(seg, LineString) or seg.is_empty:
+                    continue
+                tid = None
+                if i < len(support.evidence_traj_ids):
+                    tid = str(support.evidence_traj_ids[i])
+                debug_layers["step1_support_trajs"].append(
+                    {
+                        "geometry": seg,
+                        "properties": {
+                            "road_id": f"{src}_{dst}",
+                            "traj_id": tid,
+                            "gore_fallback_used": bool(step1_corridor.get("gore_fallback_used_src") or step1_corridor.get("gore_fallback_used_dst")),
+                        },
+                    }
+                )
+            for tag, pt in (
+                ("src", step1_corridor.get("cross_point_src")),
+                ("dst", step1_corridor.get("cross_point_dst")),
+            ):
+                if isinstance(pt, Point) and not pt.is_empty:
+                    debug_layers["step1_seed_selected"].append(
+                        {
+                            "geometry": pt,
+                            "properties": {
+                                "road_id": f"{src}_{dst}",
+                                "endpoint_tag": tag,
+                                "strategy": step1_corridor.get("strategy"),
+                            },
+                        }
+                    )
+        if step1_corridor.get("hard_reason"):
+            road = _make_base_road_record(
+                src=src,
+                dst=dst,
+                support=support,
+                src_type=src_type,
+                dst_type=dst_type,
+                neighbor_search_pass=int(neighbor_search_pass),
+            )
+            road["step1_strategy"] = step1_corridor.get("strategy")
+            road["step1_reason"] = step1_corridor.get("hard_reason")
+            road["gore_fallback_used_src"] = bool(step1_corridor.get("gore_fallback_used_src", False))
+            road["gore_fallback_used_dst"] = bool(step1_corridor.get("gore_fallback_used_dst", False))
+            road["hard_anomaly"] = True
+            road["hard_reasons"] = [str(step1_corridor.get("hard_reason"))]
+            road["soft_issue_flags"] = []
+            road["_geometry_metric"] = None
+            road_records.append(road)
+            hard_breakpoints.append(
+                build_breakpoint(
+                    road=road,
+                    reason=str(step1_corridor.get("hard_reason")),
+                    severity="hard",
+                    hint=str(step1_corridor.get("hard_hint") or "step1_corridor_rejected"),
+                )
+            )
+            continue
         cluster_ids = _select_cluster_candidates(support, max_clusters=3)
         candidate_roads: list[dict[str, Any]] = []
         cluster_inputs: list[tuple[int, PairSupport, dict[str, Any]]] = []
@@ -793,11 +907,17 @@ def _run_patch_core(
                 dst_in_degree=in_degree.get(dst, 0),
                 lane_boundaries_metric=patch_inputs.lane_boundaries_metric,
                 surface_points_xyz=points_xyz,
+                non_ground_xy=non_ground_xy,
                 patch_inputs=patch_inputs,
                 gore_zone_metric=gore_zone_metric,
                 params=params,
                 traj_surface_hint=surface_hint,
+                shape_ref_hint_metric=step1_corridor.get("shape_ref_line"),
             )
+            road_k["step1_strategy"] = step1_corridor.get("strategy")
+            road_k["step1_reason"] = step1_corridor.get("hard_reason")
+            road_k["gore_fallback_used_src"] = bool(step1_corridor.get("gore_fallback_used_src", False))
+            road_k["gore_fallback_used_dst"] = bool(step1_corridor.get("gore_fallback_used_dst", False))
             key_k = f"{src}_{dst}_k{int(cluster_id)}"
             stage_timer.add("t_build_lane_graph", float(road_k.get("_timing_lb_graph_ms", 0.0)))
             sp_ms = float(road_k.get("_timing_shortest_path_ms", 0.0))
@@ -997,6 +1117,15 @@ def _run_patch_core(
     xsec_support_empty_reason_dst_hist: dict[str, int] = {}
     endpoint_fallback_mode_src_hist: dict[str, int] = {}
     endpoint_fallback_mode_dst_hist: dict[str, int] = {}
+    xsec_selected_by_src_hist: dict[str, int] = {}
+    xsec_selected_by_dst_hist: dict[str, int] = {}
+    xsec_shift_used_vals: list[float] = []
+    xsec_mid_to_ref_vals: list[float] = []
+    xsec_ref_intersection_n_vals: list[float] = []
+    xsec_barrier_candidate_vals: list[float] = []
+    xsec_barrier_final_vals: list[float] = []
+    xsec_intersects_ref_true_count = 0
+    xsec_intersects_ref_total = 0
     traj_surface_enforced_count = 0
     traj_surface_insufficient_count = 0
     road_outside_traj_surface_count = 0
@@ -1164,6 +1293,62 @@ def _run_patch_core(
             reason = str(road.get(key) or "").strip()
             if reason:
                 target[reason] = int(target.get(reason, 0) + 1)
+        for key, target in (
+            ("xsec_road_selected_by_src", xsec_selected_by_src_hist),
+            ("xsec_road_selected_by_dst", xsec_selected_by_dst_hist),
+        ):
+            reason = str(road.get(key) or "").strip()
+            if reason:
+                target[reason] = int(target.get(reason, 0) + 1)
+        for k in (
+            "xsec_shift_used_m_src",
+            "xsec_shift_used_m_dst",
+        ):
+            v = road.get(k)
+            try:
+                fv = float(v)
+            except Exception:
+                fv = float("nan")
+            if np.isfinite(fv):
+                xsec_shift_used_vals.append(float(fv))
+        for k in (
+            "xsec_mid_to_ref_m_src",
+            "xsec_mid_to_ref_m_dst",
+        ):
+            v = road.get(k)
+            try:
+                fv = float(v)
+            except Exception:
+                fv = float("nan")
+            if np.isfinite(fv):
+                xsec_mid_to_ref_vals.append(float(fv))
+        for k in (
+            "xsec_ref_intersection_n_src",
+            "xsec_ref_intersection_n_dst",
+            "xsec_barrier_candidate_count_src",
+            "xsec_barrier_candidate_count_dst",
+            "xsec_barrier_final_count_src",
+            "xsec_barrier_final_count_dst",
+        ):
+            v = road.get(k)
+            try:
+                fv = float(v)
+            except Exception:
+                fv = float("nan")
+            if not np.isfinite(fv):
+                continue
+            if "ref_intersection_n" in k:
+                xsec_ref_intersection_n_vals.append(float(fv))
+            elif "barrier_candidate_count" in k:
+                xsec_barrier_candidate_vals.append(float(fv))
+            elif "barrier_final_count" in k:
+                xsec_barrier_final_vals.append(float(fv))
+        for k in ("xsec_intersects_ref_src", "xsec_intersects_ref_dst"):
+            if road.get(k) is None:
+                continue
+            xsec_intersects_ref_total += 1
+            if bool(road.get(k)):
+                xsec_intersects_ref_true_count += 1
         try:
             endcap_width_clamped_src_total += int(max(0, int(road.get("endcap_width_clamped_src_count", 0) or 0)))
         except Exception:
@@ -1321,6 +1506,27 @@ def _run_patch_core(
         if traj_in_ratio_est_vals
         else np.empty((0,), dtype=np.float64)
     )
+    xsec_shift_used_arr = (
+        np.asarray(xsec_shift_used_vals, dtype=np.float64) if xsec_shift_used_vals else np.empty((0,), dtype=np.float64)
+    )
+    xsec_mid_to_ref_arr = (
+        np.asarray(xsec_mid_to_ref_vals, dtype=np.float64) if xsec_mid_to_ref_vals else np.empty((0,), dtype=np.float64)
+    )
+    xsec_ref_intersection_n_arr = (
+        np.asarray(xsec_ref_intersection_n_vals, dtype=np.float64)
+        if xsec_ref_intersection_n_vals
+        else np.empty((0,), dtype=np.float64)
+    )
+    xsec_barrier_candidate_arr = (
+        np.asarray(xsec_barrier_candidate_vals, dtype=np.float64)
+        if xsec_barrier_candidate_vals
+        else np.empty((0,), dtype=np.float64)
+    )
+    xsec_barrier_final_arr = (
+        np.asarray(xsec_barrier_final_vals, dtype=np.float64)
+        if xsec_barrier_final_vals
+        else np.empty((0,), dtype=np.float64)
+    )
 
     return _finalize_payloads(
         run_id=run_id,
@@ -1476,6 +1682,8 @@ def _run_patch_core(
             ),
             "xsec_support_empty_reason_src_hist": dict(xsec_support_empty_reason_src_hist),
             "xsec_support_empty_reason_dst_hist": dict(xsec_support_empty_reason_dst_hist),
+            "xsec_selected_by_src_hist": dict(xsec_selected_by_src_hist),
+            "xsec_selected_by_dst_hist": dict(xsec_selected_by_dst_hist),
             "xsec_support_empty_src_count": int(xsec_support_empty_reason_src_hist.get("xsec_support_empty", 0)),
             "xsec_support_empty_dst_count": int(xsec_support_empty_reason_dst_hist.get("xsec_support_empty", 0)),
             "xsec_support_disabled_src_count": int(
@@ -1494,6 +1702,33 @@ def _run_patch_core(
             ),
             "offset_clamp_hit_ratio_max": (float(np.max(offset_clamp_hit_arr)) if offset_clamp_hit_arr.size > 0 else None),
             "offset_clamp_fallback_count": int(offset_clamp_fallback_total),
+            "xsec_shift_used_m_p90": (
+                float(np.percentile(xsec_shift_used_arr, 90.0)) if xsec_shift_used_arr.size > 0 else None
+            ),
+            "xsec_mid_to_ref_m_p90": (
+                float(np.percentile(xsec_mid_to_ref_arr, 90.0)) if xsec_mid_to_ref_arr.size > 0 else None
+            ),
+            "xsec_mid_to_ref_m_max": (float(np.max(xsec_mid_to_ref_arr)) if xsec_mid_to_ref_arr.size > 0 else None),
+            "xsec_intersects_ref_ratio": (
+                float(xsec_intersects_ref_true_count) / float(max(1, xsec_intersects_ref_total))
+                if xsec_intersects_ref_total > 0
+                else None
+            ),
+            "xsec_ref_intersection_n_p90": (
+                float(np.percentile(xsec_ref_intersection_n_arr, 90.0))
+                if xsec_ref_intersection_n_arr.size > 0
+                else None
+            ),
+            "xsec_barrier_candidate_count_p90": (
+                float(np.percentile(xsec_barrier_candidate_arr, 90.0))
+                if xsec_barrier_candidate_arr.size > 0
+                else None
+            ),
+            "xsec_barrier_final_count_p90": (
+                float(np.percentile(xsec_barrier_final_arr, 90.0))
+                if xsec_barrier_final_arr.size > 0
+                else None
+            ),
             "endpoint_anchor_dist_p90": (
                 float(np.percentile(endpoint_anchor_arr, 90.0)) if endpoint_anchor_arr.size > 0 else None
             ),
@@ -1523,22 +1758,30 @@ def _load_surface_points(
     patch_inputs: PatchInputs,
     supports: dict[tuple[int, int], PairSupport],
     params: dict[str, Any],
-) -> tuple[np.ndarray, dict[str, Any]]:
+    *,
+    with_non_ground: bool = False,
+) -> Any:
     stats: dict[str, Any] = {
         "pointcloud_cache_hit": False,
         "pointcloud_cache_key": None,
         "pointcloud_bbox_point_count": 0,
         "pointcloud_selected_point_count": 0,
+        "pointcloud_non_ground_selected_point_count": 0,
     }
     if patch_inputs.point_cloud_path is None:
+        if with_non_ground:
+            return np.empty((0, 3), dtype=np.float64), np.empty((0, 2), dtype=np.float64), stats
         return np.empty((0, 3), dtype=np.float64), stats
 
     bbox = _support_union_bbox(patch_inputs, supports, margin_m=float(params["XSEC_ACROSS_HALF_WINDOW_M"]) + 5.0)
     if bbox is None:
+        if with_non_ground:
+            return np.empty((0, 3), dtype=np.float64), np.empty((0, 2), dtype=np.float64), stats
         return np.empty((0, 3), dtype=np.float64), stats
 
     cache_enabled = bool(int(params.get("CACHE_ENABLED", 1)))
     cache_path: Path | None = None
+    cache_ng_path: Path | None = None
     cache_key: str | None = None
     if cache_enabled:
         try:
@@ -1551,26 +1794,41 @@ def _load_surface_points(
                 "point_cloud_mtime_ns": int(st.st_mtime_ns),
                 "bbox": [round(float(v), 3) for v in bbox],
                 "point_class_primary": int(params.get("POINT_CLASS_PRIMARY", 2)),
+                "point_class_non_ground": 1,
                 "point_class_fallback_any": int(params.get("POINT_CLASS_FALLBACK_ANY", 0)),
                 "max_points": 900_000,
             }
             cache_key = _stable_json_digest(cache_key_payload)
             cache_dir = patch_inputs.patch_dir / ".t05_cache" / "pointcloud"
             cache_path = cache_dir / f"ground_{cache_key}.npz"
-            if cache_path.is_file():
+            cache_ng_path = cache_dir / f"nonground_{cache_key}.npz" if with_non_ground else None
+            has_ng_cache = (cache_ng_path is not None and cache_ng_path.is_file()) if with_non_ground else True
+            if cache_path.is_file() and has_ng_cache:
                 with np.load(cache_path, allow_pickle=False) as zf:
                     xyz = np.asarray(zf["xyz"], dtype=np.float64)
-                    stats.update(
-                        {
-                            "pointcloud_cache_hit": True,
-                            "pointcloud_cache_key": cache_key,
-                            "pointcloud_bbox_point_count": int(zf["bbox_point_count"].item()),
-                            "pointcloud_selected_point_count": int(zf["selected_point_count"].item()),
-                        }
-                    )
+                    bbox_cnt = int(zf["bbox_point_count"].item())
+                    sel_cnt = int(zf["selected_point_count"].item())
+                ng_xy = np.empty((0, 2), dtype=np.float64)
+                ng_sel_cnt = 0
+                if with_non_ground and cache_ng_path is not None:
+                    with np.load(cache_ng_path, allow_pickle=False) as zng:
+                        ng_xy = np.asarray(zng["xy"], dtype=np.float64)
+                        ng_sel_cnt = int(zng["selected_point_count"].item())
+                stats.update(
+                    {
+                        "pointcloud_cache_hit": True,
+                        "pointcloud_cache_key": cache_key,
+                        "pointcloud_bbox_point_count": int(bbox_cnt),
+                        "pointcloud_selected_point_count": int(sel_cnt),
+                        "pointcloud_non_ground_selected_point_count": int(ng_sel_cnt),
+                    }
+                )
+                if with_non_ground:
+                    return xyz, ng_xy, stats
                 return xyz, stats
         except Exception:
             cache_path = None
+            cache_ng_path = None
 
     try:
         primary_cls = int(params.get("POINT_CLASS_PRIMARY", 2))
@@ -1592,6 +1850,28 @@ def _load_surface_points(
                 "pointcloud_selected_point_count": int(window.selected_point_count),
             }
         )
+        ng_xy = np.empty((0, 2), dtype=np.float64)
+        if with_non_ground:
+            try:
+                ng_window = load_point_cloud_window(
+                    patch_inputs.point_cloud_path,
+                    bbox_metric=bbox,
+                    allowed_classes=(1,),
+                    fallback_to_any_class=False,
+                    max_points=600_000,
+                )
+                ng_xy = np.asarray(ng_window.xyz_metric[:, :2], dtype=np.float64)
+                stats["pointcloud_non_ground_selected_point_count"] = int(ng_window.selected_point_count)
+            except InputDataError:
+                ng_xy = np.empty((0, 2), dtype=np.float64)
+            if ng_xy.ndim != 2 or ng_xy.shape[0] == 0:
+                ng_xy = np.empty((0, 2), dtype=np.float64)
+            elif ng_xy.shape[1] >= 2:
+                ng_xy = ng_xy[:, :2]
+                finite_ng = np.isfinite(ng_xy[:, 0]) & np.isfinite(ng_xy[:, 1])
+                ng_xy = ng_xy[finite_ng, :]
+            else:
+                ng_xy = np.empty((0, 2), dtype=np.float64)
         if cache_enabled and cache_path is not None:
             try:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1601,10 +1881,23 @@ def _load_surface_points(
                     bbox_point_count=np.asarray([int(window.bbox_point_count)], dtype=np.int64),
                     selected_point_count=np.asarray([int(window.selected_point_count)], dtype=np.int64),
                 )
+                if with_non_ground and cache_ng_path is not None:
+                    np.savez_compressed(
+                        cache_ng_path,
+                        xy=np.asarray(ng_xy, dtype=np.float64),
+                        selected_point_count=np.asarray(
+                            [int(stats.get("pointcloud_non_ground_selected_point_count", int(ng_xy.shape[0])))],
+                            dtype=np.int64,
+                        ),
+                    )
             except Exception:
                 pass
+        if with_non_ground:
+            return xyz, ng_xy, stats
         return xyz, stats
     except InputDataError:
+        if with_non_ground:
+            return np.empty((0, 3), dtype=np.float64), np.empty((0, 2), dtype=np.float64), stats
         return np.empty((0, 3), dtype=np.float64), stats
 
 
@@ -1657,6 +1950,125 @@ def _max_segment_detail(line: LineString) -> tuple[int | None, float | None]:
         return None, None
     idx = int(np.argmax(d))
     return idx, float(d[idx])
+
+
+def _choose_step1_cross_point(points: Sequence[Point], xsec: LineString) -> Point | None:
+    best: Point | None = None
+    best_d = float("inf")
+    for pt in points:
+        if not isinstance(pt, Point) or pt.is_empty:
+            continue
+        try:
+            d = float(pt.distance(xsec))
+        except Exception:
+            continue
+        if d < best_d:
+            best_d = d
+            best = pt
+    return best
+
+
+def _point_in_gore(pt: Point | None, gore_zone_metric: BaseGeometry | None) -> bool:
+    if pt is None or pt.is_empty or gore_zone_metric is None or gore_zone_metric.is_empty:
+        return False
+    p_xy = point_xy_safe(pt, context="step1_gore_check")
+    if p_xy is None:
+        return False
+    try:
+        return bool(
+            contains_xy(
+                gore_zone_metric,
+                np.asarray([float(p_xy[0])], dtype=np.float64),
+                np.asarray([float(p_xy[1])], dtype=np.float64),
+            ).item()
+        )
+    except Exception:
+        return False
+
+
+def _build_step1_corridor_for_pair(
+    *,
+    support: PairSupport,
+    src_type: str,
+    dst_type: str,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    gore_zone_metric: BaseGeometry | None,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "strategy": None,
+        "hard_reason": None,
+        "hard_hint": None,
+        "shape_ref_line": None,
+        "support_traj_ids": sorted({str(v) for v in support.support_traj_ids}),
+        "cross_point_src": _choose_step1_cross_point(support.src_cross_points, src_xsec),
+        "cross_point_dst": _choose_step1_cross_point(support.dst_cross_points, dst_xsec),
+        "gore_fallback_used_src": False,
+        "gore_fallback_used_dst": False,
+        "candidate_count": int(len(support.traj_segments)),
+        "candidate_topk": [],
+    }
+
+    if str(dst_type) == "diverge":
+        strategy = "dst_diverge_reverse_trace"
+        seed_xsec = dst_xsec
+    elif str(dst_type) == "merge" and str(src_type) == "merge":
+        strategy = "merge_to_merge_forward_trace"
+        seed_xsec = src_xsec
+    elif str(dst_type) == "merge" and str(src_type) == "diverge":
+        out["strategy"] = "unsupported"
+        out["hard_reason"] = HARD_NO_STRATEGY_MERGE_TO_DIVERGE
+        out["hard_hint"] = "dst=merge_src=diverge_no_strategy"
+        return out
+    else:
+        strategy = "generic_forward_trace"
+        seed_xsec = src_xsec
+
+    out["strategy"] = str(strategy)
+    segs = [s for s in support.traj_segments if isinstance(s, LineString) and (not s.is_empty) and s.length > 1.0]
+    if not segs:
+        out["strategy"] = f"{strategy}|fallback_no_traj"
+        out["hard_reason"] = None
+        out["hard_hint"] = "step1_corridor_empty_fallback"
+        return out
+    seed_pt = seed_xsec.interpolate(0.5, normalized=True) if seed_xsec.length > 0 else Point(0.0, 0.0)
+    ranked: list[tuple[float, float, int, LineString]] = []
+    for i, seg in enumerate(segs):
+        try:
+            d_seed = float(seg.distance(seed_pt))
+        except Exception:
+            d_seed = 1e9
+        ranked.append((d_seed, -float(seg.length), i, seg))
+    ranked.sort(key=lambda it: (float(it[0]), float(it[1]), int(it[2])))
+    topk = ranked[:3]
+    out["candidate_topk"] = [{"rank": int(i), "dist_to_seed_m": float(it[0]), "length_m": float(-it[1])} for i, it in enumerate(topk, start=1)]
+    multi_sep_m = float(max(1.0, params.get("STEP1_MULTI_CORRIDOR_DIST_M", 8.0)))
+    multi_ratio = float(max(0.0, min(1.0, params.get("STEP1_MULTI_CORRIDOR_MIN_RATIO", 0.60))))
+    if len(topk) >= 2 and int(max(1, support.cluster_count)) > 1 and float(support.main_cluster_ratio) < multi_ratio:
+        mids: list[tuple[float, float]] = []
+        for _, _, _, seg in topk:
+            mid = seg.interpolate(0.5, normalized=True)
+            mid_xy = point_xy_safe(mid, context="step1_corridor_mid")
+            if mid_xy is not None:
+                mids.append((float(mid_xy[0]), float(mid_xy[1])))
+        if len(mids) >= 2:
+            arr = np.asarray(mids, dtype=np.float64)
+            dm = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=2)
+            sep = float(np.max(dm))
+            if sep > multi_sep_m:
+                out["hard_reason"] = HARD_MULTI_CORRIDOR
+                out["hard_hint"] = (
+                    f"cluster_count={int(support.cluster_count)};"
+                    f"main_cluster_ratio={float(support.main_cluster_ratio):.3f};"
+                    f"corridor_sep_m={sep:.3f}"
+                )
+                return out
+    picked = topk[0][3]
+    out["shape_ref_line"] = _orient_axis_line(picked, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    out["gore_fallback_used_src"] = _point_in_gore(out["cross_point_src"], gore_zone_metric)
+    out["gore_fallback_used_dst"] = _point_in_gore(out["cross_point_dst"], gore_zone_metric)
+    return out
 
 
 def _fallback_geometry_from_shape_ref(
@@ -3147,10 +3559,12 @@ def _evaluate_candidate_road(
     dst_in_degree: int,
     lane_boundaries_metric: Sequence[LineString],
     surface_points_xyz: np.ndarray,
+    non_ground_xy: np.ndarray,
     patch_inputs: PatchInputs,
     gore_zone_metric: BaseGeometry | None,
     params: dict[str, Any],
     traj_surface_hint: dict[str, Any],
+    shape_ref_hint_metric: LineString | None = None,
 ) -> dict[str, Any]:
     t0_center = perf_counter()
     center = estimate_centerline(
@@ -3197,6 +3611,17 @@ def _evaluate_candidate_road(
         xsec_road_evidence_radius_m=float(params.get("XSEC_ROAD_EVIDENCE_RADIUS_M", 1.0)),
         xsec_road_min_ground_pts=int(params.get("XSEC_ROAD_MIN_GROUND_PTS", 1)),
         xsec_road_min_traj_pts=int(params.get("XSEC_ROAD_MIN_TRAJ_PTS", 1)),
+        xsec_core_band_m=float(params.get("XSEC_CORE_BAND_M", 20.0)),
+        xsec_shift_step_m=float(params.get("XSEC_SHIFT_STEP_M", 5.0)),
+        xsec_fallback_short_half_len_m=float(params.get("XSEC_FALLBACK_SHORT_HALF_LEN_M", 15.0)),
+        xsec_barrier_min_ng_count=int(params.get("XSEC_BARRIER_MIN_NG_COUNT", 2)),
+        xsec_barrier_min_len_m=float(params.get("XSEC_BARRIER_MIN_LEN_M", 4.0)),
+        xsec_barrier_along_len_m=float(params.get("XSEC_BARRIER_ALONG_LEN_M", 60.0)),
+        xsec_barrier_along_width_m=float(params.get("XSEC_BARRIER_ALONG_WIDTH_M", 2.5)),
+        xsec_barrier_bin_step_m=float(params.get("XSEC_BARRIER_BIN_STEP_M", 2.0)),
+        xsec_barrier_occ_ratio_min=float(params.get("XSEC_BARRIER_OCC_RATIO_MIN", 0.65)),
+        xsec_endcap_window_m=float(params.get("XSEC_ENDCAP_WINDOW_M", 60.0)),
+        xsec_caseb_pre_m=float(params.get("XSEC_CASEB_PRE_M", 3.0)),
         d_min=float(params["D_MIN"]),
         d_max=float(params["D_MAX"]),
         near_len=float(params["NEAR_LEN"]),
@@ -3208,6 +3633,8 @@ def _evaluate_candidate_road(
         r_gore=float(params["R_GORE"]),
         transition_m=float(params["TRANSITION_M"]),
         stable_fallback_m=float(params["STABLE_FALLBACK_M"]),
+        non_ground_xy=non_ground_xy,
+        shape_ref_hint_metric=shape_ref_hint_metric,
     )
     t_center_ms = float((perf_counter() - t0_center) * 1000.0)
 
@@ -3261,6 +3688,20 @@ def _evaluate_candidate_road(
     road["xsec_target_mode_dst"] = center.diagnostics.get("xsec_target_mode_dst")
     road["xsec_road_selected_by_src"] = center.diagnostics.get("xsec_road_selected_by_src")
     road["xsec_road_selected_by_dst"] = center.diagnostics.get("xsec_road_selected_by_dst")
+    road["xsec_selected_by_src"] = road["xsec_road_selected_by_src"]
+    road["xsec_selected_by_dst"] = road["xsec_road_selected_by_dst"]
+    road["xsec_shift_used_m_src"] = center.diagnostics.get("xsec_shift_used_m_src")
+    road["xsec_shift_used_m_dst"] = center.diagnostics.get("xsec_shift_used_m_dst")
+    road["xsec_mid_to_ref_m_src"] = center.diagnostics.get("xsec_mid_to_ref_m_src")
+    road["xsec_mid_to_ref_m_dst"] = center.diagnostics.get("xsec_mid_to_ref_m_dst")
+    road["xsec_intersects_ref_src"] = center.diagnostics.get("xsec_intersects_ref_src")
+    road["xsec_intersects_ref_dst"] = center.diagnostics.get("xsec_intersects_ref_dst")
+    road["xsec_ref_intersection_n_src"] = center.diagnostics.get("xsec_ref_intersection_n_src")
+    road["xsec_ref_intersection_n_dst"] = center.diagnostics.get("xsec_ref_intersection_n_dst")
+    road["xsec_barrier_candidate_count_src"] = center.diagnostics.get("xsec_barrier_candidate_count_src")
+    road["xsec_barrier_candidate_count_dst"] = center.diagnostics.get("xsec_barrier_candidate_count_dst")
+    road["xsec_barrier_final_count_src"] = center.diagnostics.get("xsec_barrier_final_count_src")
+    road["xsec_barrier_final_count_dst"] = center.diagnostics.get("xsec_barrier_final_count_dst")
     road["xsec_road_selected_len_src_m"] = center.diagnostics.get("xsec_road_selected_len_src_m")
     road["xsec_road_selected_len_dst_m"] = center.diagnostics.get("xsec_road_selected_len_dst_m")
     road["xsec_road_all_geom_type_src"] = center.diagnostics.get("xsec_road_all_geom_type_src")
@@ -3301,6 +3742,10 @@ def _evaluate_candidate_road(
     road["_xsec_road_all_dst_metric"] = center.diagnostics.get("_xsec_road_all_dst_metric")
     road["_xsec_road_selected_src_metric"] = center.diagnostics.get("_xsec_road_selected_src_metric")
     road["_xsec_road_selected_dst_metric"] = center.diagnostics.get("_xsec_road_selected_dst_metric")
+    road["_xsec_ref_shifted_candidates_src_metric"] = center.diagnostics.get("_xsec_ref_shifted_candidates_src_metric")
+    road["_xsec_ref_shifted_candidates_dst_metric"] = center.diagnostics.get("_xsec_ref_shifted_candidates_dst_metric")
+    road["_xsec_barrier_samples_src_metric"] = center.diagnostics.get("_xsec_barrier_samples_src_metric")
+    road["_xsec_barrier_samples_dst_metric"] = center.diagnostics.get("_xsec_barrier_samples_dst_metric")
     road["_endpoint_before_src_metric"] = center.diagnostics.get("_endpoint_before_src_metric")
     road["_endpoint_before_dst_metric"] = center.diagnostics.get("_endpoint_before_dst_metric")
     road["_endpoint_after_src_metric"] = center.diagnostics.get("_endpoint_after_src_metric")
@@ -3671,9 +4116,14 @@ def _collect_debug_layers_for_selected(
     xsec_road_all_dst = road.get("_xsec_road_all_dst_metric")
     xsec_road_sel_src = road.get("_xsec_road_selected_src_metric")
     xsec_road_sel_dst = road.get("_xsec_road_selected_dst_metric")
+    xsec_ref_shifted_src = road.get("_xsec_ref_shifted_candidates_src_metric")
+    xsec_ref_shifted_dst = road.get("_xsec_ref_shifted_candidates_dst_metric")
+    xsec_barrier_samples_src = road.get("_xsec_barrier_samples_src_metric")
+    xsec_barrier_samples_dst = road.get("_xsec_barrier_samples_dst_metric")
 
     for ls in _iter_line_parts(xsec_ref_src):
         debug_layers["xsec_ref_src"].append({"geometry": ls, "properties": {"road_id": road_id}})
+        debug_layers["step2_xsec_ref_src"].append({"geometry": ls, "properties": {"road_id": road_id}})
         try:
             mid = ls.interpolate(0.5, normalized=True)
         except Exception:
@@ -3682,12 +4132,38 @@ def _collect_debug_layers_for_selected(
             debug_layers["xsec_anchor_mid_src"].append({"geometry": mid, "properties": {"road_id": road_id}})
     for ls in _iter_line_parts(xsec_ref_dst):
         debug_layers["xsec_ref_dst"].append({"geometry": ls, "properties": {"road_id": road_id}})
+        debug_layers["step2_xsec_ref_dst"].append({"geometry": ls, "properties": {"road_id": road_id}})
         try:
             mid = ls.interpolate(0.5, normalized=True)
         except Exception:
             mid = None
         if isinstance(mid, Point) and not mid.is_empty:
             debug_layers["xsec_anchor_mid_dst"].append({"geometry": mid, "properties": {"road_id": road_id}})
+
+    if isinstance(xsec_ref_shifted_src, list):
+        for item in xsec_ref_shifted_src:
+            if not isinstance(item, tuple) or len(item) != 2:
+                continue
+            geom, shift_m = item
+            for ls in _iter_line_parts(geom):
+                debug_layers["step2_xsec_ref_shifted_candidates_src"].append(
+                    {
+                        "geometry": ls,
+                        "properties": {"road_id": road_id, "shift_m": shift_m},
+                    }
+                )
+    if isinstance(xsec_ref_shifted_dst, list):
+        for item in xsec_ref_shifted_dst:
+            if not isinstance(item, tuple) or len(item) != 2:
+                continue
+            geom, shift_m = item
+            for ls in _iter_line_parts(geom):
+                debug_layers["step2_xsec_ref_shifted_candidates_dst"].append(
+                    {
+                        "geometry": ls,
+                        "properties": {"road_id": road_id, "shift_m": shift_m},
+                    }
+                )
 
     for ls in _iter_line_parts(xsec_road_all_src):
         debug_layers["xsec_road_all_src"].append(
@@ -3697,6 +4173,16 @@ def _collect_debug_layers_for_selected(
                     "road_id": road_id,
                     "selected_by": road.get("xsec_road_selected_by_src"),
                     "geom_type": road.get("xsec_road_all_geom_type_src"),
+                },
+            }
+        )
+        debug_layers["step2_xsec_road_all_src"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "selected_by": road.get("xsec_road_selected_by_src"),
+                    "shift_used": road.get("xsec_shift_used_m_src"),
                 },
             }
         )
@@ -3711,6 +4197,16 @@ def _collect_debug_layers_for_selected(
                 },
             }
         )
+        debug_layers["step2_xsec_road_all_dst"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "selected_by": road.get("xsec_road_selected_by_dst"),
+                    "shift_used": road.get("xsec_shift_used_m_dst"),
+                },
+            }
+        )
     for ls in _iter_line_parts(xsec_road_sel_src):
         debug_layers["xsec_road_selected_src"].append(
             {
@@ -3718,6 +4214,17 @@ def _collect_debug_layers_for_selected(
                 "properties": {
                     "road_id": road_id,
                     "selected_by": road.get("xsec_road_selected_by_src"),
+                },
+            }
+        )
+        debug_layers["step2_xsec_road_selected_src"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "selected_by": road.get("xsec_road_selected_by_src"),
+                    "shift_used": road.get("xsec_shift_used_m_src"),
+                    "mid_to_ref_m": road.get("xsec_mid_to_ref_m_src"),
                 },
             }
         )
@@ -3731,6 +4238,56 @@ def _collect_debug_layers_for_selected(
                 },
             }
         )
+        debug_layers["step2_xsec_road_selected_dst"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "selected_by": road.get("xsec_road_selected_by_dst"),
+                    "shift_used": road.get("xsec_shift_used_m_dst"),
+                    "mid_to_ref_m": road.get("xsec_mid_to_ref_m_dst"),
+                },
+            }
+        )
+
+    if isinstance(xsec_barrier_samples_src, list):
+        for smp in xsec_barrier_samples_src:
+            if not isinstance(smp, dict):
+                continue
+            xy = smp.get("xy")
+            if not (isinstance(xy, tuple) and len(xy) == 2):
+                continue
+            debug_layers["step2_xsec_barrier_samples_src"].append(
+                {
+                    "geometry": Point(float(xy[0]), float(xy[1])),
+                    "properties": {
+                        "road_id": road_id,
+                        "ng_count": smp.get("ng_count"),
+                        "occupancy_ratio": smp.get("occupancy_ratio"),
+                        "barrier_candidate": smp.get("barrier_candidate"),
+                        "barrier_final": smp.get("barrier_final"),
+                    },
+                }
+            )
+    if isinstance(xsec_barrier_samples_dst, list):
+        for smp in xsec_barrier_samples_dst:
+            if not isinstance(smp, dict):
+                continue
+            xy = smp.get("xy")
+            if not (isinstance(xy, tuple) and len(xy) == 2):
+                continue
+            debug_layers["step2_xsec_barrier_samples_dst"].append(
+                {
+                    "geometry": Point(float(xy[0]), float(xy[1])),
+                    "properties": {
+                        "road_id": road_id,
+                        "ng_count": smp.get("ng_count"),
+                        "occupancy_ratio": smp.get("occupancy_ratio"),
+                        "barrier_candidate": smp.get("barrier_candidate"),
+                        "barrier_final": smp.get("barrier_final"),
+                    },
+                }
+            )
 
     src_support = None
     dst_support = None
@@ -3810,6 +4367,21 @@ def _collect_debug_layers_for_selected(
                     "properties": {
                         "road_id": road_id,
                         "tag": tag,
+                    },
+                }
+            )
+    for tag, geom, dist_v in (
+        ("src", road.get("_endpoint_after_src_metric"), road.get("endpoint_dist_to_xsec_src_m")),
+        ("dst", road.get("_endpoint_after_dst_metric"), road.get("endpoint_dist_to_xsec_dst_m")),
+    ):
+        if isinstance(geom, Point) and not geom.is_empty:
+            debug_layers["step3_endpoint_src_dst"].append(
+                {
+                    "geometry": geom,
+                    "properties": {
+                        "road_id": road_id,
+                        "endpoint_tag": tag,
+                        "dist_to_xsec": dist_v,
                     },
                 }
             )
@@ -4200,6 +4772,20 @@ def _make_base_road_record(
         "xsec_target_mode_dst": None,
         "xsec_road_selected_by_src": None,
         "xsec_road_selected_by_dst": None,
+        "xsec_selected_by_src": None,
+        "xsec_selected_by_dst": None,
+        "xsec_shift_used_m_src": None,
+        "xsec_shift_used_m_dst": None,
+        "xsec_mid_to_ref_m_src": None,
+        "xsec_mid_to_ref_m_dst": None,
+        "xsec_intersects_ref_src": None,
+        "xsec_intersects_ref_dst": None,
+        "xsec_ref_intersection_n_src": None,
+        "xsec_ref_intersection_n_dst": None,
+        "xsec_barrier_candidate_count_src": None,
+        "xsec_barrier_candidate_count_dst": None,
+        "xsec_barrier_final_count_src": None,
+        "xsec_barrier_final_count_dst": None,
         "xsec_road_selected_len_src_m": None,
         "xsec_road_selected_len_dst_m": None,
         "xsec_road_all_geom_type_src": None,
@@ -4231,6 +4817,10 @@ def _make_base_road_record(
         "lb_path_length_m": None,
         "traj_surface_hint_axis_source": None,
         "traj_surface_hint_reason": None,
+        "step1_strategy": None,
+        "step1_reason": None,
+        "gore_fallback_used_src": False,
+        "gore_fallback_used_dst": False,
         "repr_traj_ids": repr_ids,
         "stitch_hops_p50": stitch_p50,
         "stitch_hops_p90": stitch_p90,
@@ -4259,6 +4849,8 @@ def _stitch_stats(values: Sequence[int]) -> tuple[int, int, int]:
 
 def _reason_hint(reason: str) -> str:
     hints = {
+        HARD_MULTI_CORRIDOR: "multiple_step1_corridors_detected",
+        HARD_NO_STRATEGY_MERGE_TO_DIVERGE: "merge_to_diverge_not_supported",
         HARD_MULTI_ROAD: "pair_has_multiple_channel_clusters",
         HARD_NON_RC: "non_rc_node_used_in_pair",
         HARD_CENTER_EMPTY: "centerline_generation_failed",
@@ -4369,6 +4961,12 @@ def _finalize_payloads(
                 or sk.startswith("xsec_support_")
                 or sk.startswith("xsec_target_")
                 or sk.startswith("xsec_road_")
+                or sk.startswith("xsec_shift_")
+                or sk.startswith("xsec_mid_")
+                or sk.startswith("xsec_intersects_")
+                or sk.startswith("xsec_ref_intersection_")
+                or sk.startswith("xsec_barrier_")
+                or sk.startswith("xsec_selected_by_")
                 or sk.startswith("xsec_trunc")
                 or sk.startswith("xsec_truncated")
                 or sk.startswith("offset_clamp_")
@@ -4402,6 +5000,20 @@ def _finalize_payloads(
     debug_feature_collections: dict[str, dict[str, Any]] = {}
     if debug_layers:
         always_emit_empty = {
+            "step1_corridor_centerline",
+            "step1_support_trajs",
+            "step1_seed_selected",
+            "step2_xsec_ref_src",
+            "step2_xsec_ref_dst",
+            "step2_xsec_ref_shifted_candidates_src",
+            "step2_xsec_ref_shifted_candidates_dst",
+            "step2_xsec_road_all_src",
+            "step2_xsec_road_all_dst",
+            "step2_xsec_road_selected_src",
+            "step2_xsec_road_selected_dst",
+            "step2_xsec_barrier_samples_src",
+            "step2_xsec_barrier_samples_dst",
+            "step3_endpoint_src_dst",
             "xsec_support_src",
             "xsec_support_dst",
             "xsec_ref_src",
