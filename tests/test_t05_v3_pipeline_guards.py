@@ -91,7 +91,7 @@ def test_endpoint_projection_prefers_gore_free_xsec_piece() -> None:
     xsec = LineString([(0.0, -8.0), (0.0, 8.0)])
     gore = Polygon([(-1.0, -2.0), (1.0, -2.0), (1.0, 2.0), (-1.0, 2.0)])
 
-    out_xy = _project_endpoint_to_valid_xsec(
+    out_xy, _mode, _support_len = _project_endpoint_to_valid_xsec(
         endpoint_xy=(0.0, 0.0),
         xsec=xsec,
         gore_zone_metric=gore,
@@ -414,6 +414,7 @@ def test_debug_surface_dump_keeps_polygon_geometry() -> None:
         "traj_surface_best_polygon": [],
         "traj_surface_best_boundary": [],
         "lb_path_best": [],
+        "ref_axis_best": [],
         "xsec_valid_src": [],
         "xsec_valid_dst": [],
         "xsec_support_src": [],
@@ -472,3 +473,67 @@ def test_traj_surface_builder_outputs_polygon_and_histogram() -> None:
     assert float(built.get("covered_length_ratio", 0.0)) > 0.9
     hist = dict(built.get("slice_half_win_used_hist") or {})
     assert len(hist) >= 1
+
+
+def test_traj_surface_builder_endcap_clamp_limits_width() -> None:
+    ref_line = LineString([(0.0, 0.0), (200.0, 0.0)])
+    xs_mid = np.linspace(30.0, 170.0, 180)
+    xs_src = np.linspace(0.0, 25.0, 40)
+    xs_dst = np.linspace(175.0, 200.0, 40)
+    mid_pts = np.vstack(
+        (
+            np.column_stack((xs_mid, np.full_like(xs_mid, -2.0))),
+            np.column_stack((xs_mid, np.full_like(xs_mid, 2.0))),
+        )
+    )
+    # 两端混入远离主通道的点，模拟端帽爆宽污染。
+    src_noise = np.column_stack((np.repeat(xs_src, 2), np.tile(np.asarray([-120.0, 120.0]), xs_src.size)))
+    dst_noise = np.column_stack((np.repeat(xs_dst, 2), np.tile(np.asarray([-120.0, 120.0]), xs_dst.size)))
+    traj_xy = np.vstack((mid_pts, src_noise, dst_noise)).astype(np.float64)
+
+    params = dict(pipeline.DEFAULT_PARAMS)
+    params.update(
+        {
+            "SURF_SLICE_STEP_M": 5.0,
+            "SURF_SLICE_HALF_WIN_M": 2.0,
+            "SURF_SLICE_HALF_WIN_LEVELS_M": [2.0, 5.0, 10.0],
+            "TRAJ_SURF_MIN_POINTS_PER_SLICE": 5,
+            "AXIS_MAX_PROJECT_DIST_M": 200.0,
+            "ENDCAP_M": 30.0,
+            "ENDCAP_WIDTH_ABS_CAP_M": 40.0,
+            "ENDCAP_WIDTH_REL_CAP": 2.0,
+        }
+    )
+    built = pipeline._build_traj_surface_from_refline(
+        ref_line=ref_line,
+        traj_xy=traj_xy,
+        gore_zone_metric=None,
+        params=params,
+    )
+    assert float(built.get("endcap_width_src_before_m") or 0.0) > 40.0
+    assert float(built.get("endcap_width_src_after_m") or 0.0) <= 40.0 + 1e-6
+    assert int(built.get("endcap_width_clamped_src_count") or 0) > 0
+
+
+def test_finalize_payloads_emits_empty_xsec_support_layers(tmp_path: Path) -> None:
+    payload = pipeline._finalize_payloads(
+        run_id="unit_run",
+        repo_root=tmp_path,
+        patch_id="unit_patch",
+        roads=[],
+        road_lines_metric=[],
+        road_feature_props=[],
+        hard_breakpoints=[],
+        soft_breakpoints=[],
+        params=dict(pipeline.DEFAULT_PARAMS),
+        overall_pass=True,
+        debug_layers={
+            "xsec_support_src": [],
+            "xsec_support_dst": [],
+        },
+    )
+    debug_fc = payload.get("debug_feature_collections") or {}
+    assert "debug/xsec_support_src.geojson" in debug_fc
+    assert "debug/xsec_support_dst.geojson" in debug_fc
+    assert debug_fc["debug/xsec_support_src.geojson"]["features"] == []
+    assert debug_fc["debug/xsec_support_dst.geojson"]["features"] == []

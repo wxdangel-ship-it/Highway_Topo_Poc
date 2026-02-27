@@ -67,6 +67,7 @@ _ROAD_COMPAT_OUT_NAME = "RCSDRoad.geojson"
 _SOFT_CROSS_EMPTY_SKIPPED = "CROSS_EMPTY_SKIPPED"
 _SOFT_CROSS_GEOM_UNEXPECTED = "CROSS_GEOM_UNEXPECTED"
 _SOFT_CROSS_DISTANCE_GATE_REJECT = "CROSS_DISTANCE_GATE_REJECT"
+_SOFT_ENDCAP_WIDTH_CLAMPED = "ENDCAP_WIDTH_CLAMPED"
 _HARD_NO_ADJACENT_PAIR_AFTER_PASS2 = "NO_ADJACENT_PAIR_AFTER_PASS2"
 
 
@@ -128,6 +129,11 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "SURF_SLICE_STEP_M": 5.0,
     "SURF_SLICE_HALF_WIN_M": 2.0,
     "SURF_SLICE_HALF_WIN_LEVELS_M": [2.0, 5.0, 10.0],
+    "AXIS_MAX_PROJECT_DIST_M": 20.0,
+    "ENDCAP_M": 30.0,
+    "ENDCAP_MIN_VALID_RATIO": 0.50,
+    "ENDCAP_WIDTH_ABS_CAP_M": 40.0,
+    "ENDCAP_WIDTH_REL_CAP": 2.0,
     "SURF_QUANT_LOW": 0.02,
     "SURF_QUANT_HIGH": 0.98,
     "SURF_BUF_M": 1.0,
@@ -137,6 +143,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "TRAJ_SURF_MIN_SLICE_VALID_RATIO": 0.60,
     "TRAJ_SURF_MIN_COVERED_LEN_RATIO": 0.70,
     "TRAJ_SURF_MIN_UNIQUE_TRAJ": 2,
+    "XSEC_ANCHOR_WINDOW_M": 15.0,
+    "XSEC_ENDPOINT_MAX_DIST_M": 20.0,
     "ENDPOINT_ON_XSEC_TOL_M": 1.0,
     "TOPK_INTERVALS": 20,
     "CONF_W1_SUPPORT": 0.4,
@@ -579,6 +587,7 @@ def _run_patch_core(
         "traj_surface_best_polygon": [],
         "traj_surface_best_boundary": [],
         "lb_path_best": [],
+        "ref_axis_best": [],
         "xsec_valid_src": [],
         "xsec_valid_dst": [],
         "xsec_support_src": [],
@@ -834,7 +843,9 @@ def _run_patch_core(
     if hard_breakpoints:
         overall_pass = False
 
-    # Endpoint gate hard-check（对成功出图的路再次校验）
+    # v6: intersection_l 作为锚点窗口，不再要求端点精确落线，仅做邻域诊断统计。
+    endpoint_anchor_dist_vals: list[float] = []
+    endpoint_anchor_max_dist = float(params.get("XSEC_ENDPOINT_MAX_DIST_M", 20.0))
     for road in road_records:
         geom = road.get("_geometry_metric")
         if not isinstance(geom, LineString):
@@ -844,14 +855,19 @@ def _run_patch_core(
         src_x = xsec_map.get(src)
         dst_x = xsec_map.get(dst)
         if src_x is None or dst_x is None:
-            overall_pass = False
             continue
-
         p0 = Point(geom.coords[0])
         p1 = Point(geom.coords[-1])
         d0 = float(p0.distance(src_x.geometry_metric))
         d1 = float(p1.distance(dst_x.geometry_metric))
-        if d0 > float(params["ENDPOINT_ON_XSEC_TOL_M"]) or d1 > float(params["ENDPOINT_ON_XSEC_TOL_M"]):
+        road["endpoint_anchor_dist_src_m"] = float(d0)
+        road["endpoint_anchor_dist_dst_m"] = float(d1)
+        if np.isfinite(d0):
+            endpoint_anchor_dist_vals.append(float(d0))
+        if np.isfinite(d1):
+            endpoint_anchor_dist_vals.append(float(d1))
+        # 仅在明显跑飞时标记总体失败（避免 intersection_l 精度误差造成误报）。
+        if d0 > float(endpoint_anchor_max_dist) * 3.0 or d1 > float(endpoint_anchor_max_dist) * 3.0:
             overall_pass = False
 
     endpoint_vals: list[float] = []
@@ -864,6 +880,15 @@ def _run_patch_core(
     traj_surface_area_vals: list[float] = []
     traj_surface_cov_vals: list[float] = []
     traj_surface_valid_ratio_vals: list[float] = []
+    traj_surface_covered_station_len_vals: list[float] = []
+    endcap_valid_ratio_src_vals: list[float] = []
+    endcap_valid_ratio_dst_vals: list[float] = []
+    endcap_width_src_before_vals: list[float] = []
+    endcap_width_src_after_vals: list[float] = []
+    endcap_width_dst_before_vals: list[float] = []
+    endcap_width_dst_after_vals: list[float] = []
+    xsec_support_len_src_vals: list[float] = []
+    xsec_support_len_dst_vals: list[float] = []
     traj_in_ratio_vals: list[float] = []
     traj_in_ratio_est_vals: list[float] = []
     traj_surface_enforced_count = 0
@@ -873,6 +898,8 @@ def _run_patch_core(
     expanded_end_count = 0
     gore_tip_end_count = 0
     fallback_end_count = 0
+    endcap_width_clamped_src_total = 0
+    endcap_width_clamped_dst_total = 0
     for road in road_records:
         for k in ("endpoint_center_offset_m_src", "endpoint_center_offset_m_dst"):
             v = road.get(k)
@@ -953,6 +980,38 @@ def _run_patch_core(
             f_surf_valid = float("nan")
         if np.isfinite(f_surf_valid):
             traj_surface_valid_ratio_vals.append(float(f_surf_valid))
+        v_cov_len_m = road.get("traj_surface_covered_station_length_m")
+        try:
+            f_cov_len_m = float(v_cov_len_m)
+        except Exception:
+            f_cov_len_m = float("nan")
+        if np.isfinite(f_cov_len_m):
+            traj_surface_covered_station_len_vals.append(float(f_cov_len_m))
+        for k, target in (
+            ("endcap_valid_ratio_src", endcap_valid_ratio_src_vals),
+            ("endcap_valid_ratio_dst", endcap_valid_ratio_dst_vals),
+            ("endcap_width_src_before_m", endcap_width_src_before_vals),
+            ("endcap_width_src_after_m", endcap_width_src_after_vals),
+            ("endcap_width_dst_before_m", endcap_width_dst_before_vals),
+            ("endcap_width_dst_after_m", endcap_width_dst_after_vals),
+            ("xsec_support_len_src", xsec_support_len_src_vals),
+            ("xsec_support_len_dst", xsec_support_len_dst_vals),
+        ):
+            v = road.get(k)
+            try:
+                fv = float(v)
+            except Exception:
+                fv = float("nan")
+            if np.isfinite(fv):
+                target.append(float(fv))
+        try:
+            endcap_width_clamped_src_total += int(max(0, int(road.get("endcap_width_clamped_src_count", 0) or 0)))
+        except Exception:
+            pass
+        try:
+            endcap_width_clamped_dst_total += int(max(0, int(road.get("endcap_width_clamped_dst_count", 0) or 0)))
+        except Exception:
+            pass
         v_ratio = road.get("traj_in_ratio")
         try:
             f_ratio = float(v_ratio)
@@ -1024,6 +1083,56 @@ def _run_patch_core(
     surf_valid_arr = (
         np.asarray(traj_surface_valid_ratio_vals, dtype=np.float64)
         if traj_surface_valid_ratio_vals
+        else np.empty((0,), dtype=np.float64)
+    )
+    surf_cov_len_arr = (
+        np.asarray(traj_surface_covered_station_len_vals, dtype=np.float64)
+        if traj_surface_covered_station_len_vals
+        else np.empty((0,), dtype=np.float64)
+    )
+    endcap_valid_src_arr = (
+        np.asarray(endcap_valid_ratio_src_vals, dtype=np.float64)
+        if endcap_valid_ratio_src_vals
+        else np.empty((0,), dtype=np.float64)
+    )
+    endcap_valid_dst_arr = (
+        np.asarray(endcap_valid_ratio_dst_vals, dtype=np.float64)
+        if endcap_valid_ratio_dst_vals
+        else np.empty((0,), dtype=np.float64)
+    )
+    endcap_width_src_before_arr = (
+        np.asarray(endcap_width_src_before_vals, dtype=np.float64)
+        if endcap_width_src_before_vals
+        else np.empty((0,), dtype=np.float64)
+    )
+    endcap_width_src_after_arr = (
+        np.asarray(endcap_width_src_after_vals, dtype=np.float64)
+        if endcap_width_src_after_vals
+        else np.empty((0,), dtype=np.float64)
+    )
+    endcap_width_dst_before_arr = (
+        np.asarray(endcap_width_dst_before_vals, dtype=np.float64)
+        if endcap_width_dst_before_vals
+        else np.empty((0,), dtype=np.float64)
+    )
+    endcap_width_dst_after_arr = (
+        np.asarray(endcap_width_dst_after_vals, dtype=np.float64)
+        if endcap_width_dst_after_vals
+        else np.empty((0,), dtype=np.float64)
+    )
+    xsec_support_len_src_arr = (
+        np.asarray(xsec_support_len_src_vals, dtype=np.float64)
+        if xsec_support_len_src_vals
+        else np.empty((0,), dtype=np.float64)
+    )
+    xsec_support_len_dst_arr = (
+        np.asarray(xsec_support_len_dst_vals, dtype=np.float64)
+        if xsec_support_len_dst_vals
+        else np.empty((0,), dtype=np.float64)
+    )
+    endpoint_anchor_arr = (
+        np.asarray(endpoint_anchor_dist_vals, dtype=np.float64)
+        if endpoint_anchor_dist_vals
         else np.empty((0,), dtype=np.float64)
     )
     traj_in_ratio_arr = (
@@ -1116,11 +1225,63 @@ def _run_patch_core(
             "traj_surface_covered_length_ratio_p90": (
                 float(np.percentile(surf_cov_arr, 90.0)) if surf_cov_arr.size > 0 else None
             ),
+            "traj_surface_covered_station_length_m_p50": (
+                float(np.percentile(surf_cov_len_arr, 50.0)) if surf_cov_len_arr.size > 0 else None
+            ),
+            "traj_surface_covered_station_length_m_p90": (
+                float(np.percentile(surf_cov_len_arr, 90.0)) if surf_cov_len_arr.size > 0 else None
+            ),
             "traj_surface_valid_slices_ratio_p50": (
                 float(np.percentile(surf_valid_arr, 50.0)) if surf_valid_arr.size > 0 else None
             ),
             "traj_surface_valid_slices_ratio_p90": (
                 float(np.percentile(surf_valid_arr, 90.0)) if surf_valid_arr.size > 0 else None
+            ),
+            "endcap_valid_ratio_src_p50": (
+                float(np.percentile(endcap_valid_src_arr, 50.0)) if endcap_valid_src_arr.size > 0 else None
+            ),
+            "endcap_valid_ratio_src_p90": (
+                float(np.percentile(endcap_valid_src_arr, 90.0)) if endcap_valid_src_arr.size > 0 else None
+            ),
+            "endcap_valid_ratio_dst_p50": (
+                float(np.percentile(endcap_valid_dst_arr, 50.0)) if endcap_valid_dst_arr.size > 0 else None
+            ),
+            "endcap_valid_ratio_dst_p90": (
+                float(np.percentile(endcap_valid_dst_arr, 90.0)) if endcap_valid_dst_arr.size > 0 else None
+            ),
+            "endcap_width_src_before_m_p90": (
+                float(np.percentile(endcap_width_src_before_arr, 90.0))
+                if endcap_width_src_before_arr.size > 0
+                else None
+            ),
+            "endcap_width_src_after_m_p90": (
+                float(np.percentile(endcap_width_src_after_arr, 90.0))
+                if endcap_width_src_after_arr.size > 0
+                else None
+            ),
+            "endcap_width_dst_before_m_p90": (
+                float(np.percentile(endcap_width_dst_before_arr, 90.0))
+                if endcap_width_dst_before_arr.size > 0
+                else None
+            ),
+            "endcap_width_dst_after_m_p90": (
+                float(np.percentile(endcap_width_dst_after_arr, 90.0))
+                if endcap_width_dst_after_arr.size > 0
+                else None
+            ),
+            "endcap_width_clamped_src_total": int(endcap_width_clamped_src_total),
+            "endcap_width_clamped_dst_total": int(endcap_width_clamped_dst_total),
+            "xsec_support_len_src_p90": (
+                float(np.percentile(xsec_support_len_src_arr, 90.0)) if xsec_support_len_src_arr.size > 0 else None
+            ),
+            "xsec_support_len_dst_p90": (
+                float(np.percentile(xsec_support_len_dst_arr, 90.0)) if xsec_support_len_dst_arr.size > 0 else None
+            ),
+            "endpoint_anchor_dist_p90": (
+                float(np.percentile(endpoint_anchor_arr, 90.0)) if endpoint_anchor_arr.size > 0 else None
+            ),
+            "endpoint_anchor_dist_max": (
+                float(np.max(endpoint_anchor_arr)) if endpoint_anchor_arr.size > 0 else None
             ),
             "traj_surface_enforced_count": int(traj_surface_enforced_count),
             "traj_surface_insufficient_count": int(traj_surface_insufficient_count),
@@ -1431,6 +1592,75 @@ def _surface_component_count(surface: BaseGeometry | None) -> int:
     return 0
 
 
+def _kmeans_1d_two_cluster(values: np.ndarray, *, iters: int = 8) -> tuple[np.ndarray, np.ndarray]:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.size == 0:
+        return np.zeros((0,), dtype=np.int8), np.asarray([], dtype=np.float64)
+    finite = np.isfinite(arr)
+    arr = arr[finite]
+    if arr.size == 0:
+        return np.zeros((0,), dtype=np.int8), np.asarray([], dtype=np.float64)
+    if arr.size < 4:
+        return np.zeros((arr.size,), dtype=np.int8), np.asarray([float(np.median(arr))], dtype=np.float64)
+    c0 = float(np.quantile(arr, 0.25))
+    c1 = float(np.quantile(arr, 0.75))
+    if not np.isfinite(c0):
+        c0 = float(np.min(arr))
+    if not np.isfinite(c1):
+        c1 = float(np.max(arr))
+    if abs(c1 - c0) <= 1e-6:
+        c0 = float(np.min(arr))
+        c1 = float(np.max(arr))
+    if abs(c1 - c0) <= 1e-6:
+        return np.zeros((arr.size,), dtype=np.int8), np.asarray([float(np.median(arr))], dtype=np.float64)
+    labels = np.zeros((arr.size,), dtype=np.int8)
+    for _ in range(max(1, int(iters))):
+        d0 = np.abs(arr - c0)
+        d1 = np.abs(arr - c1)
+        labels = (d1 < d0).astype(np.int8)
+        n0 = int(np.count_nonzero(labels == 0))
+        n1 = int(np.count_nonzero(labels == 1))
+        if n0 == 0 or n1 == 0:
+            return np.zeros((arr.size,), dtype=np.int8), np.asarray([float(np.median(arr))], dtype=np.float64)
+        c0_new = float(np.median(arr[labels == 0]))
+        c1_new = float(np.median(arr[labels == 1]))
+        if abs(c0_new - c0) <= 1e-6 and abs(c1_new - c1) <= 1e-6:
+            c0, c1 = c0_new, c1_new
+            break
+        c0, c1 = c0_new, c1_new
+    centers = np.asarray([c0, c1], dtype=np.float64)
+    return labels, centers
+
+
+def _pick_endcap_cluster(values: np.ndarray, *, ref_u: float, min_pts: int) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size < max(6, int(min_pts)):
+        return arr
+    labels, centers = _kmeans_1d_two_cluster(arr)
+    if centers.size < 2:
+        return arr
+    idx = int(np.argmin(np.abs(centers - float(ref_u))))
+    picked = arr[labels == idx]
+    if picked.size < int(min_pts):
+        return arr
+    return picked
+
+
+def _covered_station_length(stations: np.ndarray, valid_mask: np.ndarray) -> float:
+    st = np.asarray(stations, dtype=np.float64)
+    vm = np.asarray(valid_mask, dtype=bool)
+    if st.size < 2 or vm.size != st.size:
+        return 0.0
+    seg = st[1:] - st[:-1]
+    if seg.size == 0:
+        return 0.0
+    use = vm[:-1] & vm[1:] & np.isfinite(seg) & (seg > 0.0)
+    if not np.any(use):
+        return 0.0
+    return float(np.sum(seg[use]))
+
+
 def _station_gap_intervals(
     stations: np.ndarray,
     valid_mask: np.ndarray,
@@ -1538,49 +1768,53 @@ def _build_traj_surface_from_refline(
     if q_hi <= q_lo:
         q_lo, q_hi = 0.02, 0.98
     min_pts = max(3, int(params["TRAJ_SURF_MIN_POINTS_PER_SLICE"]))
+    axis_max_project_dist = max(5.0, float(params.get("AXIS_MAX_PROJECT_DIST_M", 20.0)))
+    endcap_m = max(0.0, float(params.get("ENDCAP_M", 30.0)))
+    endcap_rel_cap = max(1.1, float(params.get("ENDCAP_WIDTH_REL_CAP", 2.0)))
+    endcap_abs_cap = max(5.0, float(params.get("ENDCAP_WIDTH_ABS_CAP_M", 40.0)))
 
     stations = np.arange(0.0, ref_len + step * 0.5, step, dtype=np.float64)
     if stations.size == 0 or abs(float(stations[-1]) - ref_len) > 1e-6:
         stations = np.concatenate((stations, np.asarray([ref_len], dtype=np.float64)))
     stations = np.unique(np.clip(stations, 0.0, ref_len))
 
-    left_pts: list[tuple[float, float]] = []
-    right_pts: list[tuple[float, float]] = []
     valid_mask = np.zeros((stations.size,), dtype=bool)
-    valid_stations: list[float] = []
     half_hist: dict[str, int] = {}
+    lo_arr = np.full((stations.size,), np.nan, dtype=np.float64)
+    hi_arr = np.full((stations.size,), np.nan, dtype=np.float64)
+    center_u_arr = np.full((stations.size,), np.nan, dtype=np.float64)
+
+    def _empty_result() -> dict[str, Any]:
+        return {
+            "surface": None,
+            "stations": stations,
+            "valid_mask": valid_mask,
+            "left_pts": np.empty((0, 2), dtype=np.float64),
+            "right_pts": np.empty((0, 2), dtype=np.float64),
+            "total_slices": int(stations.size),
+            "valid_slices": 0,
+            "slice_valid_ratio": 0.0,
+            "covered_length_ratio": 0.0,
+            "covered_station_length_m": 0.0,
+            "endcap_valid_ratio_src": 0.0,
+            "endcap_valid_ratio_dst": 0.0,
+            "endcap_width_src_before_m": None,
+            "endcap_width_src_after_m": None,
+            "endcap_width_dst_before_m": None,
+            "endcap_width_dst_after_m": None,
+            "endcap_width_clamped_src_count": 0,
+            "endcap_width_clamped_dst_count": 0,
+            "slice_half_win_used_hist": half_hist,
+            "slice_half_win_levels": [float(v) for v in half_levels],
+        }
 
     xy = np.asarray(traj_xy, dtype=np.float64)
     if xy.ndim != 2 or xy.shape[0] == 0:
-        return {
-            "surface": None,
-            "stations": stations,
-            "valid_mask": valid_mask,
-            "left_pts": np.empty((0, 2), dtype=np.float64),
-            "right_pts": np.empty((0, 2), dtype=np.float64),
-            "total_slices": int(stations.size),
-            "valid_slices": 0,
-            "slice_valid_ratio": 0.0,
-            "covered_length_ratio": 0.0,
-            "slice_half_win_used_hist": half_hist,
-            "slice_half_win_levels": [float(v) for v in half_levels],
-        }
+        return _empty_result()
     finite = np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])
     xy = xy[finite, :]
     if xy.shape[0] == 0:
-        return {
-            "surface": None,
-            "stations": stations,
-            "valid_mask": valid_mask,
-            "left_pts": np.empty((0, 2), dtype=np.float64),
-            "right_pts": np.empty((0, 2), dtype=np.float64),
-            "total_slices": int(stations.size),
-            "valid_slices": 0,
-            "slice_valid_ratio": 0.0,
-            "covered_length_ratio": 0.0,
-            "slice_half_win_used_hist": half_hist,
-            "slice_half_win_levels": [float(v) for v in half_levels],
-        }
+        return _empty_result()
 
     if gore_zone_metric is not None:
         try:
@@ -1589,19 +1823,7 @@ def _build_traj_surface_from_refline(
         except Exception:
             pass
     if xy.shape[0] == 0:
-        return {
-            "surface": None,
-            "stations": stations,
-            "valid_mask": valid_mask,
-            "left_pts": np.empty((0, 2), dtype=np.float64),
-            "right_pts": np.empty((0, 2), dtype=np.float64),
-            "total_slices": int(stations.size),
-            "valid_slices": 0,
-            "slice_valid_ratio": 0.0,
-            "covered_length_ratio": 0.0,
-            "slice_half_win_used_hist": half_hist,
-            "slice_half_win_levels": [float(v) for v in half_levels],
-        }
+        return _empty_result()
 
     pt_arr = points(xy[:, 0], xy[:, 1])
     s_all = np.asarray(line_locate_point(ref_line, pt_arr), dtype=np.float64)
@@ -1626,10 +1848,27 @@ def _build_traj_surface_from_refline(
     nx = -ty
     ny = tx
     u_all = (xy[:, 0] - ox) * nx + (xy[:, 1] - oy) * ny
-
+    proj_keep = np.isfinite(u_all) & (np.abs(u_all) <= float(axis_max_project_dist))
+    if np.count_nonzero(proj_keep) < min_pts:
+        return _empty_result()
+    s_all = s_all[proj_keep]
+    u_all = u_all[proj_keep]
     sort_idx = np.argsort(s_all)
     s_sorted = s_all[sort_idx]
     u_sorted = u_all[sort_idx]
+
+    mid_lo = float(min(ref_len, endcap_m))
+    mid_hi = float(max(0.0, ref_len - endcap_m))
+    if mid_hi > mid_lo + 1e-6:
+        mid_u = u_sorted[(s_sorted >= mid_lo) & (s_sorted <= mid_hi)]
+    else:
+        mid_u = np.asarray([], dtype=np.float64)
+    if mid_u.size >= min_pts:
+        u_mid_median = float(np.median(mid_u))
+    elif u_sorted.size > 0:
+        u_mid_median = float(np.median(u_sorted))
+    else:
+        u_mid_median = 0.0
 
     st_pt = line_interpolate_point(ref_line, stations)
     st_x = np.asarray(get_x(st_pt), dtype=np.float64)
@@ -1648,9 +1887,13 @@ def _build_traj_surface_from_refline(
     st_nx = -st_ty
     st_ny = st_tx
 
+    src_end_mask = stations <= float(min(ref_len, endcap_m) + 1e-6)
+    dst_end_mask = stations >= float(max(0.0, ref_len - endcap_m) - 1e-6)
+    mid_end_mask = (~src_end_mask) & (~dst_end_mask)
+
     for i, s in enumerate(stations):
-        chosen_vals = None
-        chosen_half = None
+        chosen_vals: np.ndarray | None = None
+        chosen_half: float | None = None
         for hw in half_levels:
             lo_s = float(s - hw)
             hi_s = float(s + hw)
@@ -1659,6 +1902,11 @@ def _build_traj_surface_from_refline(
             if i1 - i0 < min_pts:
                 continue
             vals = u_sorted[i0:i1]
+            vals = vals[np.isfinite(vals)]
+            if vals.size < min_pts:
+                continue
+            if bool(src_end_mask[i]) or bool(dst_end_mask[i]):
+                vals = _pick_endcap_cluster(vals, ref_u=u_mid_median, min_pts=min_pts)
             if vals.size < min_pts:
                 continue
             chosen_vals = vals
@@ -1666,14 +1914,72 @@ def _build_traj_surface_from_refline(
             break
         if chosen_vals is None or chosen_half is None:
             continue
-        lo = float(np.quantile(chosen_vals, q_lo))
-        hi = float(np.quantile(chosen_vals, q_hi))
-        left_pts.append((float(st_x[i] + st_nx[i] * lo), float(st_y[i] + st_ny[i] * lo)))
-        right_pts.append((float(st_x[i] + st_nx[i] * hi), float(st_y[i] + st_ny[i] * hi)))
+        lo_arr[i] = float(np.quantile(chosen_vals, q_lo))
+        hi_arr[i] = float(np.quantile(chosen_vals, q_hi))
+        center_u_arr[i] = float(np.median(chosen_vals))
         valid_mask[i] = True
-        valid_stations.append(float(s))
         hkey = f"{chosen_half:.1f}"
         half_hist[hkey] = int(half_hist.get(hkey, 0) + 1)
+
+    widths = hi_arr - lo_arr
+    mid_widths = widths[valid_mask & mid_end_mask & np.isfinite(widths)]
+    if mid_widths.size > 0:
+        w_base = float(np.median(mid_widths))
+    else:
+        all_widths = widths[valid_mask & np.isfinite(widths)]
+        w_base = float(np.median(all_widths)) if all_widths.size > 0 else float("nan")
+    if np.isfinite(w_base) and w_base > 0:
+        w_cap = float(min(endcap_rel_cap * w_base, endcap_abs_cap))
+    else:
+        w_cap = float(endcap_abs_cap)
+
+    src_before: list[float] = []
+    src_after: list[float] = []
+    dst_before: list[float] = []
+    dst_after: list[float] = []
+    src_clamped = 0
+    dst_clamped = 0
+    for i in range(stations.size):
+        if not bool(valid_mask[i]) or not np.isfinite(widths[i]):
+            continue
+        is_src = bool(src_end_mask[i])
+        is_dst = bool(dst_end_mask[i])
+        if not (is_src or is_dst):
+            continue
+        w_before = float(widths[i])
+        lo_v = float(lo_arr[i])
+        hi_v = float(hi_arr[i])
+        ctr = float(center_u_arr[i]) if np.isfinite(center_u_arr[i]) else float(0.5 * (lo_v + hi_v))
+        w_after = w_before
+        if np.isfinite(w_cap) and w_cap > 0.0 and w_before > w_cap:
+            lo_v = float(ctr - 0.5 * w_cap)
+            hi_v = float(ctr + 0.5 * w_cap)
+            lo_arr[i] = lo_v
+            hi_arr[i] = hi_v
+            w_after = float(w_cap)
+            if is_src:
+                src_clamped += 1
+            if is_dst:
+                dst_clamped += 1
+        if is_src:
+            src_before.append(w_before)
+            src_after.append(w_after)
+        if is_dst:
+            dst_before.append(w_before)
+            dst_after.append(w_after)
+
+    left_pts: list[tuple[float, float]] = []
+    right_pts: list[tuple[float, float]] = []
+    for i in range(stations.size):
+        if not bool(valid_mask[i]):
+            continue
+        lo = float(lo_arr[i])
+        hi = float(hi_arr[i])
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            valid_mask[i] = False
+            continue
+        left_pts.append((float(st_x[i] + st_nx[i] * lo), float(st_y[i] + st_ny[i] * lo)))
+        right_pts.append((float(st_x[i] + st_nx[i] * hi), float(st_y[i] + st_ny[i] * hi)))
 
     surface: BaseGeometry | None = None
     if len(left_pts) >= 2 and len(right_pts) >= 2:
@@ -1700,8 +2006,15 @@ def _build_traj_surface_from_refline(
     total_slices = int(stations.size)
     valid_slices = int(np.count_nonzero(valid_mask))
     slice_valid_ratio = float(valid_slices / max(1, total_slices))
-    covered_len = (max(valid_stations) - min(valid_stations)) if len(valid_stations) >= 2 else 0.0
+    covered_len = _covered_station_length(stations, valid_mask)
     covered_len_ratio = float(covered_len / max(ref_len, 1e-6))
+    src_total = int(np.count_nonzero(src_end_mask))
+    dst_total = int(np.count_nonzero(dst_end_mask))
+    src_valid = int(np.count_nonzero(valid_mask & src_end_mask))
+    dst_valid = int(np.count_nonzero(valid_mask & dst_end_mask))
+    endcap_valid_ratio_src = float(src_valid / max(1, src_total))
+    endcap_valid_ratio_dst = float(dst_valid / max(1, dst_total))
+
     return {
         "surface": surface,
         "stations": stations,
@@ -1712,6 +2025,15 @@ def _build_traj_surface_from_refline(
         "valid_slices": valid_slices,
         "slice_valid_ratio": slice_valid_ratio,
         "covered_length_ratio": covered_len_ratio,
+        "covered_station_length_m": float(covered_len),
+        "endcap_valid_ratio_src": float(endcap_valid_ratio_src),
+        "endcap_valid_ratio_dst": float(endcap_valid_ratio_dst),
+        "endcap_width_src_before_m": float(np.max(np.asarray(src_before, dtype=np.float64))) if src_before else None,
+        "endcap_width_src_after_m": float(np.max(np.asarray(src_after, dtype=np.float64))) if src_after else None,
+        "endcap_width_dst_before_m": float(np.max(np.asarray(dst_before, dtype=np.float64))) if dst_before else None,
+        "endcap_width_dst_after_m": float(np.max(np.asarray(dst_after, dtype=np.float64))) if dst_after else None,
+        "endcap_width_clamped_src_count": int(src_clamped),
+        "endcap_width_clamped_dst_count": int(dst_clamped),
         "slice_half_win_used_hist": half_hist,
         "slice_half_win_levels": [float(v) for v in half_levels],
     }
@@ -1777,7 +2099,7 @@ def _traj_surface_cache_path(
             traj_meta.append({"traj_id": tid, "missing": True})
 
     key_payload = {
-        "v": 1,
+        "v": 2,
         "patch_id": str(patch_inputs.patch_id),
         "src": int(support.src_nodeid),
         "dst": int(support.dst_nodeid),
@@ -1791,6 +2113,11 @@ def _traj_surface_cache_path(
         "slice_step": float(params["SURF_SLICE_STEP_M"]),
         "slice_half_win": float(params["SURF_SLICE_HALF_WIN_M"]),
         "slice_half_win_levels": [float(v) for v in params.get("SURF_SLICE_HALF_WIN_LEVELS_M", [])],
+        "axis_max_project_dist_m": float(params.get("AXIS_MAX_PROJECT_DIST_M", 20.0)),
+        "endcap_m": float(params.get("ENDCAP_M", 30.0)),
+        "endcap_min_valid_ratio": float(params.get("ENDCAP_MIN_VALID_RATIO", 0.5)),
+        "endcap_width_abs_cap_m": float(params.get("ENDCAP_WIDTH_ABS_CAP_M", 40.0)),
+        "endcap_width_rel_cap": float(params.get("ENDCAP_WIDTH_REL_CAP", 2.0)),
         "quant_low": float(params["SURF_QUANT_LOW"]),
         "quant_high": float(params["SURF_QUANT_HIGH"]),
         "surf_buf_m": float(params["SURF_BUF_M"]),
@@ -1826,6 +2153,17 @@ def _build_traj_surface_hint_for_cluster(
         "traj_surface_enforced": False,
         "slice_valid_ratio": 0.0,
         "covered_length_ratio": 0.0,
+        "covered_station_length_m": 0.0,
+        "endcap_valid_ratio_src": 0.0,
+        "endcap_valid_ratio_dst": 0.0,
+        "endcap_width_src_before_m": None,
+        "endcap_width_src_after_m": None,
+        "endcap_width_dst_before_m": None,
+        "endcap_width_dst_after_m": None,
+        "endcap_width_clamped_src_count": 0,
+        "endcap_width_clamped_dst_count": 0,
+        "xsec_support_available_src": False,
+        "xsec_support_available_dst": False,
         "unique_traj_count": int(unique_traj_count),
         "valid_slices": 0,
         "total_slices": 0,
@@ -1885,6 +2223,31 @@ def _build_traj_surface_hint_for_cluster(
                     total_slices = int(zf["total_slices"].item())
                     slice_valid_ratio = float(zf["slice_valid_ratio"].item())
                     covered_length_ratio = float(zf["covered_length_ratio"].item())
+                    covered_station_length = float(zf["covered_station_length_m"].item()) if "covered_station_length_m" in zf else 0.0
+                    endcap_valid_ratio_src = (
+                        float(zf["endcap_valid_ratio_src"].item()) if "endcap_valid_ratio_src" in zf else 0.0
+                    )
+                    endcap_valid_ratio_dst = (
+                        float(zf["endcap_valid_ratio_dst"].item()) if "endcap_valid_ratio_dst" in zf else 0.0
+                    )
+                    endcap_width_src_before = (
+                        float(zf["endcap_width_src_before_m"].item()) if "endcap_width_src_before_m" in zf else None
+                    )
+                    endcap_width_src_after = (
+                        float(zf["endcap_width_src_after_m"].item()) if "endcap_width_src_after_m" in zf else None
+                    )
+                    endcap_width_dst_before = (
+                        float(zf["endcap_width_dst_before_m"].item()) if "endcap_width_dst_before_m" in zf else None
+                    )
+                    endcap_width_dst_after = (
+                        float(zf["endcap_width_dst_after_m"].item()) if "endcap_width_dst_after_m" in zf else None
+                    )
+                    endcap_clamped_src_count = (
+                        int(zf["endcap_width_clamped_src_count"].item()) if "endcap_width_clamped_src_count" in zf else 0
+                    )
+                    endcap_clamped_dst_count = (
+                        int(zf["endcap_width_clamped_dst_count"].item()) if "endcap_width_clamped_dst_count" in zf else 0
+                    )
                     half_hist = {}
                     if "slice_half_win_hist_keys" in zf and "slice_half_win_hist_vals" in zf:
                         keys = [str(v) for v in np.asarray(zf["slice_half_win_hist_keys"]).tolist()]
@@ -1902,6 +2265,15 @@ def _build_traj_surface_hint_for_cluster(
                         "surface_metric": surface,
                         "slice_valid_ratio": float(slice_valid_ratio),
                         "covered_length_ratio": float(covered_length_ratio),
+                        "covered_station_length_m": float(covered_station_length),
+                        "endcap_valid_ratio_src": float(endcap_valid_ratio_src),
+                        "endcap_valid_ratio_dst": float(endcap_valid_ratio_dst),
+                        "endcap_width_src_before_m": endcap_width_src_before,
+                        "endcap_width_src_after_m": endcap_width_src_after,
+                        "endcap_width_dst_before_m": endcap_width_dst_before,
+                        "endcap_width_dst_after_m": endcap_width_dst_after,
+                        "endcap_width_clamped_src_count": int(endcap_clamped_src_count),
+                        "endcap_width_clamped_dst_count": int(endcap_clamped_dst_count),
                         "valid_slices": int(valid_slices),
                         "total_slices": int(total_slices),
                         "_stations": stations,
@@ -1925,6 +2297,15 @@ def _build_traj_surface_hint_for_cluster(
         out["surface_metric"] = built["surface"]
         out["slice_valid_ratio"] = float(built["slice_valid_ratio"])
         out["covered_length_ratio"] = float(built["covered_length_ratio"])
+        out["covered_station_length_m"] = float(built.get("covered_station_length_m", 0.0))
+        out["endcap_valid_ratio_src"] = float(built.get("endcap_valid_ratio_src", 0.0))
+        out["endcap_valid_ratio_dst"] = float(built.get("endcap_valid_ratio_dst", 0.0))
+        out["endcap_width_src_before_m"] = built.get("endcap_width_src_before_m")
+        out["endcap_width_src_after_m"] = built.get("endcap_width_src_after_m")
+        out["endcap_width_dst_before_m"] = built.get("endcap_width_dst_before_m")
+        out["endcap_width_dst_after_m"] = built.get("endcap_width_dst_after_m")
+        out["endcap_width_clamped_src_count"] = int(built.get("endcap_width_clamped_src_count", 0))
+        out["endcap_width_clamped_dst_count"] = int(built.get("endcap_width_clamped_dst_count", 0))
         out["valid_slices"] = int(built["valid_slices"])
         out["total_slices"] = int(built["total_slices"])
         out["_stations"] = built.get("stations")
@@ -1945,6 +2326,27 @@ def _build_traj_surface_hint_for_cluster(
                     total_slices=np.asarray([int(built["total_slices"])], dtype=np.int64),
                     slice_valid_ratio=np.asarray([float(built["slice_valid_ratio"])], dtype=np.float64),
                     covered_length_ratio=np.asarray([float(built["covered_length_ratio"])], dtype=np.float64),
+                    covered_station_length_m=np.asarray([float(built.get("covered_station_length_m", 0.0))], dtype=np.float64),
+                    endcap_valid_ratio_src=np.asarray([float(built.get("endcap_valid_ratio_src", 0.0))], dtype=np.float64),
+                    endcap_valid_ratio_dst=np.asarray([float(built.get("endcap_valid_ratio_dst", 0.0))], dtype=np.float64),
+                    endcap_width_src_before_m=np.asarray(
+                        [float(_to_finite_float(built.get("endcap_width_src_before_m"), 0.0))], dtype=np.float64
+                    ),
+                    endcap_width_src_after_m=np.asarray(
+                        [float(_to_finite_float(built.get("endcap_width_src_after_m"), 0.0))], dtype=np.float64
+                    ),
+                    endcap_width_dst_before_m=np.asarray(
+                        [float(_to_finite_float(built.get("endcap_width_dst_before_m"), 0.0))], dtype=np.float64
+                    ),
+                    endcap_width_dst_after_m=np.asarray(
+                        [float(_to_finite_float(built.get("endcap_width_dst_after_m"), 0.0))], dtype=np.float64
+                    ),
+                    endcap_width_clamped_src_count=np.asarray(
+                        [int(built.get("endcap_width_clamped_src_count", 0))], dtype=np.int64
+                    ),
+                    endcap_width_clamped_dst_count=np.asarray(
+                        [int(built.get("endcap_width_clamped_dst_count", 0))], dtype=np.int64
+                    ),
                     slice_half_win_hist_keys=np.asarray(sorted(hh.keys()), dtype="U16"),
                     slice_half_win_hist_vals=np.asarray(
                         [int(hh[k]) for k in sorted(hh.keys())],
@@ -1971,18 +2373,56 @@ def _build_traj_surface_hint_for_cluster(
         float(params["TRAJ_SURF_MIN_COVERED_LEN_RATIO"]),
         float(params.get("TRAJ_SURF_ENFORCE_MIN_COVERED_LEN_RATIO", 0.90)),
     )
+    min_endcap_ratio = max(0.0, min(1.0, float(params.get("ENDCAP_MIN_VALID_RATIO", 0.5))))
+    src_endcap_ok = float(out.get("endcap_valid_ratio_src", 0.0)) >= float(min_endcap_ratio)
+    dst_endcap_ok = float(out.get("endcap_valid_ratio_dst", 0.0)) >= float(min_endcap_ratio)
+    out["xsec_support_available_src"] = bool(
+        _xsec_has_surface_support(
+            xsec=src_xsec,
+            surface_metric=out.get("surface_metric"),
+            gore_zone_metric=gore_zone_metric,
+            buffer_m=float(params.get("SURF_BUF_M", 1.0)),
+        )
+    )
+    out["xsec_support_available_dst"] = bool(
+        _xsec_has_surface_support(
+            xsec=dst_xsec,
+            surface_metric=out.get("surface_metric"),
+            gore_zone_metric=gore_zone_metric,
+            buffer_m=float(params.get("SURF_BUF_M", 1.0)),
+        )
+    )
     sufficient = (
         int(out["valid_slices"]) >= 2
         and float(out["slice_valid_ratio"]) >= min_slice_ratio
         and float(out["covered_length_ratio"]) >= min_cov_ratio
+        and bool(src_endcap_ok)
+        and bool(dst_endcap_ok)
         and int(unique_traj_count) >= int(params["TRAJ_SURF_MIN_UNIQUE_TRAJ"])
         and out["surface_metric"] is not None
         and (not out["surface_metric"].is_empty)
         and float(out.get("traj_surface_area_m2") or 0.0) > 0.0
+        and bool(out.get("xsec_support_available_src", False))
+        and bool(out.get("xsec_support_available_dst", False))
     )
     out["traj_surface_enforced"] = bool(sufficient)
     if not sufficient:
-        out["reason"] = "traj_surface_insufficient"
+        reasons: list[str] = []
+        if int(out["valid_slices"]) < 2:
+            reasons.append("valid_slices_low")
+        if float(out["slice_valid_ratio"]) < min_slice_ratio:
+            reasons.append("slice_valid_ratio_low")
+        if float(out["covered_length_ratio"]) < min_cov_ratio:
+            reasons.append("covered_len_ratio_low")
+        if not src_endcap_ok:
+            reasons.append("endcap_missing_src")
+        if not dst_endcap_ok:
+            reasons.append("endcap_missing_dst")
+        if not bool(out.get("xsec_support_available_src", False)):
+            reasons.append("xsec_support_empty_src")
+        if not bool(out.get("xsec_support_available_dst", False)):
+            reasons.append("xsec_support_empty_dst")
+        out["reason"] = ",".join(reasons) if reasons else "traj_surface_insufficient"
     out["timing_ms"] = float((perf_counter() - t0) * 1000.0)
     return out
 
@@ -2005,6 +2445,17 @@ def _eval_traj_surface_gate(
         "traj_surface_component_count": 0,
         "traj_surface_valid_slices_ratio": 0.0,
         "traj_surface_covered_length_ratio": 0.0,
+        "traj_surface_covered_station_length_m": 0.0,
+        "endcap_valid_ratio_src": 0.0,
+        "endcap_valid_ratio_dst": 0.0,
+        "endcap_width_src_before_m": None,
+        "endcap_width_src_after_m": None,
+        "endcap_width_dst_before_m": None,
+        "endcap_width_dst_after_m": None,
+        "endcap_width_clamped_src_count": 0,
+        "endcap_width_clamped_dst_count": 0,
+        "xsec_support_available_src": False,
+        "xsec_support_available_dst": False,
         "traj_surface_slice_half_win_used_hist": {},
         "traj_surface_slice_half_win_levels": [],
         "traj_in_ratio": None,
@@ -2050,6 +2501,17 @@ def _eval_traj_surface_gate(
     total_slices = 0
     slice_valid_ratio = 0.0
     covered_len_ratio = 0.0
+    covered_station_length = 0.0
+    endcap_valid_ratio_src = 0.0
+    endcap_valid_ratio_dst = 0.0
+    endcap_width_src_before = None
+    endcap_width_src_after = None
+    endcap_width_dst_before = None
+    endcap_width_dst_after = None
+    endcap_width_clamped_src_count = 0
+    endcap_width_clamped_dst_count = 0
+    xsec_support_available_src = False
+    xsec_support_available_dst = False
     unique_traj_count = 0
 
     hint = traj_surface_hint if isinstance(traj_surface_hint, dict) else None
@@ -2059,6 +2521,17 @@ def _eval_traj_surface_gate(
         total_slices = int(hint.get("total_slices", 0))
         slice_valid_ratio = float(hint.get("slice_valid_ratio", 0.0))
         covered_len_ratio = float(hint.get("covered_length_ratio", 0.0))
+        covered_station_length = float(hint.get("covered_station_length_m", 0.0))
+        endcap_valid_ratio_src = float(hint.get("endcap_valid_ratio_src", 0.0))
+        endcap_valid_ratio_dst = float(hint.get("endcap_valid_ratio_dst", 0.0))
+        endcap_width_src_before = hint.get("endcap_width_src_before_m")
+        endcap_width_src_after = hint.get("endcap_width_src_after_m")
+        endcap_width_dst_before = hint.get("endcap_width_dst_before_m")
+        endcap_width_dst_after = hint.get("endcap_width_dst_after_m")
+        endcap_width_clamped_src_count = int(hint.get("endcap_width_clamped_src_count", 0))
+        endcap_width_clamped_dst_count = int(hint.get("endcap_width_clamped_dst_count", 0))
+        xsec_support_available_src = bool(hint.get("xsec_support_available_src", False))
+        xsec_support_available_dst = bool(hint.get("xsec_support_available_dst", False))
         unique_traj_count = int(hint.get("unique_traj_count", 0))
         result["traj_surface_slice_half_win_used_hist"] = dict(hint.get("slice_half_win_used_hist") or {})
         result["traj_surface_slice_half_win_levels"] = [
@@ -2096,6 +2569,17 @@ def _eval_traj_surface_gate(
         total_slices = int(built.get("total_slices", 0))
         slice_valid_ratio = float(built.get("slice_valid_ratio", 0.0))
         covered_len_ratio = float(built.get("covered_length_ratio", 0.0))
+        covered_station_length = float(built.get("covered_station_length_m", 0.0))
+        endcap_valid_ratio_src = float(built.get("endcap_valid_ratio_src", 0.0))
+        endcap_valid_ratio_dst = float(built.get("endcap_valid_ratio_dst", 0.0))
+        endcap_width_src_before = built.get("endcap_width_src_before_m")
+        endcap_width_src_after = built.get("endcap_width_src_after_m")
+        endcap_width_dst_before = built.get("endcap_width_dst_before_m")
+        endcap_width_dst_after = built.get("endcap_width_dst_after_m")
+        endcap_width_clamped_src_count = int(built.get("endcap_width_clamped_src_count", 0))
+        endcap_width_clamped_dst_count = int(built.get("endcap_width_clamped_dst_count", 0))
+        xsec_support_available_src = bool(surface is not None and not surface.is_empty)
+        xsec_support_available_dst = bool(surface is not None and not surface.is_empty)
         result["traj_surface_slice_half_win_used_hist"] = dict(built.get("slice_half_win_used_hist") or {})
         result["traj_surface_slice_half_win_levels"] = [float(v) for v in built.get("slice_half_win_levels") or []]
 
@@ -2117,11 +2601,22 @@ def _eval_traj_surface_gate(
     result["traj_surface_total_slices"] = int(total_slices)
     result["traj_surface_slice_valid_ratio"] = float(slice_valid_ratio)
     result["traj_surface_covered_length_ratio"] = float(covered_len_ratio)
+    result["traj_surface_covered_station_length_m"] = float(covered_station_length)
     result["traj_surface_unique_traj_count"] = int(unique_traj_count)
     result["traj_surface_valid_slices_ratio"] = float(slice_valid_ratio)
     result["traj_surface_geom_type"] = str(getattr(surface, "geom_type", "")) if surface is not None else None
     result["traj_surface_area_m2"] = (float(surface.area) if surface is not None and not surface.is_empty else None)
     result["traj_surface_component_count"] = int(_surface_component_count(surface))
+    result["endcap_valid_ratio_src"] = float(endcap_valid_ratio_src)
+    result["endcap_valid_ratio_dst"] = float(endcap_valid_ratio_dst)
+    result["endcap_width_src_before_m"] = endcap_width_src_before
+    result["endcap_width_src_after_m"] = endcap_width_src_after
+    result["endcap_width_dst_before_m"] = endcap_width_dst_before
+    result["endcap_width_dst_after_m"] = endcap_width_dst_after
+    result["endcap_width_clamped_src_count"] = int(endcap_width_clamped_src_count)
+    result["endcap_width_clamped_dst_count"] = int(endcap_width_clamped_dst_count)
+    result["xsec_support_available_src"] = bool(xsec_support_available_src)
+    result["xsec_support_available_dst"] = bool(xsec_support_available_dst)
 
     in_ratio_est = None
     endpoint_in_src = None
@@ -2142,11 +2637,18 @@ def _eval_traj_surface_gate(
         float(params["TRAJ_SURF_MIN_COVERED_LEN_RATIO"]),
         float(params.get("TRAJ_SURF_ENFORCE_MIN_COVERED_LEN_RATIO", 0.90)),
     )
+    min_endcap_ratio = max(0.0, min(1.0, float(params.get("ENDCAP_MIN_VALID_RATIO", 0.5))))
     min_unique = int(params["TRAJ_SURF_MIN_UNIQUE_TRAJ"])
+    src_endcap_ok = float(endcap_valid_ratio_src) >= min_endcap_ratio
+    dst_endcap_ok = float(endcap_valid_ratio_dst) >= min_endcap_ratio
     sufficient = (
         (valid_slices >= 2)
         and (slice_valid_ratio >= min_slice_ratio)
         and (covered_len_ratio >= min_cov_ratio)
+        and bool(src_endcap_ok)
+        and bool(dst_endcap_ok)
+        and bool(xsec_support_available_src)
+        and bool(xsec_support_available_dst)
         and (unique_traj_count >= min_unique)
         and (surface is not None and not surface.is_empty)
         and (float(result.get("traj_surface_area_m2") or 0.0) > 0.0)
@@ -2179,6 +2681,14 @@ def _eval_traj_surface_gate(
             reasons.append("slice_valid_ratio_low")
         if covered_len_ratio < min_cov_ratio:
             reasons.append("covered_len_ratio_low")
+        if not src_endcap_ok:
+            reasons.append("endcap_missing_src")
+        if not dst_endcap_ok:
+            reasons.append("endcap_missing_dst")
+        if not bool(xsec_support_available_src):
+            reasons.append("xsec_support_empty_src")
+        if not bool(xsec_support_available_dst):
+            reasons.append("xsec_support_empty_dst")
         if unique_traj_count < min_unique:
             reasons.append("unique_traj_low")
         if surface is None or surface.is_empty:
@@ -2193,9 +2703,14 @@ def _eval_traj_surface_gate(
                 f"valid_slices={valid_slices}/{total_slices};"
                 f"slice_valid_ratio={slice_valid_ratio:.3f};"
                 f"covered_length_ratio={covered_len_ratio:.3f};"
+                f"endcap_valid_ratio_src={endcap_valid_ratio_src:.3f};"
+                f"endcap_valid_ratio_dst={endcap_valid_ratio_dst:.3f};"
+                f"xsec_support_src={bool(xsec_support_available_src)};"
+                f"xsec_support_dst={bool(xsec_support_available_dst)};"
                 f"unique_traj_count={unique_traj_count};"
                 f"geom_type={result.get('traj_surface_geom_type')};"
                 f"area_m2={result.get('traj_surface_area_m2')};"
+                f"hint_reason={(hint.get('reason') if isinstance(hint, dict) else None)};"
                 f"reasons={','.join(reasons) if reasons else 'na'}"
             ),
         )
@@ -2302,6 +2817,8 @@ def _evaluate_candidate_road(
         traj_surface_metric=traj_surface_hint.get("surface_metric"),
         traj_surface_enforced=bool(traj_surface_hint.get("traj_surface_enforced", False)),
         divstrip_zone_metric=gore_zone_metric,
+        xsec_anchor_window_m=float(params.get("XSEC_ANCHOR_WINDOW_M", 15.0)),
+        xsec_endpoint_max_dist_m=float(params.get("XSEC_ENDPOINT_MAX_DIST_M", 20.0)),
         d_min=float(params["D_MIN"]),
         d_max=float(params["D_MAX"]),
         near_len=float(params["NEAR_LEN"]),
@@ -2361,7 +2878,24 @@ def _evaluate_candidate_road(
     road["lb_path_length_m"] = center.lb_path_length_m
     road["lb_graph_edge_total"] = center.diagnostics.get("lb_graph_edge_total")
     road["lb_graph_edge_filtered"] = center.diagnostics.get("lb_graph_edge_filtered")
+    road["endpoint_fallback_mode_src"] = center.diagnostics.get("endpoint_fallback_mode_src")
+    road["endpoint_fallback_mode_dst"] = center.diagnostics.get("endpoint_fallback_mode_dst")
+    road["xsec_support_len_src"] = center.diagnostics.get("xsec_support_len_src")
+    road["xsec_support_len_dst"] = center.diagnostics.get("xsec_support_len_dst")
+    road["xsec_support_disabled_due_to_insufficient_src"] = center.diagnostics.get(
+        "xsec_support_disabled_due_to_insufficient_src"
+    )
+    road["xsec_support_disabled_due_to_insufficient_dst"] = center.diagnostics.get(
+        "xsec_support_disabled_due_to_insufficient_dst"
+    )
+    road["s_anchor_src_m"] = center.diagnostics.get("s_anchor_src_m")
+    road["s_anchor_dst_m"] = center.diagnostics.get("s_anchor_dst_m")
+    road["s_end_src_m"] = center.diagnostics.get("s_end_src_m")
+    road["s_end_dst_m"] = center.diagnostics.get("s_end_dst_m")
+    road["anchor_window_m"] = center.diagnostics.get("anchor_window_m")
     road["traj_surface_hint_enforced"] = bool(traj_surface_hint.get("traj_surface_enforced", False))
+    road["traj_surface_hint_axis_source"] = traj_surface_hint.get("axis_source")
+    road["traj_surface_hint_reason"] = traj_surface_hint.get("reason")
     road["traj_surface_hint_valid_slices"] = int(traj_surface_hint.get("valid_slices", 0))
     road["traj_surface_hint_total_slices"] = int(traj_surface_hint.get("total_slices", 0))
     road["traj_surface_hint_slice_valid_ratio"] = _to_finite_float(traj_surface_hint.get("slice_valid_ratio"), 0.0)
@@ -2447,6 +2981,19 @@ def _evaluate_candidate_road(
                 candidate_hard_breakpoints.append(dict(bp))
             else:
                 candidate_soft_breakpoints.append(dict(bp))
+        if int(road.get("endcap_width_clamped_src_count") or 0) > 0 or int(road.get("endcap_width_clamped_dst_count") or 0) > 0:
+            soft_flags.add(_SOFT_ENDCAP_WIDTH_CLAMPED)
+            candidate_soft_breakpoints.append(
+                build_breakpoint(
+                    road=road,
+                    reason=_SOFT_ENDCAP_WIDTH_CLAMPED,
+                    severity="soft",
+                    hint=(
+                        f"src={int(road.get('endcap_width_clamped_src_count') or 0)};"
+                        f"dst={int(road.get('endcap_width_clamped_dst_count') or 0)}"
+                    ),
+                )
+            )
     else:
         soft_flags.add(SOFT_TRAJ_SURFACE_INSUFFICIENT)
 
@@ -2610,6 +3157,12 @@ def _collect_debug_layers_for_selected(
     if isinstance(shape_ref, LineString) and not shape_ref.is_empty:
         debug_layers["lb_path_best"].append(
             {"geometry": shape_ref, "properties": {"road_id": road_id, "lb_path_found": bool(road.get("lb_path_found"))}}
+        )
+        debug_layers["ref_axis_best"].append(
+            {
+                "geometry": shape_ref,
+                "properties": {"road_id": road_id, "axis_source": road.get("traj_surface_hint_axis_source")},
+            }
         )
 
     src_valid = src_xsec
@@ -2782,6 +3335,8 @@ def _make_base_road_record(
         "dst_stable_s_m": None,
         "src_cut_mode": "fallback_50m",
         "dst_cut_mode": "fallback_50m",
+        "endpoint_fallback_mode_src": None,
+        "endpoint_fallback_mode_dst": None,
         "endpoint_tangent_deviation_deg_src": None,
         "endpoint_tangent_deviation_deg_dst": None,
         "max_segment_m": None,
@@ -2791,6 +3346,26 @@ def _make_base_road_record(
         "traj_surface_component_count": None,
         "traj_surface_valid_slices_ratio": None,
         "traj_surface_covered_length_ratio": None,
+        "traj_surface_covered_station_length_m": None,
+        "endcap_valid_ratio_src": None,
+        "endcap_valid_ratio_dst": None,
+        "endcap_width_src_before_m": None,
+        "endcap_width_src_after_m": None,
+        "endcap_width_dst_before_m": None,
+        "endcap_width_dst_after_m": None,
+        "endcap_width_clamped_src_count": None,
+        "endcap_width_clamped_dst_count": None,
+        "xsec_support_available_src": None,
+        "xsec_support_available_dst": None,
+        "xsec_support_len_src": None,
+        "xsec_support_len_dst": None,
+        "xsec_support_disabled_due_to_insufficient_src": None,
+        "xsec_support_disabled_due_to_insufficient_dst": None,
+        "s_anchor_src_m": None,
+        "s_anchor_dst_m": None,
+        "s_end_src_m": None,
+        "s_end_dst_m": None,
+        "anchor_window_m": None,
         "traj_surface_slice_half_win_levels": None,
         "traj_surface_slice_half_win_used_hist": None,
         "traj_in_ratio": None,
@@ -2801,6 +3376,8 @@ def _make_base_road_record(
         "lb_path_found": False,
         "lb_path_edge_count": 0,
         "lb_path_length_m": None,
+        "traj_surface_hint_axis_source": None,
+        "traj_surface_hint_reason": None,
         "repr_traj_ids": repr_ids,
         "stitch_hops_p50": stitch_p50,
         "stitch_hops_p90": stitch_p90,
@@ -2850,6 +3427,7 @@ def _reason_hint(reason: str) -> str:
         _SOFT_CROSS_EMPTY_SKIPPED: "cross_point_empty_skipped",
         _SOFT_CROSS_GEOM_UNEXPECTED: "cross_geometry_unexpected",
         _SOFT_CROSS_DISTANCE_GATE_REJECT: "cross_distance_gate_reject",
+        _SOFT_ENDCAP_WIDTH_CLAMPED: "endcap_width_clamped",
     }
     return hints.get(reason, "")
 
@@ -2909,9 +3487,12 @@ def _finalize_payloads(
                 or sk.startswith("stitch_")
                 or sk.startswith("endpoint_center_offset_")
                 or sk.startswith("endpoint_tangent_deviation_")
+                or sk.startswith("endpoint_anchor_")
                 or sk.startswith("gore_overlap_")
+                or sk.startswith("endcap_")
                 or sk.startswith("max_segment_")
                 or sk.startswith("seg_index0_")
+                or sk.startswith("xsec_support_")
                 or sk.startswith("traj_in_ratio")
                 or sk.startswith("traj_surface_")
                 or sk.startswith("divstrip_")
@@ -2937,6 +3518,7 @@ def _finalize_payloads(
 
     debug_feature_collections: dict[str, dict[str, Any]] = {}
     if debug_layers:
+        always_emit_empty = {"xsec_support_src", "xsec_support_dst"}
         for layer_name, items in debug_layers.items():
             feats: list[dict[str, Any]] = []
             for item in items:
@@ -2954,7 +3536,7 @@ def _finalize_payloads(
                         "properties": dict(item.get("properties") or {}),
                     }
                 )
-            if feats:
+            if feats or layer_name in always_emit_empty:
                 debug_feature_collections[f"debug/{layer_name}.geojson"] = {
                     "type": "FeatureCollection",
                     "features": feats,

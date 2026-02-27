@@ -85,6 +85,27 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--surf_slice_step_m", type=float, default=float(DEFAULT_PARAMS["SURF_SLICE_STEP_M"]))
     p.add_argument("--surf_slice_half_win_m", type=float, default=float(DEFAULT_PARAMS["SURF_SLICE_HALF_WIN_M"]))
     p.add_argument(
+        "--axis_max_project_dist_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["AXIS_MAX_PROJECT_DIST_M"]),
+    )
+    p.add_argument("--endcap_m", type=float, default=float(DEFAULT_PARAMS["ENDCAP_M"]))
+    p.add_argument(
+        "--endcap_min_valid_ratio",
+        type=float,
+        default=float(DEFAULT_PARAMS["ENDCAP_MIN_VALID_RATIO"]),
+    )
+    p.add_argument(
+        "--endcap_width_abs_cap_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["ENDCAP_WIDTH_ABS_CAP_M"]),
+    )
+    p.add_argument(
+        "--endcap_width_rel_cap",
+        type=float,
+        default=float(DEFAULT_PARAMS["ENDCAP_WIDTH_REL_CAP"]),
+    )
+    p.add_argument(
         "--surf_slice_half_win_levels_m",
         type=str,
         default=",".join(str(v) for v in DEFAULT_PARAMS.get("SURF_SLICE_HALF_WIN_LEVELS_M", [2.0, 5.0, 10.0])),
@@ -93,6 +114,16 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--surf_quant_high", type=float, default=float(DEFAULT_PARAMS["SURF_QUANT_HIGH"]))
     p.add_argument("--surf_buf_m", type=float, default=float(DEFAULT_PARAMS["SURF_BUF_M"]))
     p.add_argument("--in_ratio_min", type=float, default=float(DEFAULT_PARAMS["IN_RATIO_MIN"]))
+    p.add_argument(
+        "--xsec_anchor_window_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["XSEC_ANCHOR_WINDOW_M"]),
+    )
+    p.add_argument(
+        "--xsec_endpoint_max_dist_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["XSEC_ENDPOINT_MAX_DIST_M"]),
+    )
     p.add_argument(
         "--traj_surf_min_points_per_slice",
         type=int,
@@ -193,11 +224,18 @@ def main(argv: Iterable[str] | None = None) -> int:
         "TREND_FIT_WIN_M": float(args.trend_fit_win_m),
         "SURF_SLICE_STEP_M": float(args.surf_slice_step_m),
         "SURF_SLICE_HALF_WIN_M": float(args.surf_slice_half_win_m),
+        "AXIS_MAX_PROJECT_DIST_M": float(args.axis_max_project_dist_m),
+        "ENDCAP_M": float(args.endcap_m),
+        "ENDCAP_MIN_VALID_RATIO": float(args.endcap_min_valid_ratio),
+        "ENDCAP_WIDTH_ABS_CAP_M": float(args.endcap_width_abs_cap_m),
+        "ENDCAP_WIDTH_REL_CAP": float(args.endcap_width_rel_cap),
         "SURF_SLICE_HALF_WIN_LEVELS_M": [float(v) for v in level_values],
         "SURF_QUANT_LOW": float(args.surf_quant_low),
         "SURF_QUANT_HIGH": float(args.surf_quant_high),
         "SURF_BUF_M": float(args.surf_buf_m),
         "IN_RATIO_MIN": float(args.in_ratio_min),
+        "XSEC_ANCHOR_WINDOW_M": float(args.xsec_anchor_window_m),
+        "XSEC_ENDPOINT_MAX_DIST_M": float(args.xsec_endpoint_max_dist_m),
         "TRAJ_SURF_MIN_POINTS_PER_SLICE": int(args.traj_surf_min_points_per_slice),
         "TRAJ_SURF_MIN_SLICE_VALID_RATIO": float(args.traj_surf_min_slice_valid_ratio),
         "TRAJ_SURF_MIN_COVERED_LEN_RATIO": float(args.traj_surf_min_covered_len_ratio),

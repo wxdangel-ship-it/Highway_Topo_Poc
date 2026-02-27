@@ -1124,6 +1124,8 @@ def estimate_centerline(
     traj_surface_metric: BaseGeometry | None,
     traj_surface_enforced: bool,
     divstrip_zone_metric: BaseGeometry | None,
+    xsec_anchor_window_m: float,
+    xsec_endpoint_max_dist_m: float,
     d_min: float,
     d_max: float,
     near_len: float,
@@ -1444,6 +1446,7 @@ def estimate_centerline(
         trend_reason,
         proj_dist_src,
         proj_dist_dst,
+        trend_meta,
     ) = _apply_endpoint_trend_projection(
         base_line=centerline,
         shape_ref_line=shape_ref,
@@ -1460,6 +1463,8 @@ def estimate_centerline(
         traj_surface_enforced=bool(traj_surface_enforced),
         gore_zone_metric=divstrip_zone_metric,
         endpoint_tol_m=float(endpoint_tol_m),
+        anchor_window_m=float(xsec_anchor_window_m),
+        endpoint_local_max_dist_m=float(xsec_endpoint_max_dist_m),
         road_max_vertices=int(road_max_vertices),
     )
     if trend_line is None:
@@ -1473,6 +1478,7 @@ def estimate_centerline(
         trend_dev_dst = None
         proj_dist_src = None
         proj_dist_dst = None
+        trend_meta = {}
     else:
         clipped = trend_line
         clip_reason = trend_reason
@@ -1554,6 +1560,8 @@ def estimate_centerline(
     diagnostics["endpoint_proj_dist_to_core_m_dst"] = proj_dist_dst
     diagnostics["src_cut_mode"] = src_decision.cut_mode
     diagnostics["dst_cut_mode"] = dst_decision.cut_mode
+    if isinstance(trend_meta, dict) and trend_meta:
+        diagnostics.update(trend_meta)
 
     return CenterEstimate(
         centerline_metric=clipped,
@@ -1649,22 +1657,37 @@ def _apply_endpoint_trend_projection(
     traj_surface_enforced: bool,
     gore_zone_metric: BaseGeometry | None,
     endpoint_tol_m: float,
+    anchor_window_m: float,
+    endpoint_local_max_dist_m: float,
     road_max_vertices: int,
-) -> tuple[LineString | None, float | None, float | None, str | None, float | None, float | None]:
+) -> tuple[LineString | None, float | None, float | None, str | None, float | None, float | None, dict[str, Any]]:
+    trend_meta: dict[str, Any] = {
+        "anchor_window_m": float(max(0.0, anchor_window_m)),
+        "xsec_support_len_src": 0.0,
+        "xsec_support_len_dst": 0.0,
+        "xsec_support_disabled_due_to_insufficient_src": not bool(traj_surface_enforced),
+        "xsec_support_disabled_due_to_insufficient_dst": not bool(traj_surface_enforced),
+        "endpoint_fallback_mode_src": None,
+        "endpoint_fallback_mode_dst": None,
+        "s_anchor_src_m": None,
+        "s_anchor_dst_m": None,
+        "s_end_src_m": None,
+        "s_end_dst_m": None,
+    }
     if base_line.is_empty or base_line.length <= 0:
-        return None, None, None, HARD_CENTER_EMPTY, None, None
+        return None, None, None, HARD_CENTER_EMPTY, None, None, trend_meta
     if sample_center_points.shape[0] < 2 or sample_stations.size != sample_center_points.shape[0]:
-        return None, None, None, HARD_CENTER_EMPTY, None, None
+        return None, None, None, HARD_CENTER_EMPTY, None, None, trend_meta
 
     n = int(sample_center_points.shape[0])
     if src_decision.anchor_station_m is None or dst_decision.anchor_station_m is None:
-        return None, None, None, HARD_CENTER_EMPTY, None, None
+        return None, None, None, HARD_CENTER_EMPTY, None, None, trend_meta
     i_src = int(np.argmin(np.abs(sample_stations - float(src_decision.anchor_station_m))))
     i_dst = int(np.argmin(np.abs(sample_stations - float(dst_decision.anchor_station_m))))
     i_src = max(0, min(n - 1, i_src))
     i_dst = max(0, min(n - 1, i_dst))
     if i_dst <= i_src:
-        return None, None, None, HARD_CENTER_EMPTY, None, None
+        return None, None, None, HARD_CENTER_EMPTY, None, None, trend_meta
 
     src_anchor = sample_center_points[i_src, :]
     dst_anchor = sample_center_points[i_dst, :]
@@ -1688,7 +1711,7 @@ def _apply_endpoint_trend_projection(
             fit_win_m=max(5.0, float(trend_fit_win_m)),
         )
     if t_src is None or t_dst is None:
-        return None, None, None, HARD_CENTER_EMPTY, None, None
+        return None, None, None, HARD_CENTER_EMPTY, None, None, trend_meta
 
     p_src0 = _project_trend_to_xsec(
         anchor_xy=(float(src_anchor[0]), float(src_anchor[1])),
@@ -1701,63 +1724,106 @@ def _apply_endpoint_trend_projection(
         xsec=dst_xsec,
     )
     if p_src0 is None or p_dst0 is None:
-        return None, None, None, HARD_CENTER_EMPTY, None, None
+        return None, None, None, HARD_CENTER_EMPTY, None, None, trend_meta
 
     src_ref = _channel_ref_on_xsec(src_xsec=src_xsec, cross_points=src_channel_points)
     dst_ref = _channel_ref_on_xsec(src_xsec=dst_xsec, cross_points=dst_channel_points)
-    src_support = _xsec_surface_support(
+    src_support_raw = _xsec_surface_support(
         xsec=src_xsec,
         gore_zone_metric=gore_zone_metric,
         traj_surface_metric=traj_surface_metric,
         enforced=bool(traj_surface_enforced),
     )
-    dst_support = _xsec_surface_support(
+    dst_support_raw = _xsec_surface_support(
         xsec=dst_xsec,
         gore_zone_metric=gore_zone_metric,
         traj_surface_metric=traj_surface_metric,
         enforced=bool(traj_surface_enforced),
     )
-    p_src = _project_endpoint_to_valid_xsec(
+    src_support_parts = _iter_linestring_parts(src_support_raw)
+    dst_support_parts = _iter_linestring_parts(dst_support_raw)
+    src_support_enabled = bool(traj_surface_enforced) and bool(src_support_parts)
+    dst_support_enabled = bool(traj_surface_enforced) and bool(dst_support_parts)
+    if bool(traj_surface_enforced) and not src_support_enabled:
+        trend_meta["xsec_support_disabled_due_to_insufficient_src"] = True
+    if bool(traj_surface_enforced) and not dst_support_enabled:
+        trend_meta["xsec_support_disabled_due_to_insufficient_dst"] = True
+
+    p_src, mode_src, support_len_src = _project_endpoint_to_valid_xsec(
         endpoint_xy=p_src0,
         xsec=src_xsec,
         gore_zone_metric=gore_zone_metric,
         channel_ref_xy=src_ref,
-        xsec_support_geom=src_support,
+        xsec_support_geom=(src_support_raw if src_support_enabled else None),
+        lb_ref_line=shape_ref_line,
+        prefer_lb_guard=not bool(src_support_enabled),
+        local_max_dist_m=float(endpoint_local_max_dist_m),
     )
-    p_dst = _project_endpoint_to_valid_xsec(
+    p_dst, mode_dst, support_len_dst = _project_endpoint_to_valid_xsec(
         endpoint_xy=p_dst0,
         xsec=dst_xsec,
         gore_zone_metric=gore_zone_metric,
         channel_ref_xy=dst_ref,
-        xsec_support_geom=dst_support,
+        xsec_support_geom=(dst_support_raw if dst_support_enabled else None),
+        lb_ref_line=shape_ref_line,
+        prefer_lb_guard=not bool(dst_support_enabled),
+        local_max_dist_m=float(endpoint_local_max_dist_m),
     )
+    trend_meta["endpoint_fallback_mode_src"] = str(mode_src)
+    trend_meta["endpoint_fallback_mode_dst"] = str(mode_dst)
+    trend_meta["xsec_support_len_src"] = float(max(0.0, support_len_src))
+    trend_meta["xsec_support_len_dst"] = float(max(0.0, support_len_dst))
 
     q_src = _nearest_point_on_line_xy(base_line, p_src)
     q_dst = _nearest_point_on_line_xy(base_line, p_dst)
     if q_src is None or q_dst is None:
-        return None, None, None, HARD_CENTER_EMPTY, None, None
+        return None, None, None, HARD_CENTER_EMPTY, None, None, trend_meta
     proj_dist_src = float(math.hypot(float(p_src[0]) - float(q_src[0]), float(p_src[1]) - float(q_src[1])))
     proj_dist_dst = float(math.hypot(float(p_dst[0]) - float(q_dst[0]), float(p_dst[1]) - float(q_dst[1])))
 
+    s_anchor_src = _xsec_anchor_station(base_line, src_xsec)
+    s_anchor_dst = _xsec_anchor_station(base_line, dst_xsec)
+    trend_meta["s_anchor_src_m"] = float(s_anchor_src) if s_anchor_src is not None else None
+    trend_meta["s_anchor_dst_m"] = float(s_anchor_dst) if s_anchor_dst is not None else None
     try:
         s_src = float(base_line.project(Point(float(q_src[0]), float(q_src[1]))))
         s_dst = float(base_line.project(Point(float(q_dst[0]), float(q_dst[1]))))
     except Exception:
-        return None, None, None, HARD_CENTER_EMPTY, None, None
+        return None, None, None, HARD_CENTER_EMPTY, None, None, trend_meta
+    L = float(base_line.length)
+    aw = float(max(0.0, anchor_window_m))
+    if s_anchor_src is not None and aw > 0.0:
+        lo = max(0.0, float(s_anchor_src) - aw)
+        hi = min(L, float(s_anchor_src) + aw)
+        s_src = min(max(float(s_src), lo), hi)
+        p = base_line.interpolate(s_src)
+        pxy = point_xy_safe(p, context="src_anchor_window_snap")
+        if pxy is not None:
+            q_src = (float(pxy[0]), float(pxy[1]))
+    if s_anchor_dst is not None and aw > 0.0:
+        lo = max(0.0, float(s_anchor_dst) - aw)
+        hi = min(L, float(s_anchor_dst) + aw)
+        s_dst = min(max(float(s_dst), lo), hi)
+        p = base_line.interpolate(s_dst)
+        pxy = point_xy_safe(p, context="dst_anchor_window_snap")
+        if pxy is not None:
+            q_dst = (float(pxy[0]), float(pxy[1]))
+    trend_meta["s_end_src_m"] = float(s_src)
+    trend_meta["s_end_dst_m"] = float(s_dst)
     if abs(s_dst - s_src) < 1e-3:
-        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst
+        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst, trend_meta
     s0 = min(s_src, s_dst)
     s1 = max(s_src, s_dst)
     try:
         core = substring(base_line, s0, s1)
     except Exception:
-        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst
+        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst, trend_meta
     if core is None or core.is_empty or (not isinstance(core, LineString)) or len(core.coords) < 2:
-        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst
+        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst, trend_meta
     core = _orient_line(core, src_xsec, dst_xsec)
     core_coords = list(core.coords)
     if len(core_coords) < 2:
-        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst
+        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst, trend_meta
 
     src_mid = _build_trend_midpoint(
         endpoint_xy=p_src,
@@ -1782,23 +1848,24 @@ def _apply_endpoint_trend_projection(
     coords.append((float(p_dst[0]), float(p_dst[1])))
     coords = _dedup_coords(coords, eps=1e-4)
     if len(coords) < 2:
-        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst
+        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst, trend_meta
     line = LineString(coords)
     if line.is_empty or line.length <= 0:
-        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst
+        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst, trend_meta
     line = _limit_vertices(line, road_max_vertices)
 
     p0 = Point(line.coords[0])
     p1 = Point(line.coords[-1])
     d0 = float(p0.distance(src_xsec))
     d1 = float(p1.distance(dst_xsec))
-    if d0 > float(endpoint_tol_m) or d1 > float(endpoint_tol_m):
-        return None, None, None, HARD_ENDPOINT, proj_dist_src, proj_dist_dst
+    max_local = max(5.0, float(endpoint_local_max_dist_m))
+    if d0 > max_local * 1.5 or d1 > max_local * 1.5:
+        return None, None, None, HARD_ENDPOINT, proj_dist_src, proj_dist_dst, trend_meta
 
     dev_src = _endpoint_tangent_deviation(line, trend_xy=t_src, at_start=True)
     dev_dst = _endpoint_tangent_deviation(line, trend_xy=t_dst, at_start=False)
 
-    return line, dev_src, dev_dst, None, proj_dist_src, proj_dist_dst
+    return line, dev_src, dev_dst, None, proj_dist_src, proj_dist_dst, trend_meta
 
 
 def _fit_endpoint_trend(
@@ -1919,9 +1986,12 @@ def _project_endpoint_to_valid_xsec(
     gore_zone_metric: BaseGeometry | None,
     channel_ref_xy: tuple[float, float] | None,
     xsec_support_geom: BaseGeometry | None = None,
-) -> tuple[float, float]:
+    lb_ref_line: LineString | None = None,
+    prefer_lb_guard: bool = False,
+    local_max_dist_m: float = 20.0,
+) -> tuple[tuple[float, float], str, float]:
     if xsec.is_empty or xsec.length <= 0:
-        return (float(endpoint_xy[0]), float(endpoint_xy[1]))
+        return (float(endpoint_xy[0]), float(endpoint_xy[1])), "xsec_empty", 0.0
     valid_geom: BaseGeometry = xsec
     if gore_zone_metric is not None:
         try:
@@ -1931,13 +2001,11 @@ def _project_endpoint_to_valid_xsec(
         except Exception:
             pass
     support_parts = _iter_linestring_parts(xsec_support_geom)
+    support_len = float(sum(float(p.length) for p in support_parts))
     parts = support_parts if support_parts else _iter_linestring_parts(valid_geom)
     if not parts:
-        return _adjust_endpoint_on_xsec_gore(
-            endpoint_xy=endpoint_xy,
-            xsec=xsec,
-            gore_zone_metric=gore_zone_metric,
-        )
+        out = _adjust_endpoint_on_xsec_gore(endpoint_xy=endpoint_xy, xsec=xsec, gore_zone_metric=gore_zone_metric)
+        return out, "fallback_no_parts", support_len
 
     ref_pt = Point(float(endpoint_xy[0]), float(endpoint_xy[1]))
     ch_pt = (
@@ -1945,8 +2013,11 @@ def _project_endpoint_to_valid_xsec(
         if channel_ref_xy is not None
         else None
     )
+    lb_line = lb_ref_line if isinstance(lb_ref_line, LineString) and (not lb_ref_line.is_empty) and lb_ref_line.length > 0 else None
     best_xy: tuple[float, float] | None = None
     best_score = float("inf")
+    best_d0 = float("inf")
+    mode = "enforced_support" if support_parts else ("lb_path_guarded_fallback" if prefer_lb_guard else "channel_fallback")
     for part in parts:
         try:
             s = float(part.project(ref_pt))
@@ -1960,17 +2031,28 @@ def _project_endpoint_to_valid_xsec(
         d1 = 0.0
         if ch_pt is not None:
             d1 = float(ch_pt.distance(Point(float(p_xy[0]), float(p_xy[1]))))
-        score = d0 + 0.7 * d1
+        d_lb = 0.0
+        if lb_line is not None:
+            try:
+                d_lb = float(lb_line.distance(Point(float(p_xy[0]), float(p_xy[1]))))
+            except Exception:
+                d_lb = 0.0
+        if support_parts:
+            score = d0 + 0.7 * d1
+        elif prefer_lb_guard:
+            score = 2.0 * d_lb + 0.6 * d1 + 0.3 * d0
+        else:
+            score = d0 + 0.7 * d1
         if score < best_score:
             best_score = score
+            best_d0 = d0
             best_xy = (float(p_xy[0]), float(p_xy[1]))
     if best_xy is not None:
-        return best_xy
-    return _adjust_endpoint_on_xsec_gore(
-        endpoint_xy=endpoint_xy,
-        xsec=xsec,
-        gore_zone_metric=gore_zone_metric,
-    )
+        if float(local_max_dist_m) > 0.0 and best_d0 > float(local_max_dist_m):
+            mode = f"{mode}_out_local"
+        return best_xy, mode, support_len
+    out = _adjust_endpoint_on_xsec_gore(endpoint_xy=endpoint_xy, xsec=xsec, gore_zone_metric=gore_zone_metric)
+    return out, f"{mode}_adjust_gore", support_len
 
 
 def _xsec_surface_support(
@@ -2078,6 +2160,22 @@ def _project_trend_to_xsec(
     if xp_xy is None:
         return None
     return (float(xp_xy[0]), float(xp_xy[1]))
+
+
+def _xsec_anchor_station(line: LineString, xsec: LineString) -> float | None:
+    if line.is_empty or line.length <= 0 or xsec.is_empty or xsec.length <= 0:
+        return None
+    try:
+        lp, _xp = nearest_points(line, xsec)
+    except Exception:
+        return None
+    lp_xy = point_xy_safe(lp, context="xsec_anchor_station_line")
+    if lp_xy is None:
+        return None
+    try:
+        return float(line.project(Point(float(lp_xy[0]), float(lp_xy[1]))))
+    except Exception:
+        return None
 
 
 def _nearest_point_on_line_xy(

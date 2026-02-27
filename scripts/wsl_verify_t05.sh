@@ -118,8 +118,20 @@ keys = [
     "traj_surface_area_m2_p90",
     "traj_surface_covered_length_ratio_p50",
     "traj_surface_covered_length_ratio_p90",
+    "traj_surface_covered_station_length_m_p50",
+    "traj_surface_covered_station_length_m_p90",
     "traj_surface_valid_slices_ratio_p50",
     "traj_surface_valid_slices_ratio_p90",
+    "endcap_valid_ratio_src_p90",
+    "endcap_valid_ratio_dst_p90",
+    "endcap_width_src_before_m_p90",
+    "endcap_width_src_after_m_p90",
+    "endcap_width_dst_before_m_p90",
+    "endcap_width_dst_after_m_p90",
+    "xsec_support_len_src_p90",
+    "xsec_support_len_dst_p90",
+    "endpoint_anchor_dist_p90",
+    "endpoint_anchor_dist_max",
     "traj_surface_enforced_count",
     "traj_surface_insufficient_count",
     "traj_in_ratio_p50",
@@ -153,7 +165,7 @@ print(f"road_count={len(features)}")
 for feat in features[:5]:
     props = feat.get("properties") or {}
     print(
-        "road_id={rid} chosen_cluster_id={cid} traj_surface_enforced={enf} traj_surface_geom_type={gt} traj_surface_area_m2={ga} covered_len_ratio={cov} valid_slices_ratio={vr} traj_in_ratio={ratio} endpoint_in_surface_src={es} endpoint_in_surface_dst={ed} seg_index0_len_m={seg0} divstrip_intersect_len_m={dlen}".format(
+        "road_id={rid} chosen_cluster_id={cid} traj_surface_enforced={enf} traj_surface_geom_type={gt} traj_surface_area_m2={ga} covered_len_ratio={cov} valid_slices_ratio={vr} endcap_valid_src={evs} endcap_valid_dst={evd} endcap_width_src_before={ewsb} endcap_width_src_after={ewsa} endcap_width_dst_before={ewdb} endcap_width_dst_after={ewda} xsec_support_len_src={xss} xsec_support_len_dst={xsd} endpoint_fallback_mode_src={fms} endpoint_fallback_mode_dst={fmd} traj_in_ratio={ratio} endpoint_in_surface_src={es} endpoint_in_surface_dst={ed} seg_index0_len_m={seg0} divstrip_intersect_len_m={dlen}".format(
             rid=props.get("road_id"),
             cid=props.get("chosen_cluster_id"),
             enf=props.get("traj_surface_enforced"),
@@ -161,6 +173,16 @@ for feat in features[:5]:
             ga=props.get("traj_surface_area_m2"),
             cov=props.get("traj_surface_covered_length_ratio"),
             vr=props.get("traj_surface_valid_slices_ratio"),
+            evs=props.get("endcap_valid_ratio_src"),
+            evd=props.get("endcap_valid_ratio_dst"),
+            ewsb=props.get("endcap_width_src_before_m"),
+            ewsa=props.get("endcap_width_src_after_m"),
+            ewdb=props.get("endcap_width_dst_before_m"),
+            ewda=props.get("endcap_width_dst_after_m"),
+            xss=props.get("xsec_support_len_src"),
+            xsd=props.get("xsec_support_len_dst"),
+            fms=props.get("endpoint_fallback_mode_src"),
+            fmd=props.get("endpoint_fallback_mode_dst"),
             ratio=props.get("traj_in_ratio"),
             es=props.get("endpoint_in_traj_surface_src"),
             ed=props.get("endpoint_in_traj_surface_dst"),
@@ -200,6 +222,9 @@ PY
   if [ "$DEBUG_DUMP" = "1" ]; then
     echo "debug_surface_polygon=$OUT_DIR/debug/traj_surface_best_polygon.geojson"
     echo "debug_surface_boundary=$OUT_DIR/debug/traj_surface_best_boundary.geojson"
+    echo "debug_ref_axis=$OUT_DIR/debug/ref_axis_best.geojson"
+    echo "debug_xsec_support_src=$OUT_DIR/debug/xsec_support_src.geojson"
+    echo "debug_xsec_support_dst=$OUT_DIR/debug/xsec_support_dst.geojson"
   fi
 
 done
