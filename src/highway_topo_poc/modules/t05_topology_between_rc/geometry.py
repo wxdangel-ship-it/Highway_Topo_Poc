@@ -10,7 +10,7 @@ import numpy as np
 from shapely import contains_xy
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import linemerge, nearest_points, substring
+from shapely.ops import linemerge, nearest_points, substring, unary_union
 
 from .io import CrossSection, TrajectoryData
 
@@ -20,7 +20,7 @@ HARD_NON_RC = "NON_RC_IN_BETWEEN"
 HARD_CENTER_EMPTY = "CENTER_ESTIMATE_EMPTY"
 HARD_ENDPOINT = "ENDPOINT_NOT_ON_XSEC"
 HARD_ENDPOINT_LOCAL = "ENDPOINT_OUT_OF_LOCAL_XSEC_NEIGHBORHOOD"
-HARD_ENDPOINT_OFF_ANCHOR = "ENDPOINT_OFF_ANCHOR"
+HARD_ENDPOINT_OFF_ANCHOR = "ENDPOINT_OFF_XSEC_ROAD"
 HARD_BRIDGE_SEGMENT = "BRIDGE_SEGMENT_TOO_LONG"
 HARD_DIVSTRIP_INTERSECT = "ROAD_INTERSECTS_DIVSTRIP"
 
@@ -1147,6 +1147,12 @@ def estimate_centerline(
     divstrip_zone_metric: BaseGeometry | None,
     xsec_anchor_window_m: float,
     xsec_endpoint_max_dist_m: float,
+    xsec_ref_half_len_m: float,
+    xsec_road_sample_step_m: float,
+    xsec_road_nonpass_k: int,
+    xsec_road_evidence_radius_m: float,
+    xsec_road_min_ground_pts: int,
+    xsec_road_min_traj_pts: int,
     d_min: float,
     d_max: float,
     near_len: float,
@@ -1479,6 +1485,8 @@ def estimate_centerline(
         dst_xsec=dst_xsec,
         src_channel_points=support.src_cross_points,
         dst_channel_points=support.dst_cross_points,
+        support_traj_segments=support.traj_segments,
+        surface_points_xyz=surface_points_xyz,
         trend_fit_win_m=float(trend_fit_win_m),
         traj_surface_metric=traj_surface_metric,
         traj_surface_enforced=bool(traj_surface_enforced),
@@ -1486,6 +1494,12 @@ def estimate_centerline(
         endpoint_tol_m=float(endpoint_tol_m),
         anchor_window_m=float(xsec_anchor_window_m),
         endpoint_local_max_dist_m=float(xsec_endpoint_max_dist_m),
+        xsec_ref_half_len_m=float(xsec_ref_half_len_m),
+        xsec_road_sample_step_m=float(xsec_road_sample_step_m),
+        xsec_road_nonpass_k=int(xsec_road_nonpass_k),
+        xsec_road_evidence_radius_m=float(xsec_road_evidence_radius_m),
+        xsec_road_min_ground_pts=int(xsec_road_min_ground_pts),
+        xsec_road_min_traj_pts=int(xsec_road_min_traj_pts),
         road_max_vertices=int(road_max_vertices),
     )
     if trend_line is None:
@@ -1676,6 +1690,8 @@ def _apply_endpoint_trend_projection(
     dst_xsec: LineString,
     src_channel_points: Sequence[Point],
     dst_channel_points: Sequence[Point],
+    support_traj_segments: Sequence[LineString],
+    surface_points_xyz: np.ndarray,
     trend_fit_win_m: float,
     traj_surface_metric: BaseGeometry | None,
     traj_surface_enforced: bool,
@@ -1683,6 +1699,12 @@ def _apply_endpoint_trend_projection(
     endpoint_tol_m: float,
     anchor_window_m: float,
     endpoint_local_max_dist_m: float,
+    xsec_ref_half_len_m: float,
+    xsec_road_sample_step_m: float,
+    xsec_road_nonpass_k: int,
+    xsec_road_evidence_radius_m: float,
+    xsec_road_min_ground_pts: int,
+    xsec_road_min_traj_pts: int,
     road_max_vertices: int,
 ) -> tuple[LineString | None, float | None, float | None, str | None, float | None, float | None, dict[str, Any]]:
     trend_meta: dict[str, Any] = {
@@ -1707,6 +1729,10 @@ def _apply_endpoint_trend_projection(
         "s_anchor_dst_m": None,
         "s_end_src_m": None,
         "s_end_dst_m": None,
+        "endpoint_dist_to_xsec_src_m": None,
+        "endpoint_dist_to_xsec_dst_m": None,
+        "xsec_road_selected_by_src": None,
+        "xsec_road_selected_by_dst": None,
     }
     if base_line.is_empty or base_line.length <= 0:
         return None, None, None, HARD_CENTER_EMPTY, None, None, trend_meta
@@ -1760,39 +1786,110 @@ def _apply_endpoint_trend_projection(
     if p_src0 is None or p_dst0 is None:
         return None, None, None, HARD_CENTER_EMPTY, None, None, trend_meta
 
-    src_ref = _channel_ref_on_xsec(src_xsec=src_xsec, cross_points=src_channel_points)
-    dst_ref = _channel_ref_on_xsec(src_xsec=dst_xsec, cross_points=dst_channel_points)
+    ground_xy = np.asarray(surface_points_xyz[:, :2], dtype=np.float64) if surface_points_xyz.shape[1] >= 2 else np.empty((0, 2), dtype=np.float64)
+    finite_ground = (
+        np.isfinite(ground_xy[:, 0]) & np.isfinite(ground_xy[:, 1])
+        if ground_xy.size > 0
+        else np.zeros((0,), dtype=bool)
+    )
+    if ground_xy.size > 0 and np.any(finite_ground):
+        ground_xy = ground_xy[finite_ground, :]
+    else:
+        ground_xy = np.empty((0, 2), dtype=np.float64)
+    src_xsec_road = _build_xsec_road_for_endpoint(
+        xsec_seed=src_xsec,
+        shape_ref_line=shape_ref_line,
+        traj_segments=support_traj_segments,
+        ground_xy=ground_xy,
+        gore_zone_metric=gore_zone_metric,
+        ref_half_len_m=float(xsec_ref_half_len_m),
+        sample_step_m=float(xsec_road_sample_step_m),
+        nonpass_k=int(xsec_road_nonpass_k),
+        evidence_radius_m=float(xsec_road_evidence_radius_m),
+        min_ground_pts=int(xsec_road_min_ground_pts),
+        min_traj_pts=int(xsec_road_min_traj_pts),
+    )
+    dst_xsec_road = _build_xsec_road_for_endpoint(
+        xsec_seed=dst_xsec,
+        shape_ref_line=shape_ref_line,
+        traj_segments=support_traj_segments,
+        ground_xy=ground_xy,
+        gore_zone_metric=gore_zone_metric,
+        ref_half_len_m=float(xsec_ref_half_len_m),
+        sample_step_m=float(xsec_road_sample_step_m),
+        nonpass_k=int(xsec_road_nonpass_k),
+        evidence_radius_m=float(xsec_road_evidence_radius_m),
+        min_ground_pts=int(xsec_road_min_ground_pts),
+        min_traj_pts=int(xsec_road_min_traj_pts),
+    )
+    src_xsec_sel = src_xsec_road.get("xsec_road_selected")
+    dst_xsec_sel = dst_xsec_road.get("xsec_road_selected")
+    if not isinstance(src_xsec_sel, BaseGeometry) or src_xsec_sel.is_empty:
+        src_xsec_sel = src_xsec
+    if not isinstance(dst_xsec_sel, BaseGeometry) or dst_xsec_sel.is_empty:
+        dst_xsec_sel = dst_xsec
+    trend_meta["_xsec_ref_src_metric"] = src_xsec_road.get("xsec_ref")
+    trend_meta["_xsec_ref_dst_metric"] = dst_xsec_road.get("xsec_ref")
+    trend_meta["_xsec_road_all_src_metric"] = src_xsec_road.get("xsec_road_all")
+    trend_meta["_xsec_road_all_dst_metric"] = dst_xsec_road.get("xsec_road_all")
+    trend_meta["_xsec_road_selected_src_metric"] = src_xsec_sel
+    trend_meta["_xsec_road_selected_dst_metric"] = dst_xsec_sel
+    trend_meta["xsec_road_selected_by_src"] = str(src_xsec_road.get("selected_by"))
+    trend_meta["xsec_road_selected_by_dst"] = str(dst_xsec_road.get("selected_by"))
+    trend_meta["xsec_road_left_extent_src_m"] = src_xsec_road.get("left_extent_m")
+    trend_meta["xsec_road_right_extent_src_m"] = src_xsec_road.get("right_extent_m")
+    trend_meta["xsec_road_left_extent_dst_m"] = dst_xsec_road.get("left_extent_m")
+    trend_meta["xsec_road_right_extent_dst_m"] = dst_xsec_road.get("right_extent_m")
+    trend_meta["xsec_road_all_geom_type_src"] = src_xsec_road.get("all_geom_type")
+    trend_meta["xsec_road_all_geom_type_dst"] = dst_xsec_road.get("all_geom_type")
+    trend_meta["xsec_road_selected_len_src_m"] = (
+        float(src_xsec_sel.length) if isinstance(src_xsec_sel, BaseGeometry) and not src_xsec_sel.is_empty else 0.0
+    )
+    trend_meta["xsec_road_selected_len_dst_m"] = (
+        float(dst_xsec_sel.length) if isinstance(dst_xsec_sel, BaseGeometry) and not dst_xsec_sel.is_empty else 0.0
+    )
+
+    src_xsec_for_endpoint = src_xsec_sel if isinstance(src_xsec_sel, LineString) else src_xsec
+    dst_xsec_for_endpoint = dst_xsec_sel if isinstance(dst_xsec_sel, LineString) else dst_xsec
+
+    src_ref = _channel_ref_on_xsec(src_xsec=src_xsec_for_endpoint, cross_points=src_channel_points)
+    dst_ref = _channel_ref_on_xsec(src_xsec=dst_xsec_for_endpoint, cross_points=dst_channel_points)
     src_support_raw = _xsec_surface_support(
-        xsec=src_xsec,
+        xsec=src_xsec_for_endpoint,
         gore_zone_metric=gore_zone_metric,
         traj_surface_metric=traj_surface_metric,
         enforced=bool(traj_surface_enforced),
     )
     dst_support_raw = _xsec_surface_support(
-        xsec=dst_xsec,
+        xsec=dst_xsec_for_endpoint,
         gore_zone_metric=gore_zone_metric,
         traj_surface_metric=traj_surface_metric,
         enforced=bool(traj_surface_enforced),
     )
     src_support_parts = _iter_linestring_parts(src_support_raw)
     dst_support_parts = _iter_linestring_parts(dst_support_raw)
-    src_support_enabled = bool(traj_surface_enforced) and bool(src_support_parts)
-    dst_support_enabled = bool(traj_surface_enforced) and bool(dst_support_parts)
-    if bool(traj_surface_enforced) and not src_support_enabled:
+    requested_enforced = bool(traj_surface_enforced)
+    src_support_enabled = bool(requested_enforced) and bool(src_support_parts)
+    dst_support_enabled = bool(requested_enforced) and bool(dst_support_parts)
+    if requested_enforced and not src_support_enabled:
         trend_meta["xsec_support_disabled_due_to_insufficient_src"] = True
         trend_meta["xsec_support_empty_reason_src"] = "xsec_support_empty"
-    if bool(traj_surface_enforced) and not dst_support_enabled:
+    if requested_enforced and not dst_support_enabled:
         trend_meta["xsec_support_disabled_due_to_insufficient_dst"] = True
         trend_meta["xsec_support_empty_reason_dst"] = "xsec_support_empty"
+    if requested_enforced and (not src_support_enabled or not dst_support_enabled):
+        traj_surface_enforced = False
+        src_support_enabled = False
+        dst_support_enabled = False
     src_target_sel, src_target_mode = _select_xsec_target_segment(
-        xsec=src_xsec,
+        xsec=src_xsec_for_endpoint,
         gore_zone_metric=gore_zone_metric,
         xsec_support_geom=(src_support_raw if src_support_enabled else None),
         enforced=bool(src_support_enabled),
         lb_ref_line=shape_ref_line,
     )
     dst_target_sel, dst_target_mode = _select_xsec_target_segment(
-        xsec=dst_xsec,
+        xsec=dst_xsec_for_endpoint,
         gore_zone_metric=gore_zone_metric,
         xsec_support_geom=(dst_support_raw if dst_support_enabled else None),
         enforced=bool(dst_support_enabled),
@@ -1805,7 +1902,7 @@ def _apply_endpoint_trend_projection(
 
     p_src, mode_src, support_len_src = _project_endpoint_to_valid_xsec(
         endpoint_xy=p_src0,
-        xsec=src_xsec,
+        xsec=src_xsec_for_endpoint,
         gore_zone_metric=gore_zone_metric,
         channel_ref_xy=src_ref,
         xsec_support_geom=(src_support_raw if src_support_enabled else None),
@@ -1815,7 +1912,7 @@ def _apply_endpoint_trend_projection(
     )
     p_dst, mode_dst, support_len_dst = _project_endpoint_to_valid_xsec(
         endpoint_xy=p_dst0,
-        xsec=dst_xsec,
+        xsec=dst_xsec_for_endpoint,
         gore_zone_metric=gore_zone_metric,
         channel_ref_xy=dst_ref,
         xsec_support_geom=(dst_support_raw if dst_support_enabled else None),
@@ -1837,7 +1934,7 @@ def _apply_endpoint_trend_projection(
     if proj_dist_src > max_local:
         p_src_retry, mode_src_retry, _support_len_src_retry = _project_endpoint_to_valid_xsec(
             endpoint_xy=q_src,
-            xsec=src_xsec,
+            xsec=src_xsec_for_endpoint,
             gore_zone_metric=gore_zone_metric,
             channel_ref_xy=src_ref,
             xsec_support_geom=(src_support_raw if src_support_enabled else None),
@@ -1864,7 +1961,7 @@ def _apply_endpoint_trend_projection(
     if proj_dist_dst > max_local:
         p_dst_retry, mode_dst_retry, _support_len_dst_retry = _project_endpoint_to_valid_xsec(
             endpoint_xy=q_dst,
-            xsec=dst_xsec,
+            xsec=dst_xsec_for_endpoint,
             gore_zone_metric=gore_zone_metric,
             channel_ref_xy=dst_ref,
             xsec_support_geom=(dst_support_raw if dst_support_enabled else None),
@@ -1893,8 +1990,8 @@ def _apply_endpoint_trend_projection(
     if proj_dist_src > max_local * 2.0 or proj_dist_dst > max_local * 2.0:
         return None, None, None, HARD_ENDPOINT_LOCAL, proj_dist_src, proj_dist_dst, trend_meta
 
-    s_anchor_src = _xsec_anchor_station(base_line, src_xsec)
-    s_anchor_dst = _xsec_anchor_station(base_line, dst_xsec)
+    s_anchor_src = _xsec_anchor_station(base_line, src_xsec_for_endpoint)
+    s_anchor_dst = _xsec_anchor_station(base_line, dst_xsec_for_endpoint)
     trend_meta["s_anchor_src_m"] = float(s_anchor_src) if s_anchor_src is not None else None
     trend_meta["s_anchor_dst_m"] = float(s_anchor_dst) if s_anchor_dst is not None else None
     try:
@@ -2027,9 +2124,18 @@ def _apply_endpoint_trend_projection(
 
     p0 = Point(line.coords[0])
     p1 = Point(line.coords[-1])
-    d0 = float(p0.distance(src_xsec))
-    d1 = float(p1.distance(dst_xsec))
+    src_target_for_dist = src_target_sel if (src_target_sel is not None and not src_target_sel.is_empty) else src_xsec_for_endpoint
+    dst_target_for_dist = dst_target_sel if (dst_target_sel is not None and not dst_target_sel.is_empty) else dst_xsec_for_endpoint
+    d0 = float(p0.distance(src_target_for_dist))
+    d1 = float(p1.distance(dst_target_for_dist))
+    trend_meta["endpoint_dist_to_xsec_src_m"] = float(d0)
+    trend_meta["endpoint_dist_to_xsec_dst_m"] = float(d1)
     max_local = max(5.0, float(endpoint_local_max_dist_m))
+    endpoint_tol = max(1.0, float(endpoint_tol_m))
+    if d0 > endpoint_tol or d1 > endpoint_tol:
+        trend_meta["endpoint_off_anchor_src"] = bool(d0 > endpoint_tol)
+        trend_meta["endpoint_off_anchor_dst"] = bool(d1 > endpoint_tol)
+        return line, None, None, HARD_ENDPOINT_OFF_ANCHOR, proj_dist_src, proj_dist_dst, trend_meta
     if d0 > max_local * 1.5 or d1 > max_local * 1.5:
         return None, None, None, HARD_ENDPOINT, proj_dist_src, proj_dist_dst, trend_meta
 
@@ -2332,6 +2438,216 @@ def _xsec_valid_union(
     if valid_geom is None or valid_geom.is_empty:
         return None
     return valid_geom
+
+
+def _build_traj_evidence_geom(traj_segments: Sequence[LineString]) -> BaseGeometry | None:
+    lines: list[LineString] = []
+    for seg in traj_segments:
+        if isinstance(seg, LineString) and (not seg.is_empty) and seg.length > 1e-6:
+            lines.append(seg)
+    if not lines:
+        return None
+    try:
+        geom = unary_union(lines)
+    except Exception:
+        geom = lines[0]
+    if geom is None or geom.is_empty:
+        return None
+    return geom
+
+
+def _count_xy_within_radius(
+    *,
+    pts_xy: np.ndarray,
+    x: float,
+    y: float,
+    radius_m: float,
+) -> int:
+    if pts_xy.size == 0:
+        return 0
+    r = float(max(0.0, radius_m))
+    if r <= 0.0:
+        return 0
+    minx = float(x - r)
+    maxx = float(x + r)
+    miny = float(y - r)
+    maxy = float(y + r)
+    mask = (
+        (pts_xy[:, 0] >= minx)
+        & (pts_xy[:, 0] <= maxx)
+        & (pts_xy[:, 1] >= miny)
+        & (pts_xy[:, 1] <= maxy)
+    )
+    if not np.any(mask):
+        return 0
+    sub = pts_xy[mask, :]
+    d2 = (sub[:, 0] - float(x)) ** 2 + (sub[:, 1] - float(y)) ** 2
+    return int(np.count_nonzero(d2 <= (r * r)))
+
+
+def _build_xsec_road_for_endpoint(
+    *,
+    xsec_seed: LineString,
+    shape_ref_line: LineString,
+    traj_segments: Sequence[LineString],
+    ground_xy: np.ndarray,
+    gore_zone_metric: BaseGeometry | None,
+    ref_half_len_m: float,
+    sample_step_m: float,
+    nonpass_k: int,
+    evidence_radius_m: float,
+    min_ground_pts: int,
+    min_traj_pts: int,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "xsec_ref": xsec_seed,
+        "xsec_road_all": xsec_seed,
+        "xsec_road_selected": xsec_seed,
+        "selected_by": "seed",
+        "left_extent_m": 0.0,
+        "right_extent_m": 0.0,
+        "all_geom_type": "LineString",
+    }
+    if xsec_seed.is_empty or xsec_seed.length <= 1e-6:
+        return out
+    center = xsec_seed.interpolate(0.5, normalized=True)
+    c_xy = point_xy_safe(center, context="xsec_road_anchor")
+    if c_xy is None:
+        return out
+    anchor = (float(c_xy[0]), float(c_xy[1]))
+    s_anchor = _xsec_anchor_station(shape_ref_line, xsec_seed)
+    if s_anchor is None:
+        return out
+    tan = _shape_ref_tangent(shape_ref_line, station_m=float(s_anchor))
+    if tan is None:
+        return out
+    nx, ny = float(-tan[1]), float(tan[0])
+    n_norm = float(math.hypot(nx, ny))
+    if n_norm <= 1e-9:
+        return out
+    nx /= n_norm
+    ny /= n_norm
+    L = float(max(10.0, ref_half_len_m))
+    p_l = (float(anchor[0] - nx * L), float(anchor[1] - ny * L))
+    p_r = (float(anchor[0] + nx * L), float(anchor[1] + ny * L))
+    xsec_ref = LineString([p_l, p_r])
+    if xsec_ref.is_empty or xsec_ref.length <= 1e-6:
+        return out
+
+    traj_geom = _build_traj_evidence_geom(traj_segments)
+    step = float(max(0.5, sample_step_m))
+    kk = int(max(2, nonpass_k))
+    n_steps = int(max(1, round(L / step)))
+
+    def _walk(sign: float) -> float:
+        best = 0.0
+        fail = 0
+        for i in range(1, n_steps + 1):
+            d = float(i) * step
+            px = float(anchor[0] + sign * nx * d)
+            py = float(anchor[1] + sign * ny * d)
+            p = Point(px, py)
+            blocked = False
+            if gore_zone_metric is not None and (not gore_zone_metric.is_empty):
+                try:
+                    blocked = bool(gore_zone_metric.buffer(1e-6).covers(p))
+                except Exception:
+                    blocked = False
+            passable = False
+            if not blocked:
+                g_cnt = _count_xy_within_radius(
+                    pts_xy=ground_xy,
+                    x=px,
+                    y=py,
+                    radius_m=float(evidence_radius_m),
+                )
+                t_cnt = 0
+                if traj_geom is not None and (not traj_geom.is_empty):
+                    try:
+                        t_cnt = int(float(p.distance(traj_geom)) <= float(evidence_radius_m))
+                    except Exception:
+                        t_cnt = 0
+                passable = (int(g_cnt) >= int(min_ground_pts)) or (int(t_cnt) >= int(min_traj_pts))
+            if passable:
+                best = d
+                fail = 0
+            else:
+                fail += 1
+            if fail >= kk:
+                break
+        return float(best)
+
+    left_extent = _walk(-1.0)
+    right_extent = _walk(+1.0)
+    if left_extent < step and right_extent < step:
+        left_extent = min(L, max(step, 0.5 * float(xsec_seed.length)))
+        right_extent = min(L, max(step, 0.5 * float(xsec_seed.length)))
+
+    x0 = float(anchor[0] - nx * left_extent)
+    y0 = float(anchor[1] - ny * left_extent)
+    x1 = float(anchor[0] + nx * right_extent)
+    y1 = float(anchor[1] + ny * right_extent)
+    xsec_road = LineString([(x0, y0), (x1, y1)])
+    if xsec_road.is_empty or xsec_road.length <= 1e-6:
+        xsec_road = xsec_ref
+    xsec_all: BaseGeometry = xsec_road
+    if gore_zone_metric is not None and (not gore_zone_metric.is_empty):
+        try:
+            diff = xsec_road.difference(gore_zone_metric)
+            if diff is not None and not diff.is_empty:
+                xsec_all = diff
+        except Exception:
+            pass
+
+    parts = _iter_linestring_parts(xsec_all)
+    selected: BaseGeometry = xsec_all
+    selected_by = "single"
+    if len(parts) > 1:
+        candidates: list[tuple[float, LineString, str]] = []
+        for part in parts:
+            try:
+                if float(part.distance(shape_ref_line)) <= 1e-6:
+                    p_mid = part.interpolate(0.5, normalized=True)
+                    p_mid_xy = point_xy_safe(p_mid, context="xsec_road_mid_inter")
+                    if p_mid_xy is not None:
+                        d_anchor = float(
+                            math.hypot(float(p_mid_xy[0]) - float(anchor[0]), float(p_mid_xy[1]) - float(anchor[1]))
+                        )
+                        candidates.append((d_anchor, part, "intersect"))
+                        continue
+            except Exception:
+                pass
+            try:
+                p_mid = part.interpolate(0.5, normalized=True)
+                p_mid_xy = point_xy_safe(p_mid, context="xsec_road_mid_dist")
+                if p_mid_xy is None:
+                    continue
+                d = float(shape_ref_line.distance(Point(float(p_mid_xy[0]), float(p_mid_xy[1]))))
+                candidates.append((d, part, "min_dist"))
+            except Exception:
+                continue
+        if candidates:
+            candidates.sort(key=lambda it: float(it[0]))
+            selected = candidates[0][1]
+            selected_by = str(candidates[0][2])
+        else:
+            selected = parts[0]
+            selected_by = "fallback_first"
+    elif len(parts) == 1:
+        selected = parts[0]
+        selected_by = "single"
+    else:
+        selected = xsec_ref
+        selected_by = "fallback_ref"
+
+    out["xsec_ref"] = xsec_ref
+    out["xsec_road_all"] = xsec_all
+    out["xsec_road_selected"] = selected
+    out["selected_by"] = selected_by
+    out["left_extent_m"] = float(left_extent)
+    out["right_extent_m"] = float(right_extent)
+    out["all_geom_type"] = str(getattr(xsec_all, "geom_type", ""))
+    return out
 
 
 def _select_xsec_target_segment(

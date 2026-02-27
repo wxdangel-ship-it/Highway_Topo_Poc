@@ -165,6 +165,8 @@ def test_endpoint_trend_projection_rejects_far_core_connector() -> None:
         dst_xsec=dst_xsec,
         src_channel_points=[],
         dst_channel_points=[],
+        support_traj_segments=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
         trend_fit_win_m=20.0,
         traj_surface_metric=None,
         traj_surface_enforced=False,
@@ -172,6 +174,12 @@ def test_endpoint_trend_projection_rejects_far_core_connector() -> None:
         endpoint_tol_m=1.0,
         anchor_window_m=15.0,
         endpoint_local_max_dist_m=20.0,
+        xsec_ref_half_len_m=80.0,
+        xsec_road_sample_step_m=1.0,
+        xsec_road_nonpass_k=6,
+        xsec_road_evidence_radius_m=1.0,
+        xsec_road_min_ground_pts=1,
+        xsec_road_min_traj_pts=1,
         road_max_vertices=2000,
     )
 
