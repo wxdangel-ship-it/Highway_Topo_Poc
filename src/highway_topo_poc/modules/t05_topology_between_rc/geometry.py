@@ -19,6 +19,7 @@ HARD_MULTI_ROAD = "MULTI_ROAD_SAME_PAIR"
 HARD_NON_RC = "NON_RC_IN_BETWEEN"
 HARD_CENTER_EMPTY = "CENTER_ESTIMATE_EMPTY"
 HARD_ENDPOINT = "ENDPOINT_NOT_ON_XSEC"
+HARD_ENDPOINT_LOCAL = "ENDPOINT_OUT_OF_LOCAL_XSEC_NEIGHBORHOOD"
 HARD_BRIDGE_SEGMENT = "BRIDGE_SEGMENT_TOO_LONG"
 HARD_DIVSTRIP_INTERSECT = "ROAD_INTERSECTS_DIVSTRIP"
 
@@ -1667,6 +1668,12 @@ def _apply_endpoint_trend_projection(
         "xsec_support_len_dst": 0.0,
         "xsec_support_disabled_due_to_insufficient_src": not bool(traj_surface_enforced),
         "xsec_support_disabled_due_to_insufficient_dst": not bool(traj_surface_enforced),
+        "xsec_support_empty_reason_src": (
+            "support_disabled_due_to_insufficient" if not bool(traj_surface_enforced) else None
+        ),
+        "xsec_support_empty_reason_dst": (
+            "support_disabled_due_to_insufficient" if not bool(traj_surface_enforced) else None
+        ),
         "endpoint_fallback_mode_src": None,
         "endpoint_fallback_mode_dst": None,
         "s_anchor_src_m": None,
@@ -1746,8 +1753,10 @@ def _apply_endpoint_trend_projection(
     dst_support_enabled = bool(traj_surface_enforced) and bool(dst_support_parts)
     if bool(traj_surface_enforced) and not src_support_enabled:
         trend_meta["xsec_support_disabled_due_to_insufficient_src"] = True
+        trend_meta["xsec_support_empty_reason_src"] = "xsec_support_empty"
     if bool(traj_surface_enforced) and not dst_support_enabled:
         trend_meta["xsec_support_disabled_due_to_insufficient_dst"] = True
+        trend_meta["xsec_support_empty_reason_dst"] = "xsec_support_empty"
 
     p_src, mode_src, support_len_src = _project_endpoint_to_valid_xsec(
         endpoint_xy=p_src0,
@@ -1773,6 +1782,8 @@ def _apply_endpoint_trend_projection(
     trend_meta["endpoint_fallback_mode_dst"] = str(mode_dst)
     trend_meta["xsec_support_len_src"] = float(max(0.0, support_len_src))
     trend_meta["xsec_support_len_dst"] = float(max(0.0, support_len_dst))
+    if str(mode_src).endswith("_out_local") or str(mode_dst).endswith("_out_local"):
+        return None, None, None, HARD_ENDPOINT_LOCAL, None, None, trend_meta
 
     q_src = _nearest_point_on_line_xy(base_line, p_src)
     q_dst = _nearest_point_on_line_xy(base_line, p_dst)
@@ -1853,6 +1864,19 @@ def _apply_endpoint_trend_projection(
     if line.is_empty or line.length <= 0:
         return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst, trend_meta
     line = _limit_vertices(line, road_max_vertices)
+    line, clamp_stats = _clamp_line_to_surface(
+        line=line,
+        surface_metric=traj_surface_metric,
+        gore_zone_metric=gore_zone_metric,
+        axis_fallback=core,
+    )
+    trend_meta["offset_clamp_hit_ratio"] = float(clamp_stats.get("offset_clamp_hit_ratio", 0.0))
+    trend_meta["offset_clamp_fallback_count"] = int(clamp_stats.get("offset_clamp_fallback_count", 0))
+    trend_meta["divstrip_intersect_len_pre_m"] = float(clamp_stats.get("divstrip_intersect_len_pre_m", 0.0))
+    if line is None:
+        if float(clamp_stats.get("divstrip_intersect_len_pre_m", 0.0)) > 1e-6:
+            return None, None, None, HARD_DIVSTRIP_INTERSECT, proj_dist_src, proj_dist_dst, trend_meta
+        return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst, trend_meta
 
     p0 = Point(line.coords[0])
     p1 = Point(line.coords[-1])
@@ -2126,6 +2150,81 @@ def _endpoint_tangent_deviation(
     if np.linalg.norm(lv) <= 1e-9:
         return None
     return _angle_deg(_unit_vec(lv), _unit_vec(np.asarray([float(trend_xy[0]), float(trend_xy[1])], dtype=np.float64)))
+
+
+def _clamp_line_to_surface(
+    *,
+    line: LineString,
+    surface_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+    axis_fallback: LineString | None,
+    local_eps: float = 1e-6,
+) -> tuple[LineString | None, dict[str, Any]]:
+    stats: dict[str, Any] = {
+        "offset_clamp_hit_ratio": 0.0,
+        "offset_clamp_fallback_count": 0,
+        "divstrip_intersect_len_pre_m": 0.0,
+    }
+    if line.is_empty or line.length <= 0:
+        return None, stats
+    coords = list(line.coords)
+    if len(coords) < 2:
+        return None, stats
+    surf = surface_metric
+    if surf is None or surf.is_empty:
+        out = line
+    else:
+        clamped: list[tuple[float, float]] = []
+        hit = 0
+        for c in coords:
+            p = Point(float(c[0]), float(c[1]))
+            inside = False
+            try:
+                inside = bool(surf.buffer(float(local_eps)).covers(p))
+            except Exception:
+                inside = False
+            if inside:
+                clamped.append((float(c[0]), float(c[1])))
+                continue
+            hit += 1
+            try:
+                _a, b = nearest_points(p, surf)
+                b_xy = point_xy_safe(b, context="clamp_surface_nearest")
+            except Exception:
+                b_xy = None
+            if b_xy is None:
+                clamped.append((float(c[0]), float(c[1])))
+            else:
+                clamped.append((float(b_xy[0]), float(b_xy[1])))
+        clamped = _dedup_coords(clamped, eps=1e-4)
+        if len(clamped) < 2:
+            return None, stats
+        out = LineString(clamped)
+        if out.is_empty or out.length <= 0:
+            return None, stats
+        stats["offset_clamp_hit_ratio"] = float(hit / max(1, len(coords)))
+        if float(stats["offset_clamp_hit_ratio"]) > 0.5 and axis_fallback is not None and (not axis_fallback.is_empty):
+            out = axis_fallback
+            stats["offset_clamp_fallback_count"] = 1
+
+    if gore_zone_metric is not None and not gore_zone_metric.is_empty:
+        try:
+            inter_len = float(out.intersection(gore_zone_metric).length)
+        except Exception:
+            inter_len = 0.0
+        stats["divstrip_intersect_len_pre_m"] = float(max(0.0, inter_len))
+        if inter_len > 1e-6 and axis_fallback is not None and (not axis_fallback.is_empty):
+            try:
+                fallback_len = float(axis_fallback.intersection(gore_zone_metric).length)
+            except Exception:
+                fallback_len = inter_len
+            if fallback_len <= 1e-6:
+                out = axis_fallback
+                stats["offset_clamp_fallback_count"] = int(stats.get("offset_clamp_fallback_count", 0)) + 1
+            else:
+                return None, stats
+
+    return out, stats
 
 
 def _project_trend_to_xsec(
@@ -3894,6 +3993,7 @@ __all__ = [
     "CrossingExtractResult",
     "HARD_CENTER_EMPTY",
     "HARD_ENDPOINT",
+    "HARD_ENDPOINT_LOCAL",
     "HARD_BRIDGE_SEGMENT",
     "HARD_DIVSTRIP_INTERSECT",
     "HARD_MULTI_ROAD",

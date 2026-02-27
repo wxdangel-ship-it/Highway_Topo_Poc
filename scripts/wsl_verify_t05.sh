@@ -130,6 +130,18 @@ keys = [
     "endcap_width_dst_after_m_p90",
     "xsec_support_len_src_p90",
     "xsec_support_len_dst_p90",
+    "xsec_support_empty_src_count",
+    "xsec_support_empty_dst_count",
+    "xsec_support_disabled_src_count",
+    "xsec_support_disabled_dst_count",
+    "xsec_support_empty_reason_src_hist",
+    "xsec_support_empty_reason_dst_hist",
+    "endpoint_fallback_mode_src_hist",
+    "endpoint_fallback_mode_dst_hist",
+    "offset_clamp_hit_ratio_p50",
+    "offset_clamp_hit_ratio_p90",
+    "offset_clamp_hit_ratio_max",
+    "offset_clamp_fallback_count",
     "endpoint_anchor_dist_p90",
     "endpoint_anchor_dist_max",
     "traj_surface_enforced_count",
@@ -165,7 +177,7 @@ print(f"road_count={len(features)}")
 for feat in features[:5]:
     props = feat.get("properties") or {}
     print(
-        "road_id={rid} chosen_cluster_id={cid} traj_surface_enforced={enf} traj_surface_geom_type={gt} traj_surface_area_m2={ga} covered_len_ratio={cov} valid_slices_ratio={vr} endcap_valid_src={evs} endcap_valid_dst={evd} endcap_width_src_before={ewsb} endcap_width_src_after={ewsa} endcap_width_dst_before={ewdb} endcap_width_dst_after={ewda} xsec_support_len_src={xss} xsec_support_len_dst={xsd} endpoint_fallback_mode_src={fms} endpoint_fallback_mode_dst={fmd} traj_in_ratio={ratio} endpoint_in_surface_src={es} endpoint_in_surface_dst={ed} seg_index0_len_m={seg0} divstrip_intersect_len_m={dlen}".format(
+        "road_id={rid} chosen_cluster_id={cid} traj_surface_enforced={enf} traj_surface_geom_type={gt} traj_surface_area_m2={ga} covered_len_ratio={cov} valid_slices_ratio={vr} endcap_valid_src={evs} endcap_valid_dst={evd} endcap_width_src_before={ewsb} endcap_width_src_after={ewsa} endcap_width_dst_before={ewdb} endcap_width_dst_after={ewda} xsec_support_len_src={xss} xsec_support_len_dst={xsd} xsec_support_empty_reason_src={xrs} xsec_support_empty_reason_dst={xrd} endpoint_fallback_mode_src={fms} endpoint_fallback_mode_dst={fmd} offset_clamp_hit_ratio={chr} offset_clamp_fallback_count={cfc} traj_in_ratio={ratio} endpoint_in_surface_src={es} endpoint_in_surface_dst={ed} seg_index0_len_m={seg0} divstrip_intersect_len_m={dlen}".format(
             rid=props.get("road_id"),
             cid=props.get("chosen_cluster_id"),
             enf=props.get("traj_surface_enforced"),
@@ -181,8 +193,12 @@ for feat in features[:5]:
             ewda=props.get("endcap_width_dst_after_m"),
             xss=props.get("xsec_support_len_src"),
             xsd=props.get("xsec_support_len_dst"),
+            xrs=props.get("xsec_support_empty_reason_src"),
+            xrd=props.get("xsec_support_empty_reason_dst"),
             fms=props.get("endpoint_fallback_mode_src"),
             fmd=props.get("endpoint_fallback_mode_dst"),
+            chr=props.get("offset_clamp_hit_ratio"),
+            cfc=props.get("offset_clamp_fallback_count"),
             ratio=props.get("traj_in_ratio"),
             es=props.get("endpoint_in_traj_surface_src"),
             ed=props.get("endpoint_in_traj_surface_dst"),

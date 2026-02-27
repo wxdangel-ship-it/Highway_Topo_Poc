@@ -19,6 +19,7 @@ from .geometry import (
     HARD_CENTER_EMPTY,
     HARD_DIVSTRIP_INTERSECT,
     HARD_ENDPOINT,
+    HARD_ENDPOINT_LOCAL,
     HARD_MULTI_ROAD,
     HARD_NON_RC,
     SOFT_LOW_SUPPORT,
@@ -889,8 +890,13 @@ def _run_patch_core(
     endcap_width_dst_after_vals: list[float] = []
     xsec_support_len_src_vals: list[float] = []
     xsec_support_len_dst_vals: list[float] = []
+    offset_clamp_hit_vals: list[float] = []
     traj_in_ratio_vals: list[float] = []
     traj_in_ratio_est_vals: list[float] = []
+    xsec_support_empty_reason_src_hist: dict[str, int] = {}
+    xsec_support_empty_reason_dst_hist: dict[str, int] = {}
+    endpoint_fallback_mode_src_hist: dict[str, int] = {}
+    endpoint_fallback_mode_dst_hist: dict[str, int] = {}
     traj_surface_enforced_count = 0
     traj_surface_insufficient_count = 0
     road_outside_traj_surface_count = 0
@@ -900,6 +906,7 @@ def _run_patch_core(
     fallback_end_count = 0
     endcap_width_clamped_src_total = 0
     endcap_width_clamped_dst_total = 0
+    offset_clamp_fallback_total = 0
     for road in road_records:
         for k in ("endpoint_center_offset_m_src", "endpoint_center_offset_m_dst"):
             v = road.get(k)
@@ -1004,6 +1011,26 @@ def _run_patch_core(
                 fv = float("nan")
             if np.isfinite(fv):
                 target.append(float(fv))
+        v_clamp = road.get("offset_clamp_hit_ratio")
+        try:
+            f_clamp = float(v_clamp)
+        except Exception:
+            f_clamp = float("nan")
+        if np.isfinite(f_clamp):
+            offset_clamp_hit_vals.append(float(f_clamp))
+        try:
+            offset_clamp_fallback_total += int(max(0, int(road.get("offset_clamp_fallback_count", 0) or 0)))
+        except Exception:
+            pass
+        for key, target in (
+            ("xsec_support_empty_reason_src", xsec_support_empty_reason_src_hist),
+            ("xsec_support_empty_reason_dst", xsec_support_empty_reason_dst_hist),
+            ("endpoint_fallback_mode_src", endpoint_fallback_mode_src_hist),
+            ("endpoint_fallback_mode_dst", endpoint_fallback_mode_dst_hist),
+        ):
+            reason = str(road.get(key) or "").strip()
+            if reason:
+                target[reason] = int(target.get(reason, 0) + 1)
         try:
             endcap_width_clamped_src_total += int(max(0, int(road.get("endcap_width_clamped_src_count", 0) or 0)))
         except Exception:
@@ -1129,6 +1156,9 @@ def _run_patch_core(
         np.asarray(xsec_support_len_dst_vals, dtype=np.float64)
         if xsec_support_len_dst_vals
         else np.empty((0,), dtype=np.float64)
+    )
+    offset_clamp_hit_arr = (
+        np.asarray(offset_clamp_hit_vals, dtype=np.float64) if offset_clamp_hit_vals else np.empty((0,), dtype=np.float64)
     )
     endpoint_anchor_arr = (
         np.asarray(endpoint_anchor_dist_vals, dtype=np.float64)
@@ -1277,6 +1307,26 @@ def _run_patch_core(
             "xsec_support_len_dst_p90": (
                 float(np.percentile(xsec_support_len_dst_arr, 90.0)) if xsec_support_len_dst_arr.size > 0 else None
             ),
+            "xsec_support_empty_reason_src_hist": dict(xsec_support_empty_reason_src_hist),
+            "xsec_support_empty_reason_dst_hist": dict(xsec_support_empty_reason_dst_hist),
+            "xsec_support_empty_src_count": int(xsec_support_empty_reason_src_hist.get("xsec_support_empty", 0)),
+            "xsec_support_empty_dst_count": int(xsec_support_empty_reason_dst_hist.get("xsec_support_empty", 0)),
+            "xsec_support_disabled_src_count": int(
+                xsec_support_empty_reason_src_hist.get("support_disabled_due_to_insufficient", 0)
+            ),
+            "xsec_support_disabled_dst_count": int(
+                xsec_support_empty_reason_dst_hist.get("support_disabled_due_to_insufficient", 0)
+            ),
+            "endpoint_fallback_mode_src_hist": dict(endpoint_fallback_mode_src_hist),
+            "endpoint_fallback_mode_dst_hist": dict(endpoint_fallback_mode_dst_hist),
+            "offset_clamp_hit_ratio_p50": (
+                float(np.percentile(offset_clamp_hit_arr, 50.0)) if offset_clamp_hit_arr.size > 0 else None
+            ),
+            "offset_clamp_hit_ratio_p90": (
+                float(np.percentile(offset_clamp_hit_arr, 90.0)) if offset_clamp_hit_arr.size > 0 else None
+            ),
+            "offset_clamp_hit_ratio_max": (float(np.max(offset_clamp_hit_arr)) if offset_clamp_hit_arr.size > 0 else None),
+            "offset_clamp_fallback_count": int(offset_clamp_fallback_total),
             "endpoint_anchor_dist_p90": (
                 float(np.percentile(endpoint_anchor_arr, 90.0)) if endpoint_anchor_arr.size > 0 else None
             ),
@@ -2615,6 +2665,33 @@ def _eval_traj_surface_gate(
     result["endcap_width_dst_after_m"] = endcap_width_dst_after
     result["endcap_width_clamped_src_count"] = int(endcap_width_clamped_src_count)
     result["endcap_width_clamped_dst_count"] = int(endcap_width_clamped_dst_count)
+    src_nodeid = int(road.get("src_nodeid")) if road.get("src_nodeid") is not None else None
+    dst_nodeid = int(road.get("dst_nodeid")) if road.get("dst_nodeid") is not None else None
+    xsec_src_geom = None
+    xsec_dst_geom = None
+    if src_nodeid is not None or dst_nodeid is not None:
+        for cs in patch_inputs.intersection_lines:
+            nid = int(cs.nodeid)
+            if src_nodeid is not None and nid == src_nodeid:
+                xsec_src_geom = cs.geometry_metric
+            if dst_nodeid is not None and nid == dst_nodeid:
+                xsec_dst_geom = cs.geometry_metric
+            if xsec_src_geom is not None and xsec_dst_geom is not None:
+                break
+    if xsec_src_geom is not None:
+        xsec_support_available_src = _xsec_has_surface_support(
+            xsec=xsec_src_geom,
+            surface_metric=surface,
+            gore_zone_metric=gore_zone_metric,
+            buffer_m=float(params.get("SURF_BUF_M", 1.0)),
+        )
+    if xsec_dst_geom is not None:
+        xsec_support_available_dst = _xsec_has_surface_support(
+            xsec=xsec_dst_geom,
+            surface_metric=surface,
+            gore_zone_metric=gore_zone_metric,
+            buffer_m=float(params.get("SURF_BUF_M", 1.0)),
+        )
     result["xsec_support_available_src"] = bool(xsec_support_available_src)
     result["xsec_support_available_dst"] = bool(xsec_support_available_dst)
 
@@ -2888,11 +2965,15 @@ def _evaluate_candidate_road(
     road["xsec_support_disabled_due_to_insufficient_dst"] = center.diagnostics.get(
         "xsec_support_disabled_due_to_insufficient_dst"
     )
+    road["xsec_support_empty_reason_src"] = center.diagnostics.get("xsec_support_empty_reason_src")
+    road["xsec_support_empty_reason_dst"] = center.diagnostics.get("xsec_support_empty_reason_dst")
     road["s_anchor_src_m"] = center.diagnostics.get("s_anchor_src_m")
     road["s_anchor_dst_m"] = center.diagnostics.get("s_anchor_dst_m")
     road["s_end_src_m"] = center.diagnostics.get("s_end_src_m")
     road["s_end_dst_m"] = center.diagnostics.get("s_end_dst_m")
     road["anchor_window_m"] = center.diagnostics.get("anchor_window_m")
+    road["offset_clamp_hit_ratio"] = center.diagnostics.get("offset_clamp_hit_ratio")
+    road["offset_clamp_fallback_count"] = center.diagnostics.get("offset_clamp_fallback_count")
     road["traj_surface_hint_enforced"] = bool(traj_surface_hint.get("traj_surface_enforced", False))
     road["traj_surface_hint_axis_source"] = traj_surface_hint.get("axis_source")
     road["traj_surface_hint_reason"] = traj_surface_hint.get("reason")
@@ -3185,7 +3266,9 @@ def _collect_debug_layers_for_selected(
     for ls in _iter_line_parts(dst_valid):
         debug_layers["xsec_valid_dst"].append({"geometry": ls, "properties": {"road_id": road_id}})
 
-    if bool(road.get("traj_surface_enforced", False)) and surface is not None and (not surface.is_empty):
+    src_support = None
+    dst_support = None
+    if surface is not None and (not surface.is_empty):
         try:
             src_support = src_valid.intersection(surface)
         except Exception:
@@ -3194,10 +3277,28 @@ def _collect_debug_layers_for_selected(
             dst_support = dst_valid.intersection(surface)
         except Exception:
             dst_support = None
-        for ls in _iter_line_parts(src_support):
-            debug_layers["xsec_support_src"].append({"geometry": ls, "properties": {"road_id": road_id}})
-        for ls in _iter_line_parts(dst_support):
-            debug_layers["xsec_support_dst"].append({"geometry": ls, "properties": {"road_id": road_id}})
+    support_disabled_src = bool(road.get("xsec_support_disabled_due_to_insufficient_src", False))
+    support_disabled_dst = bool(road.get("xsec_support_disabled_due_to_insufficient_dst", False))
+    for ls in _iter_line_parts(src_support):
+        debug_layers["xsec_support_src"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "support_disabled_due_to_insufficient": support_disabled_src,
+                },
+            }
+        )
+    for ls in _iter_line_parts(dst_support):
+        debug_layers["xsec_support_dst"].append(
+            {
+                "geometry": ls,
+                "properties": {
+                    "road_id": road_id,
+                    "support_disabled_due_to_insufficient": support_disabled_dst,
+                },
+            }
+        )
 
     if isinstance(line, LineString) and not line.is_empty:
         if gore_zone_metric is not None and (not gore_zone_metric.is_empty):
@@ -3361,6 +3462,10 @@ def _make_base_road_record(
         "xsec_support_len_dst": None,
         "xsec_support_disabled_due_to_insufficient_src": None,
         "xsec_support_disabled_due_to_insufficient_dst": None,
+        "xsec_support_empty_reason_src": None,
+        "xsec_support_empty_reason_dst": None,
+        "offset_clamp_hit_ratio": None,
+        "offset_clamp_fallback_count": None,
         "s_anchor_src_m": None,
         "s_anchor_dst_m": None,
         "s_end_src_m": None,
@@ -3409,6 +3514,7 @@ def _reason_hint(reason: str) -> str:
         HARD_NON_RC: "non_rc_node_used_in_pair",
         HARD_CENTER_EMPTY: "centerline_generation_failed",
         HARD_ENDPOINT: "endpoints_not_on_intersection_l",
+        HARD_ENDPOINT_LOCAL: "endpoint_out_of_local_xsec_neighborhood",
         HARD_BRIDGE_SEGMENT: "bridge_segment_too_long",
         HARD_DIVSTRIP_INTERSECT: "road_intersects_divstrip_forbidden",
         _HARD_NO_ADJACENT_PAIR_AFTER_PASS2: "no_adjacent_pair_after_pass2",
@@ -3493,6 +3599,8 @@ def _finalize_payloads(
                 or sk.startswith("max_segment_")
                 or sk.startswith("seg_index0_")
                 or sk.startswith("xsec_support_")
+                or sk.startswith("offset_clamp_")
+                or sk.startswith("endpoint_fallback_mode_")
                 or sk.startswith("traj_in_ratio")
                 or sk.startswith("traj_surface_")
                 or sk.startswith("divstrip_")
