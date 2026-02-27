@@ -20,6 +20,7 @@ HARD_NON_RC = "NON_RC_IN_BETWEEN"
 HARD_CENTER_EMPTY = "CENTER_ESTIMATE_EMPTY"
 HARD_ENDPOINT = "ENDPOINT_NOT_ON_XSEC"
 HARD_ENDPOINT_LOCAL = "ENDPOINT_OUT_OF_LOCAL_XSEC_NEIGHBORHOOD"
+HARD_ENDPOINT_OFF_ANCHOR = "ENDPOINT_OFF_ANCHOR"
 HARD_BRIDGE_SEGMENT = "BRIDGE_SEGMENT_TOO_LONG"
 HARD_DIVSTRIP_INTERSECT = "ROAD_INTERSECTS_DIVSTRIP"
 
@@ -1783,6 +1784,24 @@ def _apply_endpoint_trend_projection(
     if bool(traj_surface_enforced) and not dst_support_enabled:
         trend_meta["xsec_support_disabled_due_to_insufficient_dst"] = True
         trend_meta["xsec_support_empty_reason_dst"] = "xsec_support_empty"
+    src_target_sel, src_target_mode = _select_xsec_target_segment(
+        xsec=src_xsec,
+        gore_zone_metric=gore_zone_metric,
+        xsec_support_geom=(src_support_raw if src_support_enabled else None),
+        enforced=bool(src_support_enabled),
+        lb_ref_line=shape_ref_line,
+    )
+    dst_target_sel, dst_target_mode = _select_xsec_target_segment(
+        xsec=dst_xsec,
+        gore_zone_metric=gore_zone_metric,
+        xsec_support_geom=(dst_support_raw if dst_support_enabled else None),
+        enforced=bool(dst_support_enabled),
+        lb_ref_line=shape_ref_line,
+    )
+    trend_meta["_xsec_target_selected_src_metric"] = src_target_sel
+    trend_meta["_xsec_target_selected_dst_metric"] = dst_target_sel
+    trend_meta["xsec_target_mode_src"] = str(src_target_mode)
+    trend_meta["xsec_target_mode_dst"] = str(dst_target_mode)
 
     p_src, mode_src, support_len_src = _project_endpoint_to_valid_xsec(
         endpoint_xy=p_src0,
@@ -1996,6 +2015,16 @@ def _apply_endpoint_trend_projection(
             return None, None, None, HARD_DIVSTRIP_INTERSECT, proj_dist_src, proj_dist_dst, trend_meta
         return None, None, None, HARD_CENTER_EMPTY, proj_dist_src, proj_dist_dst, trend_meta
 
+    line, snap_meta = _endpoint_snap_to_target(
+        line=line,
+        src_target=src_target_sel,
+        dst_target=dst_target_sel,
+        trend_src=t_src,
+        trend_dst=t_dst,
+        road_max_vertices=int(road_max_vertices),
+    )
+    trend_meta.update(snap_meta)
+
     p0 = Point(line.coords[0])
     p1 = Point(line.coords[-1])
     d0 = float(p0.distance(src_xsec))
@@ -2134,14 +2163,9 @@ def _project_endpoint_to_valid_xsec(
 ) -> tuple[tuple[float, float], str, float]:
     if xsec.is_empty or xsec.length <= 0:
         return (float(endpoint_xy[0]), float(endpoint_xy[1])), "xsec_empty", 0.0
-    valid_geom: BaseGeometry = xsec
-    if gore_zone_metric is not None:
-        try:
-            diff = xsec.difference(gore_zone_metric)
-            if diff is not None and not diff.is_empty:
-                valid_geom = diff
-        except Exception:
-            pass
+    valid_geom = _xsec_valid_union(xsec=xsec, gore_zone_metric=gore_zone_metric)
+    if valid_geom is None:
+        return (float(endpoint_xy[0]), float(endpoint_xy[1])), "xsec_valid_empty", 0.0
     support_parts = _iter_linestring_parts(xsec_support_geom)
     support_len = float(sum(float(p.length) for p in support_parts))
     parts = support_parts if support_parts else _iter_linestring_parts(valid_geom)
@@ -2290,6 +2314,76 @@ def _xsec_surface_support(
     return inter
 
 
+def _xsec_valid_union(
+    *,
+    xsec: LineString,
+    gore_zone_metric: BaseGeometry | None,
+) -> BaseGeometry | None:
+    if xsec.is_empty or xsec.length <= 0:
+        return None
+    valid_geom: BaseGeometry = xsec
+    if gore_zone_metric is not None:
+        try:
+            diff = xsec.difference(gore_zone_metric)
+            if diff is not None and not diff.is_empty:
+                valid_geom = diff
+        except Exception:
+            pass
+    if valid_geom is None or valid_geom.is_empty:
+        return None
+    return valid_geom
+
+
+def _select_xsec_target_segment(
+    *,
+    xsec: LineString,
+    gore_zone_metric: BaseGeometry | None,
+    xsec_support_geom: BaseGeometry | None,
+    enforced: bool,
+    lb_ref_line: LineString | None,
+) -> tuple[BaseGeometry | None, str]:
+    valid_union = _xsec_valid_union(xsec=xsec, gore_zone_metric=gore_zone_metric)
+    support_parts = _iter_linestring_parts(xsec_support_geom)
+    if bool(enforced) and support_parts:
+        target_union: BaseGeometry | None = xsec_support_geom
+        mode = "enforced_support"
+    else:
+        target_union = valid_union
+        mode = "xsec_valid_union"
+    parts = _iter_linestring_parts(target_union)
+    if not parts:
+        return (target_union, mode)
+    if len(parts) == 1:
+        return (parts[0], mode)
+    lb_line = (
+        lb_ref_line
+        if isinstance(lb_ref_line, LineString) and (not lb_ref_line.is_empty) and lb_ref_line.length > 0
+        else None
+    )
+    if lb_line is None:
+        return (parts[0], f"{mode}|segment_default")
+    best: LineString | None = None
+    best_dist = float("inf")
+    for part in parts:
+        try:
+            mid = part.interpolate(0.5, normalized=True)
+        except Exception:
+            continue
+        mid_xy = point_xy_safe(mid, context="xsec_target_mid")
+        if mid_xy is None:
+            continue
+        try:
+            d = float(lb_line.distance(Point(float(mid_xy[0]), float(mid_xy[1]))))
+        except Exception:
+            continue
+        if d < best_dist:
+            best_dist = d
+            best = part
+    if best is not None:
+        return (best, f"{mode}|segment_lb_nearest")
+    return (parts[0], f"{mode}|segment_fallback")
+
+
 def _build_trend_midpoint(
     *,
     endpoint_xy: tuple[float, float],
@@ -2307,6 +2401,141 @@ def _build_trend_midpoint(
     if float(np.linalg.norm(m - a)) > d:
         m = 0.5 * (a + e)
     return (float(m[0]), float(m[1]))
+
+
+def _endpoint_snap_to_target(
+    *,
+    line: LineString,
+    src_target: BaseGeometry | None,
+    dst_target: BaseGeometry | None,
+    trend_src: tuple[float, float],
+    trend_dst: tuple[float, float],
+    road_max_vertices: int,
+) -> tuple[LineString, dict[str, Any]]:
+    meta: dict[str, Any] = {
+        "endpoint_snap_dist_src_before_m": None,
+        "endpoint_snap_dist_src_after_m": None,
+        "endpoint_snap_dist_dst_before_m": None,
+        "endpoint_snap_dist_dst_after_m": None,
+        "endpoint_off_anchor_src": False,
+        "endpoint_off_anchor_dst": False,
+        "_endpoint_before_src_metric": None,
+        "_endpoint_before_dst_metric": None,
+        "_endpoint_after_src_metric": None,
+        "_endpoint_after_dst_metric": None,
+    }
+    if line.is_empty or line.length <= 0 or len(line.coords) < 2:
+        return line, meta
+    src_before = Point(float(line.coords[0][0]), float(line.coords[0][1]))
+    dst_before = Point(float(line.coords[-1][0]), float(line.coords[-1][1]))
+    meta["_endpoint_before_src_metric"] = src_before
+    meta["_endpoint_before_dst_metric"] = dst_before
+
+    src_after_xy = (float(src_before.x), float(src_before.y))
+    dst_after_xy = (float(dst_before.x), float(dst_before.y))
+
+    if src_target is not None and (not src_target.is_empty):
+        try:
+            meta["endpoint_snap_dist_src_before_m"] = float(src_before.distance(src_target))
+        except Exception:
+            meta["endpoint_snap_dist_src_before_m"] = None
+        try:
+            _a, b = nearest_points(src_before, src_target)
+            b_xy = point_xy_safe(b, context="endpoint_snap_src")
+        except Exception:
+            b_xy = None
+        if b_xy is not None:
+            src_after_xy = (float(b_xy[0]), float(b_xy[1]))
+    if dst_target is not None and (not dst_target.is_empty):
+        try:
+            meta["endpoint_snap_dist_dst_before_m"] = float(dst_before.distance(dst_target))
+        except Exception:
+            meta["endpoint_snap_dist_dst_before_m"] = None
+        try:
+            _a, b = nearest_points(dst_before, dst_target)
+            b_xy = point_xy_safe(b, context="endpoint_snap_dst")
+        except Exception:
+            b_xy = None
+        if b_xy is not None:
+            dst_after_xy = (float(b_xy[0]), float(b_xy[1]))
+
+    src_after = Point(float(src_after_xy[0]), float(src_after_xy[1]))
+    dst_after = Point(float(dst_after_xy[0]), float(dst_after_xy[1]))
+    meta["_endpoint_after_src_metric"] = src_after
+    meta["_endpoint_after_dst_metric"] = dst_after
+
+    if src_target is not None and (not src_target.is_empty):
+        try:
+            meta["endpoint_snap_dist_src_after_m"] = float(src_after.distance(src_target))
+        except Exception:
+            meta["endpoint_snap_dist_src_after_m"] = None
+    if dst_target is not None and (not dst_target.is_empty):
+        try:
+            meta["endpoint_snap_dist_dst_after_m"] = float(dst_after.distance(dst_target))
+        except Exception:
+            meta["endpoint_snap_dist_dst_after_m"] = None
+    try:
+        meta["endpoint_off_anchor_src"] = (
+            meta["endpoint_snap_dist_src_after_m"] is not None
+            and float(meta["endpoint_snap_dist_src_after_m"]) > 1.0
+        )
+    except Exception:
+        meta["endpoint_off_anchor_src"] = False
+    try:
+        meta["endpoint_off_anchor_dst"] = (
+            meta["endpoint_snap_dist_dst_after_m"] is not None
+            and float(meta["endpoint_snap_dist_dst_after_m"]) > 1.0
+        )
+    except Exception:
+        meta["endpoint_off_anchor_dst"] = False
+
+    q_src = _nearest_point_on_line_xy(line, src_after_xy)
+    q_dst = _nearest_point_on_line_xy(line, dst_after_xy)
+    if q_src is None or q_dst is None:
+        return line, meta
+    try:
+        s_src = float(line.project(Point(float(q_src[0]), float(q_src[1]))))
+        s_dst = float(line.project(Point(float(q_dst[0]), float(q_dst[1]))))
+    except Exception:
+        return line, meta
+    if abs(s_dst - s_src) < 1e-3:
+        return line, meta
+    try:
+        core = substring(line, min(s_src, s_dst), max(s_src, s_dst))
+    except Exception:
+        core = line
+    if core is None or core.is_empty or not isinstance(core, LineString) or len(core.coords) < 2:
+        return line, meta
+    core_coords = list(core.coords)
+    src_mid = _build_trend_midpoint(
+        endpoint_xy=src_after_xy,
+        anchor_xy=(float(q_src[0]), float(q_src[1])),
+        trend_xy=trend_src,
+        toward_start=True,
+    )
+    dst_mid = _build_trend_midpoint(
+        endpoint_xy=dst_after_xy,
+        anchor_xy=(float(q_dst[0]), float(q_dst[1])),
+        trend_xy=trend_dst,
+        toward_start=False,
+    )
+    coords: list[tuple[float, float]] = []
+    coords.append((float(src_after_xy[0]), float(src_after_xy[1])))
+    coords.append((float(src_mid[0]), float(src_mid[1])))
+    coords.append((float(q_src[0]), float(q_src[1])))
+    for c in core_coords[1:-1]:
+        coords.append((float(c[0]), float(c[1])))
+    coords.append((float(q_dst[0]), float(q_dst[1])))
+    coords.append((float(dst_mid[0]), float(dst_mid[1])))
+    coords.append((float(dst_after_xy[0]), float(dst_after_xy[1])))
+    coords = _dedup_coords(coords, eps=1e-4)
+    if len(coords) < 2:
+        return line, meta
+    snapped = LineString(coords)
+    if snapped.is_empty or snapped.length <= 0:
+        return line, meta
+    snapped = _limit_vertices(snapped, road_max_vertices)
+    return snapped, meta
 
 
 def _endpoint_tangent_deviation(
@@ -4177,6 +4406,7 @@ __all__ = [
     "HARD_CENTER_EMPTY",
     "HARD_ENDPOINT",
     "HARD_ENDPOINT_LOCAL",
+    "HARD_ENDPOINT_OFF_ANCHOR",
     "HARD_BRIDGE_SEGMENT",
     "HARD_DIVSTRIP_INTERSECT",
     "HARD_MULTI_ROAD",
