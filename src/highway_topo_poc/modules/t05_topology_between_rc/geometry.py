@@ -307,6 +307,8 @@ def build_pair_supports(
             target_key = search.target_key
             if target_key is None:
                 last_stitch_candidates = _count_outgoing_stitch_edges(graph.edges.get(search.last_key, []))
+                explored_stitch_candidates = int(max(0, search.explored_stitch_candidates))
+                stitch_candidate_count = int(max(last_stitch_candidates, explored_stitch_candidates))
                 unresolved_events.append(
                     {
                         "road_id": f"na_{ev.nodeid}_{traj_id}_{ev.seq_idx}",
@@ -320,11 +322,17 @@ def build_pair_supports(
                         "hint": (
                             f"max_dist_m={search.max_explored_dist_m:.1f};"
                             f"last_node={search.last_key};"
-                            f"stitch_candidates={last_stitch_candidates}"
+                            f"stitch_candidates={stitch_candidate_count};"
+                            f"stitch_candidates_last={last_stitch_candidates};"
+                            f"stitch_candidates_explored={explored_stitch_candidates};"
+                            f"explored_nodes={int(search.explored_node_count)}"
                         ),
                         "max_explored_dist_m": float(search.max_explored_dist_m),
                         "last_node_ref": str(search.last_key),
-                        "stitch_candidate_count": int(last_stitch_candidates),
+                        "stitch_candidate_count": int(stitch_candidate_count),
+                        "stitch_candidate_count_last": int(last_stitch_candidates),
+                        "stitch_candidate_count_explored": int(explored_stitch_candidates),
+                        "explored_node_count": int(search.explored_node_count),
                     }
                 )
                 continue
@@ -530,6 +538,8 @@ class _SearchResult:
     prev_edge: dict[str, _GraphEdge]
     max_explored_dist_m: float
     last_key: str
+    explored_node_count: int
+    explored_stitch_candidates: int
 
 
 @dataclass(frozen=True)
@@ -850,6 +860,8 @@ def _search_next_crossing(
 
     max_explored = 0.0
     last_key = source_key
+    explored_keys: set[str] = set()
+    explored_stitch_candidates = 0
 
     while heap:
         dist, hops, key = heapq.heappop(heap)
@@ -870,6 +882,9 @@ def _search_next_crossing(
         node = nodes.get(key)
         if node is None:
             continue
+        if key not in explored_keys:
+            explored_keys.add(key)
+            explored_stitch_candidates += int(_count_outgoing_stitch_edges(edges.get(key, [])))
         if node.kind == "cross" and node.cross_nodeid is not None and int(node.cross_nodeid) != int(source_nodeid):
             return _SearchResult(
                 target_key=key,
@@ -879,6 +894,8 @@ def _search_next_crossing(
                 prev_edge=prev_edge,
                 max_explored_dist_m=float(max_explored),
                 last_key=str(last_key),
+                explored_node_count=int(len(explored_keys)),
+                explored_stitch_candidates=int(explored_stitch_candidates),
             )
 
         for edge in edges.get(key, []):
@@ -905,6 +922,8 @@ def _search_next_crossing(
         prev_edge=prev_edge,
         max_explored_dist_m=float(max_explored),
         last_key=str(last_key),
+        explored_node_count=int(len(explored_keys)),
+        explored_stitch_candidates=int(explored_stitch_candidates),
     )
 
 
@@ -1676,6 +1695,10 @@ def _apply_endpoint_trend_projection(
         ),
         "endpoint_fallback_mode_src": None,
         "endpoint_fallback_mode_dst": None,
+        "endpoint_reproject_retry_src": False,
+        "endpoint_reproject_retry_dst": False,
+        "endpoint_conn_len_src_m": None,
+        "endpoint_conn_len_dst_m": None,
         "s_anchor_src_m": None,
         "s_anchor_dst_m": None,
         "s_end_src_m": None,
@@ -1778,12 +1801,8 @@ def _apply_endpoint_trend_projection(
         prefer_lb_guard=not bool(dst_support_enabled),
         local_max_dist_m=float(endpoint_local_max_dist_m),
     )
-    trend_meta["endpoint_fallback_mode_src"] = str(mode_src)
-    trend_meta["endpoint_fallback_mode_dst"] = str(mode_dst)
     trend_meta["xsec_support_len_src"] = float(max(0.0, support_len_src))
     trend_meta["xsec_support_len_dst"] = float(max(0.0, support_len_dst))
-    if str(mode_src).endswith("_out_local") or str(mode_dst).endswith("_out_local"):
-        return None, None, None, HARD_ENDPOINT_LOCAL, None, None, trend_meta
 
     q_src = _nearest_point_on_line_xy(base_line, p_src)
     q_dst = _nearest_point_on_line_xy(base_line, p_dst)
@@ -1791,6 +1810,66 @@ def _apply_endpoint_trend_projection(
         return None, None, None, HARD_CENTER_EMPTY, None, None, trend_meta
     proj_dist_src = float(math.hypot(float(p_src[0]) - float(q_src[0]), float(p_src[1]) - float(q_src[1])))
     proj_dist_dst = float(math.hypot(float(p_dst[0]) - float(q_dst[0]), float(p_dst[1]) - float(q_dst[1])))
+    max_local = max(5.0, float(endpoint_local_max_dist_m))
+
+    if proj_dist_src > max_local:
+        p_src_retry, mode_src_retry, _support_len_src_retry = _project_endpoint_to_valid_xsec(
+            endpoint_xy=q_src,
+            xsec=src_xsec,
+            gore_zone_metric=gore_zone_metric,
+            channel_ref_xy=src_ref,
+            xsec_support_geom=(src_support_raw if src_support_enabled else None),
+            lb_ref_line=shape_ref_line,
+            prefer_lb_guard=not bool(src_support_enabled),
+            local_max_dist_m=max_local * 2.0,
+        )
+        if not str(mode_src_retry).endswith("_out_local"):
+            q_src_retry = _nearest_point_on_line_xy(base_line, p_src_retry)
+            if q_src_retry is not None:
+                retry_dist_src = float(
+                    math.hypot(
+                        float(p_src_retry[0]) - float(q_src_retry[0]),
+                        float(p_src_retry[1]) - float(q_src_retry[1]),
+                    )
+                )
+                if retry_dist_src + 1e-6 < proj_dist_src:
+                    p_src = p_src_retry
+                    q_src = q_src_retry
+                    proj_dist_src = retry_dist_src
+                    mode_src = f"{mode_src}|core_retry"
+                    trend_meta["endpoint_reproject_retry_src"] = True
+
+    if proj_dist_dst > max_local:
+        p_dst_retry, mode_dst_retry, _support_len_dst_retry = _project_endpoint_to_valid_xsec(
+            endpoint_xy=q_dst,
+            xsec=dst_xsec,
+            gore_zone_metric=gore_zone_metric,
+            channel_ref_xy=dst_ref,
+            xsec_support_geom=(dst_support_raw if dst_support_enabled else None),
+            lb_ref_line=shape_ref_line,
+            prefer_lb_guard=not bool(dst_support_enabled),
+            local_max_dist_m=max_local * 2.0,
+        )
+        if not str(mode_dst_retry).endswith("_out_local"):
+            q_dst_retry = _nearest_point_on_line_xy(base_line, p_dst_retry)
+            if q_dst_retry is not None:
+                retry_dist_dst = float(
+                    math.hypot(
+                        float(p_dst_retry[0]) - float(q_dst_retry[0]),
+                        float(p_dst_retry[1]) - float(q_dst_retry[1]),
+                    )
+                )
+                if retry_dist_dst + 1e-6 < proj_dist_dst:
+                    p_dst = p_dst_retry
+                    q_dst = q_dst_retry
+                    proj_dist_dst = retry_dist_dst
+                    mode_dst = f"{mode_dst}|core_retry"
+                    trend_meta["endpoint_reproject_retry_dst"] = True
+
+    trend_meta["endpoint_fallback_mode_src"] = str(mode_src)
+    trend_meta["endpoint_fallback_mode_dst"] = str(mode_dst)
+    if proj_dist_src > max_local * 2.0 or proj_dist_dst > max_local * 2.0:
+        return None, None, None, HARD_ENDPOINT_LOCAL, proj_dist_src, proj_dist_dst, trend_meta
 
     s_anchor_src = _xsec_anchor_station(base_line, src_xsec)
     s_anchor_dst = _xsec_anchor_station(base_line, dst_xsec)
@@ -1819,6 +1898,10 @@ def _apply_endpoint_trend_projection(
         pxy = point_xy_safe(p, context="dst_anchor_window_snap")
         if pxy is not None:
             q_dst = (float(pxy[0]), float(pxy[1]))
+    proj_dist_src = float(math.hypot(float(p_src[0]) - float(q_src[0]), float(p_src[1]) - float(q_src[1])))
+    proj_dist_dst = float(math.hypot(float(p_dst[0]) - float(q_dst[0]), float(p_dst[1]) - float(q_dst[1])))
+    if proj_dist_src > max_local * 2.0 or proj_dist_dst > max_local * 2.0:
+        return None, None, None, HARD_ENDPOINT_LOCAL, proj_dist_src, proj_dist_dst, trend_meta
     trend_meta["s_end_src_m"] = float(s_src)
     trend_meta["s_end_dst_m"] = float(s_dst)
     if abs(s_dst - s_src) < 1e-3:
@@ -1848,6 +1931,38 @@ def _apply_endpoint_trend_projection(
         trend_xy=t_dst,
         toward_start=False,
     )
+    src_conn_len = float(
+        math.hypot(float(src_mid[0]) - float(p_src[0]), float(src_mid[1]) - float(p_src[1]))
+        + math.hypot(float(q_src[0]) - float(src_mid[0]), float(q_src[1]) - float(src_mid[1]))
+    )
+    dst_conn_len = float(
+        math.hypot(float(dst_mid[0]) - float(q_dst[0]), float(dst_mid[1]) - float(q_dst[1]))
+        + math.hypot(float(p_dst[0]) - float(dst_mid[0]), float(p_dst[1]) - float(dst_mid[1]))
+    )
+    conn_limit = max(15.0, max_local * 2.0)
+    if src_conn_len > conn_limit:
+        src_mid = (
+            0.5 * (float(p_src[0]) + float(q_src[0])),
+            0.5 * (float(p_src[1]) + float(q_src[1])),
+        )
+        src_conn_len = float(
+            math.hypot(float(src_mid[0]) - float(p_src[0]), float(src_mid[1]) - float(p_src[1]))
+            + math.hypot(float(q_src[0]) - float(src_mid[0]), float(q_src[1]) - float(src_mid[1]))
+        )
+    if dst_conn_len > conn_limit:
+        dst_mid = (
+            0.5 * (float(p_dst[0]) + float(q_dst[0])),
+            0.5 * (float(p_dst[1]) + float(q_dst[1])),
+        )
+        dst_conn_len = float(
+            math.hypot(float(dst_mid[0]) - float(q_dst[0]), float(dst_mid[1]) - float(q_dst[1]))
+            + math.hypot(float(p_dst[0]) - float(dst_mid[0]), float(p_dst[1]) - float(dst_mid[1]))
+        )
+    trend_meta["endpoint_conn_len_src_m"] = float(src_conn_len)
+    trend_meta["endpoint_conn_len_dst_m"] = float(dst_conn_len)
+    if src_conn_len > conn_limit * 1.2 or dst_conn_len > conn_limit * 1.2:
+        return None, None, None, HARD_ENDPOINT_LOCAL, proj_dist_src, proj_dist_dst, trend_meta
+
     coords: list[tuple[float, float]] = []
     coords.append((float(p_src[0]), float(p_src[1])))
     coords.append((float(src_mid[0]), float(src_mid[1])))

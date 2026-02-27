@@ -90,6 +90,9 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STITCH_TOPK": 3,
     "NEIGHBOR_MAX_DIST_M": 2000.0,
     "PASS2_NEIGHBOR_MAX_DIST_M": 8000.0,
+    "PASS2_UNRESOLVED_MIN_COUNT": 20,
+    "PASS2_UNRESOLVED_PER_SUPPORT": 10.0,
+    "PASS2_FORCE_WHEN_STITCH_ACCEPT_ZERO": 1,
     "MULTI_ROAD_SEP_M": 8.0,
     "MULTI_ROAD_TOPN": 10,
     "STABLE_OFFSET_M": 50.0,
@@ -499,19 +502,50 @@ def _run_patch_core(
     in_degree = pass1_in_degree
     out_degree = pass1_out_degree
 
-    if not supports_result.supports:
+    pass1_pair_count = int(len(pass1_supports.supports))
+    pass1_unresolved_count = int(len(pass1_supports.unresolved_events))
+    pass1_stitch_accept_count = int(pass1_supports.stitch_accept_count)
+    pass2_unresolved_min = int(max(1, int(params.get("PASS2_UNRESOLVED_MIN_COUNT", 20))))
+    pass2_unresolved_per_support = float(max(1.0, float(params.get("PASS2_UNRESOLVED_PER_SUPPORT", 10.0))))
+    pass2_force_when_no_stitch = bool(int(params.get("PASS2_FORCE_WHEN_STITCH_ACCEPT_ZERO", 1)))
+    unresolved_trigger = pass1_unresolved_count >= max(
+        pass2_unresolved_min,
+        int(math.ceil(pass2_unresolved_per_support * max(1, pass1_pair_count))),
+    )
+    sparse_support_trigger = pass1_pair_count <= 1 and pass1_unresolved_count >= max(5, pass2_unresolved_min // 2)
+    should_try_pass2 = (
+        pass1_pair_count == 0
+        or (
+            pass2_force_when_no_stitch
+            and pass1_stitch_accept_count <= 0
+            and (unresolved_trigger or sparse_support_trigger)
+        )
+    )
+    pass2_attempted = False
+
+    if should_try_pass2:
+        pass2_attempted = True
         pass2_cross, pass2_supports, pass2_node_type_map, pass2_in_degree, pass2_out_degree = _run_neighbor_pass(
             hit_buffer_m=float(params["PASS2_TRAJ_XSEC_HIT_BUFFER_M"]),
             stitch_max_dist_m=float(params["PASS2_STITCH_MAX_DIST_M"]),
             stitch_forward_dot_min=float(params["PASS2_STITCH_FORWARD_DOT_MIN"]),
             neighbor_max_dist_m=float(params["PASS2_NEIGHBOR_MAX_DIST_M"]),
         )
-        neighbor_search_pass = 2
-        cross_result = pass2_cross
-        supports_result = pass2_supports
-        node_type_map = pass2_node_type_map
-        in_degree = pass2_in_degree
-        out_degree = pass2_out_degree
+
+        def _supports_quality_key(res: PairSupportBuildResult) -> tuple[int, int, int, int]:
+            pair_count = int(len(res.supports))
+            support_events = int(sum(max(1, int(v.support_event_count)) for v in res.supports.values()))
+            stitch_accept = int(max(0, int(res.stitch_accept_count)))
+            unresolved_count = int(len(res.unresolved_events))
+            return (pair_count, support_events, stitch_accept, -unresolved_count)
+
+        if pass1_pair_count == 0 or _supports_quality_key(pass2_supports) > _supports_quality_key(pass1_supports):
+            neighbor_search_pass = 2
+            cross_result = pass2_cross
+            supports_result = pass2_supports
+            node_type_map = pass2_node_type_map
+            in_degree = pass2_in_degree
+            out_degree = pass2_out_degree
 
     _append_cross_breakpoints(cross_result)
     supports = supports_result.supports
@@ -562,6 +596,7 @@ def _run_patch_core(
                 "stitch_accept_count": int(supports_result.stitch_accept_count),
                 "stitch_levels_used_hist": dict(supports_result.stitch_levels_used_hist),
                 "neighbor_search_pass": int(neighbor_search_pass),
+                "neighbor_search_pass2_attempted": bool(pass2_attempted),
                 "neighbor_search_pass2_used": bool(int(neighbor_search_pass) == 2),
                 "divstrip_missing": bool(divstrip_missing),
                 "divstrip_src_crs": divstrip_src_crs,
@@ -1211,6 +1246,7 @@ def _run_patch_core(
             "stitch_reject_forward_count": int(supports_result.stitch_reject_forward_count),
             "stitch_accept_count": int(supports_result.stitch_accept_count),
             "stitch_levels_used_hist": dict(supports_result.stitch_levels_used_hist),
+            "neighbor_search_pass2_attempted": bool(pass2_attempted),
             "expanded_end_count": int(expanded_end_count),
             "gore_tip_end_count": int(gore_tip_end_count),
             "fallback_end_count": int(fallback_end_count),
