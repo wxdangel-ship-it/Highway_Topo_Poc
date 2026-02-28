@@ -4,12 +4,14 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from shapely.geometry import LineString, Point, Polygon
 
 from highway_topo_poc.modules.t05_topology_between_rc.geometry import (
+    CenterEstimate,
     HARD_ENDPOINT_OFF_ANCHOR,
     _EndStableDecision,
     _apply_endpoint_trend_projection,
@@ -254,6 +256,36 @@ def test_xsec_gate_cut_by_drivezone() -> None:
     assert bool(meta.get("fallback", False)) is False
 
 
+def test_xsec_gate_prefers_traj_evidence_segment() -> None:
+    xsec = CrossSection(
+        nodeid=9,
+        geometry_metric=LineString([(0.0, -60.0), (0.0, 60.0)]),
+        properties={"nodeid": 9},
+    )
+    drivezone_upper = Polygon([(-20.0, 10.0), (20.0, 10.0), (20.0, 20.0), (-20.0, 20.0)])
+    drivezone_lower = Polygon([(-20.0, -20.0), (20.0, -20.0), (20.0, -10.0), (-20.0, -10.0)])
+    drivezone = drivezone_upper.union(drivezone_lower)
+
+    traj = SimpleNamespace(
+        xyz_metric=np.asarray([[-30.0, 15.0, 0.0], [30.0, 15.0, 0.0]], dtype=np.float64),
+    )
+
+    out_map, _anchors, _trunc, _gate_all_map, gate_meta_map, _stats = pipeline._truncate_cross_sections_for_crossing(
+        xsec_map={9: xsec},
+        lane_boundaries_metric=[],
+        trajectories=[traj],
+        drivezone_zone_metric=drivezone,
+        gore_zone_metric=None,
+        params=dict(pipeline.DEFAULT_PARAMS),
+    )
+    got = out_map[9].geometry_metric
+    mid = got.interpolate(0.5, normalized=True)
+    assert float(mid.y) > 0.0
+    meta = gate_meta_map.get(9) or {}
+    assert str(meta.get("selected_by")) == "traj_evidence_midpoint_longest_tiebreak"
+    assert float(meta.get("selected_evidence_len_m") or 0.0) > 0.0
+
+
 def test_traj_drop_when_outside_drivezone() -> None:
     support = PairSupport(
         src_nodeid=10,
@@ -445,6 +477,111 @@ def test_endpoint_dist_to_xsec_le_1m_or_hard(monkeypatch: pytest.MonkeyPatch) ->
 
     assert line is not None
     assert hard_reason == HARD_ENDPOINT_OFF_ANCHOR
+
+
+def test_center_empty_fallback_still_outputs_step2_step3(monkeypatch: pytest.MonkeyPatch) -> None:
+    shape_ref = LineString([(0.0, 0.0), (100.0, 0.0)])
+    src_xsec = LineString([(0.0, -10.0), (0.0, 10.0)])
+    dst_xsec = LineString([(100.0, -10.0), (100.0, 10.0)])
+
+    fake_center = CenterEstimate(
+        centerline_metric=None,
+        shape_ref_metric=shape_ref,
+        lb_path_found=False,
+        lb_path_edge_count=0,
+        lb_path_length_m=None,
+        stable_offset_m_src=None,
+        stable_offset_m_dst=None,
+        center_sample_coverage=0.0,
+        width_med_m=None,
+        width_p90_m=None,
+        max_turn_deg_per_10m=None,
+        used_lane_boundary=False,
+        src_is_gore_tip=False,
+        dst_is_gore_tip=False,
+        src_is_expanded=False,
+        dst_is_expanded=False,
+        src_width_near_m=None,
+        dst_width_near_m=None,
+        src_width_base_m=None,
+        dst_width_base_m=None,
+        src_gore_overlap_near=None,
+        dst_gore_overlap_near=None,
+        src_stable_s_m=None,
+        dst_stable_s_m=None,
+        src_cut_mode="na",
+        dst_cut_mode="na",
+        endpoint_tangent_deviation_deg_src=None,
+        endpoint_tangent_deviation_deg_dst=None,
+        endpoint_center_offset_m_src=None,
+        endpoint_center_offset_m_dst=None,
+        endpoint_proj_dist_to_core_m_src=None,
+        endpoint_proj_dist_to_core_m_dst=None,
+        soft_flags=set(),
+        hard_flags={pipeline.HARD_CENTER_EMPTY},
+        diagnostics={},
+    )
+
+    def _fake_estimate_centerline(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return fake_center
+
+    def _fake_eval_traj_surface_gate(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return {}, set(), set(), []
+
+    monkeypatch.setattr(pipeline, "estimate_centerline", _fake_estimate_centerline)
+    monkeypatch.setattr(pipeline, "_eval_traj_surface_gate", _fake_eval_traj_surface_gate)
+
+    support = PairSupport(
+        src_nodeid=10,
+        dst_nodeid=20,
+        support_traj_ids={"t0"},
+        support_event_count=1,
+        traj_segments=[LineString([(0.0, 0.0), (100.0, 0.0)])],
+        src_cross_points=[Point(0.0, 0.0)],
+        dst_cross_points=[Point(100.0, 0.0)],
+        evidence_traj_ids=["t0"],
+        cluster_count=1,
+        main_cluster_ratio=1.0,
+    )
+
+    road = pipeline._evaluate_candidate_road(
+        src=10,
+        dst=20,
+        src_type="merge",
+        dst_type="merge",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=SimpleNamespace(drivezone_zone_metric=None, trajectories=[]),
+        gore_zone_metric=None,
+        params=dict(pipeline.DEFAULT_PARAMS),
+        traj_surface_hint={
+            "surface_metric": None,
+            "traj_surface_enforced": False,
+            "axis_source": "test",
+            "reason": "test",
+            "valid_slices": 0,
+            "total_slices": 0,
+            "slice_valid_ratio": 0.0,
+            "covered_length_ratio": 0.0,
+        },
+        shape_ref_hint_metric=shape_ref,
+    )
+
+    assert isinstance(road.get("_xsec_road_selected_dst_metric"), LineString)
+    assert str(road.get("xsec_road_selected_by_dst")).startswith("fallback_seed_due_center_empty")
+    assert isinstance(road.get("_endpoint_after_dst_metric"), Point)
+    assert road.get("endpoint_dist_to_xsec_dst_m") is not None
 
 
 def test_scripts_stepwise_state_resume(tmp_path: Path) -> None:
