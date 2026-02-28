@@ -7,14 +7,16 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from shapely.geometry import LineString
+from shapely.geometry import LineString, Point
 
 from highway_topo_poc.modules.t05_topology_between_rc.geometry import (
     HARD_ENDPOINT_OFF_ANCHOR,
     _EndStableDecision,
     _apply_endpoint_trend_projection,
     _build_xsec_road_for_endpoint,
+    PairSupport,
 )
+from highway_topo_poc.modules.t05_topology_between_rc import pipeline
 
 
 def _decision(anchor_s: float) -> _EndStableDecision:
@@ -70,6 +72,79 @@ def test_step2_barrier_filter_vehicle_noise() -> None:
     assert int(out.get("barrier_candidate_count", 0)) >= 1
     assert int(out.get("barrier_final_count", 0)) == 0
     assert str(out.get("selected_by")) != "fallback_short"
+
+
+def test_step1_prefers_non_gore_corridor_at_constrained_end() -> None:
+    support = PairSupport(
+        src_nodeid=100,
+        dst_nodeid=200,
+        support_traj_ids={"bad", "good"},
+        support_event_count=2,
+        traj_segments=[
+            LineString([(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)]),
+            LineString([(0.0, 8.0), (50.0, 8.0), (100.0, 8.0)]),
+        ],
+        src_cross_points=[Point(0.0, 0.0), Point(0.0, 8.0)],
+        dst_cross_points=[Point(100.0, 0.0), Point(100.0, 8.0)],
+        evidence_traj_ids=["bad", "good"],
+        cluster_count=1,
+        main_cluster_ratio=1.0,
+    )
+    src_xsec = LineString([(0.0, -20.0), (0.0, 20.0)])
+    dst_xsec = LineString([(100.0, -20.0), (100.0, 20.0)])
+    gore = LineString([(-2.0, 0.0), (2.0, 0.0)]).buffer(3.0)
+
+    out = pipeline._build_step1_corridor_for_pair(
+        support=support,
+        src_type="merge",
+        dst_type="diverge",
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        gore_zone_metric=gore,
+        params={"STEP1_GORE_NEAR_M": 20.0, "STEP1_MULTI_CORRIDOR_DIST_M": 8.0, "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6},
+    )
+
+    line = out.get("shape_ref_line")
+    assert isinstance(line, LineString)
+    assert float(line.distance(support.traj_segments[1])) <= 1e-6
+    assert float(line.distance(support.traj_segments[0])) > 1.0
+    assert bool(out.get("gore_fallback_used_src")) is False
+
+
+def test_step1_prefers_gore_free_corridor_when_constraints_equal() -> None:
+    support = PairSupport(
+        src_nodeid=101,
+        dst_nodeid=201,
+        support_traj_ids={"cross", "clean"},
+        support_event_count=2,
+        traj_segments=[
+            LineString([(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)]),
+            LineString([(0.0, 6.0), (50.0, 6.0), (100.0, 6.0)]),
+        ],
+        src_cross_points=[Point(0.0, 0.0), Point(0.0, 6.0)],
+        dst_cross_points=[Point(100.0, 0.0), Point(100.0, 6.0)],
+        evidence_traj_ids=["cross", "clean"],
+        cluster_count=1,
+        main_cluster_ratio=1.0,
+    )
+    src_xsec = LineString([(0.0, -20.0), (0.0, 20.0)])
+    dst_xsec = LineString([(100.0, -20.0), (100.0, 20.0)])
+    gore = LineString([(45.0, -4.0), (55.0, -4.0)]).buffer(8.0)
+
+    out = pipeline._build_step1_corridor_for_pair(
+        support=support,
+        src_type="merge",
+        dst_type="merge",
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        gore_zone_metric=gore,
+        params={"STEP1_GORE_NEAR_M": 20.0, "STEP1_MULTI_CORRIDOR_DIST_M": 8.0, "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6},
+    )
+
+    line = out.get("shape_ref_line")
+    assert isinstance(line, LineString)
+    assert float(line.distance(support.traj_segments[1])) <= 1e-6
+    assert float(line.distance(support.traj_segments[0])) > 1.0
 
 
 def test_xsec_selected_must_intersect_ref_or_fallback() -> None:

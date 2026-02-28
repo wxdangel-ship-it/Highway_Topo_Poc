@@ -178,6 +178,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "XSEC_CASEB_PRE_M": 3.0,
     "STEP1_MULTI_CORRIDOR_DIST_M": 8.0,
     "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.60,
+    "STEP1_GORE_NEAR_M": 30.0,
     "ENDPOINT_ON_XSEC_TOL_M": 1.0,
     "TOPK_INTERVALS": 20,
     "CONF_W1_SUPPORT": 0.4,
@@ -773,19 +774,34 @@ def _run_patch_core(
                         },
                     }
                 )
+            traj_flag_by_idx: dict[int, dict[str, Any]] = {}
+            for item in step1_corridor.get("traj_gore_flags", []):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    idx = int(item.get("idx", -1))
+                except Exception:
+                    continue
+                traj_flag_by_idx[idx] = item
             for i, seg in enumerate(support.traj_segments):
                 if not isinstance(seg, LineString) or seg.is_empty:
                     continue
                 tid = None
                 if i < len(support.evidence_traj_ids):
                     tid = str(support.evidence_traj_ids[i])
+                flag = traj_flag_by_idx.get(int(i), {})
                 debug_layers["step1_support_trajs"].append(
                     {
                         "geometry": seg,
                         "properties": {
                             "road_id": f"{src}_{dst}",
                             "traj_id": tid,
-                            "gore_fallback_used": bool(step1_corridor.get("gore_fallback_used_src") or step1_corridor.get("gore_fallback_used_dst")),
+                            "gore_fallback_used": bool(flag.get("constraint_violation", False)),
+                            "gore_src_near": bool(flag.get("gore_src_near", False)),
+                            "gore_dst_near": bool(flag.get("gore_dst_near", False)),
+                            "gore_any": bool(flag.get("gore_any", False)),
+                            "gore_intersection_m": float(flag.get("gore_intersection_m", 0.0)),
+                            "selected": bool(flag.get("selected", False)),
                         },
                     }
                 )
@@ -1986,6 +2002,56 @@ def _point_in_gore(pt: Point | None, gore_zone_metric: BaseGeometry | None) -> b
         return False
 
 
+def _segment_gore_near_anchor(
+    *,
+    seg: LineString,
+    anchor_pt: Point | None,
+    gore_zone_metric: BaseGeometry | None,
+    near_m: float,
+) -> bool:
+    if not isinstance(seg, LineString) or seg.is_empty:
+        return False
+    if gore_zone_metric is None or gore_zone_metric.is_empty:
+        return False
+    if _point_in_gore(anchor_pt, gore_zone_metric):
+        return True
+    if anchor_pt is None or anchor_pt.is_empty:
+        return False
+    try:
+        s = float(seg.project(anchor_pt))
+    except Exception:
+        return False
+    if not np.isfinite(s):
+        return False
+    win = float(max(1.0, near_m))
+    s0 = max(0.0, s - win)
+    s1 = min(float(seg.length), s + win)
+    if s1 - s0 <= 1e-6:
+        return False
+    try:
+        part = substring(seg, s0, s1)
+    except Exception:
+        part = seg
+    if not isinstance(part, LineString) or part.is_empty:
+        return False
+    try:
+        return float(part.intersection(gore_zone_metric).length) > 1e-6
+    except Exception:
+        return False
+
+
+def _segment_gore_intersection_m(seg: LineString, gore_zone_metric: BaseGeometry | None) -> float:
+    if not isinstance(seg, LineString) or seg.is_empty:
+        return 0.0
+    if gore_zone_metric is None or gore_zone_metric.is_empty:
+        return 0.0
+    try:
+        inter = seg.intersection(gore_zone_metric)
+        return float(max(0.0, float(inter.length)))
+    except Exception:
+        return 0.0
+
+
 def _build_step1_corridor_for_pair(
     *,
     support: PairSupport,
@@ -2008,6 +2074,7 @@ def _build_step1_corridor_for_pair(
         "gore_fallback_used_dst": False,
         "candidate_count": int(len(support.traj_segments)),
         "candidate_topk": [],
+        "traj_gore_flags": [],
     }
 
     if str(dst_type) == "diverge":
@@ -2026,28 +2093,104 @@ def _build_step1_corridor_for_pair(
         seed_xsec = src_xsec
 
     out["strategy"] = str(strategy)
-    segs = [s for s in support.traj_segments if isinstance(s, LineString) and (not s.is_empty) and s.length > 1.0]
-    if not segs:
+    seg_items = [
+        (int(i), s)
+        for i, s in enumerate(support.traj_segments)
+        if isinstance(s, LineString) and (not s.is_empty) and s.length > 1.0
+    ]
+    if not seg_items:
         out["strategy"] = f"{strategy}|fallback_no_traj"
         out["hard_reason"] = None
         out["hard_hint"] = "step1_corridor_empty_fallback"
         return out
     seed_pt = seed_xsec.interpolate(0.5, normalized=True) if seed_xsec.length > 0 else Point(0.0, 0.0)
-    ranked: list[tuple[float, float, int, LineString]] = []
-    for i, seg in enumerate(segs):
+    near_m = float(max(5.0, params.get("STEP1_GORE_NEAR_M", 30.0)))
+    constrained_end: str | None = None
+    if str(dst_type) == "diverge":
+        constrained_end = "src"
+    elif str(dst_type) == "merge" and str(src_type) == "merge":
+        constrained_end = "dst"
+
+    ranked: list[dict[str, Any]] = []
+    for i, seg in seg_items:
         try:
             d_seed = float(seg.distance(seed_pt))
         except Exception:
             d_seed = 1e9
-        ranked.append((d_seed, -float(seg.length), i, seg))
-    ranked.sort(key=lambda it: (float(it[0]), float(it[1]), int(it[2])))
-    topk = ranked[:3]
-    out["candidate_topk"] = [{"rank": int(i), "dist_to_seed_m": float(it[0]), "length_m": float(-it[1])} for i, it in enumerate(topk, start=1)]
+        src_cp = support.src_cross_points[i] if i < len(support.src_cross_points) else None
+        dst_cp = support.dst_cross_points[i] if i < len(support.dst_cross_points) else None
+        gore_src = _segment_gore_near_anchor(
+            seg=seg,
+            anchor_pt=src_cp if isinstance(src_cp, Point) else None,
+            gore_zone_metric=gore_zone_metric,
+            near_m=near_m,
+        )
+        gore_dst = _segment_gore_near_anchor(
+            seg=seg,
+            anchor_pt=dst_cp if isinstance(dst_cp, Point) else None,
+            gore_zone_metric=gore_zone_metric,
+            near_m=near_m,
+        )
+        gore_len_m = _segment_gore_intersection_m(seg, gore_zone_metric)
+        gore_any = bool(gore_len_m > 1e-6)
+        violation = bool((constrained_end == "src" and gore_src) or (constrained_end == "dst" and gore_dst))
+        tid = str(support.evidence_traj_ids[i]) if i < len(support.evidence_traj_ids) else None
+        ranked.append(
+            {
+                "d_seed": float(d_seed),
+                "length_m": float(seg.length),
+                "idx": int(i),
+                "seg": seg,
+                "traj_id": tid,
+                "src_cp": (src_cp if isinstance(src_cp, Point) else None),
+                "dst_cp": (dst_cp if isinstance(dst_cp, Point) else None),
+                "gore_src_near": bool(gore_src),
+                "gore_dst_near": bool(gore_dst),
+                "gore_any": bool(gore_any),
+                "gore_intersection_m": float(gore_len_m),
+                "constraint_violation": bool(violation),
+            }
+        )
+
+    ranked.sort(key=lambda it: (float(it["d_seed"]), -float(it["length_m"]), int(it["idx"])))
+    good = [it for it in ranked if not bool(it["constraint_violation"])]
+    ranked_end = good if good else ranked
+    gore_free = [it for it in ranked_end if not bool(it.get("gore_any", False))]
+    ranked_used = gore_free if gore_free else ranked_end
+    topk = ranked_used[:3]
+    out["candidate_topk"] = [
+        {
+            "rank": int(i),
+            "dist_to_seed_m": float(it["d_seed"]),
+            "length_m": float(it["length_m"]),
+            "traj_id": it.get("traj_id"),
+            "gore_src_near": bool(it.get("gore_src_near", False)),
+            "gore_dst_near": bool(it.get("gore_dst_near", False)),
+            "gore_any": bool(it.get("gore_any", False)),
+            "gore_intersection_m": float(it.get("gore_intersection_m", 0.0)),
+            "constraint_violation": bool(it.get("constraint_violation", False)),
+        }
+        for i, it in enumerate(topk, start=1)
+    ]
+    out["traj_gore_flags"] = [
+        {
+            "idx": int(it["idx"]),
+            "traj_id": it.get("traj_id"),
+            "gore_src_near": bool(it.get("gore_src_near", False)),
+            "gore_dst_near": bool(it.get("gore_dst_near", False)),
+            "gore_any": bool(it.get("gore_any", False)),
+            "gore_intersection_m": float(it.get("gore_intersection_m", 0.0)),
+            "constraint_violation": bool(it.get("constraint_violation", False)),
+            "selected": False,
+        }
+        for it in ranked
+    ]
     multi_sep_m = float(max(1.0, params.get("STEP1_MULTI_CORRIDOR_DIST_M", 8.0)))
     multi_ratio = float(max(0.0, min(1.0, params.get("STEP1_MULTI_CORRIDOR_MIN_RATIO", 0.60))))
     if len(topk) >= 2 and int(max(1, support.cluster_count)) > 1 and float(support.main_cluster_ratio) < multi_ratio:
         mids: list[tuple[float, float]] = []
-        for _, _, _, seg in topk:
+        for item in topk:
+            seg = item["seg"]
             mid = seg.interpolate(0.5, normalized=True)
             mid_xy = point_xy_safe(mid, context="step1_corridor_mid")
             if mid_xy is not None:
@@ -2064,10 +2207,18 @@ def _build_step1_corridor_for_pair(
                     f"corridor_sep_m={sep:.3f}"
                 )
                 return out
-    picked = topk[0][3]
-    out["shape_ref_line"] = _orient_axis_line(picked, src_xsec=src_xsec, dst_xsec=dst_xsec)
-    out["gore_fallback_used_src"] = _point_in_gore(out["cross_point_src"], gore_zone_metric)
-    out["gore_fallback_used_dst"] = _point_in_gore(out["cross_point_dst"], gore_zone_metric)
+    picked = topk[0]
+    picked_seg = picked["seg"]
+    out["shape_ref_line"] = _orient_axis_line(picked_seg, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    for item in out["traj_gore_flags"]:
+        if int(item.get("idx", -1)) == int(picked.get("idx", -2)):
+            item["selected"] = True
+    if isinstance(picked.get("src_cp"), Point):
+        out["cross_point_src"] = picked.get("src_cp")
+    if isinstance(picked.get("dst_cp"), Point):
+        out["cross_point_dst"] = picked.get("dst_cp")
+    out["gore_fallback_used_src"] = bool(picked.get("gore_src_near", False) and not good)
+    out["gore_fallback_used_dst"] = bool(picked.get("gore_dst_near", False) and not good)
     return out
 
 
