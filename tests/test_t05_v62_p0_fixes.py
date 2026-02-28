@@ -35,10 +35,11 @@ def test_crossing_xsec_truncation_stays_near_evidence() -> None:
         _traj("t1", [(-20.0, -6.0), (0.0, -2.0), (20.0, -6.0)]),
         _traj("t2", [(-20.0, 6.0), (0.0, 2.0), (20.0, 6.0)]),
     ]
-    out_map, _anchors, _trunc, stats = _truncate_cross_sections_for_crossing(
+    out_map, _anchors, _trunc, _gate_all_map, _gate_meta_map, stats = _truncate_cross_sections_for_crossing(
         xsec_map={1: xsec},
         lane_boundaries_metric=[],
         trajectories=trajectories,
+        drivezone_zone_metric=None,
         gore_zone_metric=None,
         params={
             "XSEC_TRUNC_LMAX_M": 80.0,

@@ -23,6 +23,7 @@ HARD_ENDPOINT_LOCAL = "ENDPOINT_OUT_OF_LOCAL_XSEC_NEIGHBORHOOD"
 HARD_ENDPOINT_OFF_ANCHOR = "ENDPOINT_OFF_XSEC_ROAD"
 HARD_BRIDGE_SEGMENT = "BRIDGE_SEGMENT_TOO_LONG"
 HARD_DIVSTRIP_INTERSECT = "ROAD_INTERSECTS_DIVSTRIP"
+HARD_ROAD_OUTSIDE_DRIVEZONE = "ROAD_OUTSIDE_DRIVEZONE"
 HARD_MULTI_CORRIDOR = "MULTI_CORRIDOR"
 HARD_NO_STRATEGY_MERGE_TO_DIVERGE = "NO_STRATEGY_MERGE_TO_DIVERGE"
 
@@ -1146,6 +1147,7 @@ def estimate_centerline(
     trend_fit_win_m: float,
     traj_surface_metric: BaseGeometry | None,
     traj_surface_enforced: bool,
+    drivezone_zone_metric: BaseGeometry | None,
     divstrip_zone_metric: BaseGeometry | None,
     xsec_anchor_window_m: float,
     xsec_endpoint_max_dist_m: float,
@@ -1506,6 +1508,7 @@ def estimate_centerline(
         trend_fit_win_m=float(trend_fit_win_m),
         traj_surface_metric=traj_surface_metric,
         traj_surface_enforced=bool(traj_surface_enforced),
+        drivezone_zone_metric=drivezone_zone_metric,
         gore_zone_metric=divstrip_zone_metric,
         endpoint_tol_m=float(endpoint_tol_m),
         anchor_window_m=float(xsec_anchor_window_m),
@@ -1721,6 +1724,7 @@ def _apply_endpoint_trend_projection(
     support_traj_segments: Sequence[LineString],
     surface_points_xyz: np.ndarray,
     trend_fit_win_m: float,
+    drivezone_zone_metric: BaseGeometry | None,
     traj_surface_metric: BaseGeometry | None,
     traj_surface_enforced: bool,
     gore_zone_metric: BaseGeometry | None,
@@ -1771,8 +1775,12 @@ def _apply_endpoint_trend_projection(
         "s_end_dst_m": None,
         "endpoint_dist_to_xsec_src_m": None,
         "endpoint_dist_to_xsec_dst_m": None,
+        "endpoint_in_drivezone_src": None,
+        "endpoint_in_drivezone_dst": None,
         "xsec_road_selected_by_src": None,
         "xsec_road_selected_by_dst": None,
+        "xsec_samples_passable_ratio_src": None,
+        "xsec_samples_passable_ratio_dst": None,
     }
     if base_line.is_empty or base_line.length <= 0:
         return None, None, None, HARD_CENTER_EMPTY, None, None, trend_meta
@@ -1840,6 +1848,7 @@ def _apply_endpoint_trend_projection(
         xsec_seed=src_xsec,
         shape_ref_line=shape_ref_line,
         traj_segments=support_traj_segments,
+        drivezone_zone_metric=drivezone_zone_metric,
         ground_xy=ground_xy,
         non_ground_xy=non_ground_xy,
         gore_zone_metric=gore_zone_metric,
@@ -1866,6 +1875,7 @@ def _apply_endpoint_trend_projection(
         xsec_seed=dst_xsec,
         shape_ref_line=shape_ref_line,
         traj_segments=support_traj_segments,
+        drivezone_zone_metric=drivezone_zone_metric,
         ground_xy=ground_xy,
         non_ground_xy=non_ground_xy,
         gore_zone_metric=gore_zone_metric,
@@ -1932,6 +1942,10 @@ def _apply_endpoint_trend_projection(
     trend_meta["_xsec_ref_shifted_candidates_dst_metric"] = dst_xsec_road.get("xsec_ref_shifted_candidates")
     trend_meta["_xsec_barrier_samples_src_metric"] = src_xsec_road.get("barrier_samples")
     trend_meta["_xsec_barrier_samples_dst_metric"] = dst_xsec_road.get("barrier_samples")
+    trend_meta["_xsec_passable_samples_src_metric"] = src_xsec_road.get("passable_samples")
+    trend_meta["_xsec_passable_samples_dst_metric"] = dst_xsec_road.get("passable_samples")
+    trend_meta["xsec_samples_passable_ratio_src"] = src_xsec_road.get("xsec_samples_passable_ratio")
+    trend_meta["xsec_samples_passable_ratio_dst"] = dst_xsec_road.get("xsec_samples_passable_ratio")
 
     local_limit = max(5.0, float(endpoint_local_max_dist_m))
     src_seed_center = src_xsec.interpolate(0.5, normalized=True) if src_xsec.length > 0 else None
@@ -2235,6 +2249,15 @@ def _apply_endpoint_trend_projection(
     d1 = float(p1.distance(dst_target_for_dist))
     trend_meta["endpoint_dist_to_xsec_src_m"] = float(d0)
     trend_meta["endpoint_dist_to_xsec_dst_m"] = float(d1)
+    if drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty):
+        try:
+            trend_meta["endpoint_in_drivezone_src"] = bool(drivezone_zone_metric.buffer(1e-6).covers(p0))
+        except Exception:
+            trend_meta["endpoint_in_drivezone_src"] = None
+        try:
+            trend_meta["endpoint_in_drivezone_dst"] = bool(drivezone_zone_metric.buffer(1e-6).covers(p1))
+        except Exception:
+            trend_meta["endpoint_in_drivezone_dst"] = None
     max_local = max(5.0, float(endpoint_local_max_dist_m))
     endpoint_tol = max(1.0, float(endpoint_tol_m))
     if d0 > endpoint_tol or d1 > endpoint_tol:
@@ -2595,6 +2618,7 @@ def _build_xsec_road_for_endpoint(
     xsec_seed: LineString,
     shape_ref_line: LineString,
     traj_segments: Sequence[LineString],
+    drivezone_zone_metric: BaseGeometry | None,
     ground_xy: np.ndarray,
     non_ground_xy: np.ndarray | None,
     gore_zone_metric: BaseGeometry | None,
@@ -2630,6 +2654,8 @@ def _build_xsec_road_for_endpoint(
         "barrier_candidate_count": 0,
         "barrier_final_count": 0,
         "barrier_samples": [],
+        "passable_samples": [],
+        "xsec_samples_passable_ratio": None,
         "case_b_used": False,
         "left_extent_m": 0.0,
         "right_extent_m": 0.0,
@@ -2641,7 +2667,6 @@ def _build_xsec_road_for_endpoint(
     c_xy = point_xy_safe(center, context="xsec_road_anchor")
     if c_xy is None:
         return out
-    anchor_mid = (float(c_xy[0]), float(c_xy[1]))
     s_anchor = _xsec_anchor_station(shape_ref_line, xsec_seed)
     if s_anchor is None:
         return out
@@ -2661,7 +2686,6 @@ def _build_xsec_road_for_endpoint(
     nx /= n_norm
     ny /= n_norm
     L = float(max(10.0, ref_half_len_m))
-    traj_geom = _build_traj_evidence_geom(traj_segments)
     traj_xy = _collect_traj_xy(traj_segments)
     ng_xy = (
         np.asarray(non_ground_xy, dtype=np.float64)
@@ -2711,31 +2735,49 @@ def _build_xsec_road_for_endpoint(
                     xsec_no_gore = diff
             except Exception:
                 pass
-        parts = _iter_linestring_parts(xsec_no_gore)
+        xsec_passable: BaseGeometry = xsec_no_gore
+        if drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty):
+            try:
+                inter = xsec_no_gore.intersection(drivezone_zone_metric)
+                if inter is not None and not inter.is_empty:
+                    xsec_passable = inter
+                else:
+                    xsec_passable = LineString()
+            except Exception:
+                xsec_passable = LineString()
+        parts = _iter_linestring_parts(xsec_passable)
         if not parts:
             continue
-        barrier_samples: list[dict[str, Any]] = []
-        barrier_candidate_count = 0
-        barrier_final_count = 0
+        pass_samples, pass_ratio, barrier_candidate_count, barrier_final_count = _build_xsec_passable_samples(
+            line=xsec_ref,
+            drivezone_zone_metric=drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            sample_step_m=float(max(0.5, sample_step_m)),
+            barrier_min_len_m=float(max(1.0, barrier_min_len_m)),
+        )
+        barrier_samples: list[dict[str, Any]] = list(pass_samples)
         kept_parts: list[LineString] = []
         for part in parts:
-            part_cut, samples, cand_n, final_n = _split_xsec_by_barrier(
-                part=part,
-                tangent_xy=(tx, ty),
-                traj_xy=traj_xy,
-                non_ground_xy=ng_xy,
-                sample_step_m=float(max(0.5, sample_step_m)),
-                evidence_radius_m=float(max(0.5, evidence_radius_m)),
-                barrier_min_ng_count=int(max(1, barrier_min_ng_count)),
-                barrier_min_len_m=float(max(1.0, barrier_min_len_m)),
-                barrier_along_len_m=float(max(5.0, barrier_along_len_m)),
-                barrier_along_width_m=float(max(1.0, barrier_along_width_m)),
-                barrier_bin_step_m=float(max(0.5, barrier_bin_step_m)),
-                barrier_occ_ratio_min=float(max(0.0, min(1.0, barrier_occ_ratio_min))),
-            )
-            barrier_samples.extend(samples)
-            barrier_candidate_count += int(cand_n)
-            barrier_final_count += int(final_n)
+            part_cut = part
+            if (drivezone_zone_metric is None or drivezone_zone_metric.is_empty) and ng_xy.shape[0] > 0:
+                part_cut, ng_samples, cand_n, final_n = _split_xsec_by_barrier(
+                    part=part,
+                    tangent_xy=(tx, ty),
+                    traj_xy=traj_xy,
+                    non_ground_xy=ng_xy,
+                    sample_step_m=float(max(0.5, sample_step_m)),
+                    evidence_radius_m=float(max(0.5, evidence_radius_m)),
+                    barrier_min_ng_count=int(max(1, barrier_min_ng_count)),
+                    barrier_min_len_m=float(max(1.0, barrier_min_len_m)),
+                    barrier_along_len_m=float(max(5.0, barrier_along_len_m)),
+                    barrier_along_width_m=float(max(1.0, barrier_along_width_m)),
+                    barrier_bin_step_m=float(max(0.5, barrier_bin_step_m)),
+                    barrier_occ_ratio_min=float(max(0.0, min(1.0, barrier_occ_ratio_min))),
+                )
+                if ng_samples:
+                    barrier_samples = ng_samples
+                    barrier_candidate_count = int(cand_n)
+                    barrier_final_count = int(final_n)
             for p in _iter_linestring_parts(part_cut):
                 if p.is_empty or p.length <= 1e-6:
                     continue
@@ -2772,6 +2814,8 @@ def _build_xsec_road_for_endpoint(
             "barrier_candidate_count": int(barrier_candidate_count),
             "barrier_final_count": int(barrier_final_count),
             "barrier_samples": barrier_samples,
+            "passable_samples": pass_samples,
+            "xsec_samples_passable_ratio": float(pass_ratio) if pass_ratio is not None else None,
             "left_extent_m": float(max(0.0, _xsec_half_extent(selected, anchor_ref, nx=-nx, ny=-ny))),
             "right_extent_m": float(max(0.0, _xsec_half_extent(selected, anchor_ref, nx=nx, ny=ny))),
             "all_geom_type": str(getattr(xsec_all, "geom_type", "")),
@@ -2914,6 +2958,74 @@ def _split_xsec_by_barrier(
     except Exception:
         diff = part
     return diff, barrier_samples, len(cand_runs), int(final_count)
+
+
+def _build_xsec_passable_samples(
+    *,
+    line: LineString,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+    sample_step_m: float,
+    barrier_min_len_m: float,
+) -> tuple[list[dict[str, Any]], float | None, int, int]:
+    if line.is_empty or line.length <= 1e-6:
+        return [], None, 0, 0
+    step = float(max(0.5, sample_step_m))
+    n_steps = int(max(1, math.ceil(float(line.length) / step)))
+    sample_ss = np.linspace(0.0, float(line.length), n_steps + 1, dtype=np.float64)
+    samples: list[dict[str, Any]] = []
+    nonpass_vals: list[int] = []
+    for s in sample_ss:
+        p = line.interpolate(float(s))
+        p_xy = point_xy_safe(p, context="xsec_passable_sample")
+        if p_xy is None:
+            continue
+        px = float(p_xy[0])
+        py = float(p_xy[1])
+        in_divstrip = False
+        if gore_zone_metric is not None and (not gore_zone_metric.is_empty):
+            try:
+                in_divstrip = bool(gore_zone_metric.buffer(1e-6).covers(Point(px, py)))
+            except Exception:
+                in_divstrip = False
+        in_drivezone = True
+        if drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty):
+            try:
+                in_drivezone = bool(drivezone_zone_metric.buffer(1e-6).covers(Point(px, py)))
+            except Exception:
+                in_drivezone = False
+        passable = bool(in_drivezone and (not in_divstrip))
+        stop_reason = "passable"
+        if not passable:
+            stop_reason = "in_divstrip" if in_divstrip else "out_drivezone"
+        samples.append(
+            {
+                "xy": (px, py),
+                "ng_count": 0,
+                "occupancy_ratio": 0.0,
+                "barrier_candidate": False,
+                "barrier_final": False,
+                "in_drivezone": bool(in_drivezone),
+                "in_divstrip": bool(in_divstrip),
+                "passable": bool(passable),
+                "stop_reason": str(stop_reason),
+            }
+        )
+        nonpass_vals.append(0 if passable else 1)
+    if not samples:
+        return [], None, 0, 0
+    cand_runs = _extract_barrier_runs(
+        values=nonpass_vals,
+        min_value=1,
+        step_m=float(step),
+        min_len_m=float(max(step, barrier_min_len_m)),
+    )
+    for lo, hi in cand_runs:
+        for i in range(int(lo), int(hi) + 1):
+            samples[i]["barrier_candidate"] = True
+            samples[i]["barrier_final"] = True
+    passable_ratio = float(np.mean(np.asarray(nonpass_vals, dtype=np.float64) == 0.0))
+    return samples, passable_ratio, int(len(cand_runs)), int(len(cand_runs))
 
 
 def _extract_barrier_runs(

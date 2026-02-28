@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, Polygon
 
 from highway_topo_poc.modules.t05_topology_between_rc.geometry import (
     HARD_ENDPOINT_OFF_ANCHOR,
@@ -17,6 +17,7 @@ from highway_topo_poc.modules.t05_topology_between_rc.geometry import (
     PairSupport,
 )
 from highway_topo_poc.modules.t05_topology_between_rc import pipeline
+from highway_topo_poc.modules.t05_topology_between_rc.io import CrossSection
 
 
 def _decision(anchor_s: float) -> _EndStableDecision:
@@ -46,6 +47,7 @@ def test_step2_barrier_filter_vehicle_noise() -> None:
         xsec_seed=xsec_seed,
         shape_ref_line=shape_ref,
         traj_segments=traj_segments,
+        drivezone_zone_metric=None,
         ground_xy=ground_xy,
         non_ground_xy=non_ground_xy,
         gore_zone_metric=None,
@@ -100,6 +102,7 @@ def test_step1_prefers_non_gore_corridor_at_constrained_end() -> None:
         dst_type="diverge",
         src_xsec=src_xsec,
         dst_xsec=dst_xsec,
+        drivezone_zone_metric=None,
         gore_zone_metric=gore,
         params={"STEP1_GORE_NEAR_M": 20.0, "STEP1_MULTI_CORRIDOR_DIST_M": 8.0, "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6},
     )
@@ -137,6 +140,7 @@ def test_step1_prefers_gore_free_corridor_when_constraints_equal() -> None:
         dst_type="merge",
         src_xsec=src_xsec,
         dst_xsec=dst_xsec,
+        drivezone_zone_metric=None,
         gore_zone_metric=gore,
         params={"STEP1_GORE_NEAR_M": 20.0, "STEP1_MULTI_CORRIDOR_DIST_M": 8.0, "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6},
     )
@@ -173,6 +177,7 @@ def test_step1_multi_corridor_soft_by_default() -> None:
         dst_type="merge",
         src_xsec=src_xsec,
         dst_xsec=dst_xsec,
+        drivezone_zone_metric=None,
         gore_zone_metric=None,
         params={"STEP1_MULTI_CORRIDOR_DIST_M": 8.0, "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6},
     )
@@ -209,6 +214,7 @@ def test_step1_multi_corridor_hard_when_enabled() -> None:
         dst_type="merge",
         src_xsec=src_xsec,
         dst_xsec=dst_xsec,
+        drivezone_zone_metric=None,
         gore_zone_metric=None,
         params={
             "STEP1_MULTI_CORRIDOR_DIST_M": 8.0,
@@ -221,6 +227,140 @@ def test_step1_multi_corridor_hard_when_enabled() -> None:
     assert out.get("shape_ref_line") is None
 
 
+def test_xsec_gate_cut_by_drivezone() -> None:
+    xsec = CrossSection(
+        nodeid=1,
+        geometry_metric=LineString([(0.0, -80.0), (0.0, 80.0)]),
+        properties={"nodeid": 1},
+    )
+    drivezone = Polygon([(-20.0, -8.0), (20.0, -8.0), (20.0, 8.0), (-20.0, 8.0)])
+    divstrip = Polygon([(-2.0, -1.5), (2.0, -1.5), (2.0, 1.5), (-2.0, 1.5)])
+
+    out_map, _anchors, _trunc, _gate_all_map, gate_meta_map, stats = pipeline._truncate_cross_sections_for_crossing(
+        xsec_map={1: xsec},
+        lane_boundaries_metric=[],
+        trajectories=[],
+        drivezone_zone_metric=drivezone,
+        gore_zone_metric=divstrip,
+        params=dict(pipeline.DEFAULT_PARAMS),
+    )
+
+    got = out_map[1].geometry_metric
+    assert float(got.length) < float(xsec.geometry_metric.length)
+    assert float(got.length) > 1.0
+    assert float(got.intersection(divstrip).length) <= 1e-6
+    assert bool(stats.get("xsec_gate_enabled")) is True
+    meta = gate_meta_map.get(1) or {}
+    assert bool(meta.get("fallback", False)) is False
+
+
+def test_traj_drop_when_outside_drivezone() -> None:
+    support = PairSupport(
+        src_nodeid=10,
+        dst_nodeid=20,
+        support_traj_ids={"in", "out"},
+        support_event_count=2,
+        traj_segments=[
+            LineString([(0.0, 0.0), (100.0, 0.0)]),
+            LineString([(0.0, 25.0), (100.0, 25.0)]),
+        ],
+        src_cross_points=[Point(0.0, 0.0), Point(0.0, 25.0)],
+        dst_cross_points=[Point(100.0, 0.0), Point(100.0, 25.0)],
+        evidence_traj_ids=["in", "out"],
+        cluster_count=2,
+        main_cluster_ratio=0.5,
+    )
+    src_xsec = LineString([(0.0, -30.0), (0.0, 30.0)])
+    dst_xsec = LineString([(100.0, -30.0), (100.0, 30.0)])
+    drivezone = Polygon([(-10.0, -6.0), (110.0, -6.0), (110.0, 6.0), (-10.0, 6.0)])
+
+    out = pipeline._build_step1_corridor_for_pair(
+        support=support,
+        src_type="merge",
+        dst_type="merge",
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=drivezone,
+        gore_zone_metric=None,
+        params={
+            "STEP1_TRAJ_IN_DRIVEZONE_MIN": 0.85,
+            "STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN": 0.60,
+            "STEP1_MULTI_CORRIDOR_DIST_M": 8.0,
+            "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6,
+        },
+    )
+    line = out.get("shape_ref_line")
+    assert isinstance(line, LineString)
+    assert float(line.distance(support.traj_segments[0])) <= 1e-6
+    assert int(out.get("traj_drop_count_by_drivezone", -1)) == 1
+    assert bool(out.get("drivezone_fallback_used", False)) is False
+
+    support_only_out = PairSupport(
+        src_nodeid=11,
+        dst_nodeid=21,
+        support_traj_ids={"out_only"},
+        support_event_count=1,
+        traj_segments=[LineString([(0.0, 25.0), (100.0, 25.0)])],
+        src_cross_points=[Point(0.0, 25.0)],
+        dst_cross_points=[Point(100.0, 25.0)],
+        evidence_traj_ids=["out_only"],
+    )
+    out_fallback = pipeline._build_step1_corridor_for_pair(
+        support=support_only_out,
+        src_type="merge",
+        dst_type="merge",
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=drivezone,
+        gore_zone_metric=None,
+        params={
+            "STEP1_TRAJ_IN_DRIVEZONE_MIN": 0.85,
+            "STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN": 0.60,
+            "STEP1_MULTI_CORRIDOR_DIST_M": 8.0,
+            "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6,
+        },
+    )
+    assert bool(out_fallback.get("drivezone_fallback_used", False)) is True
+    assert int(out_fallback.get("traj_drop_count_by_drivezone", 0)) >= 0
+
+
+def test_step1_no_distance_clustering_dependency() -> None:
+    support = PairSupport(
+        src_nodeid=501,
+        dst_nodeid=601,
+        support_traj_ids={"c0", "c1", "c2"},
+        support_event_count=3,
+        traj_segments=[
+            LineString([(0.0, 0.0), (100.0, 0.0)]),
+            LineString([(0.0, 30.0), (100.0, 30.0)]),
+            LineString([(0.0, -30.0), (100.0, -30.0)]),
+        ],
+        src_cross_points=[Point(0.0, 0.0), Point(0.0, 30.0), Point(0.0, -30.0)],
+        dst_cross_points=[Point(100.0, 0.0), Point(100.0, 30.0), Point(100.0, -30.0)],
+        evidence_traj_ids=["c0", "c1", "c2"],
+        cluster_count=1,
+        main_cluster_ratio=1.0,
+    )
+    src_xsec = LineString([(0.0, -40.0), (0.0, 40.0)])
+    dst_xsec = LineString([(100.0, -40.0), (100.0, 40.0)])
+
+    out = pipeline._build_step1_corridor_for_pair(
+        support=support,
+        src_type="merge",
+        dst_type="merge",
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=None,
+        gore_zone_metric=None,
+        params={
+            "STEP1_MULTI_CORRIDOR_DIST_M": 8.0,
+            "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6,
+            "STEP1_MULTI_CORRIDOR_HARD": 1,
+        },
+    )
+    assert str(out.get("hard_reason")) == str(pipeline.HARD_MULTI_CORRIDOR)
+
+
 def test_xsec_selected_must_intersect_ref_or_fallback() -> None:
     shape_ref = LineString([(0.0, 0.0), (120.0, 0.0)])
     xsec_seed = LineString([(10.0, -40.0), (10.0, 40.0)])
@@ -230,6 +370,7 @@ def test_xsec_selected_must_intersect_ref_or_fallback() -> None:
         xsec_seed=xsec_seed,
         shape_ref_line=shape_ref,
         traj_segments=[],
+        drivezone_zone_metric=None,
         ground_xy=np.empty((0, 2), dtype=np.float64),
         non_ground_xy=np.empty((0, 2), dtype=np.float64),
         gore_zone_metric=gore,
@@ -285,6 +426,7 @@ def test_endpoint_dist_to_xsec_le_1m_or_hard(monkeypatch: pytest.MonkeyPatch) ->
         support_traj_segments=[],
         surface_points_xyz=np.empty((0, 3), dtype=np.float64),
         trend_fit_win_m=20.0,
+        drivezone_zone_metric=None,
         traj_surface_metric=None,
         traj_surface_enforced=False,
         gore_zone_metric=None,
@@ -339,8 +481,15 @@ def test_scripts_stepwise_state_resume(tmp_path: Path) -> None:
         env=env,
         check=True,
     )
+    subprocess.run(
+        ["bash", str(resume), "--data_root", str(data_root), "--patch_id", patch_id, "--run_id", run_id, "--out_root", str(out_root), "--debug"],
+        env=env,
+        check=True,
+    )
 
     step4_state = out_root / run_id / "patches" / patch_id / "step4" / "step_state.json"
+    step0_state = out_root / run_id / "patches" / patch_id / "step0" / "step_state.json"
+    assert step0_state.is_file()
     assert step4_state.is_file()
     payload = json.loads(step4_state.read_text(encoding="utf-8"))
     assert bool(payload.get("ok")) is True

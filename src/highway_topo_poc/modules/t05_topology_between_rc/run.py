@@ -105,6 +105,16 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
         default=int(DEFAULT_PARAMS["STEP1_MULTI_CORRIDOR_HARD"]),
     )
     p.add_argument("--step1_gore_near_m", type=float, default=float(DEFAULT_PARAMS["STEP1_GORE_NEAR_M"]))
+    p.add_argument(
+        "--step1_traj_in_drivezone_min",
+        type=float,
+        default=float(DEFAULT_PARAMS["STEP1_TRAJ_IN_DRIVEZONE_MIN"]),
+    )
+    p.add_argument(
+        "--step1_traj_in_drivezone_fallback_min",
+        type=float,
+        default=float(DEFAULT_PARAMS["STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN"]),
+    )
     p.add_argument("--corridor_half_width_m", type=float, default=float(DEFAULT_PARAMS["CORRIDOR_HALF_WIDTH_M"]))
     p.add_argument("--offset_smooth_win_m_1", type=float, default=float(DEFAULT_PARAMS["OFFSET_SMOOTH_WIN_M_1"]))
     p.add_argument("--offset_smooth_win_m_2", type=float, default=float(DEFAULT_PARAMS["OFFSET_SMOOTH_WIN_M_2"]))
@@ -204,7 +214,9 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
         type=int,
         default=int(DEFAULT_PARAMS["TRAJ_SURF_MIN_UNIQUE_TRAJ"]),
     )
+    p.add_argument("--pointcloud_enable", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["POINTCLOUD_ENABLE"]))
     p.add_argument("--point_class_fallback_any", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["POINT_CLASS_FALLBACK_ANY"]))
+    p.add_argument("--drivezone_sample_step_m", type=float, default=float(DEFAULT_PARAMS["DRIVEZONE_SAMPLE_STEP_M"]))
     p.add_argument("--cache_enabled", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["CACHE_ENABLED"]))
     p.add_argument("--debug_dump", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["DEBUG_DUMP"]))
 
@@ -268,6 +280,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         "STEP1_MULTI_CORRIDOR_MIN_RATIO": float(args.step1_multi_corridor_min_ratio),
         "STEP1_MULTI_CORRIDOR_HARD": int(args.step1_multi_corridor_hard),
         "STEP1_GORE_NEAR_M": float(args.step1_gore_near_m),
+        "STEP1_TRAJ_IN_DRIVEZONE_MIN": float(args.step1_traj_in_drivezone_min),
+        "STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN": float(args.step1_traj_in_drivezone_fallback_min),
         "CORRIDOR_HALF_WIDTH_M": float(args.corridor_half_width_m),
         "OFFSET_SMOOTH_WIN_M_1": float(args.offset_smooth_win_m_1),
         "OFFSET_SMOOTH_WIN_M_2": float(args.offset_smooth_win_m_2),
@@ -311,7 +325,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         "TRAJ_SURF_MIN_COVERED_LEN_RATIO": float(args.traj_surf_min_covered_len_ratio),
         "TRAJ_SURF_ENFORCE_MIN_COVERED_LEN_RATIO": float(args.traj_surf_enforce_min_covered_len_ratio),
         "TRAJ_SURF_MIN_UNIQUE_TRAJ": int(args.traj_surf_min_unique_traj),
+        "POINTCLOUD_ENABLE": int(args.pointcloud_enable),
         "POINT_CLASS_FALLBACK_ANY": int(args.point_class_fallback_any),
+        "DRIVEZONE_SAMPLE_STEP_M": float(args.drivezone_sample_step_m),
         "CACHE_ENABLED": int(args.cache_enabled),
         "DEBUG_DUMP": int(args.debug_dump),
     }
