@@ -184,6 +184,9 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_GORE_NEAR_M": 30.0,
     "STEP1_TRAJ_IN_DRIVEZONE_MIN": 0.85,
     "STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN": 0.60,
+    "STEP1_CORRIDOR_REACH_XSEC_M": 12.0,
+    "TRAJ_SURF_ENDPOINT_HOLE_TOL_M": 2.0,
+    "TRAJ_SURF_ENDPOINT_HOLE_IN_RATIO_MIN": 0.99,
     "ENDPOINT_ON_XSEC_TOL_M": 1.0,
     "TOPK_INTERVALS": 20,
     "CONF_W1_SUPPORT": 0.4,
@@ -775,6 +778,7 @@ def _run_patch_core(
         "step1_corridor_centerline": [],
         "step1_corridor_candidates": [],
         "step1_support_trajs": [],
+        "step1_support_trajs_all": [],
         "step1_seed_selected": [],
         "xsec_gate_all_src": [],
         "xsec_gate_all_dst": [],
@@ -1003,6 +1007,26 @@ def _run_patch_core(
                 if i < len(support.evidence_traj_ids):
                     tid = str(support.evidence_traj_ids[i])
                 flag = traj_flag_by_idx.get(int(i), {})
+                debug_layers["step1_support_trajs_all"].append(
+                    {
+                        "geometry": seg,
+                        "properties": {
+                            "road_id": f"{src}_{dst}",
+                            "traj_id": tid,
+                            "gore_fallback_used": bool(flag.get("constraint_violation", False)),
+                            "gore_src_near": bool(flag.get("gore_src_near", False)),
+                            "gore_dst_near": bool(flag.get("gore_dst_near", False)),
+                            "gore_any": bool(flag.get("gore_any", False)),
+                            "gore_intersection_m": float(flag.get("gore_intersection_m", 0.0)),
+                            "inside_ratio": flag.get("inside_ratio"),
+                            "dropped_by_drivezone": bool(flag.get("dropped_by_drivezone", False)),
+                            "corridor_id": flag.get("corridor_id"),
+                            "selected": bool(flag.get("selected", False)),
+                        },
+                    }
+                )
+                if flag.get("corridor_id") is None:
+                    continue
                 debug_layers["step1_support_trajs"].append(
                     {
                         "geometry": seg,
@@ -2457,6 +2481,80 @@ def _choose_step1_cross_point(points: Sequence[Point], xsec: LineString) -> Poin
     return best
 
 
+def _line_xsec_contact_point(
+    *,
+    line: LineString | None,
+    xsec: LineString,
+    fallback: Point | None = None,
+) -> Point | None:
+    if isinstance(line, LineString) and (not line.is_empty) and line.length > 1e-6:
+        xsec_mid = xsec.interpolate(0.5, normalized=True) if (isinstance(xsec, LineString) and xsec.length > 1e-6) else None
+        try:
+            inter = line.intersection(xsec)
+        except Exception:
+            inter = None
+        pts: list[Point] = []
+        if isinstance(inter, Point) and (not inter.is_empty):
+            pts.append(inter)
+        elif str(getattr(inter, "geom_type", "")) == "MultiPoint":
+            for g in getattr(inter, "geoms", []):
+                if isinstance(g, Point) and (not g.is_empty):
+                    pts.append(g)
+        elif isinstance(inter, LineString) and (not inter.is_empty) and inter.length > 1e-6:
+            pts.append(inter.interpolate(0.5, normalized=True))
+        elif str(getattr(inter, "geom_type", "")) == "MultiLineString":
+            parts = [g for g in getattr(inter, "geoms", []) if isinstance(g, LineString) and (not g.is_empty) and g.length > 1e-6]
+            if parts:
+                best = max(parts, key=lambda g: float(g.length))
+                pts.append(best.interpolate(0.5, normalized=True))
+        elif str(getattr(inter, "geom_type", "")) == "GeometryCollection":
+            for g in getattr(inter, "geoms", []):
+                if isinstance(g, Point) and (not g.is_empty):
+                    pts.append(g)
+                elif isinstance(g, LineString) and (not g.is_empty) and g.length > 1e-6:
+                    pts.append(g.interpolate(0.5, normalized=True))
+        if pts:
+            if isinstance(xsec_mid, Point) and (not xsec_mid.is_empty):
+                try:
+                    return min(pts, key=lambda p: float(p.distance(xsec_mid)))
+                except Exception:
+                    return pts[0]
+            return pts[0]
+        try:
+            _lp, xp = nearest_points(line, xsec)
+            if isinstance(xp, Point) and (not xp.is_empty):
+                return xp
+        except Exception:
+            pass
+    if isinstance(fallback, Point) and (not fallback.is_empty):
+        return fallback
+    return None
+
+
+def _pick_step1_primary_item(items: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
+    valid = [it for it in items if isinstance(it, dict) and isinstance(it.get("seg"), LineString)]
+    if not valid:
+        return None
+    if len(valid) == 1:
+        return valid[0]
+    mids: list[tuple[float, float]] = []
+    for it in valid:
+        seg = it.get("seg")
+        if not isinstance(seg, LineString) or seg.is_empty or seg.length <= 1e-6:
+            mids.append((0.0, 0.0))
+            continue
+        p = seg.interpolate(0.5, normalized=True)
+        mids.append((float(p.x), float(p.y)))
+    arr = np.asarray(mids, dtype=np.float64)
+    dm = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=2)
+    score = np.sum(dm, axis=1)
+    for i, it in enumerate(valid):
+        score[i] += 0.05 * float(max(0.0, it.get("d_seed", 0.0)))
+        score[i] -= 0.0005 * float(max(0.0, it.get("length_m", 0.0)))
+    idx = int(np.argmin(score))
+    return valid[idx]
+
+
 def _point_in_gore(pt: Point | None, gore_zone_metric: BaseGeometry | None) -> bool:
     if pt is None or pt.is_empty or gore_zone_metric is None or gore_zone_metric.is_empty:
         return False
@@ -2755,7 +2853,7 @@ def _build_step1_corridor_for_pair(
         out["main_corridor_ratio"] = 1.0
     # 主流程只保留单通路；其余候选仅用于 debug 与强证据 multi-corridor 诊断。
     out["corridor_count"] = 1
-    picked = topk_debug[0]
+    picked = _pick_step1_primary_item(topk_debug) or topk_debug[0]
     corridor_id_by_idx = {int(it["idx"]): int(i) for i, it in enumerate(topk_debug, start=1)}
     out["corridor_candidates"] = []
     for cid, it in enumerate(topk_debug, start=1):
@@ -2859,10 +2957,18 @@ def _build_step1_corridor_for_pair(
     for item in out["traj_gore_flags"]:
         if int(item.get("idx", -1)) == int(picked.get("idx", -2)):
             item["selected"] = True
-    if isinstance(picked.get("src_cp"), Point):
-        out["cross_point_src"] = picked.get("src_cp")
-    if isinstance(picked.get("dst_cp"), Point):
-        out["cross_point_dst"] = picked.get("dst_cp")
+    src_fallback = picked.get("src_cp") if isinstance(picked.get("src_cp"), Point) else out.get("cross_point_src")
+    dst_fallback = picked.get("dst_cp") if isinstance(picked.get("dst_cp"), Point) else out.get("cross_point_dst")
+    out["cross_point_src"] = _line_xsec_contact_point(
+        line=out.get("shape_ref_line"),
+        xsec=src_xsec,
+        fallback=src_fallback if isinstance(src_fallback, Point) else None,
+    )
+    out["cross_point_dst"] = _line_xsec_contact_point(
+        line=out.get("shape_ref_line"),
+        xsec=dst_xsec,
+        fallback=dst_fallback if isinstance(dst_fallback, Point) else None,
+    )
     out["gore_fallback_used_src"] = bool(picked.get("gore_src_near", False) and not good)
     out["gore_fallback_used_dst"] = bool(picked.get("gore_dst_near", False) and not good)
     return out
@@ -4153,6 +4259,12 @@ def _eval_traj_surface_gate(
         "traj_in_ratio_est": None,
         "endpoint_in_traj_surface_src": None,
         "endpoint_in_traj_surface_dst": None,
+        "endpoint_in_traj_surface_src_raw": None,
+        "endpoint_in_traj_surface_dst_raw": None,
+        "endpoint_dist_to_traj_surface_src_m": None,
+        "endpoint_dist_to_traj_surface_dst_m": None,
+        "endpoint_traj_surface_tolerance_used_src": False,
+        "endpoint_traj_surface_tolerance_used_dst": False,
         "_traj_surface_geom_metric": None,
     }
     soft_flags: set[str] = set()
@@ -4337,8 +4449,14 @@ def _eval_traj_surface_gate(
     result["xsec_support_available_dst"] = bool(xsec_support_available_dst)
 
     in_ratio_est = None
+    endpoint_in_src_raw = None
+    endpoint_in_dst_raw = None
     endpoint_in_src = None
     endpoint_in_dst = None
+    endpoint_dist_src_m = None
+    endpoint_dist_dst_m = None
+    endpoint_tol_used_src = False
+    endpoint_tol_used_dst = False
     if surface is not None and not surface.is_empty:
         try:
             inter_len = float(road_line.intersection(surface).length)
@@ -4347,8 +4465,44 @@ def _eval_traj_surface_gate(
         in_ratio_est = float(inter_len / max(1e-6, float(road_line.length)))
         p_src = Point(road_line.coords[0])
         p_dst = Point(road_line.coords[-1])
-        endpoint_in_src = bool(surface.buffer(1e-6).covers(p_src))
-        endpoint_in_dst = bool(surface.buffer(1e-6).covers(p_dst))
+        endpoint_in_src_raw = bool(surface.buffer(1e-6).covers(p_src))
+        endpoint_in_dst_raw = bool(surface.buffer(1e-6).covers(p_dst))
+        endpoint_in_src = bool(endpoint_in_src_raw)
+        endpoint_in_dst = bool(endpoint_in_dst_raw)
+        try:
+            endpoint_dist_src_m = float(max(0.0, p_src.distance(surface)))
+        except Exception:
+            endpoint_dist_src_m = None
+        try:
+            endpoint_dist_dst_m = float(max(0.0, p_dst.distance(surface)))
+        except Exception:
+            endpoint_dist_dst_m = None
+        endpoint_hole_tol_m = float(max(0.0, params.get("TRAJ_SURF_ENDPOINT_HOLE_TOL_M", 2.0)))
+        endpoint_hole_ratio_min = float(max(0.0, min(1.0, params.get("TRAJ_SURF_ENDPOINT_HOLE_IN_RATIO_MIN", 0.99))))
+        drivezone_ok_src = road.get("endpoint_in_drivezone_src") is not False
+        drivezone_ok_dst = road.get("endpoint_in_drivezone_dst") is not False
+        if (
+            (endpoint_in_src is False)
+            and endpoint_dist_src_m is not None
+            and np.isfinite(endpoint_dist_src_m)
+            and endpoint_dist_src_m <= endpoint_hole_tol_m + 1e-6
+            and in_ratio_est is not None
+            and float(in_ratio_est) >= endpoint_hole_ratio_min
+            and bool(drivezone_ok_src)
+        ):
+            endpoint_in_src = True
+            endpoint_tol_used_src = True
+        if (
+            (endpoint_in_dst is False)
+            and endpoint_dist_dst_m is not None
+            and np.isfinite(endpoint_dist_dst_m)
+            and endpoint_dist_dst_m <= endpoint_hole_tol_m + 1e-6
+            and in_ratio_est is not None
+            and float(in_ratio_est) >= endpoint_hole_ratio_min
+            and bool(drivezone_ok_dst)
+        ):
+            endpoint_in_dst = True
+            endpoint_tol_used_dst = True
 
     min_slice_ratio = max(float(params["TRAJ_SURF_MIN_SLICE_VALID_RATIO"]), 0.60)
     min_cov_ratio = max(
@@ -4375,6 +4529,12 @@ def _eval_traj_surface_gate(
     result["traj_in_ratio_est"] = in_ratio_est
     result["endpoint_in_traj_surface_src"] = endpoint_in_src
     result["endpoint_in_traj_surface_dst"] = endpoint_in_dst
+    result["endpoint_in_traj_surface_src_raw"] = endpoint_in_src_raw
+    result["endpoint_in_traj_surface_dst_raw"] = endpoint_in_dst_raw
+    result["endpoint_dist_to_traj_surface_src_m"] = endpoint_dist_src_m
+    result["endpoint_dist_to_traj_surface_dst_m"] = endpoint_dist_dst_m
+    result["endpoint_traj_surface_tolerance_used_src"] = bool(endpoint_tol_used_src)
+    result["endpoint_traj_surface_tolerance_used_dst"] = bool(endpoint_tol_used_dst)
 
     gaps = _station_gap_intervals(stations=stations, valid_mask=valid_mask)
     if gaps:
@@ -4457,6 +4617,10 @@ def _eval_traj_surface_gate(
             hint=(
                 f"in_ratio={in_ratio_est if in_ratio_est is not None else 'na'};"
                 f"endpoint_src={endpoint_in_src};endpoint_dst={endpoint_in_dst};"
+                f"endpoint_src_raw={endpoint_in_src_raw};endpoint_dst_raw={endpoint_in_dst_raw};"
+                f"endpoint_src_dist_m={endpoint_dist_src_m if endpoint_dist_src_m is not None else 'na'};"
+                f"endpoint_dst_dist_m={endpoint_dist_dst_m if endpoint_dist_dst_m is not None else 'na'};"
+                f"endpoint_tol_src={bool(endpoint_tol_used_src)};endpoint_tol_dst={bool(endpoint_tol_used_dst)};"
                 f"threshold={in_ratio_min:.2f}"
             ),
         )
@@ -6178,6 +6342,12 @@ def _make_base_road_record(
         "traj_in_ratio_est": None,
         "endpoint_in_traj_surface_src": None,
         "endpoint_in_traj_surface_dst": None,
+        "endpoint_in_traj_surface_src_raw": None,
+        "endpoint_in_traj_surface_dst_raw": None,
+        "endpoint_dist_to_traj_surface_src_m": None,
+        "endpoint_dist_to_traj_surface_dst_m": None,
+        "endpoint_traj_surface_tolerance_used_src": False,
+        "endpoint_traj_surface_tolerance_used_dst": False,
         "endpoint_in_drivezone_src": None,
         "endpoint_in_drivezone_dst": None,
         "xsec_samples_passable_ratio_src": None,
@@ -6393,6 +6563,7 @@ def _finalize_payloads(
             "step1_corridor_centerline",
             "step1_corridor_candidates",
             "step1_support_trajs",
+            "step1_support_trajs_all",
             "step1_seed_selected",
             "xsec_gate_all_src",
             "xsec_gate_all_dst",
