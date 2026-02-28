@@ -286,6 +286,38 @@ def test_xsec_gate_prefers_traj_evidence_segment() -> None:
     assert float(meta.get("selected_evidence_len_m") or 0.0) > 0.0
 
 
+def test_xsec_gate_does_not_use_far_evidence_segment() -> None:
+    xsec = CrossSection(
+        nodeid=11,
+        geometry_metric=LineString([(0.0, -80.0), (0.0, 80.0)]),
+        properties={"nodeid": 11},
+    )
+    drivezone_near = Polygon([(-20.0, 10.0), (20.0, 10.0), (20.0, 20.0), (-20.0, 20.0)])
+    drivezone_far = Polygon([(-20.0, 45.0), (20.0, 45.0), (20.0, 55.0), (-20.0, 55.0)])
+    drivezone = drivezone_near.union(drivezone_far)
+
+    traj = SimpleNamespace(
+        xyz_metric=np.asarray([[-30.0, 50.0, 0.0], [30.0, 50.0, 0.0]], dtype=np.float64),
+    )
+
+    params = dict(pipeline.DEFAULT_PARAMS)
+    params["XSEC_GATE_EVIDENCE_MID_MARGIN_M"] = 8.0
+    params["XSEC_GATE_EVIDENCE_MIN_LEN_M"] = 0.5
+    out_map, _anchors, _trunc, _gate_all_map, gate_meta_map, _stats = pipeline._truncate_cross_sections_for_crossing(
+        xsec_map={11: xsec},
+        lane_boundaries_metric=[],
+        trajectories=[traj],
+        drivezone_zone_metric=drivezone,
+        gore_zone_metric=None,
+        params=params,
+    )
+    got = out_map[11].geometry_metric
+    mid = got.interpolate(0.5, normalized=True)
+    assert float(mid.y) < 30.0
+    meta = gate_meta_map.get(11) or {}
+    assert str(meta.get("selected_by")) == "nearest_midpoint_longest_tiebreak"
+
+
 def test_traj_drop_when_outside_drivezone() -> None:
     support = PairSupport(
         src_nodeid=10,

@@ -160,6 +160,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "XSEC_TRUNC_STEP_M": 1.0,
     "XSEC_TRUNC_NONPASS_K": 6,
     "XSEC_TRUNC_EVIDENCE_RADIUS_M": 1.0,
+    "XSEC_GATE_EVIDENCE_MID_MARGIN_M": 8.0,
+    "XSEC_GATE_EVIDENCE_MIN_LEN_M": 1.0,
     "XSEC_REF_HALF_LEN_M": 80.0,
     "XSEC_ROAD_SAMPLE_STEP_M": 1.0,
     "XSEC_ROAD_NONPASS_K": 6,
@@ -5638,6 +5640,8 @@ def _truncate_cross_sections_for_crossing(
     step = float(max(0.5, params.get("XSEC_TRUNC_STEP_M", 1.0)))
     nonpass_k = int(max(2, params.get("XSEC_TRUNC_NONPASS_K", 6)))
     evidence_radius = float(max(0.5, params.get("XSEC_TRUNC_EVIDENCE_RADIUS_M", 1.0)))
+    gate_evidence_mid_margin_m = float(max(0.0, params.get("XSEC_GATE_EVIDENCE_MID_MARGIN_M", 8.0)))
+    gate_evidence_min_len_m = float(max(0.0, params.get("XSEC_GATE_EVIDENCE_MIN_LEN_M", 1.0)))
     gate_traj_evidence_zone = _build_traj_evidence_zone_for_gate(
         traj_union=traj_union,
         evidence_radius_m=float(max(1.0, evidence_radius * 2.0)),
@@ -5727,11 +5731,19 @@ def _truncate_cross_sections_for_crossing(
                             "len_m": float(ls.length),
                         }
                     )
+                min_mid_dist_m = float(min(float(it["mid_dist_m"]) for it in scored_parts))
                 selected_payload = max(
                     scored_parts,
                     key=lambda it: (
-                        float(it["evidence_len_m"]) > 1e-3,
-                        float(it["evidence_len_m"]),
+                        (
+                            float(it["mid_dist_m"]) <= float(min_mid_dist_m + gate_evidence_mid_margin_m)
+                            and float(it["evidence_len_m"]) >= float(gate_evidence_min_len_m)
+                        ),
+                        (
+                            float(it["evidence_len_m"])
+                            if float(it["mid_dist_m"]) <= float(min_mid_dist_m + gate_evidence_mid_margin_m)
+                            else 0.0
+                        ),
                         -float(it["mid_dist_m"]),
                         float(it["len_m"]),
                         -int(it["idx"]),
@@ -5740,7 +5752,10 @@ def _truncate_cross_sections_for_crossing(
                 selected_line = selected_payload["geom"]
                 selected_evidence_len_m = float(selected_payload["evidence_len_m"])
                 selected_mid_dist_m = float(selected_payload["mid_dist_m"])
-                if selected_evidence_len_m > 1e-3:
+                if (
+                    selected_mid_dist_m <= float(min_mid_dist_m + gate_evidence_mid_margin_m)
+                    and selected_evidence_len_m >= float(gate_evidence_min_len_m)
+                ):
                     segment_selected_by = "traj_evidence_midpoint_longest_tiebreak"
                 else:
                     segment_selected_by = "nearest_midpoint_longest_tiebreak"
