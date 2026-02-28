@@ -55,6 +55,27 @@ def _make_patch(tmp_path: Path, *, lane_crs: str) -> Path:
         ],
         lane_crs,
     )
+    drivezone = _fc(
+        [
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [8.439, 49.009],
+                            [8.451, 49.009],
+                            [8.451, 49.021],
+                            [8.439, 49.021],
+                            [8.439, 49.009],
+                        ]
+                    ],
+                },
+                "properties": {},
+            }
+        ],
+        "urn:ogc:def:crs:OGC:1.3:CRS84",
+    )
     traj_fc = _fc(
         [
             {
@@ -73,6 +94,7 @@ def _make_patch(tmp_path: Path, *, lane_crs: str) -> Path:
 
     _write_json(vector / "intersection_l.geojson", inter)
     _write_json(vector / "LaneBoundary.geojson", lane)
+    _write_json(vector / "DriveZone.geojson", drivezone)
     _write_json(traj / "raw_dat_pose.geojson", traj_fc)
     return patch_dir
 

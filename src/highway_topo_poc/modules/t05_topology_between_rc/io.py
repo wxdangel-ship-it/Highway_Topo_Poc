@@ -59,6 +59,8 @@ class PatchInputs:
     lane_boundaries_metric: list[LineString]
     node_kind_map: dict[int, int]
     trajectories: list[TrajectoryData]
+    drivezone_zone_metric: BaseGeometry | None
+    drivezone_source_path: Path | None
     divstrip_zone_metric: BaseGeometry | None
     divstrip_source_path: Path | None
     point_cloud_path: Path | None
@@ -73,11 +75,13 @@ class PatchProbe:
     patch_dir: Path
     has_intersection_file: bool
     has_laneboundary_file: bool
+    has_drivezone_file: bool
     has_node_file: bool
     has_road_file: bool
     has_tiles_dir: bool
     intersection_feature_count: int
     laneboundary_feature_count: int
+    drivezone_feature_count: int
     trajectory_count: int
     trajectory_point_count: int
     has_point_cloud_file: bool
@@ -166,6 +170,7 @@ def probe_patch(patch_dir: Path) -> PatchProbe:
 
     intersection_path = vector_dir / "intersection_l.geojson"
     laneboundary_path = vector_dir / "LaneBoundary.geojson"
+    drivezone_path = vector_dir / "DriveZone.geojson"
     divstrip_path = vector_dir / "DivStripZone.geojson"
     node_path = _resolve_vector_file(
         vector_dir=vector_dir,
@@ -181,6 +186,7 @@ def probe_patch(patch_dir: Path) -> PatchProbe:
 
     intersection_features = _safe_geojson_feature_count(intersection_path)
     laneboundary_features = _safe_geojson_feature_count(laneboundary_path)
+    drivezone_features = _safe_geojson_feature_count(drivezone_path)
 
     traj_files = sorted(traj_dir.rglob(_TRAJ_FILE_NAME)) if traj_dir.is_dir() else []
     traj_count = 0
@@ -200,11 +206,13 @@ def probe_patch(patch_dir: Path) -> PatchProbe:
         patch_dir=patch_dir,
         has_intersection_file=intersection_path.is_file(),
         has_laneboundary_file=laneboundary_path.is_file(),
+        has_drivezone_file=drivezone_path.is_file(),
         has_node_file=node_path.is_file(),
         has_road_file=road_path.is_file(),
         has_tiles_dir=tiles_dir.is_dir(),
         intersection_feature_count=intersection_features,
         laneboundary_feature_count=laneboundary_features,
+        drivezone_feature_count=drivezone_features,
         trajectory_count=traj_count,
         trajectory_point_count=traj_pts,
         has_point_cloud_file=bool(pc_files),
@@ -223,6 +231,7 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
 
     intersection_path = vector_dir / "intersection_l.geojson"
     laneboundary_path = vector_dir / "LaneBoundary.geojson"
+    drivezone_path = vector_dir / "DriveZone.geojson"
     divstrip_path = vector_dir / "DivStripZone.geojson"
     node_path = _resolve_vector_file(
         vector_dir=vector_dir,
@@ -239,8 +248,12 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
     if not intersection_path.is_file():
         raise InputDataError(f"intersection_l_missing: {intersection_path}")
 
+    if not drivezone_path.is_file():
+        raise InputDataError(f"drivezone_missing: {drivezone_path}")
+
     inter_payload = _load_geojson(intersection_path)
     lane_payload = _load_geojson(laneboundary_path) if laneboundary_path.is_file() else {"type": "FeatureCollection", "features": []}
+    drive_payload = _load_geojson(drivezone_path)
     div_payload = _load_geojson(divstrip_path) if divstrip_path.is_file() else {"type": "FeatureCollection", "features": []}
     node_payload = _load_geojson(node_path) if node_path.is_file() else {"type": "FeatureCollection", "features": []}
 
@@ -250,9 +263,11 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
     dst_crs = "EPSG:3857"
     inter_crs = _require_geojson_crs(inter_payload, path=intersection_path, allow_empty_if_no_features=False)
     lane_crs = _require_geojson_crs(lane_payload, path=laneboundary_path, allow_empty_if_no_features=True) or inter_crs
+    drive_crs = _require_geojson_crs(drive_payload, path=drivezone_path, allow_empty_if_no_features=False) or inter_crs
     div_crs = _require_geojson_crs(div_payload, path=divstrip_path, allow_empty_if_no_features=True) or inter_crs
     inter_to_metric = _make_transformer(inter_crs, dst_crs)
     lane_to_metric = _make_transformer(lane_crs, dst_crs)
+    drive_to_metric = _make_transformer(drive_crs, dst_crs)
     div_to_metric = _make_transformer(div_crs, dst_crs)
 
     projection = ProjectionInfo(
@@ -267,7 +282,10 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
 
     intersections = _extract_intersections(inter_payload, inter_to_metric)
     lane_boundaries = _extract_linestrings(lane_payload, lane_to_metric)
+    drivezone_zone = _extract_polygon_union(drive_payload, drive_to_metric)
     divstrip_zone = _extract_polygon_union(div_payload, div_to_metric)
+    if drivezone_zone is None or drivezone_zone.is_empty:
+        raise InputDataError(f"drivezone_empty: {drivezone_path}")
     node_kind = _extract_node_kind_map(node_payload)
     projected_traj = _project_trajectories(trajectories, dst_crs=dst_crs)
 
@@ -281,6 +299,8 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
         lane_boundaries_metric=lane_boundaries,
         node_kind_map=node_kind,
         trajectories=projected_traj,
+        drivezone_zone_metric=drivezone_zone,
+        drivezone_source_path=drivezone_path,
         divstrip_zone_metric=divstrip_zone,
         divstrip_source_path=(divstrip_path if divstrip_path.is_file() else None),
         point_cloud_path=point_cloud_path,
@@ -294,7 +314,10 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
             "dst_crs": dst_crs,
             "intersection_src_crs": inter_crs,
             "lane_src_crs": lane_crs,
+            "drivezone_src_crs": drive_crs,
             "divstrip_src_crs": div_crs if divstrip_path.is_file() else None,
+            "has_drivezone_file": drivezone_path.is_file(),
+            "drivezone_feature_count": int(len(drive_payload.get("features", []))),
             "has_divstrip_file": divstrip_path.is_file(),
             "divstrip_feature_count": int(len(div_payload.get("features", []))),
         },

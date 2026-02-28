@@ -39,6 +39,9 @@ step_state() {
   printf "%s/%s/patches/%s/%s/step_state.json" "$OUT_ROOT" "$RUN_ID" "$PATCH_ID" "$step"
 }
 
+if [ ! -f "$(step_state step0)" ]; then
+  exec bash "$SCRIPT_DIR/t05_step0_xsec_gate.sh" --data_root "$DATA_ROOT" --patch_id "$PATCH_ID" --run_id "$RUN_ID" --out_root "$OUT_ROOT" $DEBUG_FLAG
+fi
 if [ ! -f "$(step_state step1)" ]; then
   exec bash "$SCRIPT_DIR/t05_step1_shape_ref.sh" --data_root "$DATA_ROOT" --patch_id "$PATCH_ID" --run_id "$RUN_ID" --out_root "$OUT_ROOT" $DEBUG_FLAG
 fi

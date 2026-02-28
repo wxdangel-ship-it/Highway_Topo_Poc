@@ -41,6 +41,8 @@ def _mk_patch_inputs(
         lane_boundaries_metric=[],
         node_kind_map={},
         trajectories=trajectories,
+        drivezone_zone_metric=None,
+        drivezone_source_path=None,
         divstrip_zone_metric=None,
         divstrip_source_path=None,
         point_cloud_path=None,
@@ -168,6 +170,7 @@ def test_endpoint_trend_projection_rejects_far_core_connector() -> None:
         support_traj_segments=[],
         surface_points_xyz=np.empty((0, 3), dtype=np.float64),
         trend_fit_win_m=20.0,
+        drivezone_zone_metric=None,
         traj_surface_metric=None,
         traj_surface_enforced=False,
         gore_zone_metric=None,
@@ -474,6 +477,8 @@ def test_surface_point_cache_skips_second_laz_read(tmp_path: Path, monkeypatch) 
         lane_boundaries_metric=[],
         node_kind_map={},
         trajectories=[],
+        drivezone_zone_metric=None,
+        drivezone_source_path=None,
         divstrip_zone_metric=None,
         divstrip_source_path=None,
         point_cloud_path=pc_path,
@@ -499,8 +504,8 @@ def test_surface_point_cache_skips_second_laz_read(tmp_path: Path, monkeypatch) 
 
     monkeypatch.setattr(pipeline, "load_point_cloud_window", _fake_load)
 
-    xyz_1, stats_1 = pipeline._load_surface_points(patch_inputs, {}, params)
-    xyz_2, stats_2 = pipeline._load_surface_points(patch_inputs, {}, params)
+    xyz_1, stats_1 = pipeline._load_surface_points(patch_inputs, {}, params, use_pointcloud=True)
+    xyz_2, stats_2 = pipeline._load_surface_points(patch_inputs, {}, params, use_pointcloud=True)
 
     assert xyz_1.shape == xyz_2.shape
     assert call_count["n"] == 1
@@ -523,6 +528,8 @@ def test_divstrip_intersection_prefers_gore_free_fallback(tmp_path: Path, monkey
         lane_boundaries_metric=[],
         node_kind_map={},
         trajectories=[],
+        drivezone_zone_metric=None,
+        drivezone_source_path=None,
         divstrip_zone_metric=Polygon([(90.0, -20.0), (120.0, -20.0), (120.0, 20.0), (90.0, 20.0)]),
         divstrip_source_path=tmp_path / "DivStripZone.geojson",
         point_cloud_path=None,
@@ -845,6 +852,8 @@ def test_divstrip_intersection_hard_when_no_gore_free_fallback(tmp_path: Path, m
         lane_boundaries_metric=[],
         node_kind_map={},
         trajectories=[],
+        drivezone_zone_metric=None,
+        drivezone_source_path=None,
         divstrip_zone_metric=Polygon([(-50.0, -30.0), (80.0, -30.0), (80.0, 30.0), (-50.0, 30.0)]),
         divstrip_source_path=tmp_path / "DivStripZone.geojson",
         point_cloud_path=None,

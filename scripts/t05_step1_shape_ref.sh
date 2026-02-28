@@ -47,7 +47,7 @@ mkdir -p "$STEP_DIR"
 
 if [ "${T05_TEST_MODE:-0}" = "1" ]; then
   mkdir -p "$PATCH_OUT/debug"
-  for f in step1_corridor_centerline step1_support_trajs step1_seed_selected; do
+  for f in step1_corridor_centerline step1_corridor_candidates step1_support_trajs step1_seed_selected; do
     cat >"$PATCH_OUT/debug/$f.geojson" <<'JSON'
 {"type":"FeatureCollection","features":[],"crs":{"type":"name","properties":{"name":"EPSG:3857"}}}
 JSON
@@ -69,7 +69,7 @@ else
 fi
 
 mkdir -p "$STEP_DIR/debug"
-for f in step1_corridor_centerline step1_support_trajs step1_seed_selected; do
+for f in step1_corridor_centerline step1_corridor_candidates step1_support_trajs step1_seed_selected; do
   if [ -f "$PATCH_OUT/debug/$f.geojson" ]; then
     cp "$PATCH_OUT/debug/$f.geojson" "$STEP_DIR/debug/$f.geojson"
   fi
