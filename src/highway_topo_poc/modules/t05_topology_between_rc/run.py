@@ -99,6 +99,11 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
         type=float,
         default=float(DEFAULT_PARAMS["STEP1_MULTI_CORRIDOR_MIN_RATIO"]),
     )
+    p.add_argument(
+        "--step1_multi_corridor_hard",
+        type=int,
+        default=int(DEFAULT_PARAMS["STEP1_MULTI_CORRIDOR_HARD"]),
+    )
     p.add_argument("--step1_gore_near_m", type=float, default=float(DEFAULT_PARAMS["STEP1_GORE_NEAR_M"]))
     p.add_argument("--corridor_half_width_m", type=float, default=float(DEFAULT_PARAMS["CORRIDOR_HALF_WIDTH_M"]))
     p.add_argument("--offset_smooth_win_m_1", type=float, default=float(DEFAULT_PARAMS["OFFSET_SMOOTH_WIN_M_1"]))
@@ -261,6 +266,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "XSEC_CASEB_PRE_M": float(args.xsec_caseb_pre_m),
         "STEP1_MULTI_CORRIDOR_DIST_M": float(args.step1_multi_corridor_dist_m),
         "STEP1_MULTI_CORRIDOR_MIN_RATIO": float(args.step1_multi_corridor_min_ratio),
+        "STEP1_MULTI_CORRIDOR_HARD": int(args.step1_multi_corridor_hard),
         "STEP1_GORE_NEAR_M": float(args.step1_gore_near_m),
         "CORRIDOR_HALF_WIDTH_M": float(args.corridor_half_width_m),
         "OFFSET_SMOOTH_WIN_M_1": float(args.offset_smooth_win_m_1),

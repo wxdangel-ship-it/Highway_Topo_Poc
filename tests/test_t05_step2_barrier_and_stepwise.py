@@ -147,6 +147,80 @@ def test_step1_prefers_gore_free_corridor_when_constraints_equal() -> None:
     assert float(line.distance(support.traj_segments[0])) > 1.0
 
 
+def test_step1_multi_corridor_soft_by_default() -> None:
+    support = PairSupport(
+        src_nodeid=300,
+        dst_nodeid=400,
+        support_traj_ids={"c0", "c1", "c2"},
+        support_event_count=3,
+        traj_segments=[
+            LineString([(0.0, 0.0), (100.0, 0.0)]),
+            LineString([(0.0, 45.0), (100.0, 45.0)]),
+            LineString([(0.0, -45.0), (100.0, -45.0)]),
+        ],
+        src_cross_points=[Point(0.0, 0.0), Point(0.0, 45.0), Point(0.0, -45.0)],
+        dst_cross_points=[Point(100.0, 0.0), Point(100.0, 45.0), Point(100.0, -45.0)],
+        evidence_traj_ids=["c0", "c1", "c2"],
+        cluster_count=6,
+        main_cluster_ratio=0.35,
+    )
+    src_xsec = LineString([(0.0, -20.0), (0.0, 20.0)])
+    dst_xsec = LineString([(100.0, -20.0), (100.0, 20.0)])
+
+    out = pipeline._build_step1_corridor_for_pair(
+        support=support,
+        src_type="merge",
+        dst_type="merge",
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        gore_zone_metric=None,
+        params={"STEP1_MULTI_CORRIDOR_DIST_M": 8.0, "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6},
+    )
+
+    line = out.get("shape_ref_line")
+    assert isinstance(line, LineString)
+    assert out.get("hard_reason") is None
+    assert bool(out.get("multi_corridor_detected")) is True
+
+
+def test_step1_multi_corridor_hard_when_enabled() -> None:
+    support = PairSupport(
+        src_nodeid=301,
+        dst_nodeid=401,
+        support_traj_ids={"c0", "c1", "c2"},
+        support_event_count=3,
+        traj_segments=[
+            LineString([(0.0, 0.0), (100.0, 0.0)]),
+            LineString([(0.0, 45.0), (100.0, 45.0)]),
+            LineString([(0.0, -45.0), (100.0, -45.0)]),
+        ],
+        src_cross_points=[Point(0.0, 0.0), Point(0.0, 45.0), Point(0.0, -45.0)],
+        dst_cross_points=[Point(100.0, 0.0), Point(100.0, 45.0), Point(100.0, -45.0)],
+        evidence_traj_ids=["c0", "c1", "c2"],
+        cluster_count=6,
+        main_cluster_ratio=0.35,
+    )
+    src_xsec = LineString([(0.0, -20.0), (0.0, 20.0)])
+    dst_xsec = LineString([(100.0, -20.0), (100.0, 20.0)])
+
+    out = pipeline._build_step1_corridor_for_pair(
+        support=support,
+        src_type="merge",
+        dst_type="merge",
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        gore_zone_metric=None,
+        params={
+            "STEP1_MULTI_CORRIDOR_DIST_M": 8.0,
+            "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6,
+            "STEP1_MULTI_CORRIDOR_HARD": 1,
+        },
+    )
+
+    assert str(out.get("hard_reason")) == str(pipeline.HARD_MULTI_CORRIDOR)
+    assert out.get("shape_ref_line") is None
+
+
 def test_xsec_selected_must_intersect_ref_or_fallback() -> None:
     shape_ref = LineString([(0.0, 0.0), (120.0, 0.0)])
     xsec_seed = LineString([(10.0, -40.0), (10.0, 40.0)])

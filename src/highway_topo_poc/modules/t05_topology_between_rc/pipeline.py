@@ -178,6 +178,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "XSEC_CASEB_PRE_M": 3.0,
     "STEP1_MULTI_CORRIDOR_DIST_M": 8.0,
     "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.60,
+    "STEP1_MULTI_CORRIDOR_HARD": 0,
     "STEP1_GORE_NEAR_M": 30.0,
     "ENDPOINT_ON_XSEC_TOL_M": 1.0,
     "TOPK_INTERVALS": 20,
@@ -771,6 +772,8 @@ def _run_patch_core(
                             "src_nodeid": int(src),
                             "dst_nodeid": int(dst),
                             "strategy": step1_corridor.get("strategy"),
+                            "multi_corridor_detected": bool(step1_corridor.get("multi_corridor_detected", False)),
+                            "multi_corridor_hint": step1_corridor.get("multi_corridor_hint"),
                         },
                     }
                 )
@@ -2066,6 +2069,8 @@ def _build_step1_corridor_for_pair(
         "strategy": None,
         "hard_reason": None,
         "hard_hint": None,
+        "multi_corridor_detected": False,
+        "multi_corridor_hint": None,
         "shape_ref_line": None,
         "support_traj_ids": sorted({str(v) for v in support.support_traj_ids}),
         "cross_point_src": _choose_step1_cross_point(support.src_cross_points, src_xsec),
@@ -2187,6 +2192,7 @@ def _build_step1_corridor_for_pair(
     ]
     multi_sep_m = float(max(1.0, params.get("STEP1_MULTI_CORRIDOR_DIST_M", 8.0)))
     multi_ratio = float(max(0.0, min(1.0, params.get("STEP1_MULTI_CORRIDOR_MIN_RATIO", 0.60))))
+    multi_hard = bool(int(params.get("STEP1_MULTI_CORRIDOR_HARD", 0)))
     if len(topk) >= 2 and int(max(1, support.cluster_count)) > 1 and float(support.main_cluster_ratio) < multi_ratio:
         mids: list[tuple[float, float]] = []
         for item in topk:
@@ -2200,13 +2206,18 @@ def _build_step1_corridor_for_pair(
             dm = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=2)
             sep = float(np.max(dm))
             if sep > multi_sep_m:
-                out["hard_reason"] = HARD_MULTI_CORRIDOR
-                out["hard_hint"] = (
+                hint = (
                     f"cluster_count={int(support.cluster_count)};"
                     f"main_cluster_ratio={float(support.main_cluster_ratio):.3f};"
                     f"corridor_sep_m={sep:.3f}"
                 )
-                return out
+                out["multi_corridor_detected"] = True
+                out["multi_corridor_hint"] = str(hint)
+                if multi_hard:
+                    out["hard_reason"] = HARD_MULTI_CORRIDOR
+                    out["hard_hint"] = str(hint)
+                    return out
+                out["strategy"] = f"{strategy}|multi_corridor_soft"
     picked = topk[0]
     picked_seg = picked["seg"]
     out["shape_ref_line"] = _orient_axis_line(picked_seg, src_xsec=src_xsec, dst_xsec=dst_xsec)
