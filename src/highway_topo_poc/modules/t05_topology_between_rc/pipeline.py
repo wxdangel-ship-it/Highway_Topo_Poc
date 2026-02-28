@@ -2704,8 +2704,27 @@ def _build_step1_corridor_for_pair(
     ranked_end = good if good else ranked
     gore_free = [it for it in ranked_end if not bool(it.get("gore_any", False))]
     ranked_used = gore_free if gore_free else ranked_end
-    topk = ranked_used[:3]
-    if not topk:
+    reach_xsec_m = float(max(1.0, params.get("STEP1_CORRIDOR_REACH_XSEC_M", 12.0)))
+    for it in ranked_all:
+        seg = it.get("seg")
+        d_src = float("inf")
+        d_dst = float("inf")
+        if isinstance(seg, LineString) and (not seg.is_empty):
+            try:
+                d_src = float(seg.distance(src_xsec))
+            except Exception:
+                d_src = float("inf")
+            try:
+                d_dst = float(seg.distance(dst_xsec))
+            except Exception:
+                d_dst = float("inf")
+        it["dist_to_src_xsec_m"] = float(d_src)
+        it["dist_to_dst_xsec_m"] = float(d_dst)
+        it["reaches_other_end"] = bool(np.isfinite(d_src) and np.isfinite(d_dst) and d_src <= reach_xsec_m and d_dst <= reach_xsec_m)
+    ranked_reach = [it for it in ranked_used if bool(it.get("reaches_other_end", False))]
+    ranked_main = ranked_reach if ranked_reach else ranked_used
+    topk_debug = ranked_main[:3]
+    if not topk_debug:
         out["hard_reason"] = HARD_CENTER_EMPTY
         out["hard_hint"] = "step1_no_candidate_after_filter"
         out["traj_gore_flags"] = [
@@ -2720,21 +2739,26 @@ def _build_step1_corridor_for_pair(
                 "inside_ratio": float(it.get("inside_ratio", 0.0)),
                 "dropped_by_drivezone": bool(it.get("dropped_by_drivezone", False)),
                 "corridor_id": None,
+                "dist_to_src_xsec_m": float(it.get("dist_to_src_xsec_m", float("inf"))),
+                "dist_to_dst_xsec_m": float(it.get("dist_to_dst_xsec_m", float("inf"))),
+                "reaches_other_end": bool(it.get("reaches_other_end", False)),
                 "selected": False,
             }
             for it in ranked_all
         ]
         return out
 
-    weights = np.asarray([max(1.0, float(it.get("length_m", 0.0))) for it in topk], dtype=np.float64)
+    weights = np.asarray([max(1.0, float(it.get("length_m", 0.0))) for it in topk_debug], dtype=np.float64)
     if weights.size > 0 and float(np.sum(weights)) > 1e-6:
         out["main_corridor_ratio"] = float(np.max(weights) / float(np.sum(weights)))
     else:
         out["main_corridor_ratio"] = 1.0
-    out["corridor_count"] = int(len(topk))
-    corridor_id_by_idx = {int(it["idx"]): int(i) for i, it in enumerate(topk, start=1)}
+    # 主流程只保留单通路；其余候选仅用于 debug 与强证据 multi-corridor 诊断。
+    out["corridor_count"] = 1
+    picked = topk_debug[0]
+    corridor_id_by_idx = {int(it["idx"]): int(i) for i, it in enumerate(topk_debug, start=1)}
     out["corridor_candidates"] = []
-    for cid, it in enumerate(topk, start=1):
+    for cid, it in enumerate(topk_debug, start=1):
         seg = it.get("seg")
         line = _orient_axis_line(seg, src_xsec=src_xsec, dst_xsec=dst_xsec) if isinstance(seg, LineString) else None
         if not isinstance(line, LineString) or line.is_empty:
@@ -2744,9 +2768,12 @@ def _build_step1_corridor_for_pair(
                 "corridor_id": int(cid),
                 "start_traj_id": it.get("traj_id"),
                 "length_m": float(line.length),
-                "reaches_other_end": True,
+                "reaches_other_end": bool(it.get("reaches_other_end", False)),
                 "inside_ratio": float(it.get("inside_ratio", 0.0)),
                 "drivezone_fallback_used": bool(out.get("drivezone_fallback_used", False)),
+                "dist_to_src_xsec_m": float(it.get("dist_to_src_xsec_m", float("inf"))),
+                "dist_to_dst_xsec_m": float(it.get("dist_to_dst_xsec_m", float("inf"))),
+                "selected": bool(int(it.get("idx", -1)) == int(picked.get("idx", -2))),
                 "geometry": line,
             }
         )
@@ -2762,8 +2789,12 @@ def _build_step1_corridor_for_pair(
             "gore_intersection_m": float(it.get("gore_intersection_m", 0.0)),
             "constraint_violation": bool(it.get("constraint_violation", False)),
             "inside_ratio": float(it.get("inside_ratio", 0.0)),
+            "dist_to_src_xsec_m": float(it.get("dist_to_src_xsec_m", float("inf"))),
+            "dist_to_dst_xsec_m": float(it.get("dist_to_dst_xsec_m", float("inf"))),
+            "reaches_other_end": bool(it.get("reaches_other_end", False)),
+            "selected": bool(int(it.get("idx", -1)) == int(picked.get("idx", -2))),
         }
-        for i, it in enumerate(topk, start=1)
+        for i, it in enumerate(topk_debug, start=1)
     ]
     out["traj_gore_flags"] = [
         {
@@ -2777,6 +2808,9 @@ def _build_step1_corridor_for_pair(
             "inside_ratio": float(it.get("inside_ratio", 0.0)),
             "dropped_by_drivezone": bool(it.get("dropped_by_drivezone", False)),
             "corridor_id": corridor_id_by_idx.get(int(it["idx"])),
+            "dist_to_src_xsec_m": float(it.get("dist_to_src_xsec_m", float("inf"))),
+            "dist_to_dst_xsec_m": float(it.get("dist_to_dst_xsec_m", float("inf"))),
+            "reaches_other_end": bool(it.get("reaches_other_end", False)),
             "selected": False,
         }
         for it in ranked_all
@@ -2784,9 +2818,10 @@ def _build_step1_corridor_for_pair(
     multi_sep_m = float(max(1.0, params.get("STEP1_MULTI_CORRIDOR_DIST_M", 8.0)))
     multi_ratio = float(max(0.0, min(1.0, params.get("STEP1_MULTI_CORRIDOR_MIN_RATIO", 0.60))))
     multi_hard = bool(int(params.get("STEP1_MULTI_CORRIDOR_HARD", 0)))
-    if len(topk) >= 2:
+    topk_multi = [it for it in topk_debug if bool(it.get("reaches_other_end", False))]
+    if len(topk_multi) >= 2:
         mids: list[tuple[float, float]] = []
-        for item in topk:
+        for item in topk_multi:
             seg = item["seg"]
             mid = seg.interpolate(0.5, normalized=True)
             mid_xy = point_xy_safe(mid, context="step1_corridor_mid")
@@ -2796,10 +2831,14 @@ def _build_step1_corridor_for_pair(
             arr = np.asarray(mids, dtype=np.float64)
             dm = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=2)
             sep = float(np.max(dm))
-            main_ratio = float(out.get("main_corridor_ratio") or 1.0)
-            if sep > multi_sep_m and (len(topk) >= 3 or main_ratio < multi_ratio):
+            weights_multi = np.asarray([max(1.0, float(it.get("length_m", 0.0))) for it in topk_multi], dtype=np.float64)
+            if weights_multi.size > 0 and float(np.sum(weights_multi)) > 1e-6:
+                main_ratio = float(np.max(weights_multi) / float(np.sum(weights_multi)))
+            else:
+                main_ratio = 1.0
+            if sep > multi_sep_m and (len(topk_multi) >= 3 or main_ratio < multi_ratio):
                 hint = (
-                    f"corridor_count={int(len(topk))};"
+                    f"corridor_count={int(len(topk_multi))};"
                     f"main_corridor_ratio={float(main_ratio):.3f};"
                     f"corridor_sep_m={sep:.3f}"
                 )
@@ -2815,7 +2854,6 @@ def _build_step1_corridor_for_pair(
                     out["hard_hint"] = str(hint)
                     return out
                 out["strategy"] = f"{strategy}|multi_corridor_soft"
-    picked = topk[0]
     picked_seg = picked["seg"]
     out["shape_ref_line"] = _orient_axis_line(picked_seg, src_xsec=src_xsec, dst_xsec=dst_xsec)
     for item in out["traj_gore_flags"]:
@@ -4780,6 +4818,7 @@ def _evaluate_candidate_road(
 
     road_line = center.centerline_metric
     centerline_fallback_used = False
+    center_empty_downgraded = False
     if not (isinstance(road_line, LineString) and (not road_line.is_empty)):
         fallback_line = _fallback_geometry_from_shape_ref(
             shape_ref_line=center.shape_ref_metric,
@@ -4789,7 +4828,6 @@ def _evaluate_candidate_road(
         if isinstance(fallback_line, LineString) and (not fallback_line.is_empty):
             road_line = fallback_line
             centerline_fallback_used = True
-            hard_flags.add(HARD_CENTER_EMPTY)
             road["endpoint_fallback_mode_src"] = str(road.get("endpoint_fallback_mode_src") or "shape_ref_substring_fallback")
             road["endpoint_fallback_mode_dst"] = str(road.get("endpoint_fallback_mode_dst") or "shape_ref_substring_fallback")
     if _is_valid_linestring(road_line):
@@ -4824,7 +4862,15 @@ def _evaluate_candidate_road(
                 road["endpoint_snap_dist_dst_after_m"] = float(road["endpoint_dist_to_xsec_dst_m"])
                 if road.get("_endpoint_before_dst_metric") is None:
                     road["_endpoint_before_dst_metric"] = Point(road_line.coords[-1])
+    if centerline_fallback_used and HARD_CENTER_EMPTY in hard_flags and _is_valid_linestring(road_line):
+        endpoint_tol = float(max(0.5, float(params.get("ENDPOINT_ON_XSEC_TOL_M", 1.0))))
+        src_dist = _to_finite_float(road.get("endpoint_dist_to_xsec_src_m"), float("nan"))
+        dst_dist = _to_finite_float(road.get("endpoint_dist_to_xsec_dst_m"), float("nan"))
+        if np.isfinite(src_dist) and np.isfinite(dst_dist) and src_dist <= endpoint_tol + 1e-6 and dst_dist <= endpoint_tol + 1e-6:
+            hard_flags.discard(HARD_CENTER_EMPTY)
+            center_empty_downgraded = True
     road["centerline_fallback_geometry_used"] = bool(centerline_fallback_used)
+    road["center_estimate_empty_downgraded"] = bool(center_empty_downgraded)
     if road_line is not None:
         road["length_m"] = float(road_line.length)
         seg_idx, seg_len = _max_segment_detail(road_line)

@@ -363,19 +363,30 @@ def build_pair_supports(
                 traj_line_map=graph.traj_line_map,
             )
             edge_kinds = _path_edge_kinds(path_keys=path_keys, prev_edge=search.prev_edge)
-            if (path_line is None or path_line.length <= 0) and ("stitch" not in edge_kinds):
-                src_xy = point_xy_safe(ev.cross_point, context="pair_path_fallback_src")
-                dst_xy = point_xy_safe(target_node.point, context="pair_path_fallback_dst")
-                if src_xy is None or dst_xy is None:
-                    continue
-                path_line = LineString(
-                    [
-                        (float(src_xy[0]), float(src_xy[1])),
-                        (float(dst_xy[0]), float(dst_xy[1])),
-                    ]
-                )
             if path_line is None or path_line.length <= 0:
-                # 不允许把 stitch 直连段带入几何证据，拓扑支持仍可保留。
+                unresolved_events.append(
+                    {
+                        "road_id": f"na_{ev.nodeid}_{traj_id}_{ev.seq_idx}",
+                        "src_nodeid": int(ev.nodeid),
+                        "dst_nodeid": int(dst_nodeid),
+                        "traj_id": str(traj_id),
+                        "seq_range": [int(ev.seq_idx), int(ev.seq_idx)],
+                        "station_range_m": [float(ev.station_m), float(ev.station_m)],
+                        "reason": SOFT_UNRESOLVED_NEIGHBOR,
+                        "severity": "soft",
+                        "hint": (
+                            "path_geometry_empty_no_straight_fallback;"
+                            f"path_nodes={int(len(path_keys))};"
+                            f"edge_kinds={','.join(sorted(edge_kinds)) if edge_kinds else 'none'}"
+                        ),
+                        "max_explored_dist_m": float(search.max_explored_dist_m),
+                        "last_node_ref": str(search.last_key),
+                        "stitch_candidate_count": int(max(0, search.explored_stitch_candidates)),
+                        "stitch_candidate_count_last": int(_count_outgoing_stitch_edges(graph.edges.get(search.last_key, []))),
+                        "stitch_candidate_count_explored": int(max(0, search.explored_stitch_candidates)),
+                        "explored_node_count": int(max(0, search.explored_node_count)),
+                    }
+                )
                 continue
 
             path_traj_ids = _extract_path_traj_ids(path_keys=path_keys, nodes=graph.nodes)
@@ -4172,6 +4183,59 @@ def _choose_shape_ref(
     )
 
 
+def _line_overlap_ratio(line: LineString, zone: BaseGeometry | None) -> float | None:
+    if not isinstance(line, LineString) or line.is_empty:
+        return None
+    total_len = float(line.length)
+    if total_len <= 1e-6:
+        return None
+    if zone is None or zone.is_empty:
+        return 1.0
+    try:
+        inter = line.intersection(zone)
+        in_len = float(max(0.0, float(inter.length)))
+    except Exception:
+        return 0.0
+    if not np.isfinite(in_len):
+        return 0.0
+    return float(max(0.0, min(1.0, in_len / max(total_len, 1e-6))))
+
+
+def _sanitize_preferred_shape_ref(
+    *,
+    line: LineString,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    traj_surface_metric: BaseGeometry | None,
+    divstrip_barrier_metric: BaseGeometry | None,
+) -> LineString | None:
+    if line.is_empty or line.length <= 1.0:
+        return None
+    oriented = _orient_line(line, src_xsec, dst_xsec)
+    clipped = _shape_ref_substring_by_xsecs(oriented, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    candidate = clipped if isinstance(clipped, LineString) else oriented
+    if candidate.is_empty or candidate.length <= 1.0 or len(candidate.coords) < 2:
+        return None
+
+    p0 = Point(candidate.coords[0])
+    p1 = Point(candidate.coords[-1])
+    endpoint_cap_m = 30.0
+    if float(p0.distance(src_xsec)) > endpoint_cap_m or float(p1.distance(dst_xsec)) > endpoint_cap_m:
+        return None
+
+    if traj_surface_metric is not None and (not traj_surface_metric.is_empty):
+        inside_ratio = _line_overlap_ratio(candidate, traj_surface_metric)
+        if inside_ratio is not None and inside_ratio < 0.20:
+            return None
+
+    if divstrip_barrier_metric is not None and (not divstrip_barrier_metric.is_empty):
+        divstrip_ratio = _line_overlap_ratio(candidate, divstrip_barrier_metric)
+        if divstrip_ratio is not None and divstrip_ratio > 0.60:
+            return None
+
+    return candidate
+
+
 def _choose_shape_ref_with_graph(
     *,
     support: PairSupport,
@@ -4193,18 +4257,25 @@ def _choose_shape_ref_with_graph(
         and (not preferred_shape_ref_metric.is_empty)
         and preferred_shape_ref_metric.length > 1.0
     ):
-        line = _orient_line(preferred_shape_ref_metric, src_xsec, dst_xsec)
-        return _ShapeRefChoice(
-            line=line,
-            used_lane_boundary=False,
-            lb_path_found=False,
-            lb_path_edge_count=0,
-            lb_path_length_m=float(line.length),
-            lb_graph_build_ms=0.0,
-            lb_shortest_path_ms=0.0,
-            lb_graph_edge_total=0,
-            lb_graph_edge_filtered=0,
+        preferred_line = _sanitize_preferred_shape_ref(
+            line=preferred_shape_ref_metric,
+            src_xsec=src_xsec,
+            dst_xsec=dst_xsec,
+            traj_surface_metric=traj_surface_metric,
+            divstrip_barrier_metric=divstrip_barrier_metric,
         )
+        if preferred_line is not None:
+            return _ShapeRefChoice(
+                line=preferred_line,
+                used_lane_boundary=False,
+                lb_path_found=False,
+                lb_path_edge_count=0,
+                lb_path_length_m=float(preferred_line.length),
+                lb_graph_build_ms=0.0,
+                lb_shortest_path_ms=0.0,
+                lb_graph_edge_total=0,
+                lb_graph_edge_filtered=0,
+            )
 
     lb_diag: dict[str, Any] = {}
     lb_path = _build_lb_graph_path(

@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 from shapely.geometry import LineString
 
+from highway_topo_poc.modules.t05_topology_between_rc import geometry as geom_mod
 from highway_topo_poc.modules.t05_topology_between_rc.geometry import (
     SOFT_UNRESOLVED_NEIGHBOR,
     build_pair_supports,
@@ -144,3 +145,42 @@ def test_unresolved_neighbor_is_reported_when_stitch_fails() -> None:
     assert res.unresolved_events
     assert any(str(item.get("reason")) == SOFT_UNRESOLVED_NEIGHBOR for item in res.unresolved_events)
     assert res.stitch_accept_count == 0
+
+
+def test_no_straight_fallback_when_path_geometry_empty(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    trajectories = [
+        _traj("t1", [(-2.0, 0.0), (5.0, 0.0), (10.0, 0.0), (20.0, 0.0)]),
+    ]
+    xsecs = [_xsec(100, 0.0), _xsec(200, 20.0)]
+    cross = extract_crossing_events(
+        trajectories,
+        xsecs,
+        hit_buffer_m=0.5,
+        dedup_gap_m=2.0,
+    )
+
+    def _empty_path(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return None
+
+    monkeypatch.setattr(geom_mod, "_build_path_linestring", _empty_path)
+    res = build_pair_supports(
+        trajectories,
+        cross.events_by_traj,
+        node_type_map={100: "unknown", 200: "unknown"},
+        trj_sample_step_m=2.0,
+        stitch_tail_m=30.0,
+        stitch_max_dist_levels_m=[12.0, 25.0, 50.0],
+        stitch_max_dist_m=12.0,
+        stitch_max_angle_deg=35.0,
+        stitch_forward_dot_min=0.0,
+        stitch_min_advance_m=5.0,
+        stitch_penalty=2.0,
+        stitch_topk=3,
+        neighbor_max_dist_m=2000.0,
+        multi_road_sep_m=8.0,
+        multi_road_topn=10,
+    )
+
+    assert (100, 200) not in res.supports
+    assert any("path_geometry_empty_no_straight_fallback" in str(item.get("hint")) for item in res.unresolved_events)
