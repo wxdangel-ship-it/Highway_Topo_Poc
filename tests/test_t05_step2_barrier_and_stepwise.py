@@ -117,6 +117,44 @@ def test_step1_prefers_non_gore_corridor_at_constrained_end() -> None:
     assert bool(out.get("gore_fallback_used_src")) is False
 
 
+def test_step1_seed_selected_is_projected_from_selected_corridor() -> None:
+    support = PairSupport(
+        src_nodeid=110,
+        dst_nodeid=210,
+        support_traj_ids={"main"},
+        support_event_count=1,
+        traj_segments=[LineString([(0.0, 2.0), (50.0, 2.0), (100.0, 2.0)])],
+        src_cross_points=[Point(12.0, 12.0)],
+        dst_cross_points=[Point(88.0, 12.0)],
+        evidence_traj_ids=["main"],
+        cluster_count=1,
+        main_cluster_ratio=1.0,
+    )
+    src_xsec = LineString([(0.0, -20.0), (0.0, 20.0)])
+    dst_xsec = LineString([(100.0, -20.0), (100.0, 20.0)])
+
+    out = pipeline._build_step1_corridor_for_pair(
+        support=support,
+        src_type="merge",
+        dst_type="merge",
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=None,
+        gore_zone_metric=None,
+        params={"STEP1_MULTI_CORRIDOR_DIST_M": 8.0, "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6},
+    )
+
+    cp_src = out.get("cross_point_src")
+    cp_dst = out.get("cross_point_dst")
+    assert isinstance(cp_src, Point)
+    assert isinstance(cp_dst, Point)
+    assert float(cp_src.distance(src_xsec)) <= 1e-6
+    assert float(cp_dst.distance(dst_xsec)) <= 1e-6
+    # should not keep the raw off-xsec fallback cross points.
+    assert float(cp_src.distance(Point(12.0, 12.0))) > 1.0
+    assert float(cp_dst.distance(Point(88.0, 12.0))) > 1.0
+
+
 def test_step1_prefers_gore_free_corridor_when_constraints_equal() -> None:
     support = PairSupport(
         src_nodeid=101,

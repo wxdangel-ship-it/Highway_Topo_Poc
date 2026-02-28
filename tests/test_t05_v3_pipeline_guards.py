@@ -240,6 +240,62 @@ def test_traj_surface_enforced_endpoint_outside_is_hard(tmp_path: Path) -> None:
     assert any(str(bp.get("severity")) == "hard" for bp in breakpoints)
 
 
+def test_traj_surface_endpoint_hole_tolerance_allows_small_miss(tmp_path: Path) -> None:
+    patch_inputs = _mk_patch_inputs(tmp_path=tmp_path, intersection_lines=[], trajectories=[])
+    support = PairSupport(src_nodeid=10, dst_nodeid=20, support_traj_ids={"t1"})
+    road = {"road_id": "10_20", "src_nodeid": 10, "dst_nodeid": 20}
+
+    params = dict(pipeline.DEFAULT_PARAMS)
+    params.update(
+        {
+            "TRAJ_SURF_MIN_SLICE_VALID_RATIO": 0.1,
+            "TRAJ_SURF_MIN_COVERED_LEN_RATIO": 0.1,
+            "TRAJ_SURF_MIN_UNIQUE_TRAJ": 1,
+            "IN_RATIO_MIN": 0.95,
+            "TRAJ_SURF_ENDPOINT_HOLE_TOL_M": 2.0,
+            "TRAJ_SURF_ENDPOINT_HOLE_IN_RATIO_MIN": 0.99,
+        }
+    )
+    road_line = LineString([(0.0, 0.0), (100.0, 0.0)])
+    shape_ref = LineString([(0.0, 0.0), (100.0, 0.0)])
+    # Keep almost all road inside, but make dst endpoint miss by 0.5m.
+    surface = Polygon([(0.0, -3.0), (99.5, -3.0), (99.5, 3.0), (0.0, 3.0), (0.0, -3.0)])
+    hint = {
+        "surface_metric": surface,
+        "valid_slices": 10,
+        "total_slices": 10,
+        "slice_valid_ratio": 1.0,
+        "covered_length_ratio": 1.0,
+        "covered_station_length_m": 100.0,
+        "endcap_valid_ratio_src": 1.0,
+        "endcap_valid_ratio_dst": 1.0,
+        "xsec_support_available_src": True,
+        "xsec_support_available_dst": True,
+        "unique_traj_count": 1,
+        "_stations": np.asarray([0.0, 50.0, 100.0], dtype=np.float64),
+        "_valid_mask": np.asarray([True, True, True], dtype=bool),
+    }
+
+    result, soft_flags, hard_flags, _breakpoints = pipeline._eval_traj_surface_gate(
+        road=road,
+        road_line=road_line,
+        shape_ref_line=shape_ref,
+        support=support,
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint=hint,
+    )
+
+    assert result["traj_surface_enforced"] is True
+    assert result["endpoint_in_traj_surface_dst_raw"] is False
+    assert result["endpoint_in_traj_surface_dst"] is True
+    assert result["endpoint_traj_surface_tolerance_used_dst"] is True
+    assert float(result["traj_in_ratio"] or 0.0) >= 0.99
+    assert "ROAD_OUTSIDE_TRAJ_SURFACE" not in hard_flags
+    assert not soft_flags
+
+
 def test_bridge_guard_skips_clean_long_segment_without_violation(tmp_path: Path, monkeypatch) -> None:
     xsecs = [
         CrossSection(nodeid=1, geometry_metric=LineString([(0.0, -5.0), (0.0, 5.0)]), properties={"nodeid": 1}),
