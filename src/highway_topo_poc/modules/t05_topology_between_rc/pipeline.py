@@ -180,6 +180,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_MULTI_CORRIDOR_DIST_M": 8.0,
     "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.60,
     "STEP1_MULTI_CORRIDOR_HARD": 0,
+    "STEP1_DISABLE_PAIR_CLUSTER_WHEN_GATE": 1,
     "STEP1_GORE_NEAR_M": 30.0,
     "STEP1_TRAJ_IN_DRIVEZONE_MIN": 0.85,
     "STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN": 0.60,
@@ -234,6 +235,42 @@ class _StageTimerScope:
     def __exit__(self, exc_type, exc, tb) -> None:
         dt_ms = (perf_counter() - self._t0) * 1000.0
         self._timer.add(self._key, dt_ms)
+
+
+def _normalize_support_clusters_for_xsec_gate(
+    *,
+    supports: dict[tuple[int, int], PairSupport],
+    enabled: bool,
+) -> dict[str, Any]:
+    stats: dict[str, Any] = {
+        "step1_pair_cluster_disabled": False,
+        "step1_pair_cluster_disabled_pair_count": 0,
+        "step1_pair_cluster_disabled_event_count": 0,
+        "step1_pair_cluster_disabled_hard_multi_removed_count": 0,
+    }
+    if not bool(enabled):
+        return stats
+    pair_count = 0
+    event_count = 0
+    removed_count = 0
+    for support in supports.values():
+        pair_count += 1
+        n = int(max(0, int(support.support_event_count)))
+        event_count += n
+        if HARD_MULTI_ROAD in support.hard_anomalies:
+            support.hard_anomalies.discard(HARD_MULTI_ROAD)
+            removed_count += 1
+        support.cluster_count = 1
+        support.main_cluster_id = 0
+        support.main_cluster_ratio = 1.0 if n > 0 else 0.0
+        support.cluster_sep_m_est = None
+        support.cluster_sizes = [int(n)] if n > 0 else []
+        support.evidence_cluster_ids = [0 for _ in range(n)]
+    stats["step1_pair_cluster_disabled"] = True
+    stats["step1_pair_cluster_disabled_pair_count"] = int(pair_count)
+    stats["step1_pair_cluster_disabled_event_count"] = int(event_count)
+    stats["step1_pair_cluster_disabled_hard_multi_removed_count"] = int(removed_count)
+    return stats
 
 
 def _stable_json_digest(payload: dict[str, Any]) -> str:
@@ -413,6 +450,12 @@ def _run_patch_core(
         gore_zone_metric=gore_zone_metric_raw,
         params=params,
     )
+    pair_cluster_norm_stats: dict[str, Any] = {
+        "step1_pair_cluster_disabled": False,
+        "step1_pair_cluster_disabled_pair_count": 0,
+        "step1_pair_cluster_disabled_event_count": 0,
+        "step1_pair_cluster_disabled_hard_multi_removed_count": 0,
+    }
 
     def _timing_extra_metrics() -> dict[str, Any]:
         required = (
@@ -440,6 +483,7 @@ def _run_patch_core(
         payload["drivezone_metric_bounds"] = drivezone_bounds_metric
         payload["drivezone_union_hash"] = _geometry_hash(patch_inputs.drivezone_zone_metric)
         payload.update(xsec_cross_stats)
+        payload.update(pair_cluster_norm_stats)
         return payload
 
     if not node_ids:
@@ -638,6 +682,13 @@ def _run_patch_core(
 
     _append_cross_breakpoints(cross_result)
     supports = supports_result.supports
+    disable_pair_cluster = bool(int(params.get("STEP1_DISABLE_PAIR_CLUSTER_WHEN_GATE", 1))) and bool(
+        xsec_cross_stats.get("xsec_gate_enabled", False)
+    )
+    pair_cluster_norm_stats = _normalize_support_clusters_for_xsec_gate(
+        supports=supports,
+        enabled=disable_pair_cluster,
+    )
     for unresolved in supports_result.unresolved_events:
         soft_breakpoints.append(dict(unresolved))
 

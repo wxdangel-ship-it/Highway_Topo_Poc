@@ -229,6 +229,74 @@ def test_step1_multi_corridor_hard_when_enabled() -> None:
     assert out.get("shape_ref_line") is None
 
 
+def test_pair_cluster_is_disabled_when_xsec_gate_enabled() -> None:
+    support = PairSupport(
+        src_nodeid=501,
+        dst_nodeid=601,
+        support_traj_ids={"a", "b", "c"},
+        support_event_count=3,
+        traj_segments=[
+            LineString([(0.0, 0.0), (100.0, 0.0)]),
+            LineString([(0.0, 8.0), (100.0, 8.0)]),
+            LineString([(0.0, -8.0), (100.0, -8.0)]),
+        ],
+        src_cross_points=[Point(0.0, 0.0), Point(0.0, 8.0), Point(0.0, -8.0)],
+        dst_cross_points=[Point(100.0, 0.0), Point(100.0, 8.0), Point(100.0, -8.0)],
+        evidence_traj_ids=["a", "b", "c"],
+        evidence_cluster_ids=[2, 1, 2],
+        hard_anomalies={pipeline.HARD_MULTI_ROAD, pipeline.HARD_NON_RC},
+        cluster_count=4,
+        main_cluster_id=2,
+        main_cluster_ratio=0.5,
+        cluster_sep_m_est=42.0,
+        cluster_sizes=[1, 2, 0, 0],
+    )
+    supports = {(501, 601): support}
+
+    stats = pipeline._normalize_support_clusters_for_xsec_gate(supports=supports, enabled=True)
+
+    assert bool(stats.get("step1_pair_cluster_disabled")) is True
+    assert int(stats.get("step1_pair_cluster_disabled_pair_count", 0)) == 1
+    assert int(stats.get("step1_pair_cluster_disabled_event_count", 0)) == 3
+    assert int(stats.get("step1_pair_cluster_disabled_hard_multi_removed_count", 0)) == 1
+    assert pipeline.HARD_MULTI_ROAD not in support.hard_anomalies
+    assert pipeline.HARD_NON_RC in support.hard_anomalies
+    assert int(support.cluster_count) == 1
+    assert int(support.main_cluster_id) == 0
+    assert float(support.main_cluster_ratio) == 1.0
+    assert support.cluster_sep_m_est is None
+    assert support.cluster_sizes == [3]
+    assert support.evidence_cluster_ids == [0, 0, 0]
+
+
+def test_pair_cluster_kept_when_gate_disable_switch_off() -> None:
+    support = PairSupport(
+        src_nodeid=502,
+        dst_nodeid=602,
+        support_traj_ids={"a", "b"},
+        support_event_count=2,
+        traj_segments=[LineString([(0.0, 0.0), (100.0, 0.0)]), LineString([(0.0, 10.0), (100.0, 10.0)])],
+        src_cross_points=[Point(0.0, 0.0), Point(0.0, 10.0)],
+        dst_cross_points=[Point(100.0, 0.0), Point(100.0, 10.0)],
+        evidence_traj_ids=["a", "b"],
+        evidence_cluster_ids=[1, 0],
+        hard_anomalies={pipeline.HARD_MULTI_ROAD},
+        cluster_count=2,
+        main_cluster_id=1,
+        main_cluster_ratio=0.5,
+        cluster_sep_m_est=20.0,
+        cluster_sizes=[1, 1],
+    )
+    supports = {(502, 602): support}
+
+    stats = pipeline._normalize_support_clusters_for_xsec_gate(supports=supports, enabled=False)
+
+    assert bool(stats.get("step1_pair_cluster_disabled")) is False
+    assert pipeline.HARD_MULTI_ROAD in support.hard_anomalies
+    assert int(support.cluster_count) == 2
+    assert support.evidence_cluster_ids == [1, 0]
+
+
 def test_xsec_gate_cut_by_drivezone() -> None:
     xsec = CrossSection(
         nodeid=1,
