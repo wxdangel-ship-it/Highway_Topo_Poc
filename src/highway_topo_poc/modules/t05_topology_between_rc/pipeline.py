@@ -68,8 +68,6 @@ from .metrics import (
     compute_confidence,
     params_digest,
 )
-from .step_utils import load_divstrip_buffer
-
 _ROAD_OUT_NAME = "Road.geojson"
 _ROAD_COMPAT_OUT_NAME = "RCSDRoad.geojson"
 _SOFT_CROSS_EMPTY_SKIPPED = "CROSS_EMPTY_SKIPPED"
@@ -395,10 +393,10 @@ def _run_patch_core(
                 "hint": "DivStripZone.geojson_missing",
             }
         )
-    gore_zone_buffered_metric = load_divstrip_buffer(
-        patch_inputs.divstrip_zone_metric,
-        float(params["GORE_BUFFER_M"]),
-    )
+    # IMPORTANT: cross-section slicing and step logic use raw DivStrip geometry.
+    # Do not use buffered divstrip here, otherwise gates can be over-truncated
+    # and drift to adjacent roads.
+    gore_zone_metric_raw = patch_inputs.divstrip_zone_metric
 
     (
         xsec_cross_map,
@@ -412,7 +410,7 @@ def _run_patch_core(
         lane_boundaries_metric=patch_inputs.lane_boundaries_metric,
         trajectories=patch_inputs.trajectories,
         drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
-        gore_zone_metric=gore_zone_buffered_metric,
+        gore_zone_metric=gore_zone_metric_raw,
         params=params,
     )
 
@@ -712,7 +710,7 @@ def _run_patch_core(
             use_pointcloud=pointcloud_enabled,
             with_non_ground=True,
         )
-    gore_zone_metric = gore_zone_buffered_metric
+    gore_zone_metric = gore_zone_metric_raw
 
     road_lines_metric: list[LineString] = []
     road_feature_props: list[dict[str, Any]] = []
