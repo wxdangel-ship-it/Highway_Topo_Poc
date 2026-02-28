@@ -16,6 +16,7 @@ from highway_topo_poc.modules.t05_topology_between_rc.geometry import (
     _EndStableDecision,
     _apply_endpoint_trend_projection,
     _build_xsec_road_for_endpoint,
+    _choose_shape_ref_with_graph,
     PairSupport,
 )
 from highway_topo_poc.modules.t05_topology_between_rc import pipeline
@@ -181,13 +182,19 @@ def test_step1_multi_corridor_soft_by_default() -> None:
         dst_xsec=dst_xsec,
         drivezone_zone_metric=None,
         gore_zone_metric=None,
-        params={"STEP1_MULTI_CORRIDOR_DIST_M": 8.0, "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6},
+        params={
+            "STEP1_MULTI_CORRIDOR_DIST_M": 8.0,
+            "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6,
+            "STEP1_CORRIDOR_REACH_XSEC_M": 80.0,
+        },
     )
 
     line = out.get("shape_ref_line")
     assert isinstance(line, LineString)
     assert out.get("hard_reason") is None
     assert bool(out.get("multi_corridor_detected")) is True
+    assert int(out.get("corridor_count", 0)) == 1
+    assert len(list(out.get("candidate_topk") or [])) >= 2
 
 
 def test_step1_multi_corridor_hard_when_enabled() -> None:
@@ -222,6 +229,7 @@ def test_step1_multi_corridor_hard_when_enabled() -> None:
             "STEP1_MULTI_CORRIDOR_DIST_M": 8.0,
             "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6,
             "STEP1_MULTI_CORRIDOR_HARD": 1,
+            "STEP1_CORRIDOR_REACH_XSEC_M": 80.0,
         },
     )
 
@@ -493,6 +501,40 @@ def test_step1_no_distance_clustering_dependency() -> None:
     assert str(out.get("hard_reason")) == str(pipeline.HARD_MULTI_CORRIDOR)
 
 
+def test_preferred_shape_ref_is_rejected_when_far_from_surface() -> None:
+    support = PairSupport(
+        src_nodeid=10,
+        dst_nodeid=20,
+        support_traj_ids={"t0"},
+        support_event_count=1,
+        traj_segments=[LineString([(0.0, 0.0), (100.0, 0.0)])],
+        src_cross_points=[Point(0.0, 0.0)],
+        dst_cross_points=[Point(100.0, 0.0)],
+        evidence_traj_ids=["t0"],
+    )
+    src_xsec = LineString([(0.0, -10.0), (0.0, 10.0)])
+    dst_xsec = LineString([(100.0, -10.0), (100.0, 10.0)])
+    preferred_far = LineString([(0.0, 80.0), (100.0, 80.0)])
+    lane_boundaries = [LineString([(0.0, 0.0), (100.0, 0.0)])]
+    traj_surface = Polygon([(-10.0, -8.0), (110.0, -8.0), (110.0, 8.0), (-10.0, 8.0)])
+
+    choice = _choose_shape_ref_with_graph(
+        support=support,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        lane_boundaries_metric=lane_boundaries,
+        lb_snap_m=2.0,
+        lb_start_end_topk=3,
+        traj_surface_metric=traj_surface,
+        preferred_shape_ref_metric=preferred_far,
+    )
+
+    assert bool(choice.used_lane_boundary) is True
+    assert isinstance(choice.line, LineString)
+    assert float(choice.line.distance(preferred_far)) > 20.0
+    assert float(choice.line.distance(lane_boundaries[0])) <= 1e-6
+
+
 def test_xsec_selected_must_intersect_ref_or_fallback() -> None:
     shape_ref = LineString([(0.0, 0.0), (120.0, 0.0)])
     xsec_seed = LineString([(10.0, -40.0), (10.0, 40.0)])
@@ -682,6 +724,8 @@ def test_center_empty_fallback_still_outputs_step2_step3(monkeypatch: pytest.Mon
     assert str(road.get("xsec_road_selected_by_dst")).startswith("fallback_seed_due_center_empty")
     assert isinstance(road.get("_endpoint_after_dst_metric"), Point)
     assert road.get("endpoint_dist_to_xsec_dst_m") is not None
+    assert pipeline.HARD_CENTER_EMPTY not in set(road.get("hard_reasons", []))
+    assert bool(road.get("center_estimate_empty_downgraded", False)) is True
 
 
 def test_scripts_stepwise_state_resume(tmp_path: Path) -> None:
