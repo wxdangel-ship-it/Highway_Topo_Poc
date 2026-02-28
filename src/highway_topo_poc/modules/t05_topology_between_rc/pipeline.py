@@ -2333,15 +2333,19 @@ def _support_union_bbox(
     ys: list[float] = []
 
     for cs in patch_inputs.intersection_lines:
-        for x, y in cs.geometry_metric.coords:
-            xs.append(float(x))
-            ys.append(float(y))
+        for coord in cs.geometry_metric.coords:
+            if len(coord) < 2:
+                continue
+            xs.append(float(coord[0]))
+            ys.append(float(coord[1]))
 
     for support in supports.values():
         for seg in support.traj_segments[:6]:
-            for x, y in seg.coords:
-                xs.append(float(x))
-                ys.append(float(y))
+            for coord in seg.coords:
+                if len(coord) < 2:
+                    continue
+                xs.append(float(coord[0]))
+                ys.append(float(coord[1]))
 
     if not xs:
         return None
@@ -5464,7 +5468,13 @@ def _truncate_cross_sections_for_crossing(
                     key=lambda ls: (float(ls.distance(mid)), -float(ls.length)),
                 )
                 segment_selected_by = "nearest_midpoint_longest_tiebreak"
-            gate_selected_line = LineString([(float(x), float(y)) for x, y in selected_line.coords])
+            gate_selected_line = LineString(
+                [
+                    (float(coord[0]), float(coord[1]))
+                    for coord in selected_line.coords
+                    if len(coord) >= 2
+                ]
+            )
             if gate_selected_line.length < geom.length - 1e-6:
                 used_trunc += 1
             if gate_fallback:

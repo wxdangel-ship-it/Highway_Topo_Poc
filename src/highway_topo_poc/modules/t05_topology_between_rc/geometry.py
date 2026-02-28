@@ -5312,7 +5312,13 @@ def _limit_vertices(line: LineString, max_vertices: int) -> LineString:
 
     idx = np.linspace(0, n - 1, max_vertices).astype(np.int64)
     new_coords = [coords[int(i)] for i in idx]
-    new_coords = _dedup_coords([(float(x), float(y)) for x, y in new_coords])
+    new_coords = _dedup_coords(
+        [
+            (float(coord[0]), float(coord[1]))
+            for coord in new_coords
+            if len(coord) >= 2
+        ]
+    )
     if len(new_coords) < 2:
         return line
     return LineString(new_coords)

@@ -450,7 +450,11 @@ def write_geojson_lines(
                 "type": "Feature",
                 "geometry": {
                     "type": "LineString",
-                    "coordinates": [[float(x), float(y)] for x, y in geom.coords],
+                    "coordinates": [
+                        [float(coord[0]), float(coord[1])]
+                        for coord in geom.coords
+                        if len(coord) >= 2
+                    ],
                 },
                 "properties": _jsonable(props),
             }

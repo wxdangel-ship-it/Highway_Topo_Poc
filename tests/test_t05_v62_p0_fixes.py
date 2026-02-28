@@ -89,3 +89,28 @@ def test_shape_ref_fallback_geometry_substring_is_valid() -> None:
 
     assert out is not None
     assert 90.0 <= float(out.length) <= 120.0
+
+
+def test_xsec_gate_fallback_accepts_3d_seed_coords() -> None:
+    xsec = CrossSection(
+        nodeid=99,
+        geometry_metric=LineString([(0.0, -20.0, 1.0), (0.0, 20.0, 2.0)]),
+        properties={"nodeid": 99},
+    )
+    drivezone_far = LineString([(100.0, 100.0), (120.0, 100.0)]).buffer(2.0)
+
+    out_map, _anchors, _trunc, _gate_all_map, gate_meta_map, stats = _truncate_cross_sections_for_crossing(
+        xsec_map={99: xsec},
+        lane_boundaries_metric=[],
+        trajectories=[],
+        drivezone_zone_metric=drivezone_far,
+        gore_zone_metric=None,
+        params=dict(),
+    )
+
+    got = out_map[99].geometry_metric
+    assert isinstance(got, LineString)
+    assert float(got.length) > 0.0
+    assert got.has_z is False
+    assert bool(stats.get("xsec_gate_fallback_count", 0)) is True
+    assert bool((gate_meta_map.get(99) or {}).get("fallback")) is True
