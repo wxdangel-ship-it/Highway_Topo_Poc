@@ -1030,8 +1030,8 @@ def _run_patch_core(
                 surface_hint = _build_traj_surface_hint_for_cluster(
                     support=support_k,
                     cluster_id=int(cluster_id),
-                    src_xsec=src_xsec.geometry_metric,
-                    dst_xsec=dst_xsec.geometry_metric,
+                    src_xsec=src_xsec_gate.geometry_metric,
+                    dst_xsec=dst_xsec_gate.geometry_metric,
                     lane_boundaries_metric=patch_inputs.lane_boundaries_metric,
                     patch_inputs=patch_inputs,
                     gore_zone_metric=gore_zone_metric,
@@ -1055,12 +1055,12 @@ def _run_patch_core(
             support_ok = True
             if enforced and surface_geom is not None and (not surface_geom.is_empty):
                 support_ok = _xsec_has_surface_support(
-                    xsec=src_xsec.geometry_metric,
+                    xsec=src_xsec_gate.geometry_metric,
                     gore_zone_metric=gore_zone_metric,
                     surface_metric=surface_geom,
                     buffer_m=float(params.get("SURF_NODE_BUFFER_M", 2.0)),
                 ) and _xsec_has_surface_support(
-                    xsec=dst_xsec.geometry_metric,
+                    xsec=dst_xsec_gate.geometry_metric,
                     gore_zone_metric=gore_zone_metric,
                     surface_metric=surface_geom,
                     buffer_m=float(params.get("SURF_NODE_BUFFER_M", 2.0)),
@@ -1089,8 +1089,6 @@ def _run_patch_core(
                 parent_support=support,
                 cluster_id=int(cluster_id),
                 neighbor_search_pass=int(neighbor_search_pass),
-                src_xsec=src_xsec.geometry_metric,
-                dst_xsec=dst_xsec.geometry_metric,
                 src_out_degree=out_degree.get(src, 0),
                 dst_in_degree=in_degree.get(dst, 0),
                 lane_boundaries_metric=patch_inputs.lane_boundaries_metric,
@@ -1101,6 +1099,8 @@ def _run_patch_core(
                 params=params,
                 traj_surface_hint=surface_hint,
                 shape_ref_hint_metric=step1_corridor.get("shape_ref_line"),
+                src_xsec=src_xsec_gate.geometry_metric,
+                dst_xsec=dst_xsec_gate.geometry_metric,
             )
             _apply_xsec_gate_meta_to_road(road=road_k, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
             road_k["step1_strategy"] = step1_corridor.get("strategy")
