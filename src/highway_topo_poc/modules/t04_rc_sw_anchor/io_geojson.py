@@ -369,6 +369,71 @@ def load_divstrip_union(
     return union, meta, errors
 
 
+def load_drivezone_union(
+    *,
+    path: Path,
+    src_crs_override: str,
+    dst_crs: str,
+    aoi: BaseGeometry | None = None,
+) -> tuple[BaseGeometry | None, GeoLoadMeta, list[str]]:
+    payload, src_meta = _load_reprojected(path=path, src_crs_override=src_crs_override, dst_crs=dst_crs)
+    errors: list[str] = []
+    geoms: list[BaseGeometry] = []
+    total = 0
+
+    for idx, feat in enumerate(payload.get("features", [])):
+        total += 1
+        if not isinstance(feat, dict):
+            errors.append(f"drivezone_feature_not_object:{idx}")
+            continue
+
+        geom = feat.get("geometry")
+        if not isinstance(geom, dict):
+            continue
+        try:
+            g = shape(geom)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"drivezone_geometry_invalid:{idx}:{type(exc).__name__}")
+            continue
+        if g.is_empty:
+            continue
+        if g.geom_type not in {"Polygon", "MultiPolygon"}:
+            continue
+
+        if not g.is_valid:
+            try:
+                from shapely import make_valid  # type: ignore
+
+                g = make_valid(g)
+            except Exception:
+                try:
+                    g = g.buffer(0)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"drivezone_make_valid_failed:{idx}:{type(exc).__name__}")
+                    continue
+        if g.is_empty:
+            continue
+
+        if aoi is not None and not g.intersects(aoi):
+            continue
+        geoms.append(g)
+
+    union = None
+    if geoms:
+        try:
+            union = unary_union(geoms)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"drivezone_union_failed:{type(exc).__name__}")
+            union = None
+
+    if union is None or union.is_empty:
+        errors.append("drivezone_union_empty")
+        union = None
+
+    meta = _build_meta(path, src_meta, total, len(geoms))
+    return union, meta, errors
+
+
 __all__ = [
     "GeoLoadMeta",
     "IntersectionLineRecord",
@@ -377,6 +442,7 @@ __all__ = [
     "extract_crs_name",
     "infer_lonlat_like_bbox",
     "load_divstrip_union",
+    "load_drivezone_union",
     "load_intersection_lines",
     "load_nodes",
     "load_roads",

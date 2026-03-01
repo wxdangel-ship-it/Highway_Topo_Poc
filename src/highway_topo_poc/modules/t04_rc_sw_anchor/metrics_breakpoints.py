@@ -21,6 +21,16 @@ BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION = "NO_TRIGGER_BEFORE_NEXT_INTERSECTION"
 BP_SCAN_EXCEED_200M = "SCAN_EXCEED_200M"
 BP_DIVSTRIP_TOLERANCE_VIOLATION = "DIVSTRIP_TOLERANCE_VIOLATION"
 BP_DIVSTRIP_NEVER_HIT = "DIVSTRIP_NEVER_HIT"
+BP_DRIVEZONE_MISSING = "DRIVEZONE_MISSING"
+BP_DRIVEZONE_UNION_EMPTY = "DRIVEZONE_UNION_EMPTY"
+BP_DRIVEZONE_CRS_UNKNOWN = "DRIVEZONE_CRS_UNKNOWN"
+BP_DRIVEZONE_CLIP_EMPTY = "DRIVEZONE_CLIP_EMPTY"
+BP_DRIVEZONE_SPLIT_NOT_FOUND = "DRIVEZONE_SPLIT_NOT_FOUND"
+BP_NEXT_INTERSECTION_NOT_FOUND_CONNECTED = "NEXT_INTERSECTION_NOT_FOUND_CONNECTED"
+BP_NEXT_INTERSECTION_DISABLED = "NEXT_INTERSECTION_DISABLED"
+BP_NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED = "NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED"
+BP_ROAD_GRAPH_DISCONNECTED_STOP = "ROAD_GRAPH_DISCONNECTED_STOP"
+BP_POINTCLOUD_CRS_UNKNOWN_UNUSABLE = "POINTCLOUD_CRS_UNKNOWN_UNUSABLE"
 
 
 def make_breakpoint(
@@ -109,6 +119,16 @@ def build_metrics(
 
     no_trigger_count = _count_code(breakpoints, BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION)
     scan_exceed_count = _count_code(breakpoints, BP_SCAN_EXCEED_200M)
+    hard_breakpoint_count = int(sum(1 for bp in breakpoints if str(bp.get("severity", "")).lower() == "hard"))
+    degraded_trigger_count = int(
+        sum(
+            1
+            for x in seed_results
+            if str(x.get("trigger", "")) in {"divstrip_only_degraded", "pc_only", "pc_only_no_divstrip_hit", "pc_only_after_divstrip_miss"}
+        )
+    )
+    stop_reason_counts = dict(Counter(str(x.get("stop_reason", "none")) for x in seed_results))
+    evidence_source_counts = dict(Counter(str(x.get("evidence_source", "unknown")) for x in seed_results))
 
     min_ratio = float(params["min_anchor_found_ratio_focus"] if mode == "global_focus" else params["min_anchor_found_ratio_patch"])
     no_trigger_max = int(params.get("no_trigger_count_max_focus", 0 if mode == "global_focus" else seed_total))
@@ -117,6 +137,7 @@ def build_metrics(
     hard_checks = {
         "required_outputs_present": bool(required_outputs_ok),
         "seed_total_gt_0": bool(seed_total > 0),
+        "hard_breakpoint_count_eq_0": bool(hard_breakpoint_count == 0),
     }
 
     soft_checks = {
@@ -151,6 +172,10 @@ def build_metrics(
         "anchor_found_ratio": float(ratio),
         "scan_dist_m_stats": _distance_stats(scan_dists),
         "breakpoints_by_code": bp_summary.get("by_code", []),
+        "hard_breakpoint_count": int(hard_breakpoint_count),
+        "degraded_trigger_count": int(degraded_trigger_count),
+        "stop_reason_counts": stop_reason_counts,
+        "evidence_source_counts": evidence_source_counts,
         "gate_eval": {
             "hard": hard_checks,
             "soft": soft_checks,
@@ -183,7 +208,7 @@ def build_summary_text(
         layer_crs = crs_diag.get("layer_crs")
         if isinstance(layer_crs, dict):
             lines.append("layer_crs:")
-            for key in ["node", "road", "divstrip", "traj", "pointcloud"]:
+            for key in ["node", "road", "divstrip", "drivezone", "traj", "pointcloud"]:
                 row = layer_crs.get(key)
                 if not isinstance(row, dict):
                     continue
@@ -221,7 +246,7 @@ def build_summary_text(
         else:
             focus_text = "na"
         lines.append(
-            "- nodeid={nodeid} kind={kind} kind_bits(merge={is_merge},diverge={is_diverge}) anchor_type={anchor_type} status={status} scan_dist_m={scan_dist} trigger={trigger} stop_dist_m={stop} stop_reason={stop_reason} dist_line_to_divstrip_m={dist_line_to_divstrip} first_divstrip_hit={first_div_hit} best_divstrip_pc={best_div_pc} first_pc_only={first_pc} focus_resolve={focus_resolve}".format(
+            "- nodeid={nodeid} kind={kind} kind_bits(merge={is_merge},diverge={is_diverge}) anchor_type={anchor_type} status={status} scan_dist_m={scan_dist} trigger={trigger} evidence_source={evidence_source} stop_dist_m={stop} stop_reason={stop_reason} dist_line_to_divstrip_m={dist_line_to_divstrip} dist_line_to_drivezone_edge_m={dist_line_to_drivezone_edge} first_divstrip_hit={first_div_hit} best_divstrip_dz={best_div_dz} best_divstrip_pc={best_div_pc} first_pc_only={first_pc} non_drivezone_frac={non_drivezone_frac} clipped_len_m={clipped_len} focus_resolve={focus_resolve}".format(
                 nodeid=item.get("nodeid"),
                 kind=item.get("kind"),
                 is_merge=item.get("is_merge_kind"),
@@ -230,12 +255,17 @@ def build_summary_text(
                 status=item.get("status"),
                 scan_dist=item.get("scan_dist_m"),
                 trigger=item.get("trigger"),
+                evidence_source=item.get("evidence_source"),
                 stop=item.get("stop_dist_m"),
                 stop_reason=item.get("stop_reason"),
                 dist_line_to_divstrip=item.get("dist_line_to_divstrip_m"),
+                dist_line_to_drivezone_edge=item.get("dist_line_to_drivezone_edge_m"),
                 first_div_hit=item.get("first_divstrip_hit_dist_m"),
+                best_div_dz=item.get("best_divstrip_dz_dist_m"),
                 best_div_pc=item.get("best_divstrip_pc_dist_m"),
                 first_pc=item.get("first_pc_only_dist_m"),
+                non_drivezone_frac=item.get("non_drivezone_frac"),
+                clipped_len=item.get("clipped_len_m"),
                 focus_resolve=focus_text,
             )
         )
@@ -263,12 +293,22 @@ __all__ = [
     "BP_AMBIGUOUS_KIND",
     "BP_CRS_UNKNOWN",
     "BP_DIVSTRIP_NEVER_HIT",
+    "BP_DRIVEZONE_CLIP_EMPTY",
+    "BP_DRIVEZONE_CRS_UNKNOWN",
+    "BP_DRIVEZONE_MISSING",
+    "BP_DRIVEZONE_SPLIT_NOT_FOUND",
+    "BP_DRIVEZONE_UNION_EMPTY",
     "BP_DIVSTRIPZONE_MISSING",
     "BP_DIVSTRIP_TOLERANCE_VIOLATION",
     "BP_FOCUS_NODE_NOT_FOUND",
     "BP_MISSING_KIND_FIELD",
     "BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION",
+    "BP_NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED",
+    "BP_NEXT_INTERSECTION_DISABLED",
+    "BP_NEXT_INTERSECTION_NOT_FOUND_CONNECTED",
+    "BP_POINTCLOUD_CRS_UNKNOWN_UNUSABLE",
     "BP_POINTCLOUD_MISSING_OR_UNUSABLE",
+    "BP_ROAD_GRAPH_DISCONNECTED_STOP",
     "BP_ROAD_FIELD_MISSING",
     "BP_ROAD_GRAPH_WEAK_STOP",
     "BP_ROAD_LINK_NOT_FOUND",

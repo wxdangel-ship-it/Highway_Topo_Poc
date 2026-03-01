@@ -66,16 +66,19 @@ def create_synth_patch(
     if crs_mode == "3857":
         node_road_crs = "EPSG:3857"
         divstrip_crs = "EPSG:3857"
+        drivezone_crs = "EPSG:3857"
         traj_crs = "EPSG:3857"
         pointcloud_crs = "EPSG:3857"
     elif crs_mode == "4326":
         node_road_crs = "EPSG:4326"
         divstrip_crs = "EPSG:4326"
+        drivezone_crs = "EPSG:4326"
         traj_crs = "EPSG:4326"
         pointcloud_crs = "EPSG:4326"
     elif crs_mode == "mixed":
         node_road_crs = "EPSG:4326"
         divstrip_crs = "EPSG:3857"
+        drivezone_crs = "EPSG:3857"
         traj_crs = "EPSG:4326"
         pointcloud_crs = "EPSG:4326"
     else:
@@ -83,6 +86,7 @@ def create_synth_patch(
 
     xy_node_road = _make_xy_transform(node_road_crs)
     xy_div = _make_xy_transform(divstrip_crs)
+    xy_dz = _make_xy_transform(drivezone_crs)
     xy_traj = _make_xy_transform(traj_crs)
     xy_pc = _make_xy_transform(pointcloud_crs)
 
@@ -104,6 +108,10 @@ def create_synth_patch(
 
     def tr(dx: float, dy: float) -> list[float]:
         x, y = xy_traj(dx, dy)
+        return [x, y]
+
+    def dz(dx: float, dy: float) -> list[float]:
+        x, y = xy_dz(dx, dy)
         return [x, y]
 
     def pc(dx: float, dy: float) -> list[float]:
@@ -179,6 +187,26 @@ def create_synth_patch(
     ]
     _write_json(patch_dir / "Vector" / "DivStripZone.geojson", _fc(divstrip_features, divstrip_crs))
 
+    drivezone_features = [
+        {
+            "type": "Feature",
+            "properties": {"name": "drivezone_left"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[dz(-8.0, -60.0), dz(-1.0, -60.0), dz(-1.0, 160.0), dz(-8.0, 160.0), dz(-8.0, -60.0)]],
+            },
+        },
+        {
+            "type": "Feature",
+            "properties": {"name": "drivezone_right"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[dz(1.0, -60.0), dz(8.0, -60.0), dz(8.0, 160.0), dz(1.0, 160.0), dz(1.0, -60.0)]],
+            },
+        },
+    ]
+    _write_json(patch_dir / "Vector" / "DriveZone.geojson", _fc(drivezone_features, drivezone_crs))
+
     pc_features: list[dict[str, Any]] = []
     for dx in [2.6, 2.8, 3.0, 3.2, 3.4, 3.6]:
         pc_features.append(
@@ -246,6 +274,7 @@ def create_synth_patch(
         "global_node_path": global_dir / "RCSDNode.geojson",
         "global_road_path": global_dir / "RCSDRoad.geojson",
         "divstrip_path": patch_dir / "Vector" / "DivStripZone.geojson",
+        "drivezone_path": patch_dir / "Vector" / "DriveZone.geojson",
         "pointcloud_path": patch_dir / "PointCloud" / "merged.geojson",
         "traj_glob": str((patch_dir / "Traj" / "*" / "raw_dat_pose.geojson").as_posix()),
         "focus_node_ids": [str(node_a), str(node_b)],
@@ -253,6 +282,7 @@ def create_synth_patch(
         "node_src_crs": "auto",
         "road_src_crs": "auto",
         "divstrip_src_crs": "auto",
+        "drivezone_src_crs": "auto",
         "traj_src_crs": "auto",
         "pointcloud_crs": pointcloud_crs,
         "dst_crs": "EPSG:3857",

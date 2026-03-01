@@ -14,7 +14,8 @@ from shapely.geometry.base import BaseGeometry
 
 from .crs_norm import guess_crs_from_bbox, normalize_epsg_name, transform_xy_arrays
 from .divstrip_ops import anchor_point_from_crossline, is_divstrip_hit
-from .io_geojson import NodeRecord, RoadRecord, load_divstrip_union, load_nodes, load_roads
+from .drivezone_ops import build_fan_band, clip_crossline_to_drivezone, detect_non_drivezone_in_fan
+from .io_geojson import NodeRecord, RoadRecord, load_divstrip_union, load_drivezone_union, load_nodes, load_roads
 from .local_frame import LocalFrame
 from .metrics_breakpoints import (
     BP_AMBIGUOUS_KIND,
@@ -22,12 +23,21 @@ from .metrics_breakpoints import (
     BP_DIVSTRIP_NEVER_HIT,
     BP_DIVSTRIPZONE_MISSING,
     BP_DIVSTRIP_TOLERANCE_VIOLATION,
+    BP_DRIVEZONE_CLIP_EMPTY,
+    BP_DRIVEZONE_CRS_UNKNOWN,
+    BP_DRIVEZONE_MISSING,
+    BP_DRIVEZONE_SPLIT_NOT_FOUND,
+    BP_DRIVEZONE_UNION_EMPTY,
     BP_FOCUS_NODE_NOT_FOUND,
     BP_MISSING_KIND_FIELD,
     BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION,
+    BP_NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED,
+    BP_NEXT_INTERSECTION_DISABLED,
+    BP_NEXT_INTERSECTION_NOT_FOUND_CONNECTED,
+    BP_POINTCLOUD_CRS_UNKNOWN_UNUSABLE,
     BP_POINTCLOUD_MISSING_OR_UNUSABLE,
+    BP_ROAD_GRAPH_DISCONNECTED_STOP,
     BP_ROAD_FIELD_MISSING,
-    BP_ROAD_GRAPH_WEAK_STOP,
     BP_ROAD_LINK_NOT_FOUND,
     BP_SCAN_EXCEED_200M,
     BP_TRAJ_MISSING,
@@ -326,15 +336,21 @@ def _empty_fail_result(
     scan_dir: str,
     line: Any,
     divstrip_union: BaseGeometry | None,
+    drivezone_union: BaseGeometry | None,
     stop_reason: str,
+    id_fields: tuple[tuple[str, int], ...] = (),
     resolved_from: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     pt, dist = anchor_point_from_crossline(line=line, divstrip_union=divstrip_union)
     dist_line = None if divstrip_union is None else float(line.distance(divstrip_union))
+    id_map = {str(k): int(v) for k, v in id_fields}
     is_merge = bool(kind is not None and (int(kind) & (1 << 3)) != 0)
     is_diverge = bool(kind is not None and (int(kind) & (1 << 4)) != 0)
     return {
         "nodeid": int(nodeid),
+        "id": id_map.get("id"),
+        "mainid": id_map.get("mainid"),
+        "mainnodeid": id_map.get("mainnodeid"),
         "kind": None if kind is None else int(kind),
         "is_merge_kind": bool(is_merge),
         "is_diverge_kind": bool(is_diverge),
@@ -349,13 +365,23 @@ def _empty_fail_result(
         "next_intersection_dist_m": None,
         "dist_to_divstrip_m": dist,
         "dist_line_to_divstrip_m": dist_line,
+        "dist_line_to_drivezone_edge_m": None if drivezone_union is None else float(line.distance(drivezone_union.boundary)),
         "confidence": 0.0,
         "flags": [],
+        "evidence_source": "none",
         "anchor_point": pt,
         "crossline_opt": line,
+        "tip_s_m": None,
         "first_divstrip_hit_dist_m": None,
+        "best_divstrip_dz_dist_m": None,
         "best_divstrip_pc_dist_m": None,
         "first_pc_only_dist_m": None,
+        "fan_area_m2": 0.0,
+        "non_drivezone_area_m2": 0.0,
+        "non_drivezone_frac": 0.0,
+        "clipped_len_m": float(line.length),
+        "clip_empty": False,
+        "clip_piece_type": "none",
         "ng_candidates_before_suppress": 0,
         "ng_candidates_after_suppress": 0,
         "resolved_from": resolved_from,
@@ -367,6 +393,8 @@ def _evaluate_node(
     node: NodeRecord,
     road_graph: RoadGraph,
     divstrip_union: BaseGeometry | None,
+    drivezone_union: BaseGeometry | None,
+    drivezone_usable: bool,
     ng_points_xy: np.ndarray,
     params: dict[str, Any],
     breakpoints: list[dict[str, Any]],
@@ -400,7 +428,9 @@ def _evaluate_node(
             scan_dir="na",
             line=dummy_line,
             divstrip_union=divstrip_union,
+            drivezone_union=drivezone_union,
             stop_reason="kind_missing",
+            id_fields=node.id_fields,
             resolved_from=resolved_from,
         )
 
@@ -420,7 +450,9 @@ def _evaluate_node(
             scan_dir="na",
             line=dummy_line,
             divstrip_union=divstrip_union,
+            drivezone_union=drivezone_union,
             stop_reason="ambiguous_kind",
+            id_fields=node.id_fields,
             resolved_from=resolved_from,
         )
 
@@ -441,7 +473,9 @@ def _evaluate_node(
             scan_dir="na",
             line=dummy_line,
             divstrip_union=divstrip_union,
+            drivezone_union=drivezone_union,
             stop_reason="unsupported_kind",
+            id_fields=node.id_fields,
             resolved_from=resolved_from,
         )
 
@@ -470,7 +504,9 @@ def _evaluate_node(
             scan_dir=scan_dir_label,
             line=dummy_line,
             divstrip_union=divstrip_union,
+            drivezone_union=drivezone_union,
             stop_reason="road_link_missing",
+            id_fields=node.id_fields,
             resolved_from=resolved_from,
         )
 
@@ -478,28 +514,80 @@ def _evaluate_node(
     scan_vec = tangent if is_diverge else (-float(tangent[0]), -float(tangent[1]))
     frame = LocalFrame.from_tangent(origin_xy=(float(node.point.x), float(node.point.y)), tangent_xy=scan_vec)
 
-    next_inter = road_graph.find_next_intersection_distance(
-        nodeid=nodeid,
-        scan_dir=scan_vec,
-        intersection_kind_mask=0b11100,
-    )
-
     scan_max = float(params["scan_max_limit_m"])
     stop_dist = float(scan_max)
     stop_reason = "max_200"
-    if bool(params.get("stop_at_next_intersection", True)) and next_inter is not None and next_inter > 0:
-        stop_dist = min(stop_dist, float(next_inter))
-        stop_reason = "next_intersection"
+    next_inter: float | None = None
+    stop_diag: dict[str, Any] = {}
+
+    if bool(params.get("stop_at_next_intersection", True)):
+        if bool(params.get("stop_intersection_require_connected", True)):
+            next_inter, stop_diag = road_graph.find_next_intersection_distance_connected(
+                nodeid=nodeid,
+                scan_dir=scan_vec,
+                degree_min=int(params.get("next_intersection_degree_min", 3)),
+                intersection_kind_mask=None,
+                max_hops=64,
+                disable_geometric_fallback=bool(params.get("disable_geometric_stop_fallback", True)),
+            )
+            deg_skip = int(stop_diag.get("deg_too_low_skipped", 0))
+            if deg_skip > 0:
+                breakpoints.append(
+                    make_breakpoint(
+                        code=BP_NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED,
+                        severity="soft",
+                        nodeid=nodeid,
+                        message="next_intersection_degree_too_low_skipped",
+                        extra={"count": int(deg_skip)},
+                    )
+                )
+            if next_inter is not None and next_inter > 0:
+                stop_reason = "next_intersection_connected_deg3"
+                stop_dist = min(stop_dist, float(next_inter))
+            else:
+                stop_reason = "next_intersection_not_found_connected"
+                breakpoints.append(
+                    make_breakpoint(
+                        code=BP_NEXT_INTERSECTION_NOT_FOUND_CONNECTED,
+                        severity="soft",
+                        nodeid=nodeid,
+                        message="next_intersection_not_found_connected",
+                        extra={"diag": dict(stop_diag)},
+                    )
+                )
+                breakpoints.append(
+                    make_breakpoint(
+                        code=BP_ROAD_GRAPH_DISCONNECTED_STOP,
+                        severity="soft",
+                        nodeid=nodeid,
+                        message="road_graph_disconnected_or_no_valid_stop",
+                        extra={"diag": dict(stop_diag)},
+                    )
+                )
+        else:
+            next_inter = road_graph.find_next_intersection_distance(
+                nodeid=nodeid,
+                scan_dir=scan_vec,
+                intersection_kind_mask=0b11100,
+            )
+            if next_inter is not None and next_inter > 0:
+                stop_dist = min(stop_dist, float(next_inter))
+                stop_reason = "next_intersection"
+            else:
+                stop_reason = "next_intersection_not_found"
     else:
-        stop_reason = "graph_weak"
+        stop_reason = "next_intersection_disabled"
         breakpoints.append(
             make_breakpoint(
-                code=BP_ROAD_GRAPH_WEAK_STOP,
+                code=BP_NEXT_INTERSECTION_DISABLED,
                 severity="soft",
                 nodeid=nodeid,
-                message="next_intersection_not_found_use_scan_max",
+                message="next_intersection_disabled",
             )
         )
+
+    if stop_dist >= scan_max - 1e-9 and stop_reason == "next_intersection_connected_deg3":
+        stop_reason = "max_200"
 
     stop_dist = max(0.0, float(stop_dist))
     step = max(0.25, float(params["scan_step_m"]))
@@ -512,6 +600,13 @@ def _evaluate_node(
     line_buf = float(params["pc_line_buffer_m"])
     pc_only_min_scan = float(params.get("pc_only_min_scan_dist_m", 10.0))
     pc_only_after_div_min = float(params.get("pc_only_after_divstrip_min_m", 5.0))
+    use_drivezone = bool(params.get("use_drivezone", True))
+    drivezone_clip_crossline = bool(params.get("drivezone_clip_crossline", True))
+    drivezone_fan_radius_m = float(params.get("drivezone_fan_radius_m", 20.0))
+    drivezone_fan_half_angle_deg = float(params.get("drivezone_fan_half_angle_deg", 30.0))
+    drivezone_fan_band_width_m = float(params.get("drivezone_fan_band_width_m", 6.0))
+    drivezone_non_drivezone_area_min_m2 = float(params.get("drivezone_non_drivezone_area_min_m2", 3.0))
+    drivezone_non_drivezone_frac_min = float(params.get("drivezone_non_drivezone_frac_min", 0.15))
 
     if ng_points_xy.size > 0:
         u, v = frame.project_xy(ng_points_xy)
@@ -530,10 +625,14 @@ def _evaluate_node(
     hit_ng: list[bool] = []
     lines: list[Any] = []
     scan_values: list[float] = []
+    fan_diag_by_idx: dict[int, dict[str, Any]] = {}
 
     first_divstrip_s: float | None = None
+    tip_s: float | None = None
+    best_divstrip_dz_s: float | None = None
     best_divstrip_pc_s: float | None = None
     first_pc_only_s: float | None = None
+    best_fan_diag: dict[str, Any] = {"fan_area_m2": 0.0, "non_drivezone_area_m2": 0.0, "non_drivezone_frac": 0.0, "reason": "none"}
 
     for i in range(n_steps):
         s = float(i) * step
@@ -542,9 +641,31 @@ def _evaluate_node(
         lines.append(line)
 
         div_hit = is_divstrip_hit(line=line, divstrip_union=divstrip_union, tol_m=div_tol)
+        div_intersects = bool(divstrip_union is not None and line.intersects(divstrip_union))
         if div_hit and first_divstrip_s is None:
             first_divstrip_s = s
+            tip_s = s
         hit_divstrip.append(div_hit)
+
+        if div_hit and use_drivezone and drivezone_usable and drivezone_union is not None:
+            anchor_tmp, _ = anchor_point_from_crossline(line=line, divstrip_union=divstrip_union)
+            fan_band = build_fan_band(
+                origin_xy=(float(anchor_tmp.x), float(anchor_tmp.y)),
+                scan_unit_vec=scan_vec,
+                radius_m=drivezone_fan_radius_m,
+                half_angle_deg=drivezone_fan_half_angle_deg,
+                band_width_m=drivezone_fan_band_width_m,
+            )
+            dz_hit, fan_diag = detect_non_drivezone_in_fan(
+                drivezone_union=drivezone_union,
+                fan_band=fan_band,
+                area_min_m2=drivezone_non_drivezone_area_min_m2,
+                frac_min=drivezone_non_drivezone_frac_min,
+            )
+            fan_diag_by_idx[i] = fan_diag
+            if dz_hit and best_divstrip_dz_s is None and div_intersects:
+                best_divstrip_dz_s = s
+                best_fan_diag = fan_diag
 
         ng_ok, _ng_count = ng_hit_at(s)
         hit_ng.append(ng_ok)
@@ -577,48 +698,80 @@ def _evaluate_node(
     trigger = "none"
     status = "ok"
     flags: list[str] = []
+    evidence_source = "none"
 
     allow_pc_only_no_div = bool(params.get("allow_pc_only_when_no_divstrip", True))
     allow_divstrip_only = bool(params.get("allow_divstrip_only_when_no_pointcloud", True))
+    allow_divstrip_only_when_drivezone_miss = bool(params.get("allow_divstrip_only_when_drivezone_miss", False))
 
-    if divstrip_union is not None and best_divstrip_pc_s is not None:
-        found_idx = int(round(best_divstrip_pc_s / step))
-        trigger = "divstrip+pc"
-    elif divstrip_union is not None and (not pointcloud_usable) and allow_divstrip_only and first_divstrip_s is not None:
-        found_idx = int(round(first_divstrip_s / step))
-        trigger = "divstrip_only_degraded"
-        status = "suspect"
-        flags.append("degraded_divstrip_only")
-    elif pointcloud_usable and first_pc_only_s is not None:
-        if divstrip_union is None:
-            if allow_pc_only_no_div:
-                found_idx = int(round(first_pc_only_s / step))
-                trigger = "pc_only"
-        elif first_divstrip_s is None:
-            if allow_pc_only_no_div:
-                found_idx = int(round(first_pc_only_s / step))
-                trigger = "pc_only_no_divstrip_hit"
-                status = "suspect"
-                flags.append("divstrip_present_but_never_hit")
-                breakpoints.append(
-                    make_breakpoint(
-                        code=BP_DIVSTRIP_NEVER_HIT,
-                        severity="soft",
-                        nodeid=nodeid,
-                        message="divstrip_exists_but_never_hit_fallback_pc_only",
-                        extra={"first_pc_only_dist_m": float(first_pc_only_s)},
-                    )
+    if use_drivezone and drivezone_usable:
+        if best_divstrip_dz_s is not None:
+            found_idx = int(round(best_divstrip_dz_s / step))
+            trigger = "divstrip+dz"
+            evidence_source = "drivezone"
+        else:
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_DRIVEZONE_SPLIT_NOT_FOUND,
+                    severity="hard",
+                    nodeid=nodeid,
+                    message="drivezone_split_not_found_after_divstrip",
+                    extra={"first_divstrip_hit_dist_m": first_divstrip_s},
                 )
-        elif first_pc_only_s >= float(first_divstrip_s + pc_only_after_div_min):
-            found_idx = int(round(first_pc_only_s / step))
-            trigger = "pc_only_after_divstrip_miss"
+            )
+            if allow_divstrip_only_when_drivezone_miss and first_divstrip_s is not None:
+                found_idx = int(round(first_divstrip_s / step))
+                trigger = "divstrip_only_degraded"
+                status = "suspect"
+                flags.append("drivezone_split_not_found_degraded_divstrip_only")
+                evidence_source = "divstrip_only"
+    else:
+        if use_drivezone and not drivezone_usable:
+            flags.append("drivezone_missing")
+        if divstrip_union is not None and best_divstrip_pc_s is not None:
+            found_idx = int(round(best_divstrip_pc_s / step))
+            trigger = "divstrip+pc"
+            evidence_source = "pointcloud"
+        elif divstrip_union is not None and (not pointcloud_usable) and allow_divstrip_only and first_divstrip_s is not None:
+            found_idx = int(round(first_divstrip_s / step))
+            trigger = "divstrip_only_degraded"
             status = "suspect"
-            flags.append("pc_only_after_divstrip_miss")
+            flags.append("degraded_divstrip_only")
+            evidence_source = "divstrip_only"
+        elif pointcloud_usable and first_pc_only_s is not None:
+            if divstrip_union is None:
+                if allow_pc_only_no_div:
+                    found_idx = int(round(first_pc_only_s / step))
+                    trigger = "pc_only"
+                    evidence_source = "pointcloud"
+            elif first_divstrip_s is None:
+                if allow_pc_only_no_div:
+                    found_idx = int(round(first_pc_only_s / step))
+                    trigger = "pc_only_no_divstrip_hit"
+                    status = "suspect"
+                    evidence_source = "pointcloud"
+                    flags.append("divstrip_present_but_never_hit")
+                    breakpoints.append(
+                        make_breakpoint(
+                            code=BP_DIVSTRIP_NEVER_HIT,
+                            severity="soft",
+                            nodeid=nodeid,
+                            message="divstrip_exists_but_never_hit_fallback_pc_only",
+                            extra={"first_pc_only_dist_m": float(first_pc_only_s)},
+                        )
+                    )
+            elif first_pc_only_s >= float(first_divstrip_s + pc_only_after_div_min):
+                found_idx = int(round(first_pc_only_s / step))
+                trigger = "pc_only_after_divstrip_miss"
+                status = "suspect"
+                evidence_source = "pointcloud"
+                flags.append("pc_only_after_divstrip_miss")
 
     if found_idx is None:
         final_line = lines[-1] if lines else dummy_line
         anchor_pt, dist_to_div = anchor_point_from_crossline(line=final_line, divstrip_union=divstrip_union)
         dist_line_to_div = None if divstrip_union is None else float(final_line.distance(divstrip_union))
+        dist_line_to_dz_edge = None if drivezone_union is None else float(final_line.distance(drivezone_union.boundary))
         breakpoints.append(
             make_breakpoint(
                 code=BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION,
@@ -647,8 +800,12 @@ def _evaluate_node(
                     extra={"stop_dist_m": float(stop_dist)},
                 )
             )
+        id_map = {str(k): int(v) for k, v in node.id_fields}
         return {
             "nodeid": int(nodeid),
+            "id": id_map.get("id"),
+            "mainid": id_map.get("mainid"),
+            "mainnodeid": id_map.get("mainnodeid"),
             "kind": None if kind is None else int(kind),
             "is_merge_kind": bool(is_merge),
             "is_diverge_kind": bool(is_diverge),
@@ -663,13 +820,24 @@ def _evaluate_node(
             "next_intersection_dist_m": None if next_inter is None else float(next_inter),
             "dist_to_divstrip_m": dist_to_div,
             "dist_line_to_divstrip_m": dist_line_to_div,
+            "dist_line_to_drivezone_edge_m": dist_line_to_dz_edge,
             "confidence": 0.0,
             "flags": [],
+            "evidence_source": evidence_source,
             "anchor_point": anchor_pt,
             "crossline_opt": final_line,
+            "tip_s_m": tip_s,
             "first_divstrip_hit_dist_m": first_divstrip_s,
+            "best_divstrip_dz_dist_m": best_divstrip_dz_s,
             "best_divstrip_pc_dist_m": best_divstrip_pc_s,
             "first_pc_only_dist_m": first_pc_only_s,
+            "fan_area_m2": float(best_fan_diag.get("fan_area_m2", 0.0)),
+            "non_drivezone_area_m2": float(best_fan_diag.get("non_drivezone_area_m2", 0.0)),
+            "non_drivezone_frac": float(best_fan_diag.get("non_drivezone_frac", 0.0)),
+            "clipped_len_m": float(final_line.length),
+            "clip_empty": False,
+            "clip_piece_type": "none",
+            "stop_diag": stop_diag,
             "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
             "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
             "resolved_from": resolved_from,
@@ -680,6 +848,28 @@ def _evaluate_node(
     scan_dist = float(scan_values[found_idx])
     anchor_pt, dist_to_div = anchor_point_from_crossline(line=final_line, divstrip_union=divstrip_union)
     dist_line_to_div = None if divstrip_union is None else float(final_line.distance(divstrip_union))
+    fan_diag = fan_diag_by_idx.get(found_idx, best_fan_diag)
+    clip_diag: dict[str, Any] = {"clipped_len_m": float(final_line.length), "clip_empty": False, "chosen_piece_type": "none"}
+
+    if trigger == "divstrip+dz" and drivezone_usable and drivezone_clip_crossline:
+        final_line, clip_diag = clip_crossline_to_drivezone(
+            crossline=final_line,
+            drivezone_union=drivezone_union,
+            anchor_pt=anchor_pt,
+        )
+        if bool(clip_diag.get("clip_empty", False)):
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_DRIVEZONE_CLIP_EMPTY,
+                    severity="hard",
+                    nodeid=nodeid,
+                    message="drivezone_clip_empty",
+                )
+            )
+            status = "fail"
+            flags.append("drivezone_clip_empty")
+        anchor_pt, dist_to_div = anchor_point_from_crossline(line=final_line, divstrip_union=divstrip_union)
+        dist_line_to_div = None if divstrip_union is None else float(final_line.distance(divstrip_union))
 
     if scan_dist > float(params.get("scan_near_limit_m", 20.0)):
         status = "suspect"
@@ -696,7 +886,7 @@ def _evaluate_node(
             )
         )
 
-    if trigger in {"divstrip+pc", "divstrip_only_degraded"} and dist_line_to_div is not None and dist_line_to_div > div_tol:
+    if trigger in {"divstrip+pc", "divstrip_only_degraded", "divstrip+dz"} and dist_line_to_div is not None and dist_line_to_div > div_tol:
         breakpoints.append(
             make_breakpoint(
                 code=BP_DIVSTRIP_TOLERANCE_VIOLATION,
@@ -708,14 +898,20 @@ def _evaluate_node(
         )
 
     conf = compute_confidence(trigger=trigger, scan_dist_m=scan_dist)
+    id_map = {str(k): int(v) for k, v in node.id_fields}
+    dist_line_to_dz_edge = None if drivezone_union is None else float(final_line.distance(drivezone_union.boundary))
+    anchor_found = bool(status != "fail")
     return {
         "nodeid": int(nodeid),
+        "id": id_map.get("id"),
+        "mainid": id_map.get("mainid"),
+        "mainnodeid": id_map.get("mainnodeid"),
         "kind": None if kind is None else int(kind),
         "is_merge_kind": bool(is_merge),
         "is_diverge_kind": bool(is_diverge),
         "anchor_type": anchor_type,
         "status": status,
-        "anchor_found": True,
+        "anchor_found": anchor_found,
         "trigger": trigger,
         "scan_dir": scan_dir_label,
         "scan_dist_m": float(scan_dist),
@@ -724,13 +920,24 @@ def _evaluate_node(
         "next_intersection_dist_m": None if next_inter is None else float(next_inter),
         "dist_to_divstrip_m": dist_to_div,
         "dist_line_to_divstrip_m": dist_line_to_div,
+        "dist_line_to_drivezone_edge_m": dist_line_to_dz_edge,
         "confidence": float(conf),
         "flags": flags,
+        "evidence_source": evidence_source,
         "anchor_point": anchor_pt,
         "crossline_opt": final_line,
+        "tip_s_m": tip_s,
         "first_divstrip_hit_dist_m": first_divstrip_s,
+        "best_divstrip_dz_dist_m": best_divstrip_dz_s,
         "best_divstrip_pc_dist_m": best_divstrip_pc_s,
         "first_pc_only_dist_m": first_pc_only_s,
+        "fan_area_m2": float(fan_diag.get("fan_area_m2", 0.0)),
+        "non_drivezone_area_m2": float(fan_diag.get("non_drivezone_area_m2", 0.0)),
+        "non_drivezone_frac": float(fan_diag.get("non_drivezone_frac", 0.0)),
+        "clipped_len_m": float(clip_diag.get("clipped_len_m", final_line.length)),
+        "clip_empty": bool(clip_diag.get("clip_empty", False)),
+        "clip_piece_type": str(clip_diag.get("chosen_piece_type", "none")),
+        "stop_diag": stop_diag,
         "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
         "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
         "resolved_from": resolved_from,
@@ -777,6 +984,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
     node_src_crs = _resolve_src_hint(hint=runtime.get("node_src_crs"), global_hint=src_crs_global)
     road_src_crs = _resolve_src_hint(hint=runtime.get("road_src_crs"), global_hint=src_crs_global)
     divstrip_src_crs = _resolve_src_hint(hint=runtime.get("divstrip_src_crs"), global_hint=src_crs_global)
+    drivezone_src_crs = _resolve_src_hint(hint=runtime.get("drivezone_src_crs"), global_hint=src_crs_global)
     traj_src_crs = _resolve_src_hint(hint=runtime.get("traj_src_crs"), global_hint=src_crs_global)
     pointcloud_crs = _resolve_src_hint(hint=runtime.get("pointcloud_crs"), global_hint=src_crs_global)
     params = dict(runtime.get("params", {}))
@@ -797,6 +1005,10 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
     divstrip_path = _normalize_user_path(runtime.get("divstrip_path"))
     if divstrip_path is None:
         divstrip_path = vector_dir / "DivStripZone.geojson"
+
+    drivezone_path = _normalize_user_path(runtime.get("drivezone_path"))
+    if drivezone_path is None:
+        drivezone_path = vector_dir / "DriveZone.geojson"
 
     pointcloud_path = _normalize_user_path(runtime.get("pointcloud_path"))
     if pointcloud_path is None:
@@ -996,6 +1208,84 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             )
         )
 
+    use_drivezone_cfg = bool(params.get("use_drivezone", True))
+    drivezone_union = None
+    drivezone_usable = False
+    drivezone_meta: dict[str, Any] = {
+        "path": str(drivezone_path),
+        "enabled": bool(use_drivezone_cfg),
+        "exists": bool(drivezone_path and drivezone_path.is_file()),
+        "src_crs_detected": None,
+        "src_crs_used": None,
+        "dst_crs": dst_crs,
+        "bbox_src": None,
+        "bbox_dst": None,
+    }
+    if use_drivezone_cfg:
+        if drivezone_path is None or (not drivezone_path.is_file()):
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_DRIVEZONE_MISSING,
+                    severity="soft",
+                    nodeid=None,
+                    message="drivezone_missing",
+                )
+            )
+        else:
+            try:
+                drivezone_union, meta, dz_errors = load_drivezone_union(
+                    path=drivezone_path,
+                    src_crs_override=drivezone_src_crs,
+                    dst_crs=dst_crs,
+                    aoi=aoi,
+                )
+                drivezone_meta.update(
+                    {
+                        "src_crs_detected": meta.src_crs_detected,
+                        "src_crs_used": meta.src_crs,
+                        "dst_crs": meta.dst_crs,
+                        "bbox_src": meta.bbox_src,
+                        "bbox_dst": meta.bbox_dst,
+                        "guess_source": meta.guess_source,
+                        "total_features": meta.total_features,
+                        "kept_features": meta.kept_features,
+                        "errors": dz_errors,
+                    }
+                )
+                drivezone_usable = bool(drivezone_union is not None and (not drivezone_union.is_empty))
+                if not drivezone_usable:
+                    breakpoints.append(
+                        make_breakpoint(
+                            code=BP_DRIVEZONE_UNION_EMPTY,
+                            severity="hard",
+                            nodeid=None,
+                            message="drivezone_union_empty_or_invalid",
+                        )
+                    )
+                if any(str(x) == "drivezone_union_empty" for x in dz_errors):
+                    breakpoints.append(
+                        make_breakpoint(
+                            code=BP_DRIVEZONE_UNION_EMPTY,
+                            severity="hard",
+                            nodeid=None,
+                            message="drivezone_union_empty",
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                if "crs_unknown:" in msg:
+                    breakpoints.append(
+                        make_breakpoint(
+                            code=BP_DRIVEZONE_CRS_UNKNOWN,
+                            severity="hard",
+                            nodeid=None,
+                            message="drivezone_crs_unknown",
+                            extra={"detail": msg},
+                        )
+                    )
+                else:
+                    raise
+
     pointcloud: PointCloudData | None = None
     pointcloud_usable = False
     pointcloud_meta: dict[str, Any] = {"path": str(pointcloud_path) if pointcloud_path else None}
@@ -1022,12 +1312,16 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
         )
         pointcloud_usable = bool(pointcloud.usable)
         if not pointcloud_usable:
+            reason = str(pointcloud.reason or "pointcloud_unusable")
+            bp_code = BP_POINTCLOUD_MISSING_OR_UNUSABLE
+            if reason.startswith("pointcloud_crs_unknown"):
+                bp_code = BP_POINTCLOUD_CRS_UNKNOWN_UNUSABLE
             breakpoints.append(
                 make_breakpoint(
-                    code=BP_POINTCLOUD_MISSING_OR_UNUSABLE,
+                    code=bp_code,
                     severity="soft",
                     nodeid=None,
-                    message=str(pointcloud.reason or "pointcloud_unusable"),
+                    message=reason,
                 )
             )
         else:
@@ -1070,6 +1364,8 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             node=node,
             road_graph=road_graph,
             divstrip_union=divstrip_union,
+            drivezone_union=drivezone_union,
+            drivezone_usable=bool(drivezone_usable and use_drivezone_cfg),
             ng_points_xy=ng_points_xy,
             params=params,
             breakpoints=breakpoints,
@@ -1130,6 +1426,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
         "global_node_path": str(node_path),
         "global_road_path": str(road_path),
         "divstrip_path": str(divstrip_path),
+        "drivezone_path": str(drivezone_path),
         "pointcloud_path": str(pointcloud_path) if pointcloud_path else None,
         "traj_glob": traj_glob,
         "focus_node_ids": focus_ids,
@@ -1138,6 +1435,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
         "node_src_crs": str(node_src_crs),
         "road_src_crs": str(road_src_crs),
         "divstrip_src_crs": str(divstrip_src_crs),
+        "drivezone_src_crs": str(drivezone_src_crs),
         "traj_src_crs": str(traj_src_crs),
         "pointcloud_crs": str(pointcloud_crs),
         "params": params,
@@ -1145,6 +1443,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             "nodes": node_meta,
             "roads": road_meta,
             "divstrip": divstrip_meta,
+            "drivezone": drivezone_meta,
             "pointcloud": pointcloud_meta,
             "traj": {
                 "path_count": len(traj.paths),
@@ -1189,6 +1488,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             "traj_path_count": int(len(traj.paths)),
             "traj_total_points": int(traj.total_points),
             "pointcloud_usable": bool(pointcloud_usable),
+            "drivezone_usable": bool(drivezone_usable and use_drivezone_cfg),
             "pointcloud_class_counts": pointcloud_meta.get("class_counts", {}),
             "ng_candidates_before_suppress": int(ng_before_suppress),
             "ng_candidates_after_suppress": int(ng_after_suppress),
@@ -1223,6 +1523,13 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
                 "dst_crs": divstrip_meta.get("dst_crs"),
                 "bbox_src": divstrip_meta.get("bbox_src"),
                 "bbox_dst": divstrip_meta.get("bbox_dst"),
+            },
+            "drivezone": {
+                "src_crs_detected": drivezone_meta.get("src_crs_detected"),
+                "src_crs_used": drivezone_meta.get("src_crs_used"),
+                "dst_crs": drivezone_meta.get("dst_crs"),
+                "bbox_src": drivezone_meta.get("bbox_src"),
+                "bbox_dst": drivezone_meta.get("bbox_dst"),
             },
             "traj": {
                 "src_crs_detected": traj_src_detected,
@@ -1268,6 +1575,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
                 "traj_path_count": int(len(traj.paths)),
                 "traj_total_points": int(traj.total_points),
                 "pointcloud_usable": bool(pointcloud_usable),
+                "drivezone_usable": bool(drivezone_usable and use_drivezone_cfg),
                 "pointcloud_class_counts": pointcloud_meta.get("class_counts", {}),
                 "ng_candidates_before_suppress": int(ng_before_suppress),
                 "ng_candidates_after_suppress": int(ng_after_suppress),
@@ -1316,11 +1624,13 @@ def run_patch(
         "node_src_crs": cfg.get("node_src_crs"),
         "road_src_crs": cfg.get("road_src_crs"),
         "divstrip_src_crs": cfg.get("divstrip_src_crs"),
+        "drivezone_src_crs": cfg.get("drivezone_src_crs"),
         "traj_src_crs": cfg.get("traj_src_crs"),
         "pointcloud_crs": cfg.get("pointcloud_crs"),
         "global_node_path": cfg.get("global_node_path"),
         "global_road_path": cfg.get("global_road_path"),
         "divstrip_path": cfg.get("divstrip_path"),
+        "drivezone_path": cfg.get("drivezone_path"),
         "pointcloud_path": cfg.get("pointcloud_path"),
         "traj_glob": cfg.get("traj_glob"),
         "focus_node_ids": [str(x) for x in cfg.get("focus_node_ids", [])],

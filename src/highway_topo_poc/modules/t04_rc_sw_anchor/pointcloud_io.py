@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from .crs_norm import guess_crs_from_bbox, normalize_epsg_name, parse_geojson_crs, transform_xy_arrays
+from .field_norm import get_first_int, normalize_props
 from .io_geojson import infer_lonlat_like_bbox
 
 
@@ -169,8 +170,7 @@ def _resolve_pc_src_crs(
     if "4326" in name:
         return None, "EPSG:4326", "filename_hint"
 
-    dst_norm = normalize_epsg_name(dst_crs)
-    return None, dst_norm, "fallback_dst"
+    return None, None, "unknown"
 
 
 def _project_xy_to_dst(xy: np.ndarray, *, src_crs: str | None, dst_crs: str) -> np.ndarray:
@@ -214,6 +214,8 @@ def _load_las_like(path: Path, *, use_classification: bool, src_crs_hint: str, d
         geojson_payload=None,
         dst_crs=dst_crs,
     )
+    if src_used is None:
+        return _empty_pc(path, "las", "pointcloud_crs_unknown", dst_crs=dst_crs)
 
     try:
         xy_dst = _project_xy_to_dst(xy_src, src_crs=src_used, dst_crs=dst_crs)
@@ -299,7 +301,8 @@ def _load_geojson_fallback(path: Path, *, use_classification: bool, src_crs_hint
 
         props = feat.get("properties")
         props = props if isinstance(props, dict) else {}
-        c = props.get("classification", props.get("class"))
+        props_norm = normalize_props(props)
+        c = get_first_int(props_norm, ["classification", "class"])
         if c is None:
             cls_present = False
             cls_list.append(0)
@@ -325,6 +328,8 @@ def _load_geojson_fallback(path: Path, *, use_classification: bool, src_crs_hint
         geojson_payload=payload,
         dst_crs=dst_crs,
     )
+    if src_used is None:
+        return _empty_pc(path, "geojson", "pointcloud_crs_unknown", dst_crs=dst_crs)
 
     try:
         xy_dst = _project_xy_to_dst(xy_src, src_crs=src_used, dst_crs=dst_crs)

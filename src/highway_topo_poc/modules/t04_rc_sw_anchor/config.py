@@ -28,6 +28,18 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "allow_pc_only_when_no_divstrip": True,
     "pc_only_min_scan_dist_m": 10.0,
     "pc_only_after_divstrip_min_m": 5.0,
+    "use_drivezone": True,
+    "drivezone_merge_mode": "unary_union",
+    "drivezone_clip_crossline": True,
+    "drivezone_fan_radius_m": 20.0,
+    "drivezone_fan_half_angle_deg": 30.0,
+    "drivezone_fan_band_width_m": 6.0,
+    "drivezone_non_drivezone_area_min_m2": 3.0,
+    "drivezone_non_drivezone_frac_min": 0.15,
+    "next_intersection_degree_min": 3,
+    "stop_intersection_require_connected": True,
+    "disable_geometric_stop_fallback": True,
+    "allow_divstrip_only_when_drivezone_miss": False,
     "min_anchor_found_ratio_focus": 1.0,
     "min_anchor_found_ratio_patch": 0.90,
     "no_trigger_count_max_focus": 0,
@@ -50,9 +62,11 @@ DEFAULT_RUNTIME: dict[str, Any] = {
     "global_node_path": None,
     "global_road_path": None,
     "divstrip_path": None,
+    "drivezone_path": None,
     "pointcloud_path": None,
     "traj_glob": None,
     "focus_node_ids": [],
+    "drivezone_src_crs": "auto",
 }
 
 
@@ -163,6 +177,7 @@ def _normalize_paths(runtime: dict[str, Any]) -> None:
         "global_node_path",
         "global_road_path",
         "divstrip_path",
+        "drivezone_path",
         "pointcloud_path",
         "traj_glob",
         "config_json",
@@ -192,7 +207,13 @@ def resolve_runtime_config(
 
     runtime = dict(DEFAULT_RUNTIME)
     runtime.update({k: v for k, v in cfg_payload.items() if k != "params"})
-    runtime.update({k: v for k, v in cli_overrides.items() if v is not None and k not in {"focus_node_ids", "focus_node_ids_file"}})
+    runtime.update(
+        {
+            k: v
+            for k, v in cli_overrides.items()
+            if v is not None and k not in {"focus_node_ids", "focus_node_ids_file"} and k not in DEFAULT_PARAMS
+        }
+    )
 
     params = dict(DEFAULT_PARAMS)
     raw_params = cfg_payload.get("params", {})
@@ -207,6 +228,13 @@ def resolve_runtime_config(
     for key, value in (set_overrides or {}).items():
         if key not in params:
             raise ValueError(f"unknown_param_key: {key}")
+        params[key] = _coerce_like(DEFAULT_PARAMS[key], value)
+
+    for key, value in cli_overrides.items():
+        if value is None:
+            continue
+        if key not in params:
+            continue
         params[key] = _coerce_like(DEFAULT_PARAMS[key], value)
 
     # Focus NodeIDs precedence: CLI string/file > config_json field

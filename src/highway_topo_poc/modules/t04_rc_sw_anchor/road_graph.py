@@ -42,6 +42,12 @@ class RoadGraph:
             self.incident.setdefault(int(road.snodeid), []).append(idx)
             self.incident.setdefault(int(road.enodeid), []).append(idx)
 
+    def node_degree(self, nodeid: int) -> int:
+        edges = self.incident.get(int(nodeid), [])
+        if not edges:
+            return 0
+        return int(len(set(int(x) for x in edges)))
+
     def pick_incoming_road(self, nodeid: int) -> RoadPick | None:
         cands = [r for r in self.roads if int(r.enodeid) == int(nodeid)]
         if not cands:
@@ -99,23 +105,26 @@ class RoadGraph:
             return _coords_vec(coords, len(coords) - 1, len(coords) - 2)
         return (1.0, 0.0)
 
-    def _is_intersection_kind(self, nodeid: int, mask: int) -> bool:
+    def _is_intersection_kind(self, nodeid: int, mask: int | None) -> bool:
+        if mask is None:
+            return True
         kind = int(self.node_kinds.get(int(nodeid), 0))
-        return (kind & mask) != 0
+        return (kind & int(mask)) != 0
 
-    def _walk_candidate(
+    def _walk_candidate_connected(
         self,
         *,
         start_nodeid: int,
         start_edge_idx: int,
         initial_dir: tuple[float, float],
-        intersection_kind_mask: int,
+        degree_min: int,
+        intersection_kind_mask: int | None,
         max_hops: int,
-    ) -> float | None:
+    ) -> tuple[float | None, dict[str, int]]:
         road = self.roads[start_edge_idx]
         other = self._other_node(start_edge_idx, start_nodeid)
         if other is None:
-            return None
+            return None, {"deg_too_low_skipped": 0}
 
         total = float(road.length_m)
         prev_node = int(start_nodeid)
@@ -123,9 +132,14 @@ class RoadGraph:
         curr_edge_idx = int(start_edge_idx)
         direction = normalize_vec(initial_dir[0], initial_dir[1])
 
+        diag = {"deg_too_low_skipped": 0}
         for _ in range(max_hops):
-            if curr_node != int(start_nodeid) and self._is_intersection_kind(curr_node, intersection_kind_mask):
-                return total
+            if curr_node != int(start_nodeid):
+                deg = self.node_degree(curr_node)
+                if deg >= int(degree_min) and self._is_intersection_kind(curr_node, intersection_kind_mask):
+                    return total, diag
+                if deg < int(degree_min):
+                    diag["deg_too_low_skipped"] += 1
 
             edge_candidates = self.incident.get(curr_node, [])
             best_edge_idx: int | None = None
@@ -155,9 +169,9 @@ class RoadGraph:
                     best_next_node = int(next_node)
 
             if best_edge_idx is None:
-                return None
+                return None, diag
             if best_align < -0.25:
-                return None
+                return None, diag
 
             total += float(self.roads[best_edge_idx].length_m)
             prev_node = curr_node
@@ -165,7 +179,7 @@ class RoadGraph:
             curr_edge_idx = int(best_edge_idx)
             direction = normalize_vec(best_dir[0], best_dir[1])
 
-        return None
+        return None, diag
 
     def _fallback_projection_distance(self, *, start_nodeid: int, scan_dir: tuple[float, float], mask: int) -> float | None:
         start_pt = self.node_points.get(int(start_nodeid))
@@ -202,14 +216,16 @@ class RoadGraph:
 
         return best
 
-    def find_next_intersection_distance(
+    def find_next_intersection_distance_connected(
         self,
         *,
         nodeid: int,
         scan_dir: tuple[float, float],
-        intersection_kind_mask: int = 0b11100,
+        degree_min: int = 3,
+        intersection_kind_mask: int | None = 0b11100,
         max_hops: int = 64,
-    ) -> float | None:
+        disable_geometric_fallback: bool = True,
+    ) -> tuple[float | None, dict[str, object]]:
         dir_u = normalize_vec(scan_dir[0], scan_dir[1])
         start_edges = []
         for eidx in self.incident.get(int(nodeid), []):
@@ -221,21 +237,69 @@ class RoadGraph:
         start_edges.sort(key=lambda x: (x[0], x[1]), reverse=True)
 
         distances: list[float] = []
+        deg_too_low_skipped = 0
         for _align, _length, edge_idx, away in start_edges:
-            d = self._walk_candidate(
+            d, path_diag = self._walk_candidate_connected(
                 start_nodeid=int(nodeid),
                 start_edge_idx=int(edge_idx),
                 initial_dir=away,
-                intersection_kind_mask=int(intersection_kind_mask),
+                degree_min=int(degree_min),
+                intersection_kind_mask=None if intersection_kind_mask is None else int(intersection_kind_mask),
                 max_hops=int(max_hops),
             )
+            deg_too_low_skipped += int(path_diag.get("deg_too_low_skipped", 0))
             if d is not None and d > 0:
                 distances.append(float(d))
 
         if distances:
-            return float(min(distances))
+            return float(min(distances)), {
+                "start_edges_count": int(len(start_edges)),
+                "degree_min": int(degree_min),
+                "deg_too_low_skipped": int(deg_too_low_skipped),
+                "used_fallback": False,
+                "low_confidence_fallback": False,
+            }
 
-        return self._fallback_projection_distance(start_nodeid=int(nodeid), scan_dir=dir_u, mask=int(intersection_kind_mask))
+        if not bool(disable_geometric_fallback):
+            fb = self._fallback_projection_distance(
+                start_nodeid=int(nodeid),
+                scan_dir=dir_u,
+                mask=int(intersection_kind_mask) if intersection_kind_mask is not None else 0,
+            )
+            if fb is not None and fb > 0:
+                return float(fb), {
+                    "start_edges_count": int(len(start_edges)),
+                    "degree_min": int(degree_min),
+                    "deg_too_low_skipped": int(deg_too_low_skipped),
+                    "used_fallback": True,
+                    "low_confidence_fallback": True,
+                }
+
+        return None, {
+            "start_edges_count": int(len(start_edges)),
+            "degree_min": int(degree_min),
+            "deg_too_low_skipped": int(deg_too_low_skipped),
+            "used_fallback": False,
+            "low_confidence_fallback": False,
+        }
+
+    def find_next_intersection_distance(
+        self,
+        *,
+        nodeid: int,
+        scan_dir: tuple[float, float],
+        intersection_kind_mask: int = 0b11100,
+        max_hops: int = 64,
+    ) -> float | None:
+        dist, _diag = self.find_next_intersection_distance_connected(
+            nodeid=nodeid,
+            scan_dir=scan_dir,
+            degree_min=3,
+            intersection_kind_mask=int(intersection_kind_mask),
+            max_hops=int(max_hops),
+            disable_geometric_fallback=True,
+        )
+        return dist
 
 
 __all__ = ["RoadGraph", "RoadPick", "dot"]

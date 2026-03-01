@@ -32,6 +32,7 @@ def _run_case(
         "global_node_path": str(data["global_node_path"]),
         "global_road_path": str(data["global_road_path"]),
         "divstrip_path": str(data["divstrip_path"]),
+        "drivezone_path": str(data["drivezone_path"]),
         "pointcloud_path": str(data["pointcloud_path"]),
         "traj_glob": str(data["traj_glob"]),
         "focus_node_ids": list(data["focus_node_ids"]),
@@ -40,6 +41,7 @@ def _run_case(
         "node_src_crs": "auto",
         "road_src_crs": "auto",
         "divstrip_src_crs": "auto",
+        "drivezone_src_crs": "auto",
         "traj_src_crs": "auto",
         "pointcloud_crs": pointcloud_crs_override or str(data["pointcloud_crs"]),
         "params": dict(DEFAULT_PARAMS),
@@ -89,6 +91,7 @@ def _assert_anchor_quality(out_dir: Path, expected_matched_field: str) -> None:
         assert dist_line is not None
         assert float(dist_line) <= 1.0
         assert str(record.get("trigger")) in {
+            "divstrip+dz",
             "divstrip+pc",
             "pc_only",
             "pc_only_no_divstrip_hit",

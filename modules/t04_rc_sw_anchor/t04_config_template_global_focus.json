@@ -5,6 +5,7 @@
   "global_node_path": "D:/TestData/.../RCSDNode.geojson",
   "global_road_path": "D:/TestData/.../RCSDRoad.geojson",
   "divstrip_path": "D:/TestData/highway_topo_poc_data/normal/2855795596723843/Vector/DivStripZone.geojson",
+  "drivezone_path": "D:/TestData/highway_topo_poc_data/normal/2855795596723843/Vector/DriveZone.geojson",
   "pointcloud_path": "D:/TestData/highway_topo_poc_data/normal/2855795596723843/PointCloud/merged_cleaned_classified_3857.laz",
   "traj_glob": "D:/TestData/highway_topo_poc_data/normal/2855795596723843/Traj/*/raw_dat_pose.geojson",
   "focus_node_ids": [
@@ -16,11 +17,25 @@
   "node_src_crs": "auto",
   "road_src_crs": "auto",
   "divstrip_src_crs": "auto",
+  "drivezone_src_crs": "auto",
   "traj_src_crs": "auto",
   "pointcloud_crs": "auto",
   "params": {
+    "use_drivezone": true,
+    "drivezone_merge_mode": "unary_union",
+    "drivezone_clip_crossline": true,
+    "drivezone_fan_radius_m": 20.0,
+    "drivezone_fan_half_angle_deg": 30.0,
+    "drivezone_fan_band_width_m": 6.0,
+    "drivezone_non_drivezone_area_min_m2": 3.0,
+    "drivezone_non_drivezone_frac_min": 0.15,
+    "next_intersection_degree_min": 3,
+    "stop_intersection_require_connected": true,
+    "disable_geometric_stop_fallback": true,
+    "allow_divstrip_only_when_drivezone_miss": false,
     "traj_buffer_m": 1.5,
     "pc_only_min_scan_dist_m": 10.0,
-    "pc_only_after_divstrip_min_m": 5.0
+    "pc_only_after_divstrip_min_m": 5.0,
+    "pc_use_classification": true
   }
 }

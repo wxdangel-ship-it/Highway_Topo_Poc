@@ -2,8 +2,8 @@
 
 ## 1. 目标与范围
 - 模块 ID：`t04_rc_sw_anchor`
-- 目标：识别 merge/diverge 锚点（gore tip/nose 近似）并输出最终横截线 `intersection_l_opt`。
-- 范围：仅处理 `merge/diverge`，其它类型写入 breakpoint 并输出失败条目。
+- 目标：识别 merge/diverge 锚点并输出最终横截线 `intersection_l_opt`。
+- 范围：仅处理 `merge/diverge`；其他 kind 输出 breakpoint 与失败条目。
 
 ## 2. 模式与输入
 支持模式：
@@ -19,7 +19,8 @@
 
 可选：
 - `--divstrip_path <DivStripZone.geojson>`
-- `--pointcloud_path <merged_cleaned_classified_3857.laz|las|merged.geojson>`
+- `--drivezone_path <DriveZone.geojson>`（vNext 主证据）
+- `--pointcloud_path <*.laz|*.las|*.geojson>`（兼容降级）
 - `--traj_glob <patch_dir/Traj/*/raw_dat_pose.geojson>`
 
 ### 2.2 patch 输入
@@ -27,54 +28,58 @@
 - 默认读取：
   - `patch_dir/Vector/RCSDNode.geojson`（缺失回退 `Node.geojson`）
   - `patch_dir/Vector/RCSDRoad.geojson`（缺失回退 `Road.geojson`）
+  - `patch_dir/Vector/DriveZone.geojson`（若存在）
 
 ### 2.3 Focus NodeIDs 提供方式
 优先级：`CLI > config_json`
 
-A) `--focus_node_ids "id1,id2"`  
-B) `--focus_node_ids_file <txt|json|csv>`  
+A) `--focus_node_ids "id1,id2"`
+B) `--focus_node_ids_file <txt|json|csv>`
 C) `--config_json` 内 `focus_node_ids`
 
-## 3. CRS 契约（v5）
-所有几何计算统一在 `dst_crs`（默认 `EPSG:3857`）。
-
-CLI：
-- `--dst_crs EPSG:3857`
-- `--src_crs auto`（全局缺省）
-- `--node_src_crs auto|EPSG:4326|EPSG:3857`
-- `--road_src_crs auto|EPSG:4326|EPSG:3857`
-- `--divstrip_src_crs auto|EPSG:4326|EPSG:3857`
-- `--traj_src_crs auto|EPSG:4326|EPSG:3857`
-- `--pointcloud_crs auto|EPSG:4326|EPSG:3857`
-
-检测顺序：
-1) 分层显式参数（非 `auto`）  
-2) GeoJSON 顶层 `crs.properties.name`  
-3) bbox 启发式（经纬度范围 -> 4326；米制量级 -> 3857）
-
-若 CRS 无法识别且无 override，写入 `CRS_UNKNOWN`，并允许流程继续产出完整工件（`overall_pass=false`）。
+## 3. CRS 契约（vNext）
+- 所有几何计算统一在 `dst_crs`（默认 `EPSG:3857`）。
+- 分层 `*_src_crs` 支持 `auto|EPSG:xxxx`。
+- 自动检测顺序（GeoJSON 层）：
+  1) CLI 显式 hint（非 auto）
+  2) GeoJSON 顶层 `crs.properties.name`
+  3) bbox 启发式
+- PointCloud：若 `src_crs` 无法识别，则 `usable=false` + breakpoint（fail-closed），禁止 silent fallback 混算。
+- 新增层：`drivezone_src_crs` 纳入同一归一化链路与 summary diagnostics。
 
 ## 4. 业务规则
-- 类型：
-  - `kind bit4=diverge(16)`
-  - `kind bit3=merge(8)`
-  - 同时为真 -> `AMBIGUOUS_KIND`
-  - 均为假 -> `UNSUPPORTED_KIND`
-- 扫描 stop：`min(next_intersection_dist, scan_max_limit_m)`，失败写 `ROAD_GRAPH_WEAK_STOP`
-- 点云触发只使用 `class==1`，忽略 `class==12`
-- `traj_buffer_m` 内非地面候选可抑制
 
-### 4.1 触发优先级（DivStrip 优先）
-两阶段决策：
-1) 若 DivStrip 存在，优先选 `divstrip+pc`
-2) DivStrip 存在但未命中时，可降级 `pc_only_no_divstrip_hit`（`status=suspect` + `DIVSTRIP_NEVER_HIT`）
-3) DivStrip 存在且命中但未形成 `divstrip+pc`，可选 `pc_only_after_divstrip_miss`
-4) DivStrip 缺失时，按 `pc_only` 规则
-5) 点云不可用时可退化 `divstrip_only_degraded`
+### 4.1 kind 与 seed
+- `diverge = (kind & 16) != 0`
+- `merge = (kind & 8) != 0`
+- 同时为真：`AMBIGUOUS_KIND`
+- 均为假：`UNSUPPORTED_KIND`
 
-相关参数：
-- `pc_only_min_scan_dist_m`（默认 `10.0`）
-- `pc_only_after_divstrip_min_m`（默认 `5.0`）
+### 4.2 stop（联通 + degree）
+- stop 仅认“沿扫描方向在 RCSDRoad 图上可达”且“`degree >= next_intersection_degree_min`（默认 3）”的下一个路口。
+- 默认禁用几何 fallback（`disable_geometric_stop_fallback=true`）。
+- stop_reason：
+  - `next_intersection_connected_deg3`
+  - `next_intersection_not_found_connected`
+  - `next_intersection_disabled`
+  - `max_200`
+
+### 4.3 触发优先级（DriveZone 主证据）
+1) `divstrip+dz`：DivStrip 命中后，扇形中轴带内检测到非 DriveZone。
+2) `divstrip_only_degraded`：DriveZone 缺失/不满足触发且允许降级时。
+3) `divstrip+pc` / `pc_only*`：仅在 DriveZone 不可用时作为兼容降级。
+
+### 4.4 扇形判别
+- 构造 `fan_band = sector(origin=anchor_pt, dir=scan_vec, radius, half_angle) ∩ corridor(band_width)`。
+- `non_geom = fan_band - drivezone_union`
+- 命中条件：
+  - `non_drivezone_area_m2 >= drivezone_non_drivezone_area_min_m2`
+  - 或 `non_drivezone_frac >= drivezone_non_drivezone_frac_min`
+
+### 4.5 DriveZone 截断
+- `drivezone_clip_crossline=true` 时，对 `crossline_opt` 做 `intersection(drivezone_union)`。
+- 选取包含 anchor_pt 或距 anchor_pt 最近的线段作为最终输出。
+- clip 失败输出 `DRIVEZONE_CLIP_EMPTY`。
 
 ## 5. 输出
 输出根：`outputs/_work/t04_rc_sw_anchor/<run_id>/`
@@ -84,32 +89,23 @@ CLI：
 - `intersection_l_opt_3857.geojson`
 - `anchors_wgs84.geojson`
 - `intersection_l_opt_wgs84.geojson`
-- `anchors.geojson`（兼容名，内容同 3857）
-- `intersection_l_opt.geojson`（兼容名，内容同 3857）
+- `anchors.geojson`（兼容名，内容同 dst_crs 版本）
+- `intersection_l_opt.geojson`（兼容名，内容同 dst_crs 版本）
 - `anchors.json`
 - `metrics.json`
 - `breakpoints.json`
 - `summary.txt`
 - `chosen_config.json`
 
-`anchors/intersection` 的 `properties` 最小字段：
-- `nodeid`
-- `anchor_type`
-- `status`
-- `scan_dir`
-- `scan_dist_m`
-- `trigger`
-- `dist_to_divstrip_m`
-- `confidence`
-- `flags`
-
-`anchors.json` 额外包含调试字段：
-- `first_divstrip_hit_dist_m`
-- `best_divstrip_pc_dist_m`
-- `first_pc_only_dist_m`
+`intersection_l_opt*.geojson` properties 最小字段：
+- `nodeid/kind`
+- `id/mainnodeid/mainid`（存在则输出）
+- `kind_bits.merge` / `kind_bits.diverge`
+- `anchor_type/trigger/scan_dist_m/stop_reason/evidence_source`
 - `dist_line_to_divstrip_m`
-- `stop_reason`
-- `resolved_from`
+- `dist_line_to_drivezone_edge_m`
+- `fan_area_m2/non_drivezone_area_m2/non_drivezone_frac`
+- `clipped_len_m/clip_empty/clip_piece_type`
 
 ## 6. Breakpoints
 至少包含：
@@ -120,19 +116,26 @@ CLI：
 - `AMBIGUOUS_KIND`
 - `ROAD_FIELD_MISSING`
 - `ROAD_LINK_NOT_FOUND`
-- `ROAD_GRAPH_WEAK_STOP`
 - `DIVSTRIPZONE_MISSING`
-- `DIVSTRIP_NEVER_HIT`
+- `DRIVEZONE_MISSING`
+- `DRIVEZONE_UNION_EMPTY`
+- `DRIVEZONE_CRS_UNKNOWN`
+- `DRIVEZONE_CLIP_EMPTY`
+- `DRIVEZONE_SPLIT_NOT_FOUND`
+- `NEXT_INTERSECTION_NOT_FOUND_CONNECTED`
+- `NEXT_INTERSECTION_DISABLED`
+- `NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED`
+- `ROAD_GRAPH_DISCONNECTED_STOP`
+- `POINTCLOUD_CRS_UNKNOWN_UNUSABLE`
 - `POINTCLOUD_MISSING_OR_UNUSABLE`
-- `TRAJ_MISSING`
 - `NO_TRIGGER_BEFORE_NEXT_INTERSECTION`
 - `SCAN_EXCEED_200M`
-- `DIVSTRIP_TOLERANCE_VIOLATION`
 
 ## 7. 门禁
 Hard Gates：
 - 必需输出文件齐全
 - `seed_total > 0`
+- `hard_breakpoint_count == 0`
 
 Soft Gates（focus 默认）：
 - `anchor_found_ratio >= min_anchor_found_ratio_focus`（默认 `1.0`）

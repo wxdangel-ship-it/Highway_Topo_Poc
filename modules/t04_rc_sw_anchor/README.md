@@ -1,9 +1,11 @@
 # t04_rc_sw_anchor
 
-## 1. 模块能力（v5）
+## 1. 模块能力（vNext）
 - merge/diverge 锚点识别（gore tip/nose 近似）
-- 所有输入图层 CRS 归一化到 `dst_crs`（默认 `EPSG:3857`）后再计算
-- DivStrip 优先触发，避免 `pc_only@1m` 抢跑
+- 主证据切换为 `DriveZone`：`divstrip+dz`（扇形中轴带内非 DriveZone 判别）
+- 扫描 stop 使用“联通 + degree>=3”的下一路口，不再默认几何 fallback
+- `intersection_l_opt` 可选按 DriveZone 裁剪，输出线段落在可行驶区
+- 所有输入图层统一到 `dst_crs`（默认 `EPSG:3857`）再计算
 - 输出双版本 GeoJSON：`_3857` + `_wgs84`，并保留兼容文件名
 
 ## 2. 运行入口
@@ -21,14 +23,20 @@ python -m highway_topo_poc.modules.t04_rc_sw_anchor \
   --global_node_path /mnt/d/TestData/.../RCSDNode.geojson \
   --global_road_path /mnt/d/TestData/.../RCSDRoad.geojson \
   --divstrip_path /mnt/d/TestData/highway_topo_poc_data/normal/2855795596723843/Vector/DivStripZone.geojson \
+  --drivezone_path /mnt/d/TestData/highway_topo_poc_data/normal/2855795596723843/Vector/DriveZone.geojson \
   --pointcloud_path /mnt/d/TestData/highway_topo_poc_data/normal/2855795596723843/PointCloud/merged_cleaned_classified_3857.laz \
   --traj_glob "/mnt/d/TestData/highway_topo_poc_data/normal/2855795596723843/Traj/*/raw_dat_pose.geojson" \
   --dst_crs EPSG:3857 \
-  --node_src_crs auto \
-  --road_src_crs auto \
-  --divstrip_src_crs auto \
-  --traj_src_crs auto \
-  --pointcloud_crs auto
+  --drivezone_src_crs auto \
+  --drivezone_clip_crossline true \
+  --drivezone_fan_radius_m 20 \
+  --drivezone_fan_half_angle_deg 30 \
+  --drivezone_fan_band_width_m 6 \
+  --drivezone_non_drivezone_area_min_m2 3 \
+  --drivezone_non_drivezone_frac_min 0.15 \
+  --next_intersection_degree_min 3 \
+  --stop_intersection_require_connected true \
+  --disable_geometric_stop_fallback true
 ```
 
 ## 4. Focus NodeIDs 提供方式
@@ -45,9 +53,9 @@ python -m highway_topo_poc.modules.t04_rc_sw_anchor \
 - `intersection_l_opt_3857.geojson`
 - `anchors_wgs84.geojson`
 - `intersection_l_opt_wgs84.geojson`
-- `anchors.geojson`（兼容）
-- `intersection_l_opt.geojson`（兼容）
-- `anchors.json`
+- `anchors.geojson`（兼容名，内容同 dst_crs 版本）
+- `intersection_l_opt.geojson`（兼容名，内容同 dst_crs 版本）
+- `anchors.json`（包含扇形判别与 clip 诊断）
 - `metrics.json`
 - `breakpoints.json`
 - `summary.txt`
