@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 
 from highway_topo_poc.modules.t04_rc_sw_anchor.config import DEFAULT_PARAMS
 from highway_topo_poc.modules.t04_rc_sw_anchor.drivezone_ops import (
@@ -260,6 +260,27 @@ def test_crossline_clipped_by_drivezone_contains_anchor() -> None:
     assert clipped.length < crossline.length
     assert clipped.distance(anchor) <= 1e-9
     assert bool(diag.get("clip_empty", False)) is False
+
+
+def test_crossline_clipped_selects_tip_component_on_parallel_roads() -> None:
+    crossline = LineString([(-6.0, 0.0), (10.0, 0.0)])
+    drivezone_union = MultiPolygon(
+        [
+            Polygon([(-4.0, -2.0), (-1.0, -2.0), (-1.0, 2.0), (-4.0, 2.0), (-4.0, -2.0)]),
+            Polygon([(4.0, -2.0), (7.0, -2.0), (7.0, 2.0), (4.0, 2.0), (4.0, -2.0)]),
+        ]
+    )
+    tip_anchor = Point(-2.0, 0.0)
+    clipped, diag = clip_crossline_to_drivezone(
+        crossline=crossline,
+        drivezone_union=drivezone_union,
+        anchor_pt=tip_anchor,
+    )
+    assert clipped.geom_type == "LineString"
+    assert clipped.distance(tip_anchor) <= 1e-9
+    assert float(clipped.length) <= 3.01
+    assert int(diag.get("piece_count_before_select", 0)) >= 2
+    assert str(diag.get("chosen_piece_type", "")).startswith("multi_piece")
 
 
 def test_next_intersection_stop_requires_connectivity_and_degree() -> None:

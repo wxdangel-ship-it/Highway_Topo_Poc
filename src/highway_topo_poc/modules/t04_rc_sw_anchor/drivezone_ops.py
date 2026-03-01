@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, Polygon
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
 from .local_frame import normalize_vec
@@ -27,6 +27,21 @@ def _collect_lines(geom: BaseGeometry | None) -> list[LineString]:
         out: list[LineString] = []
         for g in geom.geoms:
             out.extend(_collect_lines(g))
+        return out
+    return []
+
+
+def _collect_polygons(geom: BaseGeometry | None) -> list[Polygon]:
+    if geom is None or geom.is_empty:
+        return []
+    if isinstance(geom, Polygon):
+        return [geom] if float(geom.area) > 1e-9 else []
+    if isinstance(geom, MultiPolygon):
+        return [pg for pg in geom.geoms if float(pg.area) > 1e-9]
+    if isinstance(geom, GeometryCollection):
+        out: list[Polygon] = []
+        for g in geom.geoms:
+            out.extend(_collect_polygons(g))
         return out
     return []
 
@@ -118,13 +133,36 @@ def clip_crossline_to_drivezone(
         "clip_empty": False,
         "chosen_piece_type": "original",
         "piece_count": 0,
+        "piece_count_before_select": 0,
+        "selected_by": "none",
+        "selected_component_dist_m": None,
     }
     if drivezone_union is None or drivezone_union.is_empty:
         diag["chosen_piece_type"] = "drivezone_missing"
         return crossline, diag
 
-    inter = crossline.intersection(drivezone_union)
+    all_pieces = _collect_lines(crossline.intersection(drivezone_union))
+    total_piece_count = int(len(all_pieces))
+    diag["piece_count_before_select"] = total_piece_count
+
+    chosen_drivezone: BaseGeometry = drivezone_union
+    polygons = _collect_polygons(drivezone_union)
+    if polygons and anchor_pt is not None and (not anchor_pt.is_empty):
+        best_comp = min(
+            polygons,
+            key=lambda pg: (float(pg.distance(anchor_pt)), float(-pg.area)),
+        )
+        chosen_drivezone = best_comp
+        diag["selected_by"] = "component_nearest_anchor"
+        diag["selected_component_dist_m"] = float(best_comp.distance(anchor_pt))
+
+    inter = crossline.intersection(chosen_drivezone)
     pieces = _collect_lines(inter)
+    if not pieces and chosen_drivezone is not drivezone_union:
+        inter = crossline.intersection(drivezone_union)
+        pieces = _collect_lines(inter)
+        diag["selected_by"] = "component_fallback_union"
+
     diag["piece_count"] = int(len(pieces))
     if not pieces:
         diag["clip_empty"] = True
@@ -132,23 +170,34 @@ def clip_crossline_to_drivezone(
         return crossline, diag
 
     if len(pieces) > 1:
+        center = crossline.interpolate(0.5, normalized=True)
         ranked = sorted(
             pieces,
-            key=lambda ln: float(crossline.project(ln.interpolate(0.5, normalized=True))),
+            key=lambda ln: (
+                float(ln.distance(anchor_pt)) if anchor_pt is not None and (not anchor_pt.is_empty) else 1.0e9,
+                float(ln.distance(center)),
+                abs(
+                    float(crossline.project(ln.interpolate(0.5, normalized=True)))
+                    - float(crossline.project(center))
+                ),
+            ),
         )
-        merged = MultiLineString([list(ln.coords) for ln in ranked])
-        diag["clipped_len_m"] = float(sum(float(ln.length) for ln in ranked))
+        chosen = ranked[0]
+        diag["clipped_len_m"] = float(chosen.length)
         if anchor_pt is not None and not anchor_pt.is_empty:
-            contains = any(ln.distance(anchor_pt) <= 1e-6 for ln in ranked)
-            diag["chosen_piece_type"] = "multi_piece_contains_anchor" if contains else "multi_piece_no_anchor"
+            diag["chosen_piece_type"] = "multi_piece_selected_by_anchor"
+            diag["selected_by"] = "piece_nearest_anchor"
         else:
-            diag["chosen_piece_type"] = "multi_piece_no_anchor"
-        return merged, diag
+            diag["chosen_piece_type"] = "multi_piece_selected_by_midpoint"
+            diag["selected_by"] = "piece_nearest_midpoint"
+        return chosen, diag
 
     chosen = pieces[0]
     chosen_type = "single_piece"
     if anchor_pt is not None and not anchor_pt.is_empty and chosen.distance(anchor_pt) <= 1e-6:
         chosen_type = "single_piece_contains_anchor"
+    if total_piece_count > 1:
+        chosen_type = "multi_piece_component_selected_single"
     diag["clipped_len_m"] = float(chosen.length)
     diag["chosen_piece_type"] = chosen_type
     return chosen, diag
