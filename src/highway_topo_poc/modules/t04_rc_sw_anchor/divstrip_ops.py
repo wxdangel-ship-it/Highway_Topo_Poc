@@ -87,21 +87,31 @@ def tip_point_from_divstrip(
     if divstrip_union is None or divstrip_union.is_empty:
         return None
     ux, uy = normalize_vec(float(scan_vec[0]), float(scan_vec[1]))
+    base_ox: float | None = None
+    base_oy: float | None = None
+    if origin_xy is not None:
+        base_ox = float(origin_xy[0])
+        base_oy = float(origin_xy[1])
+
+    def _proj_xy(x: float, y: float) -> float:
+        if base_ox is not None and base_oy is not None:
+            return float((x - base_ox) * ux + (y - base_oy) * uy)
+        return float(x * ux + y * uy)
+
     target_geom: BaseGeometry = divstrip_union
     comps = _collect_polygon_components(divstrip_union)
     if comps and origin_xy is not None:
-        ox, oy = float(origin_xy[0]), float(origin_xy[1])
         ahead: list[tuple[float, BaseGeometry]] = []
         for g in comps:
             rp = g.representative_point()
-            proj = float((float(rp.x) - ox) * ux + (float(rp.y) - oy) * uy)
+            proj = _proj_xy(float(rp.x), float(rp.y))
             if proj >= -1e-6:
                 ahead.append((proj, g))
         if ahead:
             target_geom = min(ahead, key=lambda x: x[0])[1]
         else:
             target_geom = max(
-                ((float((float(g.representative_point().x) - ox) * ux + (float(g.representative_point().y) - oy) * uy), g) for g in comps),
+                ((_proj_xy(float(g.representative_point().x), float(g.representative_point().y)), g) for g in comps),
                 key=lambda x: x[0],
             )[1]
     elif comps:
@@ -114,15 +124,23 @@ def tip_point_from_divstrip(
             return None
         return Point(float(rep.x), float(rep.y))
 
-    scores = [float(x * ux + y * uy) for x, y in vertices]
-    best_score = max(scores)
+    scores = [_proj_xy(x, y) for x, y in vertices]
     tol = 1e-6
-    front_pts = [vertices[i] for i, s in enumerate(scores) if s >= best_score - tol]
-    if not front_pts:
+    non_neg = [s for s in scores if s >= -tol]
+    if non_neg:
+        target_s = min(non_neg)
+        tip_pts = [vertices[i] for i, s in enumerate(scores) if abs(s - target_s) <= tol]
+    else:
+        # Fallback: if every vertex is behind origin along scan direction,
+        # use the least-behind side.
+        target_s = max(scores)
+        tip_pts = [vertices[i] for i, s in enumerate(scores) if abs(s - target_s) <= tol]
+    if not tip_pts:
         best_xy = vertices[int(max(range(len(scores)), key=lambda i: scores[i]))]
         return Point(float(best_xy[0]), float(best_xy[1]))
-    mx = float(sum(p[0] for p in front_pts) / float(len(front_pts)))
-    my = float(sum(p[1] for p in front_pts) / float(len(front_pts)))
+    uniq_pts = list(dict.fromkeys((float(p[0]), float(p[1])) for p in tip_pts))
+    mx = float(sum(p[0] for p in uniq_pts) / float(len(uniq_pts)))
+    my = float(sum(p[1] for p in uniq_pts) / float(len(uniq_pts)))
     return Point(mx, my)
 
 

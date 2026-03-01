@@ -732,6 +732,29 @@ def _evaluate_node(
             best_divstrip_dz_s = float(scan_values[found_idx])
             trigger = "divstrip+dz"
             evidence_source = "drivezone"
+        elif first_divstrip_s is not None:
+            found_idx = int(max(0, min(int(round(first_divstrip_s / step)), n_steps - 1)))
+            best_divstrip_dz_s = float(scan_values[found_idx])
+            trigger = "divstrip+dz"
+            evidence_source = "drivezone"
+            status = "suspect"
+            flags.append("tip_not_hit_fallback_first_divstrip")
+            if tip_s is None:
+                tip_s = float(first_divstrip_s)
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_DIVSTRIP_NEVER_HIT,
+                    severity="soft",
+                    nodeid=nodeid,
+                    message="divstrip_tip_not_hit_fallback_to_first_divstrip_hit",
+                    extra={
+                        "tip_target_s_m": tip_target_s,
+                        "tip_best_dist_m": tip_best_dist,
+                        "divstrip_hit_tol_m": div_tol,
+                        "first_divstrip_hit_dist_m": first_divstrip_s,
+                    },
+                )
+            )
         else:
             breakpoints.append(
                 make_breakpoint(

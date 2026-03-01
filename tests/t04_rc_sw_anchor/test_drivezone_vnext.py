@@ -247,7 +247,8 @@ def test_tip_point_from_divstrip_accepts_3d_coords() -> None:
         origin_xy=(0.0, 0.0),
     )
     assert tip is not None
-    assert abs(float(tip.x) - 10.0) <= 1e-9
+    # Tip should be chosen on the node-near side along scan direction.
+    assert abs(float(tip.x) - 0.0) <= 1e-9
     assert abs(float(tip.y) - 0.0) <= 1e-9
 
 
