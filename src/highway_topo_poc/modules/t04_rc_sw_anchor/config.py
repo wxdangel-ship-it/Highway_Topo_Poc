@@ -7,7 +7,7 @@ from typing import Any
 
 
 DEFAULT_PARAMS: dict[str, Any] = {
-    "cross_half_len_m": 20.0,
+    "cross_half_len_m": 30.0,
     "scan_step_m": 1.0,
     "scan_near_limit_m": 20.0,
     "scan_max_limit_m": 200.0,
@@ -31,6 +31,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "use_drivezone": True,
     "drivezone_merge_mode": "unary_union",
     "drivezone_clip_crossline": True,
+    "drivezone_clip_cross_half_len_m": 80.0,
     "drivezone_fan_radius_m": 20.0,
     "drivezone_fan_half_angle_deg": 30.0,
     "drivezone_fan_band_width_m": 6.0,

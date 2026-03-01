@@ -9,18 +9,19 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from shapely.geometry import Point, box
+from shapely.geometry import LineString, Point, box
 from shapely.geometry.base import BaseGeometry
 
 from .crs_norm import guess_crs_from_bbox, normalize_epsg_name, transform_xy_arrays
 from .divstrip_ops import anchor_point_from_crossline, is_divstrip_hit, tip_point_from_divstrip
-from .drivezone_ops import build_fan_band, clip_crossline_to_drivezone, detect_non_drivezone_in_fan
+from .drivezone_ops import build_fan_band, clip_crossline_to_drivezone, detect_non_drivezone_in_fan, extend_line_to_half_len
 from .io_geojson import NodeRecord, RoadRecord, load_divstrip_union, load_drivezone_union, load_nodes, load_roads
 from .local_frame import LocalFrame
 from .metrics_breakpoints import (
     BP_AMBIGUOUS_KIND,
     BP_CRS_UNKNOWN,
     BP_DIVSTRIP_NEVER_HIT,
+    BP_DIVSTRIP_NON_INTERSECT_NOT_FOUND,
     BP_DIVSTRIPZONE_MISSING,
     BP_DIVSTRIP_TOLERANCE_VIOLATION,
     BP_DRIVEZONE_CLIP_EMPTY,
@@ -608,6 +609,7 @@ def _evaluate_node(
     drivezone_fan_band_width_m = float(params.get("drivezone_fan_band_width_m", 6.0))
     drivezone_non_drivezone_area_min_m2 = float(params.get("drivezone_non_drivezone_area_min_m2", 3.0))
     drivezone_non_drivezone_frac_min = float(params.get("drivezone_non_drivezone_frac_min", 0.15))
+    drivezone_clip_cross_half_len_m = float(params.get("drivezone_clip_cross_half_len_m", 80.0))
 
     if ng_points_xy.size > 0:
         u, v = frame.project_xy(ng_points_xy)
@@ -881,6 +883,7 @@ def _evaluate_node(
             "clipped_len_m": float(final_line.length),
             "clip_empty": False,
             "clip_piece_type": "none",
+            "clip_input_len_m": float(final_line.length),
             "stop_diag": stop_diag,
             "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
             "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
@@ -888,11 +891,43 @@ def _evaluate_node(
         }
 
     found_idx = max(0, min(found_idx, len(lines) - 1))
+
+    if trigger == "divstrip+dz" and divstrip_union is not None:
+        base_idx = int(found_idx)
+        base_line = lines[base_idx]
+        if bool(base_line.intersects(divstrip_union)):
+            refined_idx: int | None = None
+            for j in range(base_idx - 1, -1, -1):
+                ln = lines[j]
+                if float(ln.distance(divstrip_union)) <= float(div_tol) and (not bool(ln.intersects(divstrip_union))):
+                    refined_idx = int(j)
+                    break
+            if refined_idx is not None:
+                found_idx = int(refined_idx)
+                best_divstrip_dz_s = float(scan_values[found_idx])
+                flags.append("divstrip_non_intersect_refined")
+            else:
+                breakpoints.append(
+                    make_breakpoint(
+                        code=BP_DIVSTRIP_NON_INTERSECT_NOT_FOUND,
+                        severity="soft",
+                        nodeid=nodeid,
+                        message="divstrip_non_intersect_candidate_not_found_keep_intersecting_line",
+                        extra={"scan_dist_m": float(scan_values[base_idx]), "tol_m": float(div_tol)},
+                    )
+                )
+                flags.append("divstrip_non_intersect_not_found")
+
     final_line = lines[found_idx]
     scan_dist = float(scan_values[found_idx])
     anchor_pt, dist_to_div = anchor_point_from_crossline(line=final_line, divstrip_union=divstrip_union)
     dist_line_to_div = None if divstrip_union is None else float(final_line.distance(divstrip_union))
-    clip_diag: dict[str, Any] = {"clipped_len_m": float(final_line.length), "clip_empty": False, "chosen_piece_type": "none"}
+    clip_diag: dict[str, Any] = {
+        "clipped_len_m": float(final_line.length),
+        "clip_empty": False,
+        "chosen_piece_type": "none",
+        "clip_input_len_m": float(final_line.length),
+    }
 
     if trigger == "divstrip+dz" and drivezone_usable and drivezone_union is not None and tip_point is not None:
         fan_origin = Point(
@@ -926,8 +961,13 @@ def _evaluate_node(
             flags.append("drivezone_physical_split_missing")
 
     if trigger == "divstrip+dz" and drivezone_usable and drivezone_clip_crossline:
+        clip_crossline = final_line
+        target_half = max(float(half_len), float(drivezone_clip_cross_half_len_m))
+        if target_half > float(half_len) + 1e-9 and isinstance(final_line, LineString):
+            clip_crossline = extend_line_to_half_len(line=final_line, half_len_m=target_half)
+        clip_diag["clip_input_len_m"] = float(clip_crossline.length)
         final_line, clip_diag = clip_crossline_to_drivezone(
-            crossline=final_line,
+            crossline=clip_crossline,
             drivezone_union=drivezone_union,
             anchor_pt=tip_point if tip_point is not None else anchor_pt,
         )
@@ -1022,6 +1062,7 @@ def _evaluate_node(
         "clipped_len_m": float(clip_diag.get("clipped_len_m", final_line.length)),
         "clip_empty": bool(clip_diag.get("clip_empty", False)),
         "clip_piece_type": str(clip_diag.get("chosen_piece_type", "none")),
+        "clip_input_len_m": float(clip_diag.get("clip_input_len_m", final_line.length)),
         "stop_diag": stop_diag,
         "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
         "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),

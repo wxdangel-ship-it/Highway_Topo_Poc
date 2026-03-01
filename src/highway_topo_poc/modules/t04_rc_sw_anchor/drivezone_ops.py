@@ -154,8 +154,22 @@ def clip_crossline_to_drivezone(
     return chosen, diag
 
 
+def extend_line_to_half_len(*, line: LineString, half_len_m: float) -> LineString:
+    coords = list(line.coords)
+    if len(coords) < 2:
+        return line
+    x0, y0 = float(coords[0][0]), float(coords[0][1])
+    x1, y1 = float(coords[-1][0]), float(coords[-1][1])
+    cx = 0.5 * (x0 + x1)
+    cy = 0.5 * (y0 + y1)
+    ux, uy = normalize_vec(x1 - x0, y1 - y0)
+    half = max(float(half_len_m), 0.1)
+    return LineString([(cx - ux * half, cy - uy * half), (cx + ux * half, cy + uy * half)])
+
+
 __all__ = [
     "build_fan_band",
     "clip_crossline_to_drivezone",
     "detect_non_drivezone_in_fan",
+    "extend_line_to_half_len",
 ]

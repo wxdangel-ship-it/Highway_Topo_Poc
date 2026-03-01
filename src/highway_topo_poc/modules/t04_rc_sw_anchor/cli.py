@@ -38,6 +38,7 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--use_drivezone", default=None)
     p.add_argument("--drivezone_merge_mode", default=None)
     p.add_argument("--drivezone_clip_crossline", default=None)
+    p.add_argument("--drivezone_clip_cross_half_len_m", default=None)
     p.add_argument("--drivezone_fan_radius_m", default=None)
     p.add_argument("--drivezone_fan_half_angle_deg", default=None)
     p.add_argument("--drivezone_fan_band_width_m", default=None)
@@ -82,6 +83,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "use_drivezone": args.use_drivezone,
             "drivezone_merge_mode": args.drivezone_merge_mode,
             "drivezone_clip_crossline": args.drivezone_clip_crossline,
+            "drivezone_clip_cross_half_len_m": args.drivezone_clip_cross_half_len_m,
             "drivezone_fan_radius_m": args.drivezone_fan_radius_m,
             "drivezone_fan_half_angle_deg": args.drivezone_fan_half_angle_deg,
             "drivezone_fan_band_width_m": args.drivezone_fan_band_width_m,
