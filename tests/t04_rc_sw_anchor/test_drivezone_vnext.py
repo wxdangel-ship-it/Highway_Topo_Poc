@@ -11,6 +11,7 @@ from highway_topo_poc.modules.t04_rc_sw_anchor.drivezone_ops import (
     clip_crossline_to_drivezone,
     detect_non_drivezone_in_fan,
 )
+from highway_topo_poc.modules.t04_rc_sw_anchor.divstrip_ops import tip_point_from_divstrip
 from highway_topo_poc.modules.t04_rc_sw_anchor.io_geojson import RoadRecord, load_drivezone_union
 from highway_topo_poc.modules.t04_rc_sw_anchor.metrics_breakpoints import (
     BP_DRIVEZONE_CLIP_MULTIPIECE,
@@ -228,6 +229,26 @@ def test_fan_band_avoids_side_drivezone_false_positive() -> None:
     )
     assert hit is False
     assert float(diag.get("non_drivezone_frac", 0.0)) < 0.15
+
+
+def test_tip_point_from_divstrip_accepts_3d_coords() -> None:
+    divstrip_3d = Polygon(
+        [
+            (0.0, -1.0, 2.0),
+            (10.0, -1.0, 2.0),
+            (10.0, 1.0, 2.0),
+            (0.0, 1.0, 2.0),
+            (0.0, -1.0, 2.0),
+        ]
+    )
+    tip = tip_point_from_divstrip(
+        divstrip_union=divstrip_3d,
+        scan_vec=(1.0, 0.0),
+        origin_xy=(0.0, 0.0),
+    )
+    assert tip is not None
+    assert abs(float(tip.x) - 10.0) <= 1e-9
+    assert abs(float(tip.y) - 0.0) <= 1e-9
 
 
 def test_crossline_clipped_by_drivezone_contains_anchor() -> None:

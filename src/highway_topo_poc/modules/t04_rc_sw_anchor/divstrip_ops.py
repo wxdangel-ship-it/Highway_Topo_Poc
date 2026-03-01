@@ -27,16 +27,23 @@ def anchor_point_from_crossline(*, line: LineString, divstrip_union: BaseGeometr
 
 
 def _collect_divstrip_vertices(geom: BaseGeometry | None) -> list[tuple[float, float]]:
+    def _xy(coord: object) -> tuple[float, float]:
+        # Accept 2D/3D coordinates and keep XY for planar logic.
+        seq = coord if isinstance(coord, (list, tuple)) else tuple(coord)  # type: ignore[arg-type]
+        if len(seq) < 2:
+            raise ValueError("coord_dim_lt_2")
+        return (float(seq[0]), float(seq[1]))
+
     if geom is None or geom.is_empty:
         return []
     if isinstance(geom, Point):
         return [(float(geom.x), float(geom.y))]
     if isinstance(geom, LineString):
-        return [(float(x), float(y)) for x, y in geom.coords]
+        return [_xy(c) for c in geom.coords]
     if isinstance(geom, Polygon):
-        pts: list[tuple[float, float]] = [(float(x), float(y)) for x, y in geom.exterior.coords]
+        pts: list[tuple[float, float]] = [_xy(c) for c in geom.exterior.coords]
         for ring in geom.interiors:
-            pts.extend((float(x), float(y)) for x, y in ring.coords)
+            pts.extend(_xy(c) for c in ring.coords)
         return pts
     if isinstance(geom, MultiLineString):
         out: list[tuple[float, float]] = []
