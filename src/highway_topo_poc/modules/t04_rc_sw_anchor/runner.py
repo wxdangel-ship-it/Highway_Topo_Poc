@@ -13,7 +13,7 @@ from shapely.geometry import Point, box
 from shapely.geometry.base import BaseGeometry
 
 from .crs_norm import guess_crs_from_bbox, normalize_epsg_name, transform_xy_arrays
-from .divstrip_ops import anchor_point_from_crossline, is_divstrip_hit
+from .divstrip_ops import anchor_point_from_crossline, is_divstrip_hit, tip_point_from_divstrip
 from .drivezone_ops import build_fan_band, clip_crossline_to_drivezone, detect_non_drivezone_in_fan
 from .io_geojson import NodeRecord, RoadRecord, load_divstrip_union, load_drivezone_union, load_nodes, load_roads
 from .local_frame import LocalFrame
@@ -24,6 +24,7 @@ from .metrics_breakpoints import (
     BP_DIVSTRIPZONE_MISSING,
     BP_DIVSTRIP_TOLERANCE_VIOLATION,
     BP_DRIVEZONE_CLIP_EMPTY,
+    BP_DRIVEZONE_CLIP_MULTIPIECE,
     BP_DRIVEZONE_CRS_UNKNOWN,
     BP_DRIVEZONE_MISSING,
     BP_DRIVEZONE_SPLIT_NOT_FOUND,
@@ -625,14 +626,26 @@ def _evaluate_node(
     hit_ng: list[bool] = []
     lines: list[Any] = []
     scan_values: list[float] = []
-    fan_diag_by_idx: dict[int, dict[str, Any]] = {}
 
     first_divstrip_s: float | None = None
     tip_s: float | None = None
+    tip_hit_idx: int | None = None
+    tip_best_dist: float | None = None
     best_divstrip_dz_s: float | None = None
     best_divstrip_pc_s: float | None = None
     first_pc_only_s: float | None = None
-    best_fan_diag: dict[str, Any] = {"fan_area_m2": 0.0, "non_drivezone_area_m2": 0.0, "non_drivezone_frac": 0.0, "reason": "none"}
+    fan_diag: dict[str, Any] = {"fan_area_m2": 0.0, "non_drivezone_area_m2": 0.0, "non_drivezone_frac": 0.0, "reason": "none"}
+
+    tip_point = tip_point_from_divstrip(
+        divstrip_union=divstrip_union,
+        scan_vec=scan_vec,
+        origin_xy=(float(node.point.x), float(node.point.y)),
+    )
+    tip_target_s: float | None = None
+    if tip_point is not None and (not tip_point.is_empty):
+        dx = float(tip_point.x) - float(node.point.x)
+        dy = float(tip_point.y) - float(node.point.y)
+        tip_target_s = float(dx * scan_vec[0] + dy * scan_vec[1])
 
     for i in range(n_steps):
         s = float(i) * step
@@ -641,31 +654,32 @@ def _evaluate_node(
         lines.append(line)
 
         div_hit = is_divstrip_hit(line=line, divstrip_union=divstrip_union, tol_m=div_tol)
-        div_intersects = bool(divstrip_union is not None and line.intersects(divstrip_union))
         if div_hit and first_divstrip_s is None:
             first_divstrip_s = s
-            tip_s = s
         hit_divstrip.append(div_hit)
 
-        if div_hit and use_drivezone and drivezone_usable and drivezone_union is not None:
-            anchor_tmp, _ = anchor_point_from_crossline(line=line, divstrip_union=divstrip_union)
-            fan_band = build_fan_band(
-                origin_xy=(float(anchor_tmp.x), float(anchor_tmp.y)),
-                scan_unit_vec=scan_vec,
-                radius_m=drivezone_fan_radius_m,
-                half_angle_deg=drivezone_fan_half_angle_deg,
-                band_width_m=drivezone_fan_band_width_m,
-            )
-            dz_hit, fan_diag = detect_non_drivezone_in_fan(
-                drivezone_union=drivezone_union,
-                fan_band=fan_band,
-                area_min_m2=drivezone_non_drivezone_area_min_m2,
-                frac_min=drivezone_non_drivezone_frac_min,
-            )
-            fan_diag_by_idx[i] = fan_diag
-            if dz_hit and best_divstrip_dz_s is None and div_intersects:
-                best_divstrip_dz_s = s
-                best_fan_diag = fan_diag
+        if tip_point is not None and (not tip_point.is_empty):
+            tip_dist = float(line.distance(tip_point))
+            if tip_dist <= div_tol:
+                if tip_hit_idx is None:
+                    tip_hit_idx = i
+                    tip_best_dist = tip_dist
+                    tip_s = s
+                else:
+                    prev_s = float(scan_values[tip_hit_idx])
+                    better_dist = tip_best_dist is None or tip_dist < float(tip_best_dist) - 1e-9
+                    if tip_target_s is None:
+                        better_tie = bool(tip_dist <= float(tip_best_dist) + 1e-9 and s < prev_s)
+                    else:
+                        better_tie = bool(
+                            tip_best_dist is not None
+                            and abs(tip_dist - float(tip_best_dist)) <= 1e-9
+                            and abs(s - float(tip_target_s)) < abs(prev_s - float(tip_target_s)) - 1e-9
+                        )
+                    if better_dist or better_tie:
+                        tip_hit_idx = i
+                        tip_best_dist = tip_dist
+                        tip_s = s
 
         ng_ok, _ng_count = ng_hit_at(s)
         hit_ng.append(ng_ok)
@@ -702,32 +716,39 @@ def _evaluate_node(
 
     allow_pc_only_no_div = bool(params.get("allow_pc_only_when_no_divstrip", True))
     allow_divstrip_only = bool(params.get("allow_divstrip_only_when_no_pointcloud", True))
-    allow_divstrip_only_when_drivezone_miss = bool(params.get("allow_divstrip_only_when_drivezone_miss", False))
-
-    if use_drivezone and drivezone_usable:
-        if best_divstrip_dz_s is not None:
-            found_idx = int(round(best_divstrip_dz_s / step))
+    if use_drivezone:
+        if not drivezone_usable:
+            flags.append("drivezone_missing_fail_closed")
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_DRIVEZONE_MISSING,
+                    severity="hard",
+                    nodeid=nodeid,
+                    message="drivezone_missing_or_unusable_fail_closed",
+                )
+            )
+        elif tip_hit_idx is not None:
+            found_idx = int(max(0, min(tip_hit_idx, n_steps - 1)))
+            best_divstrip_dz_s = float(scan_values[found_idx])
             trigger = "divstrip+dz"
             evidence_source = "drivezone"
         else:
             breakpoints.append(
                 make_breakpoint(
-                    code=BP_DRIVEZONE_SPLIT_NOT_FOUND,
+                    code=BP_DIVSTRIP_NEVER_HIT,
                     severity="hard",
                     nodeid=nodeid,
-                    message="drivezone_split_not_found_after_divstrip",
-                    extra={"first_divstrip_hit_dist_m": first_divstrip_s},
+                    message="divstrip_tip_not_hit_within_tol",
+                    extra={
+                        "tip_target_s_m": tip_target_s,
+                        "tip_best_dist_m": tip_best_dist,
+                        "divstrip_hit_tol_m": div_tol,
+                        "first_divstrip_hit_dist_m": first_divstrip_s,
+                    },
                 )
             )
-            if allow_divstrip_only_when_drivezone_miss and first_divstrip_s is not None:
-                found_idx = int(round(first_divstrip_s / step))
-                trigger = "divstrip_only_degraded"
-                status = "suspect"
-                flags.append("drivezone_split_not_found_degraded_divstrip_only")
-                evidence_source = "divstrip_only"
+            flags.append("divstrip_tip_not_hit_within_tol")
     else:
-        if use_drivezone and not drivezone_usable:
-            flags.append("drivezone_missing")
         if divstrip_union is not None and best_divstrip_pc_s is not None:
             found_idx = int(round(best_divstrip_pc_s / step))
             trigger = "divstrip+pc"
@@ -831,9 +852,9 @@ def _evaluate_node(
             "best_divstrip_dz_dist_m": best_divstrip_dz_s,
             "best_divstrip_pc_dist_m": best_divstrip_pc_s,
             "first_pc_only_dist_m": first_pc_only_s,
-            "fan_area_m2": float(best_fan_diag.get("fan_area_m2", 0.0)),
-            "non_drivezone_area_m2": float(best_fan_diag.get("non_drivezone_area_m2", 0.0)),
-            "non_drivezone_frac": float(best_fan_diag.get("non_drivezone_frac", 0.0)),
+            "fan_area_m2": float(fan_diag.get("fan_area_m2", 0.0)),
+            "non_drivezone_area_m2": float(fan_diag.get("non_drivezone_area_m2", 0.0)),
+            "non_drivezone_frac": float(fan_diag.get("non_drivezone_frac", 0.0)),
             "clipped_len_m": float(final_line.length),
             "clip_empty": False,
             "clip_piece_type": "none",
@@ -848,14 +869,44 @@ def _evaluate_node(
     scan_dist = float(scan_values[found_idx])
     anchor_pt, dist_to_div = anchor_point_from_crossline(line=final_line, divstrip_union=divstrip_union)
     dist_line_to_div = None if divstrip_union is None else float(final_line.distance(divstrip_union))
-    fan_diag = fan_diag_by_idx.get(found_idx, best_fan_diag)
     clip_diag: dict[str, Any] = {"clipped_len_m": float(final_line.length), "clip_empty": False, "chosen_piece_type": "none"}
+
+    if trigger == "divstrip+dz" and drivezone_usable and drivezone_union is not None and tip_point is not None:
+        fan_origin = Point(
+            float(tip_point.x) + float(scan_vec[0]) * max(0.25, 0.5 * step),
+            float(tip_point.y) + float(scan_vec[1]) * max(0.25, 0.5 * step),
+        )
+        fan_band = build_fan_band(
+            origin_xy=(float(fan_origin.x), float(fan_origin.y)),
+            scan_unit_vec=scan_vec,
+            radius_m=drivezone_fan_radius_m,
+            half_angle_deg=drivezone_fan_half_angle_deg,
+            band_width_m=drivezone_fan_band_width_m,
+        )
+        fan_ok, fan_diag = detect_non_drivezone_in_fan(
+            drivezone_union=drivezone_union,
+            fan_band=fan_band,
+            area_min_m2=drivezone_non_drivezone_area_min_m2,
+            frac_min=drivezone_non_drivezone_frac_min,
+        )
+        if not fan_ok:
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_DRIVEZONE_SPLIT_NOT_FOUND,
+                    severity="hard",
+                    nodeid=nodeid,
+                    message="drivezone_physical_split_missing_after_divstrip_tip",
+                    extra={"tip_s_m": tip_s, "fan_diag": dict(fan_diag)},
+                )
+            )
+            status = "fail"
+            flags.append("drivezone_physical_split_missing")
 
     if trigger == "divstrip+dz" and drivezone_usable and drivezone_clip_crossline:
         final_line, clip_diag = clip_crossline_to_drivezone(
             crossline=final_line,
             drivezone_union=drivezone_union,
-            anchor_pt=anchor_pt,
+            anchor_pt=tip_point if tip_point is not None else anchor_pt,
         )
         if bool(clip_diag.get("clip_empty", False)):
             breakpoints.append(
@@ -868,6 +919,17 @@ def _evaluate_node(
             )
             status = "fail"
             flags.append("drivezone_clip_empty")
+        if str(clip_diag.get("chosen_piece_type", "")).startswith("multi_piece"):
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_DRIVEZONE_CLIP_MULTIPIECE,
+                    severity="soft",
+                    nodeid=nodeid,
+                    message="drivezone_clip_multiline_reported",
+                    extra={"clip_diag": dict(clip_diag)},
+                )
+            )
+            flags.append("drivezone_clip_multipiece")
         anchor_pt, dist_to_div = anchor_point_from_crossline(line=final_line, divstrip_union=divstrip_union)
         dist_line_to_div = None if divstrip_union is None else float(final_line.distance(divstrip_union))
 
@@ -1226,7 +1288,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             breakpoints.append(
                 make_breakpoint(
                     code=BP_DRIVEZONE_MISSING,
-                    severity="soft",
+                    severity="hard",
                     nodeid=None,
                     message="drivezone_missing",
                 )

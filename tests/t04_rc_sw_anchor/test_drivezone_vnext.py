@@ -12,7 +12,12 @@ from highway_topo_poc.modules.t04_rc_sw_anchor.drivezone_ops import (
     detect_non_drivezone_in_fan,
 )
 from highway_topo_poc.modules.t04_rc_sw_anchor.io_geojson import RoadRecord, load_drivezone_union
-from highway_topo_poc.modules.t04_rc_sw_anchor.metrics_breakpoints import BP_DRIVEZONE_SPLIT_NOT_FOUND, build_metrics
+from highway_topo_poc.modules.t04_rc_sw_anchor.metrics_breakpoints import (
+    BP_DRIVEZONE_CLIP_MULTIPIECE,
+    BP_DRIVEZONE_MISSING,
+    BP_DRIVEZONE_SPLIT_NOT_FOUND,
+    build_metrics,
+)
 from highway_topo_poc.modules.t04_rc_sw_anchor.road_graph import RoadGraph
 from highway_topo_poc.modules.t04_rc_sw_anchor.runner import run_from_runtime
 
@@ -22,6 +27,68 @@ from ._synth_patch_factory import create_synth_patch
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _shrink_and_shift_divstrip_y(path: Path, *, scale: float = 0.2, shift: float = 0.55) -> None:
+    payload = _read_json(path)
+    for feat in payload.get("features", []):
+        geom = feat.get("geometry", {})
+        if str(geom.get("type")) != "Polygon":
+            continue
+        rings = geom.get("coordinates", [])
+        if not rings:
+            continue
+        ring = rings[0]
+        ys = [float(pt[1]) for pt in ring[:-1]]
+        if not ys:
+            continue
+        y_mid = 0.5 * (min(ys) + max(ys))
+        out_ring = []
+        for pt in ring:
+            out_ring.append([float(pt[0]), float(y_mid + (float(pt[1]) - y_mid) * scale + shift)])
+        geom["coordinates"] = [out_ring]
+    _write_json(path, payload)
+
+
+def _rewrite_drivezone_to_single_polygon(path: Path) -> None:
+    payload = _read_json(path)
+    xs: list[float] = []
+    ys: list[float] = []
+    for feat in payload.get("features", []):
+        geom = feat.get("geometry", {})
+        if str(geom.get("type")) != "Polygon":
+            continue
+        ring = (geom.get("coordinates") or [[]])[0]
+        for pt in ring:
+            xs.append(float(pt[0]))
+            ys.append(float(pt[1]))
+    if not xs or not ys:
+        return
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    payload["features"] = [
+        {
+            "type": "Feature",
+            "properties": {"name": "drivezone_single"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [
+                    [
+                        [min_x, min_y],
+                        [max_x, min_y],
+                        [max_x, max_y],
+                        [min_x, max_y],
+                        [min_x, min_y],
+                    ]
+                ],
+            },
+        }
+    ]
+    _write_json(path, payload)
 
 
 def test_drivezone_union_and_crs_reproject(tmp_path: Path) -> None:
@@ -105,6 +172,43 @@ def test_trigger_divstrip_plus_drivezone_fan_detects_split(tmp_path: Path) -> No
     dz_items = [x for x in items if str(x.get("trigger")) == "divstrip+dz"]
     assert dz_items
     assert any(float(x.get("non_drivezone_frac", 0.0)) >= 0.05 for x in dz_items)
+
+
+def test_tip_hit_allows_near_without_divstrip_intersection(tmp_path: Path) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    _shrink_and_shift_divstrip_y(data["divstrip_path"], scale=0.2, shift=0.55)
+    out_root = tmp_path / "outputs" / "_work" / "t04_rc_sw_anchor"
+    runtime = {
+        "mode": "global_focus",
+        "patch_dir": str(data["patch_dir"]),
+        "out_root": str(out_root),
+        "run_id": "tip_near_no_intersection",
+        "global_node_path": str(data["global_node_path"]),
+        "global_road_path": str(data["global_road_path"]),
+        "divstrip_path": str(data["divstrip_path"]),
+        "drivezone_path": str(data["drivezone_path"]),
+        "pointcloud_path": str(data["pointcloud_path"]),
+        "traj_glob": str(data["traj_glob"]),
+        "focus_node_ids": list(data["focus_node_ids"]),
+        "src_crs": "auto",
+        "dst_crs": "EPSG:3857",
+        "node_src_crs": "auto",
+        "road_src_crs": "auto",
+        "divstrip_src_crs": "auto",
+        "drivezone_src_crs": "auto",
+        "traj_src_crs": "auto",
+        "pointcloud_crs": str(data["pointcloud_crs"]),
+        "params": dict(DEFAULT_PARAMS),
+    }
+    result = run_from_runtime(runtime)
+    anchors = _read_json(result.out_dir / "anchors.json")
+    items = anchors.get("items", [])
+    assert items
+    assert any(
+        str(x.get("trigger")) == "divstrip+dz"
+        and 0.0 < float(x.get("dist_line_to_divstrip_m", 0.0)) <= 1.0
+        for x in items
+    )
 
 
 def test_fan_band_avoids_side_drivezone_false_positive() -> None:
@@ -205,3 +309,105 @@ def test_overall_pass_consumes_hard_breakpoints() -> None:
     assert int(metrics.get("hard_breakpoint_count", 0)) == 1
     assert bool(metrics.get("overall_pass", True)) is False
 
+
+def test_fan_diagnostic_reports_hard_when_no_physical_split(tmp_path: Path) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    _rewrite_drivezone_to_single_polygon(data["drivezone_path"])
+    out_root = tmp_path / "outputs" / "_work" / "t04_rc_sw_anchor"
+    runtime = {
+        "mode": "global_focus",
+        "patch_dir": str(data["patch_dir"]),
+        "out_root": str(out_root),
+        "run_id": "fan_diag_no_split",
+        "global_node_path": str(data["global_node_path"]),
+        "global_road_path": str(data["global_road_path"]),
+        "divstrip_path": str(data["divstrip_path"]),
+        "drivezone_path": str(data["drivezone_path"]),
+        "pointcloud_path": str(data["pointcloud_path"]),
+        "traj_glob": str(data["traj_glob"]),
+        "focus_node_ids": list(data["focus_node_ids"]),
+        "src_crs": "auto",
+        "dst_crs": "EPSG:3857",
+        "node_src_crs": "auto",
+        "road_src_crs": "auto",
+        "divstrip_src_crs": "auto",
+        "drivezone_src_crs": "auto",
+        "traj_src_crs": "auto",
+        "pointcloud_crs": str(data["pointcloud_crs"]),
+        "params": dict(DEFAULT_PARAMS),
+    }
+    result = run_from_runtime(runtime)
+    bp = _read_json(result.out_dir / "breakpoints.json")
+    by_code = {str(x.get("code")): int(x.get("count", 0)) for x in bp.get("by_code", [])}
+    assert by_code.get(BP_DRIVEZONE_SPLIT_NOT_FOUND, 0) >= 1
+    metrics = _read_json(result.out_dir / "metrics.json")
+    assert bool(metrics.get("overall_pass", True)) is False
+
+
+def test_drivezone_missing_fail_closed(tmp_path: Path) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    data["drivezone_path"].unlink()
+    out_root = tmp_path / "outputs" / "_work" / "t04_rc_sw_anchor"
+    runtime = {
+        "mode": "global_focus",
+        "patch_dir": str(data["patch_dir"]),
+        "out_root": str(out_root),
+        "run_id": "drivezone_missing_fail_closed",
+        "global_node_path": str(data["global_node_path"]),
+        "global_road_path": str(data["global_road_path"]),
+        "divstrip_path": str(data["divstrip_path"]),
+        "drivezone_path": str(data["drivezone_path"]),
+        "pointcloud_path": str(data["pointcloud_path"]),
+        "traj_glob": str(data["traj_glob"]),
+        "focus_node_ids": list(data["focus_node_ids"]),
+        "src_crs": "auto",
+        "dst_crs": "EPSG:3857",
+        "node_src_crs": "auto",
+        "road_src_crs": "auto",
+        "divstrip_src_crs": "auto",
+        "drivezone_src_crs": "auto",
+        "traj_src_crs": "auto",
+        "pointcloud_crs": str(data["pointcloud_crs"]),
+        "params": dict(DEFAULT_PARAMS),
+    }
+    result = run_from_runtime(runtime)
+    bp = _read_json(result.out_dir / "breakpoints.json")
+    by_code = {str(x.get("code")): int(x.get("count", 0)) for x in bp.get("by_code", [])}
+    assert by_code.get(BP_DRIVEZONE_MISSING, 0) >= 1
+    metrics = _read_json(result.out_dir / "metrics.json")
+    assert bool(metrics.get("overall_pass", True)) is False
+    anchors = _read_json(result.out_dir / "anchors.json")
+    assert all(bool(x.get("anchor_found", True)) is False for x in anchors.get("items", []))
+
+
+def test_multipiece_clip_reports_anomaly(tmp_path: Path) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    out_root = tmp_path / "outputs" / "_work" / "t04_rc_sw_anchor"
+    runtime = {
+        "mode": "global_focus",
+        "patch_dir": str(data["patch_dir"]),
+        "out_root": str(out_root),
+        "run_id": "clip_multipiece_anomaly",
+        "global_node_path": str(data["global_node_path"]),
+        "global_road_path": str(data["global_road_path"]),
+        "divstrip_path": str(data["divstrip_path"]),
+        "drivezone_path": str(data["drivezone_path"]),
+        "pointcloud_path": str(data["pointcloud_path"]),
+        "traj_glob": str(data["traj_glob"]),
+        "focus_node_ids": list(data["focus_node_ids"]),
+        "src_crs": "auto",
+        "dst_crs": "EPSG:3857",
+        "node_src_crs": "auto",
+        "road_src_crs": "auto",
+        "divstrip_src_crs": "auto",
+        "drivezone_src_crs": "auto",
+        "traj_src_crs": "auto",
+        "pointcloud_crs": str(data["pointcloud_crs"]),
+        "params": dict(DEFAULT_PARAMS),
+    }
+    result = run_from_runtime(runtime)
+    anchors = _read_json(result.out_dir / "anchors.json")
+    assert any(str(x.get("clip_piece_type", "")).startswith("multi_piece") for x in anchors.get("items", []))
+    bp = _read_json(result.out_dir / "breakpoints.json")
+    by_code = {str(x.get("code")): int(x.get("count", 0)) for x in bp.get("by_code", [])}
+    assert by_code.get(BP_DRIVEZONE_CLIP_MULTIPIECE, 0) >= 1

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from shapely.geometry import LineString, Point, mapping
+from shapely.geometry import LineString, MultiLineString, Point, mapping
 
 from .crs_norm import transform_coords_recursive
 from .io_geojson import make_feature_collection, write_geojson
@@ -93,7 +93,7 @@ def write_anchor_geojson(
             )
 
         line = item.get("crossline_opt")
-        if isinstance(line, LineString):
+        if isinstance(line, (LineString, MultiLineString)):
             geom = mapping(line)
             geom = _transform_geometry_dict(geom, src_crs=src_crs_name, dst_crs=dst_crs_name)
             features.append(
@@ -117,7 +117,7 @@ def write_intersection_opt_geojson(
     features: list[dict[str, Any]] = []
     for item in seed_results:
         line = item.get("crossline_opt")
-        if not isinstance(line, LineString):
+        if not isinstance(line, (LineString, MultiLineString)):
             continue
         props = _props_min(item)
         geom = mapping(line)

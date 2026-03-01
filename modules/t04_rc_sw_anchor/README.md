@@ -46,7 +46,39 @@ python -m highway_topo_poc.modules.t04_rc_sw_anchor \
 
 优先级：CLI 覆盖 `config_json`。
 
-## 5. 输出目录
+## 5. 多 Patch 批量运行脚本（WSL）
+脚本路径：`modules/t04_rc_sw_anchor/scripts/run_t04_batch_wsl.sh`
+
+用法：
+```bash
+modules/t04_rc_sw_anchor/scripts/run_t04_batch_wsl.sh \
+  --data_root /mnt/d/TestData/highway_topo_poc_data/normal \
+  --global_node_path /mnt/d/TestData/global/RCSDNode.geojson \
+  --global_road_path /mnt/d/TestData/global/RCSDRoad.geojson \
+  --cases_file modules/t04_rc_sw_anchor/scripts/batch_cases_example.txt \
+  --out_root outputs/_work/t04_rc_sw_anchor
+```
+
+`cases_file` 每行一个 patch：
+```text
+patch_id:nodeid1,nodeid2,nodeid3
+```
+
+也支持直接通过参数传多个 patch：
+```bash
+modules/t04_rc_sw_anchor/scripts/run_t04_batch_wsl.sh \
+  --data_root /mnt/d/TestData/highway_topo_poc_data/normal \
+  --global_node_path /mnt/d/TestData/global/RCSDNode.geojson \
+  --global_road_path /mnt/d/TestData/global/RCSDRoad.geojson \
+  --case "2855795596742991:503176747,504381536" \
+  --case "2855795596723843:5278670377721456,5278670377721468"
+```
+
+支持参数：
+- `--dry_run`（只打印命令，不执行）
+- `--set key=value`（可重复，用于透传 t04 参数）
+
+## 6. 输出目录
 `outputs/_work/t04_rc_sw_anchor/<run_id>/`
 
 - `anchors_3857.geojson`
@@ -61,5 +93,5 @@ python -m highway_topo_poc.modules.t04_rc_sw_anchor \
 - `summary.txt`
 - `chosen_config.json`
 
-## 6. 配置模板
+## 7. 配置模板
 见：`modules/t04_rc_sw_anchor/t04_config_template_global_focus.json`
