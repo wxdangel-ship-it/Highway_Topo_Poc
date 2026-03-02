@@ -35,6 +35,7 @@ def _props_min(item: dict[str, Any]) -> dict[str, Any]:
         },
         "anchor_type": item.get("anchor_type"),
         "status": item.get("status"),
+        "found_split": item.get("found_split"),
         "scan_dir": item.get("scan_dir"),
         "scan_dist_m": item.get("scan_dist_m"),
         "trigger": item.get("trigger"),
@@ -56,6 +57,18 @@ def _props_min(item: dict[str, Any]) -> dict[str, Any]:
         "clipped_len_m": item.get("clipped_len_m"),
         "clip_empty": item.get("clip_empty"),
         "clip_piece_type": item.get("clip_piece_type"),
+        "pieces_count": item.get("pieces_count"),
+        "piece_lens_m": item.get("piece_lens_m"),
+        "gap_len_m": item.get("gap_len_m"),
+        "seg_len_m": item.get("seg_len_m"),
+        "branch_a_id": item.get("branch_a_id"),
+        "branch_b_id": item.get("branch_b_id"),
+        "branch_axis_id": item.get("branch_axis_id"),
+        "branch_a_crossline_hit": item.get("branch_a_crossline_hit"),
+        "branch_b_crossline_hit": item.get("branch_b_crossline_hit"),
+        "pa_center_dist_m": item.get("pa_center_dist_m"),
+        "pb_center_dist_m": item.get("pb_center_dist_m"),
+        "has_divstrip_nearby": item.get("has_divstrip_nearby"),
         "stop_reason": item.get("stop_reason"),
     }
 
@@ -115,20 +128,67 @@ def write_intersection_opt_geojson(
     dst_crs_name: str,
 ) -> None:
     features: list[dict[str, Any]] = []
+    def _piece_role(idx: int, piece_count: int) -> str:
+        if piece_count >= 2:
+            if idx == 0:
+                return "branch_a_side"
+            if idx == 1:
+                return "branch_b_side"
+        if piece_count == 1:
+            return "single_piece"
+        return f"piece_{int(idx)}"
+
     for item in seed_results:
-        line = item.get("crossline_opt")
-        if not isinstance(line, (LineString, MultiLineString)):
-            continue
         props = _props_min(item)
-        geom = mapping(line)
-        geom = _transform_geometry_dict(geom, src_crs=src_crs_name, dst_crs=dst_crs_name)
-        features.append(
-            {
-                "type": "Feature",
-                "properties": props,
-                "geometry": geom,
-            }
-        )
+        pieces = item.get("crossline_opt_pieces")
+        if isinstance(pieces, list) and pieces:
+            for idx, piece in enumerate(pieces):
+                if not isinstance(piece, LineString):
+                    continue
+                geom = mapping(piece)
+                geom = _transform_geometry_dict(geom, src_crs=src_crs_name, dst_crs=dst_crs_name)
+                features.append(
+                    {
+                        "type": "Feature",
+                        "properties": {
+                            **props,
+                            "piece_idx": int(idx),
+                            "piece_role": _piece_role(int(idx), len(pieces)),
+                        },
+                        "geometry": geom,
+                    }
+                )
+            continue
+
+        line = item.get("crossline_opt")
+        if isinstance(line, LineString):
+            geom = mapping(line)
+            geom = _transform_geometry_dict(geom, src_crs=src_crs_name, dst_crs=dst_crs_name)
+            features.append(
+                {
+                    "type": "Feature",
+                    "properties": {**props, "piece_idx": 0, "piece_role": "single_piece"},
+                    "geometry": geom,
+                }
+            )
+            continue
+        if isinstance(line, MultiLineString):
+            for idx, ln in enumerate(line.geoms):
+                if not isinstance(ln, LineString):
+                    continue
+                geom = mapping(ln)
+                geom = _transform_geometry_dict(geom, src_crs=src_crs_name, dst_crs=dst_crs_name)
+                features.append(
+                    {
+                        "type": "Feature",
+                        "properties": {
+                            **props,
+                            "piece_idx": int(idx),
+                            "piece_role": _piece_role(int(idx), len(line.geoms)),
+                        },
+                        "geometry": geom,
+                    }
+                )
 
     write_geojson(path, make_feature_collection(features, crs_name=dst_crs_name))
 

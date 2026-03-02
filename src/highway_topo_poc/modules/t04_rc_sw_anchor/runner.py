@@ -9,25 +9,26 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from shapely.geometry import LineString, Point, box
+from shapely.geometry import LineString, MultiLineString, Point, box
 from shapely.geometry.base import BaseGeometry
 
+from .between_branches import build_between_branches_segment, select_branch_pair_and_axis
 from .crs_norm import guess_crs_from_bbox, normalize_epsg_name, transform_xy_arrays
-from .divstrip_ops import anchor_point_from_crossline, is_divstrip_hit, tip_point_from_divstrip
-from .drivezone_ops import build_fan_band, clip_crossline_to_drivezone, detect_non_drivezone_in_fan, extend_line_to_half_len
+from .divstrip_ops import anchor_point_from_crossline
+from .drivezone_ops import gap_midpoint_between_pieces, pick_top_two_segment_pieces, segment_drivezone_pieces
 from .io_geojson import NodeRecord, RoadRecord, load_divstrip_union, load_drivezone_union, load_nodes, load_roads
 from .local_frame import LocalFrame
 from .metrics_breakpoints import (
+    BP_ANCHOR_GAP_UNSTABLE,
     BP_AMBIGUOUS_KIND,
     BP_CRS_UNKNOWN,
-    BP_DIVSTRIP_NEVER_HIT,
-    BP_DIVSTRIP_NON_INTERSECT_NOT_FOUND,
     BP_DIVSTRIPZONE_MISSING,
-    BP_DIVSTRIP_TOLERANCE_VIOLATION,
     BP_DRIVEZONE_CLIP_EMPTY,
     BP_DRIVEZONE_CLIP_MULTIPIECE,
     BP_DRIVEZONE_CRS_UNKNOWN,
     BP_DRIVEZONE_MISSING,
+    BP_MULTI_BRANCH_TODO,
+    BP_NEXT_INTERSECTION_NOT_FOUND_DEG3,
     BP_DRIVEZONE_SPLIT_NOT_FOUND,
     BP_DRIVEZONE_UNION_EMPTY,
     BP_FOCUS_NODE_NOT_FOUND,
@@ -35,10 +36,8 @@ from .metrics_breakpoints import (
     BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION,
     BP_NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED,
     BP_NEXT_INTERSECTION_DISABLED,
-    BP_NEXT_INTERSECTION_NOT_FOUND_CONNECTED,
     BP_POINTCLOUD_CRS_UNKNOWN_UNUSABLE,
     BP_POINTCLOUD_MISSING_OR_UNUSABLE,
-    BP_ROAD_GRAPH_DISCONNECTED_STOP,
     BP_ROAD_FIELD_MISSING,
     BP_ROAD_LINK_NOT_FOUND,
     BP_SCAN_EXCEED_200M,
@@ -358,6 +357,7 @@ def _empty_fail_result(
         "is_diverge_kind": bool(is_diverge),
         "anchor_type": str(anchor_type),
         "status": "fail",
+        "found_split": False,
         "anchor_found": False,
         "trigger": "none",
         "scan_dir": str(scan_dir),
@@ -384,6 +384,18 @@ def _empty_fail_result(
         "clipped_len_m": float(line.length),
         "clip_empty": False,
         "clip_piece_type": "none",
+        "pieces_count": 0,
+        "piece_lens_m": [],
+        "gap_len_m": None,
+        "seg_len_m": float(line.length),
+        "branch_a_id": None,
+        "branch_b_id": None,
+        "branch_axis_id": None,
+        "branch_a_crossline_hit": False,
+        "branch_b_crossline_hit": False,
+        "pa_center_dist_m": None,
+        "pb_center_dist_m": None,
+        "has_divstrip_nearby": False,
         "ng_candidates_before_suppress": 0,
         "ng_candidates_after_suppress": 0,
         "resolved_from": resolved_from,
@@ -407,6 +419,27 @@ def _evaluate_node(
     kind = None if node.kind is None else int(node.kind)
     is_merge = bool(kind is not None and (int(kind) & (1 << 3)) != 0)
     is_diverge = bool(kind is not None and (int(kind) & (1 << 4)) != 0)
+    hard_failed = False
+
+    def _add_bp(
+        *,
+        code: str,
+        severity: str,
+        message: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        nonlocal hard_failed
+        breakpoints.append(
+            make_breakpoint(
+                code=code,
+                severity=severity,
+                nodeid=nodeid,
+                message=message,
+                extra=extra,
+            )
+        )
+        if str(severity).lower() == "hard":
+            hard_failed = True
 
     dummy_line = LocalFrame.from_tangent(origin_xy=(float(node.point.x), float(node.point.y)), tangent_xy=(1.0, 0.0)).crossline(
         scan_dist_m=0.0,
@@ -414,15 +447,7 @@ def _evaluate_node(
     )
 
     if kind is None:
-        breakpoints.append(
-            make_breakpoint(
-                code=BP_MISSING_KIND_FIELD,
-                severity="hard",
-                nodeid=nodeid,
-                message="kind_missing_or_parse_failed",
-                extra={"kind_raw": node.kind_raw},
-            )
-        )
+        _add_bp(code=BP_MISSING_KIND_FIELD, severity="hard", message="kind_missing_or_parse_failed", extra={"kind_raw": node.kind_raw})
         return _empty_fail_result(
             nodeid=nodeid,
             kind=kind,
@@ -437,14 +462,7 @@ def _evaluate_node(
         )
 
     if is_merge and is_diverge:
-        breakpoints.append(
-            make_breakpoint(
-                code=BP_AMBIGUOUS_KIND,
-                severity="hard",
-                nodeid=nodeid,
-                message="bit3_and_bit4_both_set",
-            )
-        )
+        _add_bp(code=BP_AMBIGUOUS_KIND, severity="hard", message="bit3_and_bit4_both_set")
         return _empty_fail_result(
             nodeid=nodeid,
             kind=kind,
@@ -459,14 +477,11 @@ def _evaluate_node(
         )
 
     if not is_merge and not is_diverge:
-        breakpoints.append(
-            make_breakpoint(
-                code=BP_UNSUPPORTED_KIND,
-                severity="hard",
-                nodeid=nodeid,
-                message="kind_is_not_merge_or_diverge",
-                extra={"kind": int(kind), "kind_raw": node.kind_raw},
-            )
+        _add_bp(
+            code=BP_UNSUPPORTED_KIND,
+            severity="hard",
+            message="kind_is_not_merge_or_diverge",
+            extra={"kind": int(kind), "kind_raw": node.kind_raw},
         )
         return _empty_fail_result(
             nodeid=nodeid,
@@ -481,29 +496,23 @@ def _evaluate_node(
             resolved_from=resolved_from,
         )
 
-    if is_diverge:
-        pick = road_graph.pick_incoming_road(nodeid)
-        anchor_type = "diverge"
-        scan_dir_label = "forward"
-    else:
-        pick = road_graph.pick_outgoing_road(nodeid)
-        anchor_type = "merge"
-        scan_dir_label = "backward"
-
-    if pick is None:
-        breakpoints.append(
-            make_breakpoint(
-                code=BP_ROAD_LINK_NOT_FOUND,
-                severity="hard",
-                nodeid=nodeid,
-                message="road_link_not_found_for_seed",
-            )
+    try:
+        branch_sel = select_branch_pair_and_axis(
+            nodeid=nodeid,
+            is_diverge=bool(is_diverge),
+            roads=road_graph.roads,
+        )
+    except Exception as exc:
+        _add_bp(
+            code=BP_ROAD_LINK_NOT_FOUND,
+            severity="hard",
+            message=f"between_branches_selection_failed:{type(exc).__name__}",
         )
         return _empty_fail_result(
             nodeid=nodeid,
             kind=kind,
-            anchor_type=anchor_type,
-            scan_dir=scan_dir_label,
+            anchor_type="diverge" if is_diverge else "merge",
+            scan_dir="forward" if is_diverge else "backward",
             line=dummy_line,
             divstrip_union=divstrip_union,
             drivezone_union=drivezone_union,
@@ -512,80 +521,88 @@ def _evaluate_node(
             resolved_from=resolved_from,
         )
 
-    tangent = pick.tangent_at_node
-    scan_vec = tangent if is_diverge else (-float(tangent[0]), -float(tangent[1]))
-    frame = LocalFrame.from_tangent(origin_xy=(float(node.point.x), float(node.point.y)), tangent_xy=scan_vec)
+    if branch_sel.multi_branch_todo:
+        _add_bp(
+            code=BP_MULTI_BRANCH_TODO,
+            severity="soft",
+            message="multi_branch_selected_max_angle_pair",
+        )
+
+    anchor_type = str(branch_sel.anchor_type)
+    scan_dir_label = str(branch_sel.scan_dir_label)
+    scan_vec = (float(branch_sel.scan_dir[0]), float(branch_sel.scan_dir[1]))
+    branch_a = road_graph.roads[int(branch_sel.branch_a_idx)]
+    branch_b = road_graph.roads[int(branch_sel.branch_b_idx)]
+    axis_road = road_graph.roads[int(branch_sel.scan_axis_idx)]
+    branch_a_id = f"{int(branch_a.snodeid)}->{int(branch_a.enodeid)}"
+    branch_b_id = f"{int(branch_b.snodeid)}->{int(branch_b.enodeid)}"
+    axis_id = f"{int(axis_road.snodeid)}->{int(axis_road.enodeid)}"
+
+    use_drivezone = bool(params.get("use_drivezone", True))
+    if (not use_drivezone) or (drivezone_union is None) or (not drivezone_usable):
+        _add_bp(
+            code=BP_DRIVEZONE_MISSING,
+            severity="hard",
+            message="drivezone_missing_or_disabled",
+        )
+        out = _empty_fail_result(
+            nodeid=nodeid,
+            kind=kind,
+            anchor_type=anchor_type,
+            scan_dir=scan_dir_label,
+            line=dummy_line,
+            divstrip_union=divstrip_union,
+            drivezone_union=drivezone_union,
+            stop_reason="drivezone_missing",
+            id_fields=node.id_fields,
+            resolved_from=resolved_from,
+        )
+        out.update(
+            {
+                "branch_a_id": branch_a_id,
+                "branch_b_id": branch_b_id,
+                "branch_axis_id": axis_id,
+            }
+        )
+        return out
 
     scan_max = float(params["scan_max_limit_m"])
     stop_dist = float(scan_max)
     stop_reason = "max_200"
     next_inter: float | None = None
     stop_diag: dict[str, Any] = {}
-
     if bool(params.get("stop_at_next_intersection", True)):
-        if bool(params.get("stop_intersection_require_connected", True)):
-            next_inter, stop_diag = road_graph.find_next_intersection_distance_connected(
-                nodeid=nodeid,
-                scan_dir=scan_vec,
-                degree_min=int(params.get("next_intersection_degree_min", 3)),
-                intersection_kind_mask=None,
-                max_hops=64,
-                disable_geometric_fallback=bool(params.get("disable_geometric_stop_fallback", True)),
+        next_inter, stop_diag = road_graph.find_next_intersection_connected_deg3(
+            nodeid=nodeid,
+            scan_dir=scan_vec,
+            degree_min=int(params.get("next_intersection_degree_min", 3)),
+            max_hops=64,
+        )
+        deg_skip = int(stop_diag.get("deg_too_low_skipped", 0))
+        if deg_skip > 0:
+            _add_bp(
+                code=BP_NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED,
+                severity="soft",
+                message="next_intersection_degree_too_low_skipped",
+                extra={"count": int(deg_skip)},
             )
-            deg_skip = int(stop_diag.get("deg_too_low_skipped", 0))
-            if deg_skip > 0:
-                breakpoints.append(
-                    make_breakpoint(
-                        code=BP_NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED,
-                        severity="soft",
-                        nodeid=nodeid,
-                        message="next_intersection_degree_too_low_skipped",
-                        extra={"count": int(deg_skip)},
-                    )
-                )
-            if next_inter is not None and next_inter > 0:
-                stop_reason = "next_intersection_connected_deg3"
-                stop_dist = min(stop_dist, float(next_inter))
-            else:
-                stop_reason = "next_intersection_not_found_connected"
-                breakpoints.append(
-                    make_breakpoint(
-                        code=BP_NEXT_INTERSECTION_NOT_FOUND_CONNECTED,
-                        severity="soft",
-                        nodeid=nodeid,
-                        message="next_intersection_not_found_connected",
-                        extra={"diag": dict(stop_diag)},
-                    )
-                )
-                breakpoints.append(
-                    make_breakpoint(
-                        code=BP_ROAD_GRAPH_DISCONNECTED_STOP,
-                        severity="soft",
-                        nodeid=nodeid,
-                        message="road_graph_disconnected_or_no_valid_stop",
-                        extra={"diag": dict(stop_diag)},
-                    )
-                )
+        if next_inter is not None and next_inter > 0:
+            stop_reason = "next_intersection_connected_deg3"
+            stop_dist = min(stop_dist, float(next_inter))
         else:
-            next_inter = road_graph.find_next_intersection_distance(
-                nodeid=nodeid,
-                scan_dir=scan_vec,
-                intersection_kind_mask=0b11100,
+            stop_reason = "next_intersection_not_found_deg3"
+            _add_bp(
+                code=BP_NEXT_INTERSECTION_NOT_FOUND_DEG3,
+                severity="soft",
+                message="next_intersection_not_found_deg3",
+                extra={"diag": dict(stop_diag)},
             )
-            if next_inter is not None and next_inter > 0:
-                stop_dist = min(stop_dist, float(next_inter))
-                stop_reason = "next_intersection"
-            else:
-                stop_reason = "next_intersection_not_found"
     else:
         stop_reason = "next_intersection_disabled"
-        breakpoints.append(
-            make_breakpoint(
-                code=BP_NEXT_INTERSECTION_DISABLED,
-                severity="soft",
-                nodeid=nodeid,
-                message="next_intersection_disabled",
-            )
+        _add_bp(
+            code=BP_NEXT_INTERSECTION_DISABLED,
+            severity="soft",
+            message="next_intersection_disabled",
         )
 
     if stop_dist >= scan_max - 1e-9 and stop_reason == "next_intersection_connected_deg3":
@@ -594,259 +611,70 @@ def _evaluate_node(
     stop_dist = max(0.0, float(stop_dist))
     step = max(0.25, float(params["scan_step_m"]))
     n_steps = max(1, int(math.floor(stop_dist / step)) + 1)
-
-    window_steps = max(1, int(math.ceil(float(params["divstrip_trigger_window_m"]) / step)))
-    div_tol = float(params["divstrip_hit_tol_m"])
     half_len = float(params["cross_half_len_m"])
-    half_eff = max(0.0, half_len - float(params["ignore_end_margin_m"]))
-    line_buf = float(params["pc_line_buffer_m"])
-    pc_only_min_scan = float(params.get("pc_only_min_scan_dist_m", 10.0))
-    pc_only_after_div_min = float(params.get("pc_only_after_divstrip_min_m", 5.0))
-    use_drivezone = bool(params.get("use_drivezone", True))
-    drivezone_clip_crossline = bool(params.get("drivezone_clip_crossline", True))
-    drivezone_fan_radius_m = float(params.get("drivezone_fan_radius_m", 20.0))
-    drivezone_fan_half_angle_deg = float(params.get("drivezone_fan_half_angle_deg", 30.0))
-    drivezone_fan_band_width_m = float(params.get("drivezone_fan_band_width_m", 6.0))
-    drivezone_non_drivezone_area_min_m2 = float(params.get("drivezone_non_drivezone_area_min_m2", 3.0))
-    drivezone_non_drivezone_frac_min = float(params.get("drivezone_non_drivezone_frac_min", 0.15))
-    drivezone_clip_cross_half_len_m = float(params.get("drivezone_clip_cross_half_len_m", 80.0))
-
-    if ng_points_xy.size > 0:
-        u, v = frame.project_xy(ng_points_xy)
-    else:
-        u = np.zeros((0,), dtype=np.float64)
-        v = np.zeros((0,), dtype=np.float64)
-
-    def ng_hit_at(scan_s: float) -> tuple[bool, int]:
-        if u.size == 0:
-            return False, 0
-        mask = (np.abs(u - float(scan_s)) <= line_buf) & (np.abs(v) <= half_eff)
-        count = int(np.count_nonzero(mask))
-        return (count >= int(params["pc_non_ground_min_points"]), count)
-
-    hit_divstrip: list[bool] = []
-    hit_ng: list[bool] = []
-    lines: list[Any] = []
-    scan_values: list[float] = []
-
-    first_divstrip_s: float | None = None
-    tip_s: float | None = None
-    tip_hit_idx: int | None = None
-    tip_best_dist: float | None = None
-    best_divstrip_dz_s: float | None = None
-    best_divstrip_pc_s: float | None = None
-    first_pc_only_s: float | None = None
-    fan_diag: dict[str, Any] = {"fan_area_m2": 0.0, "non_drivezone_area_m2": 0.0, "non_drivezone_frac": 0.0, "reason": "none"}
-
-    tip_point = tip_point_from_divstrip(
-        divstrip_union=divstrip_union,
-        scan_vec=scan_vec,
-        origin_xy=(float(node.point.x), float(node.point.y)),
-    )
-    tip_target_s: float | None = None
-    if tip_point is not None and (not tip_point.is_empty):
-        dx = float(tip_point.x) - float(node.point.x)
-        dy = float(tip_point.y) - float(node.point.y)
-        tip_target_s = float(dx * scan_vec[0] + dy * scan_vec[1])
+    div_tol = float(params.get("divstrip_hit_tol_m", 1.0))
+    min_piece_len_m = float(params.get("min_piece_len_m", 1.0))
+    found_split = False
+    found_seg: LineString | None = None
+    found_pieces_raw: list[LineString] = []
+    found_diag: dict[str, Any] = {}
+    scan_dist = 0.0
+    last_seg = dummy_line
+    last_diag: dict[str, Any] = {"seg_len_m": float(dummy_line.length), "pa_center_dist_m": None, "pb_center_dist_m": None}
 
     for i in range(n_steps):
         s = float(i) * step
-        scan_values.append(s)
-        line = frame.crossline(scan_dist_m=s, cross_half_len_m=half_len)
-        lines.append(line)
-
-        div_hit = is_divstrip_hit(line=line, divstrip_union=divstrip_union, tol_m=div_tol)
-        if div_hit and first_divstrip_s is None:
-            first_divstrip_s = s
-        hit_divstrip.append(div_hit)
-
-        if tip_point is not None and (not tip_point.is_empty):
-            tip_dist = float(line.distance(tip_point))
-            if tip_dist <= div_tol:
-                if tip_hit_idx is None:
-                    tip_hit_idx = i
-                    tip_best_dist = tip_dist
-                    tip_s = s
-                else:
-                    prev_s = float(scan_values[tip_hit_idx])
-                    better_dist = tip_best_dist is None or tip_dist < float(tip_best_dist) - 1e-9
-                    if tip_target_s is None:
-                        better_tie = bool(tip_dist <= float(tip_best_dist) + 1e-9 and s < prev_s)
-                    else:
-                        better_tie = bool(
-                            tip_best_dist is not None
-                            and abs(tip_dist - float(tip_best_dist)) <= 1e-9
-                            and abs(s - float(tip_target_s)) < abs(prev_s - float(tip_target_s)) - 1e-9
-                        )
-                    if better_dist or better_tie:
-                        tip_hit_idx = i
-                        tip_best_dist = tip_dist
-                        tip_s = s
-
-        ng_ok, _ng_count = ng_hit_at(s)
-        hit_ng.append(ng_ok)
-
-    # Phase-1: locate earliest divstrip+pc candidate.
-    if pointcloud_usable:
-        for i in range(n_steps):
-            if not hit_divstrip[i]:
-                continue
-            lo = i
-            hi = min(n_steps - 1, i + window_steps)
-            if any(hit_ng[j] for j in range(lo, hi + 1)):
-                best_divstrip_pc_s = float(scan_values[i])
-                break
-
-    # Phase-1: locate earliest pc-only candidate gated by min scan distance and initial side suppression.
-    if pointcloud_usable:
-        for i in range(n_steps):
-            if not hit_ng[i]:
-                continue
-            if bool(params.get("ignore_initial_side_ng", True)) and i == 0:
-                continue
-            s = float(scan_values[i])
-            if s < pc_only_min_scan:
-                continue
-            first_pc_only_s = s
+        center_xy = (
+            float(node.point.x) + float(scan_vec[0]) * s,
+            float(node.point.y) + float(scan_vec[1]) * s,
+        )
+        seg, seg_diag = build_between_branches_segment(
+            center_xy=center_xy,
+            scan_dir=scan_vec,
+            branch_a=branch_a,
+            branch_b=branch_b,
+            crossline_half_len_m=half_len,
+        )
+        last_seg = seg
+        last_diag = seg_diag
+        pieces = segment_drivezone_pieces(
+            segment=seg,
+            drivezone_union=drivezone_union,
+            min_piece_len_m=min_piece_len_m,
+        )
+        if len(pieces) >= 2:
+            found_split = True
+            found_seg = seg
+            found_pieces_raw = pieces
+            found_diag = seg_diag
+            scan_dist = float(s)
             break
 
-    found_idx: int | None = None
-    trigger = "none"
-    status = "ok"
-    flags: list[str] = []
-    evidence_source = "none"
-
-    allow_pc_only_no_div = bool(params.get("allow_pc_only_when_no_divstrip", True))
-    allow_divstrip_only = bool(params.get("allow_divstrip_only_when_no_pointcloud", True))
-    if use_drivezone:
-        if not drivezone_usable:
-            flags.append("drivezone_missing_fail_closed")
-            breakpoints.append(
-                make_breakpoint(
-                    code=BP_DRIVEZONE_MISSING,
-                    severity="hard",
-                    nodeid=nodeid,
-                    message="drivezone_missing_or_unusable_fail_closed",
-                )
-            )
-        elif tip_hit_idx is not None:
-            found_idx = int(max(0, min(tip_hit_idx, n_steps - 1)))
-            best_divstrip_dz_s = float(scan_values[found_idx])
-            trigger = "divstrip+dz"
-            evidence_source = "drivezone"
-        elif first_divstrip_s is not None:
-            found_idx = int(max(0, min(int(round(first_divstrip_s / step)), n_steps - 1)))
-            best_divstrip_dz_s = float(scan_values[found_idx])
-            trigger = "divstrip+dz"
-            evidence_source = "drivezone"
-            status = "suspect"
-            flags.append("tip_not_hit_fallback_first_divstrip")
-            if tip_s is None:
-                tip_s = float(first_divstrip_s)
-            breakpoints.append(
-                make_breakpoint(
-                    code=BP_DIVSTRIP_NEVER_HIT,
-                    severity="soft",
-                    nodeid=nodeid,
-                    message="divstrip_tip_not_hit_fallback_to_first_divstrip_hit",
-                    extra={
-                        "tip_target_s_m": tip_target_s,
-                        "tip_best_dist_m": tip_best_dist,
-                        "divstrip_hit_tol_m": div_tol,
-                        "first_divstrip_hit_dist_m": first_divstrip_s,
-                    },
-                )
-            )
-        else:
-            breakpoints.append(
-                make_breakpoint(
-                    code=BP_DIVSTRIP_NEVER_HIT,
-                    severity="hard",
-                    nodeid=nodeid,
-                    message="divstrip_tip_not_hit_within_tol",
-                    extra={
-                        "tip_target_s_m": tip_target_s,
-                        "tip_best_dist_m": tip_best_dist,
-                        "divstrip_hit_tol_m": div_tol,
-                        "first_divstrip_hit_dist_m": first_divstrip_s,
-                    },
-                )
-            )
-            flags.append("divstrip_tip_not_hit_within_tol")
-    else:
-        if divstrip_union is not None and best_divstrip_pc_s is not None:
-            found_idx = int(round(best_divstrip_pc_s / step))
-            trigger = "divstrip+pc"
-            evidence_source = "pointcloud"
-        elif divstrip_union is not None and (not pointcloud_usable) and allow_divstrip_only and first_divstrip_s is not None:
-            found_idx = int(round(first_divstrip_s / step))
-            trigger = "divstrip_only_degraded"
-            status = "suspect"
-            flags.append("degraded_divstrip_only")
-            evidence_source = "divstrip_only"
-        elif pointcloud_usable and first_pc_only_s is not None:
-            if divstrip_union is None:
-                if allow_pc_only_no_div:
-                    found_idx = int(round(first_pc_only_s / step))
-                    trigger = "pc_only"
-                    evidence_source = "pointcloud"
-            elif first_divstrip_s is None:
-                if allow_pc_only_no_div:
-                    found_idx = int(round(first_pc_only_s / step))
-                    trigger = "pc_only_no_divstrip_hit"
-                    status = "suspect"
-                    evidence_source = "pointcloud"
-                    flags.append("divstrip_present_but_never_hit")
-                    breakpoints.append(
-                        make_breakpoint(
-                            code=BP_DIVSTRIP_NEVER_HIT,
-                            severity="soft",
-                            nodeid=nodeid,
-                            message="divstrip_exists_but_never_hit_fallback_pc_only",
-                            extra={"first_pc_only_dist_m": float(first_pc_only_s)},
-                        )
-                    )
-            elif first_pc_only_s >= float(first_divstrip_s + pc_only_after_div_min):
-                found_idx = int(round(first_pc_only_s / step))
-                trigger = "pc_only_after_divstrip_miss"
-                status = "suspect"
-                evidence_source = "pointcloud"
-                flags.append("pc_only_after_divstrip_miss")
-
-    if found_idx is None:
-        final_line = lines[-1] if lines else dummy_line
-        anchor_pt, dist_to_div = anchor_point_from_crossline(line=final_line, divstrip_union=divstrip_union)
-        dist_line_to_div = None if divstrip_union is None else float(final_line.distance(divstrip_union))
-        dist_line_to_dz_edge = None if drivezone_union is None else float(final_line.distance(drivezone_union.boundary))
-        breakpoints.append(
-            make_breakpoint(
-                code=BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION,
+    id_map = {str(k): int(v) for k, v in node.id_fields}
+    if not found_split or found_seg is None:
+        _add_bp(
+            code=BP_DRIVEZONE_SPLIT_NOT_FOUND,
+            severity="hard",
+            message="drivezone_split_not_found_within_stop_dist",
+            extra={"stop_dist_m": float(stop_dist)},
+        )
+        _add_bp(
+            code=BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION,
+            severity="soft",
+            message="scan_end_without_drivezone_split",
+            extra={"stop_dist_m": float(stop_dist)},
+        )
+        if stop_dist >= min(200.0, scan_max):
+            _add_bp(
+                code=BP_SCAN_EXCEED_200M,
                 severity="soft",
-                nodeid=nodeid,
-                message="scan_end_without_trigger",
+                message="scan_reached_200m_or_max",
                 extra={"stop_dist_m": float(stop_dist)},
             )
-        )
-        if divstrip_union is not None and first_divstrip_s is None:
-            breakpoints.append(
-                make_breakpoint(
-                    code=BP_DIVSTRIP_NEVER_HIT,
-                    severity="soft",
-                    nodeid=nodeid,
-                    message="divstrip_exists_but_never_hit_no_trigger",
-                )
-            )
-        if stop_dist >= min(200.0, scan_max):
-            breakpoints.append(
-                make_breakpoint(
-                    code=BP_SCAN_EXCEED_200M,
-                    severity="soft",
-                    nodeid=nodeid,
-                    message="scan_reached_200m_or_max",
-                    extra={"stop_dist_m": float(stop_dist)},
-                )
-            )
-        id_map = {str(k): int(v) for k, v in node.id_fields}
+        anchor_pt = last_seg.interpolate(0.5, normalized=True) if last_seg.length > 1e-9 else Point(float(node.point.x), float(node.point.y))
+        dist_line_to_div = None if divstrip_union is None else float(last_seg.distance(divstrip_union))
+        dist_to_div = None if divstrip_union is None else float(anchor_pt.distance(divstrip_union))
+        dist_line_to_dz_edge = None if drivezone_union is None else float(last_seg.distance(drivezone_union.boundary))
         return {
             "nodeid": int(nodeid),
             "id": id_map.get("id"),
@@ -857,6 +685,7 @@ def _evaluate_node(
             "is_diverge_kind": bool(is_diverge),
             "anchor_type": anchor_type,
             "status": "fail",
+            "found_split": False,
             "anchor_found": False,
             "trigger": "none",
             "scan_dir": scan_dir_label,
@@ -868,164 +697,127 @@ def _evaluate_node(
             "dist_line_to_divstrip_m": dist_line_to_div,
             "dist_line_to_drivezone_edge_m": dist_line_to_dz_edge,
             "confidence": 0.0,
-            "flags": [],
-            "evidence_source": evidence_source,
+            "flags": ["drivezone_split_not_found"],
+            "evidence_source": "none",
             "anchor_point": anchor_pt,
-            "crossline_opt": final_line,
-            "tip_s_m": tip_s,
-            "first_divstrip_hit_dist_m": first_divstrip_s,
-            "best_divstrip_dz_dist_m": best_divstrip_dz_s,
-            "best_divstrip_pc_dist_m": best_divstrip_pc_s,
-            "first_pc_only_dist_m": first_pc_only_s,
-            "fan_area_m2": float(fan_diag.get("fan_area_m2", 0.0)),
-            "non_drivezone_area_m2": float(fan_diag.get("non_drivezone_area_m2", 0.0)),
-            "non_drivezone_frac": float(fan_diag.get("non_drivezone_frac", 0.0)),
-            "clipped_len_m": float(final_line.length),
-            "clip_empty": False,
+            "crossline_opt": last_seg,
+            "crossline_opt_pieces": [],
+            "tip_s_m": None,
+            "first_divstrip_hit_dist_m": None,
+            "best_divstrip_dz_dist_m": None,
+            "best_divstrip_pc_dist_m": None,
+            "first_pc_only_dist_m": None,
+            "fan_area_m2": 0.0,
+            "non_drivezone_area_m2": 0.0,
+            "non_drivezone_frac": 0.0,
+            "clipped_len_m": float(last_seg.length),
+            "clip_empty": True,
             "clip_piece_type": "none",
-            "clip_input_len_m": float(final_line.length),
+            "clip_input_len_m": float(last_seg.length),
             "stop_diag": stop_diag,
+            "pieces_count": 0,
+            "piece_lens_m": [],
+            "gap_len_m": None,
+            "seg_len_m": float(last_diag.get("seg_len_m", last_seg.length)),
+            "branch_a_id": branch_a_id,
+            "branch_b_id": branch_b_id,
+            "branch_axis_id": axis_id,
+            "branch_a_crossline_hit": bool(last_diag.get("branch_a_crossline_hit", False)),
+            "branch_b_crossline_hit": bool(last_diag.get("branch_b_crossline_hit", False)),
+            "pa_center_dist_m": last_diag.get("pa_center_dist_m"),
+            "pb_center_dist_m": last_diag.get("pb_center_dist_m"),
+            "has_divstrip_nearby": False,
             "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
             "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
             "resolved_from": resolved_from,
         }
 
-    found_idx = max(0, min(found_idx, len(lines) - 1))
-
-    if trigger == "divstrip+dz" and divstrip_union is not None:
-        base_idx = int(found_idx)
-        base_line = lines[base_idx]
-        if bool(base_line.intersects(divstrip_union)):
-            refined_idx: int | None = None
-            for j in range(base_idx - 1, -1, -1):
-                ln = lines[j]
-                if float(ln.distance(divstrip_union)) <= float(div_tol) and (not bool(ln.intersects(divstrip_union))):
-                    refined_idx = int(j)
-                    break
-            if refined_idx is not None:
-                found_idx = int(refined_idx)
-                best_divstrip_dz_s = float(scan_values[found_idx])
-                flags.append("divstrip_non_intersect_refined")
-            else:
-                breakpoints.append(
-                    make_breakpoint(
-                        code=BP_DIVSTRIP_NON_INTERSECT_NOT_FOUND,
-                        severity="soft",
-                        nodeid=nodeid,
-                        message="divstrip_non_intersect_candidate_not_found_keep_intersecting_line",
-                        extra={"scan_dist_m": float(scan_values[base_idx]), "tol_m": float(div_tol)},
-                    )
-                )
-                flags.append("divstrip_non_intersect_not_found")
-
-    final_line = lines[found_idx]
-    scan_dist = float(scan_values[found_idx])
-    anchor_pt, dist_to_div = anchor_point_from_crossline(line=final_line, divstrip_union=divstrip_union)
-    dist_line_to_div = None if divstrip_union is None else float(final_line.distance(divstrip_union))
-    clip_diag: dict[str, Any] = {
-        "clipped_len_m": float(final_line.length),
-        "clip_empty": False,
-        "chosen_piece_type": "none",
-        "clip_input_len_m": float(final_line.length),
-    }
-
-    if trigger == "divstrip+dz" and drivezone_usable and drivezone_union is not None and tip_point is not None:
-        fan_origin = Point(
-            float(tip_point.x) + float(scan_vec[0]) * max(0.25, 0.5 * step),
-            float(tip_point.y) + float(scan_vec[1]) * max(0.25, 0.5 * step),
+    picked_pieces, has_extra_piece = pick_top_two_segment_pieces(segment=found_seg, pieces=found_pieces_raw)
+    if len(picked_pieces) < 2:
+        _add_bp(
+            code=BP_DRIVEZONE_CLIP_EMPTY,
+            severity="hard",
+            message="drivezone_split_pieces_lt_2_after_filter",
         )
-        fan_band = build_fan_band(
-            origin_xy=(float(fan_origin.x), float(fan_origin.y)),
-            scan_unit_vec=scan_vec,
-            radius_m=drivezone_fan_radius_m,
-            half_angle_deg=drivezone_fan_half_angle_deg,
-            band_width_m=drivezone_fan_band_width_m,
-        )
-        fan_ok, fan_diag = detect_non_drivezone_in_fan(
+        out = _empty_fail_result(
+            nodeid=nodeid,
+            kind=kind,
+            anchor_type=anchor_type,
+            scan_dir=scan_dir_label,
+            line=found_seg,
+            divstrip_union=divstrip_union,
             drivezone_union=drivezone_union,
-            fan_band=fan_band,
-            area_min_m2=drivezone_non_drivezone_area_min_m2,
-            frac_min=drivezone_non_drivezone_frac_min,
+            stop_reason="drivezone_clip_empty",
+            id_fields=node.id_fields,
+            resolved_from=resolved_from,
         )
-        if not fan_ok:
-            breakpoints.append(
-                make_breakpoint(
-                    code=BP_DRIVEZONE_SPLIT_NOT_FOUND,
-                    severity="hard",
-                    nodeid=nodeid,
-                    message="drivezone_physical_split_missing_after_divstrip_tip",
-                    extra={"tip_s_m": tip_s, "fan_diag": dict(fan_diag)},
-                )
-            )
-            status = "fail"
-            flags.append("drivezone_physical_split_missing")
-
-    if trigger == "divstrip+dz" and drivezone_usable and drivezone_clip_crossline:
-        clip_crossline = final_line
-        target_half = max(float(half_len), float(drivezone_clip_cross_half_len_m))
-        if target_half > float(half_len) + 1e-9 and isinstance(final_line, LineString):
-            clip_crossline = extend_line_to_half_len(line=final_line, half_len_m=target_half)
-        clip_diag["clip_input_len_m"] = float(clip_crossline.length)
-        final_line, clip_diag = clip_crossline_to_drivezone(
-            crossline=clip_crossline,
-            drivezone_union=drivezone_union,
-            anchor_pt=tip_point if tip_point is not None else anchor_pt,
+        out.update(
+            {
+                "branch_a_id": branch_a_id,
+                "branch_b_id": branch_b_id,
+                "branch_axis_id": axis_id,
+            }
         )
-        if bool(clip_diag.get("clip_empty", False)):
-            breakpoints.append(
-                make_breakpoint(
-                    code=BP_DRIVEZONE_CLIP_EMPTY,
-                    severity="hard",
-                    nodeid=nodeid,
-                    message="drivezone_clip_empty",
-                )
-            )
-            status = "fail"
-            flags.append("drivezone_clip_empty")
-        if str(clip_diag.get("chosen_piece_type", "")).startswith("multi_piece"):
-            breakpoints.append(
-                make_breakpoint(
-                    code=BP_DRIVEZONE_CLIP_MULTIPIECE,
-                    severity="soft",
-                    nodeid=nodeid,
-                    message="drivezone_clip_multiline_reported",
-                    extra={"clip_diag": dict(clip_diag)},
-                )
-            )
-            flags.append("drivezone_clip_multipiece")
-        anchor_pt, dist_to_div = anchor_point_from_crossline(line=final_line, divstrip_union=divstrip_union)
-        dist_line_to_div = None if divstrip_union is None else float(final_line.distance(divstrip_union))
+        return out
 
+    if has_extra_piece:
+        _add_bp(
+            code=BP_DRIVEZONE_CLIP_MULTIPIECE,
+            severity="soft",
+            message="drivezone_clip_multipiece_select_top2",
+            extra={"piece_count": int(len(found_pieces_raw))},
+        )
+
+    gap_mid, gap_len = gap_midpoint_between_pieces(segment=found_seg, pieces=picked_pieces)
+    if gap_mid is None:
+        _add_bp(
+            code=BP_ANCHOR_GAP_UNSTABLE,
+            severity="soft",
+            message="anchor_gap_unstable_fallback_seg_midpoint",
+        )
+        gap_mid = found_seg.interpolate(0.5, normalized=True) if found_seg.length > 1e-9 else Point(float(node.point.x), float(node.point.y))
+
+    has_divstrip_nearby = False
+    dist_line_to_div = None
+    dist_to_div = None
+    if divstrip_union is not None:
+        dist_line_to_div = float(found_seg.distance(divstrip_union))
+        has_divstrip_nearby = bool(dist_line_to_div <= float(div_tol))
+        dist_to_div = float(gap_mid.distance(divstrip_union))
+
+    if has_divstrip_nearby and bool(params.get("divstrip_anchor_snap_enabled", False)) and divstrip_union is not None:
+        try:
+            from shapely.ops import nearest_points
+
+            _p0, p1 = nearest_points(gap_mid, divstrip_union.boundary)
+            gap_mid = Point(float(p1.x), float(p1.y))
+        except Exception:
+            pass
+
+    final_geom: LineString | MultiLineString
+    if len(picked_pieces) == 1:
+        final_geom = picked_pieces[0]
+    else:
+        final_geom = MultiLineString(picked_pieces)
+
+    piece_lens = [float(ln.length) for ln in picked_pieces]
+    clipped_len = float(sum(piece_lens))
+    flags: list[str] = []
     if scan_dist > float(params.get("scan_near_limit_m", 20.0)):
-        status = "suspect"
         flags.append("scan_dist_gt_near_limit")
+    if has_extra_piece:
+        flags.append("drivezone_clip_multipiece")
+    if has_divstrip_nearby:
+        flags.append("divstrip_nearby")
+    status = "suspect" if flags else "ok"
+    if hard_failed:
+        status = "fail"
 
-    if scan_dist > 200.0:
-        breakpoints.append(
-            make_breakpoint(
-                code=BP_SCAN_EXCEED_200M,
-                severity="soft",
-                nodeid=nodeid,
-                message="scan_dist_exceeds_200m",
-                extra={"scan_dist_m": float(scan_dist)},
-            )
-        )
-
-    if trigger in {"divstrip+pc", "divstrip_only_degraded", "divstrip+dz"} and dist_line_to_div is not None and dist_line_to_div > div_tol:
-        breakpoints.append(
-            make_breakpoint(
-                code=BP_DIVSTRIP_TOLERANCE_VIOLATION,
-                severity="hard",
-                nodeid=nodeid,
-                message="dist_line_to_divstrip_exceeds_tol",
-                extra={"dist_line_to_divstrip_m": float(dist_line_to_div), "tol_m": float(div_tol)},
-            )
-        )
-
+    dist_line_to_dz_edge = None if drivezone_union is None else float(final_geom.distance(drivezone_union.boundary))
+    trigger = "drivezone_split"
+    evidence_source = "drivezone_split+divstrip" if has_divstrip_nearby else "drivezone_split"
     conf = compute_confidence(trigger=trigger, scan_dist_m=scan_dist)
-    id_map = {str(k): int(v) for k, v in node.id_fields}
-    dist_line_to_dz_edge = None if drivezone_union is None else float(final_line.distance(drivezone_union.boundary))
-    anchor_found = bool(status != "fail")
+    anchor_found = bool(found_split and (not hard_failed) and status in {"ok", "suspect"})
     return {
         "nodeid": int(nodeid),
         "id": id_map.get("id"),
@@ -1036,6 +828,7 @@ def _evaluate_node(
         "is_diverge_kind": bool(is_diverge),
         "anchor_type": anchor_type,
         "status": status,
+        "found_split": True,
         "anchor_found": anchor_found,
         "trigger": trigger,
         "scan_dir": scan_dir_label,
@@ -1049,21 +842,34 @@ def _evaluate_node(
         "confidence": float(conf),
         "flags": flags,
         "evidence_source": evidence_source,
-        "anchor_point": anchor_pt,
-        "crossline_opt": final_line,
-        "tip_s_m": tip_s,
-        "first_divstrip_hit_dist_m": first_divstrip_s,
-        "best_divstrip_dz_dist_m": best_divstrip_dz_s,
-        "best_divstrip_pc_dist_m": best_divstrip_pc_s,
-        "first_pc_only_dist_m": first_pc_only_s,
-        "fan_area_m2": float(fan_diag.get("fan_area_m2", 0.0)),
-        "non_drivezone_area_m2": float(fan_diag.get("non_drivezone_area_m2", 0.0)),
-        "non_drivezone_frac": float(fan_diag.get("non_drivezone_frac", 0.0)),
-        "clipped_len_m": float(clip_diag.get("clipped_len_m", final_line.length)),
-        "clip_empty": bool(clip_diag.get("clip_empty", False)),
-        "clip_piece_type": str(clip_diag.get("chosen_piece_type", "none")),
-        "clip_input_len_m": float(clip_diag.get("clip_input_len_m", final_line.length)),
+        "anchor_point": gap_mid,
+        "crossline_opt": final_geom,
+        "crossline_opt_pieces": picked_pieces,
+        "tip_s_m": None,
+        "first_divstrip_hit_dist_m": None,
+        "best_divstrip_dz_dist_m": float(scan_dist),
+        "best_divstrip_pc_dist_m": None,
+        "first_pc_only_dist_m": None,
+        "fan_area_m2": 0.0,
+        "non_drivezone_area_m2": 0.0,
+        "non_drivezone_frac": 0.0,
+        "clipped_len_m": clipped_len,
+        "clip_empty": False,
+        "clip_piece_type": "multi_piece_top2" if has_extra_piece else "two_piece",
+        "clip_input_len_m": float(found_seg.length),
         "stop_diag": stop_diag,
+        "pieces_count": int(len(picked_pieces)),
+        "piece_lens_m": piece_lens,
+        "gap_len_m": None if gap_len is None else float(gap_len),
+        "seg_len_m": float(found_diag.get("seg_len_m", found_seg.length)),
+        "branch_a_id": branch_a_id,
+        "branch_b_id": branch_b_id,
+        "branch_axis_id": axis_id,
+        "branch_a_crossline_hit": bool(found_diag.get("branch_a_crossline_hit", False)),
+        "branch_b_crossline_hit": bool(found_diag.get("branch_b_crossline_hit", False)),
+        "pa_center_dist_m": found_diag.get("pa_center_dist_m"),
+        "pb_center_dist_m": found_diag.get("pb_center_dist_m"),
+        "has_divstrip_nearby": bool(has_divstrip_nearby),
         "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
         "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
         "resolved_from": resolved_from,
@@ -1074,6 +880,7 @@ def _serialize_seed_result(item: dict[str, Any]) -> dict[str, Any]:
     out = dict(item)
     out.pop("anchor_point", None)
     out.pop("crossline_opt", None)
+    out.pop("crossline_opt_pieces", None)
     return out
 
 

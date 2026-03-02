@@ -29,10 +29,13 @@ BP_DRIVEZONE_CLIP_EMPTY = "DRIVEZONE_CLIP_EMPTY"
 BP_DRIVEZONE_CLIP_MULTIPIECE = "DRIVEZONE_CLIP_MULTIPIECE"
 BP_DRIVEZONE_SPLIT_NOT_FOUND = "DRIVEZONE_SPLIT_NOT_FOUND"
 BP_NEXT_INTERSECTION_NOT_FOUND_CONNECTED = "NEXT_INTERSECTION_NOT_FOUND_CONNECTED"
+BP_NEXT_INTERSECTION_NOT_FOUND_DEG3 = "NEXT_INTERSECTION_NOT_FOUND_DEG3"
 BP_NEXT_INTERSECTION_DISABLED = "NEXT_INTERSECTION_DISABLED"
 BP_NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED = "NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED"
 BP_ROAD_GRAPH_DISCONNECTED_STOP = "ROAD_GRAPH_DISCONNECTED_STOP"
 BP_POINTCLOUD_CRS_UNKNOWN_UNUSABLE = "POINTCLOUD_CRS_UNKNOWN_UNUSABLE"
+BP_MULTI_BRANCH_TODO = "MULTI_BRANCH_TODO"
+BP_ANCHOR_GAP_UNSTABLE = "ANCHOR_GAP_UNSTABLE"
 
 
 def make_breakpoint(
@@ -83,12 +86,8 @@ def clamp01(v: float) -> float:
 
 def compute_confidence(*, trigger: str, scan_dist_m: float | None) -> float:
     val = 0.35
-    if trigger == "divstrip+pc":
+    if trigger == "drivezone_split":
         val += 0.45
-    elif trigger in {"pc_only", "pc_only_no_divstrip_hit", "pc_only_after_divstrip_miss"}:
-        val += 0.30
-    elif trigger == "divstrip_only_degraded":
-        val += 0.15
 
     d = float(scan_dist_m) if scan_dist_m is not None else 0.0
     if d > 20.0:
@@ -122,19 +121,17 @@ def build_metrics(
     no_trigger_count = _count_code(breakpoints, BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION)
     scan_exceed_count = _count_code(breakpoints, BP_SCAN_EXCEED_200M)
     hard_breakpoint_count = int(sum(1 for bp in breakpoints if str(bp.get("severity", "")).lower() == "hard"))
-    degraded_trigger_count = int(
-        sum(
-            1
-            for x in seed_results
-            if str(x.get("trigger", "")) in {"divstrip_only_degraded", "pc_only", "pc_only_no_divstrip_hit", "pc_only_after_divstrip_miss"}
-        )
-    )
+    degraded_trigger_count = int(sum(1 for x in seed_results if str(x.get("trigger", "")) not in {"drivezone_split", "none"}))
     stop_reason_counts = dict(Counter(str(x.get("stop_reason", "none")) for x in seed_results))
     evidence_source_counts = dict(Counter(str(x.get("evidence_source", "unknown")) for x in seed_results))
 
     min_ratio = float(params["min_anchor_found_ratio_focus"] if mode == "global_focus" else params["min_anchor_found_ratio_patch"])
-    no_trigger_max = int(params.get("no_trigger_count_max_focus", 0 if mode == "global_focus" else seed_total))
-    scan_exceed_max = int(params.get("scan_exceed_200m_count_max_focus", 0 if mode == "global_focus" else seed_total))
+    if mode == "global_focus":
+        no_trigger_max = int(params.get("no_trigger_count_max_focus", 0))
+        scan_exceed_max = int(params.get("scan_exceed_200m_count_max_focus", 0))
+    else:
+        no_trigger_max = int(params.get("no_trigger_count_max_patch", seed_total))
+        scan_exceed_max = int(params.get("scan_exceed_200m_count_max_patch", seed_total))
 
     hard_checks = {
         "required_outputs_present": bool(required_outputs_ok),
@@ -248,26 +245,27 @@ def build_summary_text(
         else:
             focus_text = "na"
         lines.append(
-            "- nodeid={nodeid} kind={kind} kind_bits(merge={is_merge},diverge={is_diverge}) anchor_type={anchor_type} status={status} scan_dist_m={scan_dist} trigger={trigger} evidence_source={evidence_source} stop_dist_m={stop} stop_reason={stop_reason} dist_line_to_divstrip_m={dist_line_to_divstrip} dist_line_to_drivezone_edge_m={dist_line_to_drivezone_edge} first_divstrip_hit={first_div_hit} best_divstrip_dz={best_div_dz} best_divstrip_pc={best_div_pc} first_pc_only={first_pc} non_drivezone_frac={non_drivezone_frac} clipped_len_m={clipped_len} focus_resolve={focus_resolve}".format(
+            "- nodeid={nodeid} kind={kind} kind_bits(merge={is_merge},diverge={is_diverge}) anchor_type={anchor_type} status={status} found_split={found_split} scan_dist_m={scan_dist} trigger={trigger} evidence_source={evidence_source} stop_dist_m={stop} stop_reason={stop_reason} pieces_count={pieces_count} piece_lens_m={piece_lens} gap_len_m={gap_len} seg_len_m={seg_len} dist_line_to_divstrip_m={dist_line_to_divstrip} dist_line_to_drivezone_edge_m={dist_line_to_drivezone_edge} branchA={branch_a} branchB={branch_b} focus_resolve={focus_resolve}".format(
                 nodeid=item.get("nodeid"),
                 kind=item.get("kind"),
                 is_merge=item.get("is_merge_kind"),
                 is_diverge=item.get("is_diverge_kind"),
                 anchor_type=item.get("anchor_type"),
                 status=item.get("status"),
+                found_split=item.get("found_split"),
                 scan_dist=item.get("scan_dist_m"),
                 trigger=item.get("trigger"),
                 evidence_source=item.get("evidence_source"),
                 stop=item.get("stop_dist_m"),
                 stop_reason=item.get("stop_reason"),
+                pieces_count=item.get("pieces_count"),
+                piece_lens=item.get("piece_lens_m"),
+                gap_len=item.get("gap_len_m"),
+                seg_len=item.get("seg_len_m"),
                 dist_line_to_divstrip=item.get("dist_line_to_divstrip_m"),
                 dist_line_to_drivezone_edge=item.get("dist_line_to_drivezone_edge_m"),
-                first_div_hit=item.get("first_divstrip_hit_dist_m"),
-                best_div_dz=item.get("best_divstrip_dz_dist_m"),
-                best_div_pc=item.get("best_divstrip_pc_dist_m"),
-                first_pc=item.get("first_pc_only_dist_m"),
-                non_drivezone_frac=item.get("non_drivezone_frac"),
-                clipped_len=item.get("clipped_len_m"),
+                branch_a=item.get("branch_a_id"),
+                branch_b=item.get("branch_b_id"),
                 focus_resolve=focus_text,
             )
         )
@@ -304,11 +302,14 @@ __all__ = [
     "BP_DRIVEZONE_UNION_EMPTY",
     "BP_DIVSTRIPZONE_MISSING",
     "BP_DIVSTRIP_TOLERANCE_VIOLATION",
+    "BP_ANCHOR_GAP_UNSTABLE",
     "BP_FOCUS_NODE_NOT_FOUND",
     "BP_MISSING_KIND_FIELD",
+    "BP_MULTI_BRANCH_TODO",
     "BP_NO_TRIGGER_BEFORE_NEXT_INTERSECTION",
     "BP_NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED",
     "BP_NEXT_INTERSECTION_DISABLED",
+    "BP_NEXT_INTERSECTION_NOT_FOUND_DEG3",
     "BP_NEXT_INTERSECTION_NOT_FOUND_CONNECTED",
     "BP_POINTCLOUD_CRS_UNKNOWN_UNUSABLE",
     "BP_POINTCLOUD_MISSING_OR_UNUSABLE",

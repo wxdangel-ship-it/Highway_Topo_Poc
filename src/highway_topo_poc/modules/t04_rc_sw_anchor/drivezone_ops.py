@@ -31,6 +31,14 @@ def _collect_lines(geom: BaseGeometry | None) -> list[LineString]:
     return []
 
 
+def _piece_interval_on_segment(*, segment: LineString, piece: LineString) -> tuple[float, float]:
+    coords = list(piece.coords)
+    if not coords:
+        return (0.0, 0.0)
+    vals = [float(segment.project(Point(float(x), float(y)))) for x, y in coords]
+    return (float(min(vals)), float(max(vals)))
+
+
 def _collect_polygons(geom: BaseGeometry | None) -> list[Polygon]:
     if geom is None or geom.is_empty:
         return []
@@ -120,6 +128,57 @@ def detect_non_drivezone_in_fan(
 
     hit = bool(non_area >= float(area_min_m2) or frac >= float(frac_min))
     return hit, diag
+
+
+def segment_drivezone_pieces(
+    *,
+    segment: LineString,
+    drivezone_union: BaseGeometry | None,
+    min_piece_len_m: float,
+) -> list[LineString]:
+    if drivezone_union is None or drivezone_union.is_empty:
+        return []
+    inter = segment.intersection(drivezone_union)
+    pieces = [ln for ln in _collect_lines(inter) if float(ln.length) >= max(0.01, float(min_piece_len_m))]
+    if not pieces:
+        return []
+    return sorted(pieces, key=lambda ln: _piece_interval_on_segment(segment=segment, piece=ln)[0])
+
+
+def pick_top_two_segment_pieces(
+    *,
+    segment: LineString,
+    pieces: list[LineString],
+) -> tuple[list[LineString], bool]:
+    if len(pieces) <= 2:
+        return list(pieces), False
+    top = sorted(pieces, key=lambda ln: float(ln.length), reverse=True)[:2]
+    top = sorted(top, key=lambda ln: _piece_interval_on_segment(segment=segment, piece=ln)[0])
+    return top, True
+
+
+def gap_midpoint_between_pieces(
+    *,
+    segment: LineString,
+    pieces: list[LineString],
+) -> tuple[Point | None, float | None]:
+    if len(pieces) < 2:
+        return None, None
+    p0, p1 = pieces[0], pieces[1]
+    i0 = _piece_interval_on_segment(segment=segment, piece=p0)
+    i1 = _piece_interval_on_segment(segment=segment, piece=p1)
+    left = i0 if i0[0] <= i1[0] else i1
+    right = i1 if i0[0] <= i1[0] else i0
+    gap = float(right[0] - left[1])
+    if not math.isfinite(gap) or gap < -1e-6:
+        return None, None
+    start = max(0.0, float(left[1]))
+    end = max(start, float(right[0]))
+    mid = 0.5 * (start + end)
+    try:
+        return segment.interpolate(mid), float(max(0.0, gap))
+    except Exception:
+        return None, None
 
 
 def clip_crossline_to_drivezone(
@@ -221,4 +280,7 @@ __all__ = [
     "clip_crossline_to_drivezone",
     "detect_non_drivezone_in_fan",
     "extend_line_to_half_len",
+    "gap_midpoint_between_pieces",
+    "pick_top_two_segment_pieces",
+    "segment_drivezone_pieces",
 ]
