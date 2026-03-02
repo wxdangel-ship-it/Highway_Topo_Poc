@@ -155,6 +155,49 @@ def segment_drivezone_pieces(
     return sorted(pieces, key=lambda ln: _piece_interval_on_segment(segment=segment, piece=ln)[0])
 
 
+def build_drivezone_edge_span(
+    *,
+    segment: LineString,
+    drivezone_union: BaseGeometry | None,
+    min_piece_len_m: float,
+) -> tuple[LineString | None, list[LineString], dict[str, Any]]:
+    pieces = segment_drivezone_pieces(
+        segment=segment,
+        drivezone_union=drivezone_union,
+        min_piece_len_m=min_piece_len_m,
+    )
+    piece_lens = [float(ln.length) for ln in pieces]
+    diag: dict[str, Any] = {
+        "reason": "ok",
+        "pieces_count": int(len(pieces)),
+        "piece_lens_m": piece_lens,
+        "span_start_s": None,
+        "span_end_s": None,
+        "left_edge_dist_m": None,
+        "right_edge_dist_m": None,
+    }
+    if not pieces:
+        diag["reason"] = "no_piece"
+        return None, [], diag
+
+    intervals = [_piece_interval_on_segment(segment=segment, piece=ln) for ln in pieces]
+    start_s = float(min(iv[0] for iv in intervals))
+    end_s = float(max(iv[1] for iv in intervals))
+    if (not math.isfinite(start_s)) or (not math.isfinite(end_s)) or (end_s - start_s) <= 1e-6:
+        diag["reason"] = "degenerate_span"
+        return None, pieces, diag
+
+    p0 = segment.interpolate(start_s)
+    p1 = segment.interpolate(end_s)
+    span = LineString([(float(p0.x), float(p0.y)), (float(p1.x), float(p1.y))])
+    center_s = float(segment.project(segment.interpolate(0.5, normalized=True)))
+    diag["span_start_s"] = float(start_s)
+    diag["span_end_s"] = float(end_s)
+    diag["left_edge_dist_m"] = float(max(0.0, center_s - start_s))
+    diag["right_edge_dist_m"] = float(max(0.0, end_s - center_s))
+    return span, pieces, diag
+
+
 def pick_top_two_segment_pieces(
     *,
     segment: LineString,
@@ -327,6 +370,7 @@ __all__ = [
     "build_fan_band",
     "clip_crossline_to_drivezone",
     "detect_non_drivezone_in_fan",
+    "build_drivezone_edge_span",
     "extend_line_to_half_len",
     "gap_midpoint_between_pieces",
     "pick_segment_pieces_by_center_sides",

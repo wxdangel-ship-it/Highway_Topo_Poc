@@ -255,6 +255,21 @@ def test_merge_no_divstrip_drivezone_split_found(tmp_path: Path) -> None:
     assert int(item.get("pieces_count", 0)) == 2
 
 
+def test_divstrip_window_direction_for_diverge(tmp_path: Path) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    _data, out_dir = _run_runtime(
+        tmp_path,
+        run_id="divstrip_window_direction_for_diverge",
+        data=data,
+        focus_node_ids=[str(data["node_diverge"])],
+    )
+    item = _read_json(out_dir / "anchors.json")["items"][0]
+    assert str(item.get("status")) in {"ok", "suspect"}
+    s_div = float(item.get("s_divstrip_m", 0.0))
+    s_chosen = float(item.get("s_chosen_m", -1.0))
+    assert (s_div - 1.0) <= s_chosen <= s_div
+
+
 def test_prevent_cross_intersection_drift(tmp_path: Path) -> None:
     data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
     _rewrite_drivezone_single_polygon(data["drivezone_path"])
@@ -272,7 +287,7 @@ def test_prevent_cross_intersection_drift(tmp_path: Path) -> None:
     assert str(item.get("trigger")) == "none"
     bp = _read_json(out_dir / "breakpoints.json")
     by_code = {str(x.get("code")): int(x.get("count", 0)) for x in bp.get("by_code", [])}
-    assert by_code.get("DRIVEZONE_SPLIT_NOT_FOUND", 0) >= 1
+    assert by_code.get("DRIVEZONE_CLIP_EMPTY", 0) >= 1
 
 
 def test_drivezone_clip_multifeature_output_two_lines(tmp_path: Path) -> None:
@@ -286,10 +301,10 @@ def test_drivezone_clip_multifeature_output_two_lines(tmp_path: Path) -> None:
     )
     inter = _read_json(out_dir / "intersection_l_opt.geojson")
     feats = [f for f in inter.get("features", []) if int(f.get("properties", {}).get("nodeid", -1)) == int(data["node_diverge"])]
-    assert len(feats) == 2
-    assert {int(f["properties"]["piece_idx"]) for f in feats} == {0, 1}
-    assert {str(f["properties"].get("piece_role")) for f in feats} == {"branch_a_side", "branch_b_side"}
-    assert all(str(f.get("geometry", {}).get("type")) == "LineString" for f in feats)
+    assert len(feats) == 1
+    assert int(feats[0]["properties"]["piece_idx"]) == 0
+    assert str(feats[0]["properties"].get("piece_role")) == "single_piece"
+    assert str(feats[0].get("geometry", {}).get("type")) == "LineString"
     anchors = _read_json(out_dir / "anchors.json")
     item = anchors["items"][0]
     assert float(item.get("clipped_len_m", 0.0)) > float(item.get("seg_len_m", 0.0))
@@ -323,7 +338,7 @@ def test_divstrip_priority_over_earliest_split(tmp_path: Path) -> None:
     assert str(pref_item.get("split_pick_source", "")).startswith("divstrip_")
 
 
-def test_divstrip_far_reference_must_not_override_earliest(tmp_path: Path) -> None:
+def test_divstrip_far_reference_has_priority(tmp_path: Path) -> None:
     base_data = create_synth_patch(tmp_path / "base_far", kind_key="kind", id_mode="id", crs_mode="3857")
     base_data["divstrip_path"].unlink()
     _data0, out0 = _run_runtime(
@@ -336,7 +351,7 @@ def test_divstrip_far_reference_must_not_override_earliest(tmp_path: Path) -> No
     base_scan = float(base_item.get("scan_dist_m", 0.0))
 
     far_data = create_synth_patch(tmp_path / "far_case", kind_key="kind", id_mode="id", crs_mode="3857")
-    # Keep divstrip within stop_dist but far from earliest split, to verify guard.
+    # Keep divstrip within stop_dist but far from earliest split, to verify divstrip priority.
     _rewrite_divstrip_offset(far_data["divstrip_path"], dy=-75.0)
     _data1, out1 = _run_runtime(
         tmp_path / "far_case",
@@ -347,8 +362,11 @@ def test_divstrip_far_reference_must_not_override_earliest(tmp_path: Path) -> No
     far_item = _read_json(out1 / "anchors.json")["items"][0]
 
     far_scan = float(far_item.get("scan_dist_m", 0.0))
-    assert abs(far_scan - base_scan) <= 2.0
-    assert str(far_item.get("split_pick_source")) == "drivezone_earliest_divstrip_far_ignored"
+    assert far_scan >= base_scan + 50.0
+    assert str(far_item.get("split_pick_source", "")).startswith("divstrip_")
+    assert str(far_item.get("split_pick_source", "")).endswith("_split_far_ignored")
+    s_div = float(far_item.get("s_divstrip_m", 0.0))
+    assert s_div <= far_scan <= s_div + 1.0
 
 
 def test_divstrip_hard_window_requires_split_within_1m(tmp_path: Path) -> None:
@@ -364,11 +382,11 @@ def test_divstrip_hard_window_requires_split_within_1m(tmp_path: Path) -> None:
     assert str(item.get("status")) == "fail"
     assert bool(item.get("anchor_found", True)) is False
     assert bool(item.get("found_split", True)) is False
-    assert str(item.get("split_pick_source")) == "rejected_no_split_in_divstrip_ref_window_1m"
+    assert str(item.get("split_pick_source")) == "divstrip_first_hit_window_no_span"
     assert float(item.get("s_drivezone_split_m", 0.0)) >= float(item.get("s_divstrip_m", 0.0)) + 5.0
     bp = _read_json(out_dir / "breakpoints.json")
     by_code = {str(x.get("code")): int(x.get("count", 0)) for x in bp.get("by_code", [])}
-    assert by_code.get("DRIVEZONE_SPLIT_NOT_FOUND", 0) >= 1
+    assert by_code.get("DRIVEZONE_CLIP_EMPTY", 0) >= 1
 
 
 def test_drivezone_clip_more_than_two_pieces(tmp_path: Path) -> None:
@@ -385,7 +403,8 @@ def test_drivezone_clip_more_than_two_pieces(tmp_path: Path) -> None:
     assert by_code.get("DRIVEZONE_CLIP_MULTIPIECE", 0) >= 1
     inter = _read_json(out_dir / "intersection_l_opt.geojson")
     feats = [f for f in inter.get("features", []) if int(f.get("properties", {}).get("nodeid", -1)) == int(data["node_merge"])]
-    assert len(feats) == 2
+    assert len(feats) == 1
+    assert str(feats[0].get("geometry", {}).get("type")) == "LineString"
 
 
 def test_hard_stop_deg3_only() -> None:
@@ -422,9 +441,12 @@ def test_status_not_overwritten(tmp_path: Path) -> None:
     )
     anchors = _read_json(out_dir / "anchors.json")
     item = anchors["items"][0]
-    assert str(item.get("status")) == "fail"
-    assert bool(item.get("anchor_found", True)) is False
-    assert bool(item.get("found_split", True)) is False
+    assert str(item.get("status")) in {"ok", "suspect"}
+    assert bool(item.get("anchor_found", False)) is True
+    assert str(item.get("trigger")) == "divstrip_ref"
+    s_div = float(item.get("s_divstrip_m", 0.0))
+    s_chosen = float(item.get("s_chosen_m", -1.0))
+    assert s_div <= s_chosen <= s_div + 1.0
 
 
 def test_crs_fail_closed(tmp_path: Path) -> None:
