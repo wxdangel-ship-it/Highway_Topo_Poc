@@ -35,7 +35,17 @@ def _piece_interval_on_segment(*, segment: LineString, piece: LineString) -> tup
     coords = list(piece.coords)
     if not coords:
         return (0.0, 0.0)
-    vals = [float(segment.project(Point(float(x), float(y)))) for x, y in coords]
+    vals: list[float] = []
+    for coord in coords:
+        if not isinstance(coord, (tuple, list)) or len(coord) < 2:
+            continue
+        x = float(coord[0])
+        y = float(coord[1])
+        if not math.isfinite(x) or not math.isfinite(y):
+            continue
+        vals.append(float(segment.project(Point(x, y))))
+    if not vals:
+        return (0.0, 0.0)
     return (float(min(vals)), float(max(vals)))
 
 
