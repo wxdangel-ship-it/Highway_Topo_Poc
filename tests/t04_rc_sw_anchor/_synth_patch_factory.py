@@ -60,8 +60,14 @@ def create_synth_patch(
     crs_mode: str = "3857",
 ) -> dict[str, Any]:
     patch_id = "2855795596723843"
-    node_a = 5278670377721456
-    node_b = 5278670377721468
+    node_div = 5278670377721456
+    node_merge = 5278670377721468
+    node_in = 50000001
+    node_div_left = 50000002
+    node_div_right = 50000003
+    node_merge_left = 50000004
+    node_merge_right = 50000005
+    node_out = 50000006
 
     if crs_mode == "3857":
         node_road_crs = "EPSG:3857"
@@ -121,23 +127,43 @@ def create_synth_patch(
     node_features = [
         {
             "type": "Feature",
-            "properties": _node_props(node_id=node_a, kind_value=16, kind_key=kind_key, id_mode=id_mode),
+            "properties": _node_props(node_id=node_div, kind_value=16, kind_key=kind_key, id_mode=id_mode),
             "geometry": {"type": "Point", "coordinates": nr(0.0, 0.0)},
         },
         {
             "type": "Feature",
-            "properties": _node_props(node_id=node_b, kind_value=8, kind_key=kind_key, id_mode=id_mode),
+            "properties": _node_props(node_id=node_merge, kind_value=8, kind_key=kind_key, id_mode=id_mode),
             "geometry": {"type": "Point", "coordinates": nr(0.0, 100.0)},
         },
         {
             "type": "Feature",
-            "properties": _node_props(node_id=9001, kind_value=4, kind_key=kind_key, id_mode=id_mode),
-            "geometry": {"type": "Point", "coordinates": nr(0.0, 40.0)},
+            "properties": _node_props(node_id=node_in, kind_value=4, kind_key=kind_key, id_mode=id_mode),
+            "geometry": {"type": "Point", "coordinates": nr(0.0, -60.0)},
         },
         {
             "type": "Feature",
-            "properties": _node_props(node_id=9002, kind_value=4, kind_key=kind_key, id_mode=id_mode),
-            "geometry": {"type": "Point", "coordinates": nr(0.0, 60.0)},
+            "properties": _node_props(node_id=node_div_left, kind_value=4, kind_key=kind_key, id_mode=id_mode),
+            "geometry": {"type": "Point", "coordinates": nr(-18.0, 40.0)},
+        },
+        {
+            "type": "Feature",
+            "properties": _node_props(node_id=node_div_right, kind_value=4, kind_key=kind_key, id_mode=id_mode),
+            "geometry": {"type": "Point", "coordinates": nr(18.0, 42.0)},
+        },
+        {
+            "type": "Feature",
+            "properties": _node_props(node_id=node_merge_left, kind_value=4, kind_key=kind_key, id_mode=id_mode),
+            "geometry": {"type": "Point", "coordinates": nr(-18.0, 58.0)},
+        },
+        {
+            "type": "Feature",
+            "properties": _node_props(node_id=node_merge_right, kind_value=4, kind_key=kind_key, id_mode=id_mode),
+            "geometry": {"type": "Point", "coordinates": nr(18.0, 60.0)},
+        },
+        {
+            "type": "Feature",
+            "properties": _node_props(node_id=node_out, kind_value=4, kind_key=kind_key, id_mode=id_mode),
+            "geometry": {"type": "Point", "coordinates": nr(0.0, 160.0)},
         },
     ]
 
@@ -146,23 +172,33 @@ def create_synth_patch(
     road_features = [
         {
             "type": "Feature",
-            "properties": {"snodeid": 8000, "enodeid": node_a, "direction": 2},
-            "geometry": {"type": "LineString", "coordinates": [nr(0.0, -50.0), nr(0.0, 0.0)]},
+            "properties": {"snodeid": node_in, "enodeid": node_div, "direction": 2},
+            "geometry": {"type": "LineString", "coordinates": [nr(0.0, -60.0), nr(0.0, 0.0)]},
         },
         {
             "type": "Feature",
-            "properties": {"snodeid": node_a, "enodeid": 9001, "direction": 2},
-            "geometry": {"type": "LineString", "coordinates": [nr(0.0, 0.0), nr(0.0, 40.0)]},
+            "properties": {"snodeid": node_div, "enodeid": node_div_left, "direction": 2},
+            "geometry": {"type": "LineString", "coordinates": [nr(0.0, 0.0), nr(-18.0, 40.0)]},
         },
         {
             "type": "Feature",
-            "properties": {"snodeid": node_b, "enodeid": 8001, "direction": 2},
-            "geometry": {"type": "LineString", "coordinates": [nr(0.0, 100.0), nr(0.0, 150.0)]},
+            "properties": {"snodeid": node_div, "enodeid": node_div_right, "direction": 2},
+            "geometry": {"type": "LineString", "coordinates": [nr(0.0, 0.0), nr(18.0, 42.0)]},
         },
         {
             "type": "Feature",
-            "properties": {"snodeid": 9002, "enodeid": node_b, "direction": 2},
-            "geometry": {"type": "LineString", "coordinates": [nr(0.0, 60.0), nr(0.0, 100.0)]},
+            "properties": {"snodeid": node_merge_left, "enodeid": node_merge, "direction": 2},
+            "geometry": {"type": "LineString", "coordinates": [nr(-18.0, 58.0), nr(0.0, 100.0)]},
+        },
+        {
+            "type": "Feature",
+            "properties": {"snodeid": node_merge_right, "enodeid": node_merge, "direction": 2},
+            "geometry": {"type": "LineString", "coordinates": [nr(18.0, 60.0), nr(0.0, 100.0)]},
+        },
+        {
+            "type": "Feature",
+            "properties": {"snodeid": node_merge, "enodeid": node_out, "direction": 2},
+            "geometry": {"type": "LineString", "coordinates": [nr(0.0, 100.0), nr(0.0, 160.0)]},
         },
     ]
     _write_json(global_dir / "RCSDRoad.geojson", _fc(road_features, node_road_crs))
@@ -173,7 +209,7 @@ def create_synth_patch(
             "properties": {"name": "diverge_zone"},
             "geometry": {
                 "type": "Polygon",
-                "coordinates": [[dv(0.0, 9.0), dv(5.0, 9.0), dv(5.0, 11.0), dv(0.0, 11.0), dv(0.0, 9.0)]],
+                "coordinates": [[dv(-2.0, 12.0), dv(2.0, 12.0), dv(2.0, 18.0), dv(-2.0, 18.0), dv(-2.0, 12.0)]],
             },
         },
         {
@@ -181,7 +217,7 @@ def create_synth_patch(
             "properties": {"name": "merge_zone"},
             "geometry": {
                 "type": "Polygon",
-                "coordinates": [[dv(0.0, 89.0), dv(5.0, 89.0), dv(5.0, 91.0), dv(0.0, 91.0), dv(0.0, 89.0)]],
+                "coordinates": [[dv(-2.0, 82.0), dv(2.0, 82.0), dv(2.0, 88.0), dv(-2.0, 88.0), dv(-2.0, 82.0)]],
             },
         },
     ]
@@ -193,7 +229,7 @@ def create_synth_patch(
             "properties": {"name": "drivezone_left"},
             "geometry": {
                 "type": "Polygon",
-                "coordinates": [[dz(-8.0, -60.0), dz(-1.0, -60.0), dz(-1.0, 160.0), dz(-8.0, 160.0), dz(-8.0, -60.0)]],
+                "coordinates": [[dz(-30.0, -80.0), dz(-4.0, -80.0), dz(-4.0, 180.0), dz(-30.0, 180.0), dz(-30.0, -80.0)]],
             },
         },
         {
@@ -201,14 +237,14 @@ def create_synth_patch(
             "properties": {"name": "drivezone_right"},
             "geometry": {
                 "type": "Polygon",
-                "coordinates": [[dz(1.0, -60.0), dz(8.0, -60.0), dz(8.0, 160.0), dz(1.0, 160.0), dz(1.0, -60.0)]],
+                "coordinates": [[dz(4.0, -80.0), dz(30.0, -80.0), dz(30.0, 180.0), dz(4.0, 180.0), dz(4.0, -80.0)]],
             },
         },
     ]
     _write_json(patch_dir / "Vector" / "DriveZone.geojson", _fc(drivezone_features, drivezone_crs))
 
     pc_features: list[dict[str, Any]] = []
-    for dx in [2.6, 2.8, 3.0, 3.2, 3.4, 3.6]:
+    for dx in [8.0, 9.0, 10.0, 11.0, 12.0]:
         pc_features.append(
             {
                 "type": "Feature",
@@ -216,7 +252,7 @@ def create_synth_patch(
                 "geometry": {"type": "Point", "coordinates": pc(dx, 12.0)},
             }
         )
-    for dx in [2.6, 2.8, 3.0, 3.2, 3.4, 3.6]:
+    for dx in [8.0, 9.0, 10.0, 11.0, 12.0]:
         pc_features.append(
             {
                 "type": "Feature",
@@ -226,7 +262,7 @@ def create_synth_patch(
         )
 
     for dy in [12.0, 88.0]:
-        for dx in [0.0, 0.4, 0.8]:
+        for dx in [-0.5, 0.0, 0.5]:
             pc_features.append(
                 {
                     "type": "Feature",
@@ -240,23 +276,23 @@ def create_synth_patch(
             {
                 "type": "Feature",
                 "properties": {"classification": 12},
-                "geometry": {"type": "Point", "coordinates": pc(3.0, dy)},
+                "geometry": {"type": "Point", "coordinates": pc(10.0, dy)},
             }
         )
 
-    for y in [0.0, 20.0, 40.0, 60.0, 80.0, 100.0]:
+    for y in [-40.0, 0.0, 40.0, 80.0, 120.0, 160.0]:
         pc_features.append(
             {
                 "type": "Feature",
                 "properties": {"classification": 2},
-                "geometry": {"type": "Point", "coordinates": pc(-5.0, y)},
+                "geometry": {"type": "Point", "coordinates": pc(-20.0, y)},
             }
         )
 
     _write_json(patch_dir / "PointCloud" / "merged.geojson", _fc(pc_features, pointcloud_crs))
 
     traj_features: list[dict[str, Any]] = []
-    for i in range(-50, 151, 5):
+    for i in range(-60, 181, 5):
         xy = tr(0.0, float(i))
         traj_features.append(
             {
@@ -277,7 +313,9 @@ def create_synth_patch(
         "drivezone_path": patch_dir / "Vector" / "DriveZone.geojson",
         "pointcloud_path": patch_dir / "PointCloud" / "merged.geojson",
         "traj_glob": str((patch_dir / "Traj" / "*" / "raw_dat_pose.geojson").as_posix()),
-        "focus_node_ids": [str(node_a), str(node_b)],
+        "focus_node_ids": [str(node_div), str(node_merge)],
+        "node_diverge": int(node_div),
+        "node_merge": int(node_merge),
         "expected_matched_field": matched_field,
         "node_src_crs": "auto",
         "road_src_crs": "auto",
