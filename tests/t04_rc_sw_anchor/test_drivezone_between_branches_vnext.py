@@ -310,6 +310,8 @@ def test_drivezone_clip_multifeature_output_single_continuous_line(tmp_path: Pat
     assert float(item.get("clipped_len_m", 0.0)) > 0.0
     assert float(item.get("clipped_len_m", 0.0)) <= float(item.get("clip_input_len_m", 0.0))
     assert int(item.get("selected_piece_count", 0)) == 1
+    assert float(item.get("left_end_to_drivezone_edge_m", 99.0)) <= 0.2
+    assert float(item.get("right_end_to_drivezone_edge_m", 99.0)) <= 0.2
     assert float(item.get("output_cross_half_len_m", 0.0)) >= 120.0
 
 

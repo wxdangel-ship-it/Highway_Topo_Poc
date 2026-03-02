@@ -1058,6 +1058,21 @@ def _evaluate_node(
         span_start = base_s0
         span_end = base_s1
 
+    left_extended_to_piece_edge = False
+    right_extended_to_piece_edge = False
+    edge_touch_tol_m = 0.1
+    if drivezone_union is not None and (not drivezone_union.is_empty):
+        p0_probe = output_crossline.interpolate(span_start)
+        p1_probe = output_crossline.interpolate(span_end)
+        left_probe_dist = float(p0_probe.distance(drivezone_union.boundary))
+        right_probe_dist = float(p1_probe.distance(drivezone_union.boundary))
+        if left_probe_dist > edge_touch_tol_m + 1e-9 and span_start > base_s0 + 1e-9:
+            span_start = base_s0
+            left_extended_to_piece_edge = True
+        if right_probe_dist > edge_touch_tol_m + 1e-9 and span_end < base_s1 - 1e-9:
+            span_end = base_s1
+            right_extended_to_piece_edge = True
+
     if (not math.isfinite(span_start)) or (not math.isfinite(span_end)) or (span_end - span_start) <= 1e-6:
         _add_bp(
             code=BP_DRIVEZONE_CLIP_EMPTY,
@@ -1107,6 +1122,8 @@ def _evaluate_node(
     p0 = output_crossline.interpolate(span_start)
     p1 = output_crossline.interpolate(span_end)
     final_geom = LineString([(float(p0.x), float(p0.y)), (float(p1.x), float(p1.y))])
+    left_end_to_dz_edge = None if drivezone_union is None else float(p0.distance(drivezone_union.boundary))
+    right_end_to_dz_edge = None if drivezone_union is None else float(p1.distance(drivezone_union.boundary))
     gap_mid = final_geom.interpolate(0.5, normalized=True) if final_geom.length > 1e-9 else center_pt
     gap_len = None
     selected_lines = [selected_piece[0]]
@@ -1144,6 +1161,10 @@ def _evaluate_node(
         flags.append("divstrip_ref_offset_gt_window")
     if not center_piece_hit:
         flags.append("center_piece_missing_fallback")
+    if left_extended_to_piece_edge:
+        flags.append("left_extended_to_piece_edge")
+    if right_extended_to_piece_edge:
+        flags.append("right_extended_to_piece_edge")
 
     status = "suspect" if flags else "ok"
     if hard_failed:
@@ -1228,6 +1249,10 @@ def _evaluate_node(
         "pb_center_dist_m": found_diag.get("pb_center_dist_m"),
         "left_edge_dist_m": left_edge_dist_m,
         "right_edge_dist_m": right_edge_dist_m,
+        "left_end_to_drivezone_edge_m": left_end_to_dz_edge,
+        "right_end_to_drivezone_edge_m": right_end_to_dz_edge,
+        "left_extended_to_piece_edge": bool(left_extended_to_piece_edge),
+        "right_extended_to_piece_edge": bool(right_extended_to_piece_edge),
         "has_divstrip_nearby": bool(has_divstrip_nearby),
         "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
         "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
