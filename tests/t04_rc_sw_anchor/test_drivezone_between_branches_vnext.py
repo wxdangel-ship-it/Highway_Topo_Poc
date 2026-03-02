@@ -338,7 +338,7 @@ def test_divstrip_priority_over_earliest_split(tmp_path: Path) -> None:
     assert str(pref_item.get("split_pick_source", "")).startswith("divstrip_")
 
 
-def test_divstrip_far_reference_has_priority(tmp_path: Path) -> None:
+def test_divstrip_far_reference_must_not_override_drivezone_split(tmp_path: Path) -> None:
     base_data = create_synth_patch(tmp_path / "base_far", kind_key="kind", id_mode="id", crs_mode="3857")
     base_data["divstrip_path"].unlink()
     _data0, out0 = _run_runtime(
@@ -351,7 +351,7 @@ def test_divstrip_far_reference_has_priority(tmp_path: Path) -> None:
     base_scan = float(base_item.get("scan_dist_m", 0.0))
 
     far_data = create_synth_patch(tmp_path / "far_case", kind_key="kind", id_mode="id", crs_mode="3857")
-    # Keep divstrip within stop_dist but far from earliest split, to verify divstrip priority.
+    # Keep divstrip within stop_dist but far from earliest split, must fallback to drivezone split.
     _rewrite_divstrip_offset(far_data["divstrip_path"], dy=-75.0)
     _data1, out1 = _run_runtime(
         tmp_path / "far_case",
@@ -362,11 +362,8 @@ def test_divstrip_far_reference_has_priority(tmp_path: Path) -> None:
     far_item = _read_json(out1 / "anchors.json")["items"][0]
 
     far_scan = float(far_item.get("scan_dist_m", 0.0))
-    assert far_scan >= base_scan + 50.0
-    assert str(far_item.get("split_pick_source", "")).startswith("divstrip_")
-    assert str(far_item.get("split_pick_source", "")).endswith("_split_far_ignored")
-    s_div = float(far_item.get("s_divstrip_m", 0.0))
-    assert s_div <= far_scan <= s_div + 1.0
+    assert abs(far_scan - base_scan) <= 2.0
+    assert str(far_item.get("split_pick_source", "")) == "drivezone_split_window_divstrip_far_ignored"
 
 
 def test_divstrip_hard_window_requires_split_within_1m(tmp_path: Path) -> None:

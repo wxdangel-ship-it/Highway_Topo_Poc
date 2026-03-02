@@ -709,13 +709,18 @@ def _evaluate_node(
 
     split_pick_source = "none"
     ref_s: float | None = None
+    position_source = "none"
     if divstrip_ref_s is not None:
         ref_s = float(max(0.0, min(float(stop_dist), float(divstrip_ref_s))))
+        position_source = "divstrip_ref"
         split_pick_source = f"divstrip_{divstrip_ref_source}_window"
         if s_drivezone_split is not None and abs(float(s_drivezone_split) - float(ref_s)) > float(divstrip_drivezone_max_offset_m):
-            split_pick_source = f"{split_pick_source}_split_far_ignored"
+            ref_s = float(max(0.0, min(float(stop_dist), float(s_drivezone_split))))
+            position_source = "drivezone_split"
+            split_pick_source = "drivezone_split_window_divstrip_far_ignored"
     elif s_drivezone_split is not None:
         ref_s = float(max(0.0, min(float(stop_dist), float(s_drivezone_split))))
+        position_source = "drivezone_split"
         split_pick_source = "drivezone_split_window"
     else:
         _add_bp(
@@ -966,7 +971,7 @@ def _evaluate_node(
         flags.append("drivezone_clip_multipiece")
     if has_divstrip_nearby:
         flags.append("divstrip_nearby")
-    if divstrip_ref_s is not None:
+    if position_source == "divstrip_ref":
         flags.append("divstrip_ref_used")
     if divstrip_ref_offset is not None and divstrip_ref_offset > float(divstrip_preferred_window_m):
         flags.append("divstrip_ref_offset_gt_window")
@@ -977,9 +982,9 @@ def _evaluate_node(
 
     found_split = bool(s_drivezone_split is not None)
     trigger = "drivezone_split" if found_split else "divstrip_ref"
-    if divstrip_ref_s is not None and found_split:
+    if position_source == "divstrip_ref" and found_split:
         evidence_source = "drivezone_split+divstrip"
-    elif divstrip_ref_s is not None:
+    elif position_source == "divstrip_ref":
         evidence_source = "divstrip_ref"
     else:
         evidence_source = "drivezone_split"
