@@ -290,7 +290,7 @@ def test_prevent_cross_intersection_drift(tmp_path: Path) -> None:
     assert by_code.get("DRIVEZONE_CLIP_EMPTY", 0) >= 1
 
 
-def test_drivezone_clip_multifeature_output_two_lines(tmp_path: Path) -> None:
+def test_drivezone_clip_multifeature_output_single_continuous_line(tmp_path: Path) -> None:
     data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
     data["divstrip_path"].unlink()
     data, out_dir = _run_runtime(
@@ -301,10 +301,10 @@ def test_drivezone_clip_multifeature_output_two_lines(tmp_path: Path) -> None:
     )
     inter = _read_json(out_dir / "intersection_l_opt.geojson")
     feats = [f for f in inter.get("features", []) if int(f.get("properties", {}).get("nodeid", -1)) == int(data["node_diverge"])]
-    assert len(feats) == 2
-    assert {int(f["properties"]["piece_idx"]) for f in feats} == {0, 1}
-    assert {str(f["properties"].get("piece_role")) for f in feats} == {"branch_a_side", "branch_b_side"}
-    assert all(str(f.get("geometry", {}).get("type")) == "LineString" for f in feats)
+    assert len(feats) == 1
+    assert int(feats[0]["properties"]["piece_idx"]) == 0
+    assert str(feats[0]["properties"].get("piece_role")) == "single_piece"
+    assert str(feats[0].get("geometry", {}).get("type")) == "LineString"
     anchors = _read_json(out_dir / "anchors.json")
     item = anchors["items"][0]
     assert float(item.get("clipped_len_m", 0.0)) > float(item.get("seg_len_m", 0.0))
@@ -400,8 +400,8 @@ def test_drivezone_clip_more_than_two_pieces(tmp_path: Path) -> None:
     assert by_code.get("DRIVEZONE_CLIP_MULTIPIECE", 0) >= 1
     inter = _read_json(out_dir / "intersection_l_opt.geojson")
     feats = [f for f in inter.get("features", []) if int(f.get("properties", {}).get("nodeid", -1)) == int(data["node_merge"])]
-    assert len(feats) == 2
-    assert all(str(f.get("geometry", {}).get("type")) == "LineString" for f in feats)
+    assert len(feats) == 1
+    assert str(feats[0].get("geometry", {}).get("type")) == "LineString"
 
 
 def test_hard_stop_deg3_only() -> None:

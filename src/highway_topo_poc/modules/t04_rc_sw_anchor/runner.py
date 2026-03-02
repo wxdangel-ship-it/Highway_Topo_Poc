@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from shapely.geometry import LineString, MultiLineString, Point, box
+from shapely.geometry import LineString, Point, box
 from shapely.geometry.base import BaseGeometry
 
 from .between_branches import build_between_branches_segment, select_branch_pair_and_axis
@@ -795,20 +795,22 @@ def _evaluate_node(
     probe_step = min(0.25, max(0.05, float(step)))
     scan_candidates: list[float] = []
     if is_diverge:
-        cur = float(window_hi)
-        while cur >= float(window_lo) - 1e-9:
-            scan_candidates.append(float(max(window_lo, min(window_hi, cur))))
-            cur -= probe_step
-    else:
+        # Prefer the near-tip upstream boundary first (s_ref-1 for diverge).
         cur = float(window_lo)
         while cur <= float(window_hi) + 1e-9:
             scan_candidates.append(float(max(window_lo, min(window_hi, cur))))
             cur += probe_step
+    else:
+        # Prefer the near-tip downstream boundary first (s_ref+1 for merge).
+        cur = float(window_hi)
+        while cur >= float(window_lo) - 1e-9:
+            scan_candidates.append(float(max(window_lo, min(window_hi, cur))))
+            cur -= probe_step
     if not scan_candidates:
         scan_candidates = [float(max(window_lo, min(window_hi, float(ref_s))))]
     ref_in_window = float(max(window_lo, min(window_hi, float(ref_s))))
     if all(abs(float(x) - ref_in_window) > 1e-6 for x in scan_candidates):
-        scan_candidates.insert(0, ref_in_window)
+        scan_candidates.append(ref_in_window)
     dedup_candidates: list[float] = []
     seen_key: set[float] = set()
     for s_val in scan_candidates:
@@ -926,33 +928,165 @@ def _evaluate_node(
         _add_bp(
             code=BP_DRIVEZONE_CLIP_MULTIPIECE,
             severity="soft",
-            message="drivezone_clip_multipiece_piecewise_output",
+            message="drivezone_clip_multipiece_branch_filtered",
             extra={"piece_count": int(len(output_pieces_raw))},
         )
 
-    gap_mid, gap_len = gap_midpoint_between_pieces(segment=output_crossline, pieces=output_pieces_picked)
+    # Use branch endpoints to pick current-road pieces, then connect as a continuous span.
+    pa_pt = Point(float(found_seg.coords[0][0]), float(found_seg.coords[0][1]))
+    pb_pt = Point(float(found_seg.coords[-1][0]), float(found_seg.coords[-1][1]))
+    center_pt = output_crossline.interpolate(0.5, normalized=True) if output_crossline.length > 1e-9 else Point(float(node.point.x), float(node.point.y))
+    center_s = float(output_crossline.project(center_pt))
+
+    piece_info: list[tuple[LineString, float, float, float]] = []
+    for piece in output_pieces_raw:
+        vals: list[float] = []
+        for coord in list(piece.coords):
+            if len(coord) < 2:
+                continue
+            vals.append(float(output_crossline.project(Point(float(coord[0]), float(coord[1])))))
+        if not vals:
+            continue
+        s0 = float(min(vals))
+        s1 = float(max(vals))
+        sm = 0.5 * (s0 + s1)
+        piece_info.append((piece, s0, s1, sm))
+
+    if not piece_info:
+        _add_bp(
+            code=BP_DRIVEZONE_CLIP_EMPTY,
+            severity="hard",
+            message="drivezone_piece_interval_empty",
+        )
+        out = _empty_fail_result(
+            nodeid=nodeid,
+            kind=kind,
+            anchor_type=anchor_type,
+            scan_dir=scan_dir_label,
+            line=output_crossline,
+            divstrip_union=divstrip_union,
+            drivezone_union=drivezone_union,
+            stop_reason="drivezone_piece_interval_empty",
+            id_fields=node.id_fields,
+            resolved_from=resolved_from,
+        )
+        out.update(
+            {
+                "stop_dist_m": float(stop_dist),
+                "next_intersection_dist_m": None if next_inter is None else float(next_inter),
+                "tip_s_m": None if tip_s is None else float(tip_s),
+                "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
+                "best_divstrip_dz_dist_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "clip_empty": True,
+                "clip_piece_type": "none",
+                "clip_input_len_m": float(output_crossline.length),
+                "stop_diag": stop_diag,
+                "s_divstrip_m": None if divstrip_ref_s is None else float(divstrip_ref_s),
+                "s_drivezone_split_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "s_chosen_m": float(scan_dist),
+                "split_pick_source": f"{split_pick_source}_interval_empty",
+                "divstrip_ref_source": str(divstrip_ref_source),
+                "divstrip_ref_offset_m": divstrip_ref_offset,
+                "output_cross_half_len_m": float(output_cross_half_len_m),
+                "branch_a_id": branch_a_id,
+                "branch_b_id": branch_b_id,
+                "branch_axis_id": axis_id,
+                "has_divstrip_nearby": False,
+                "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
+                "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+            }
+        )
+        return out
+
+    def _pick_piece_for_anchor(anchor_pt: Point, candidates: list[tuple[LineString, float, float, float]]) -> tuple[LineString, float, float, float]:
+        return min(
+            candidates,
+            key=lambda x: (
+                float(x[0].distance(anchor_pt)),
+                abs(float(x[3]) - center_s),
+                -float(x[0].length),
+            ),
+        )
+
+    piece_a = _pick_piece_for_anchor(pa_pt, piece_info)
+    rem = [x for x in piece_info if x[0] is not piece_a[0]]
+    if rem:
+        piece_b = _pick_piece_for_anchor(pb_pt, rem)
+    else:
+        piece_b = piece_a
+
+    selected = [piece_a]
+    if piece_b[0] is not piece_a[0]:
+        selected.append(piece_b)
+    selected = sorted(selected, key=lambda x: float(x[1]))
+    selected_lines = [x[0] for x in selected]
+    selected_piece_lens = [float(x[0].length) for x in selected]
+
+    span_start = float(min(x[1] for x in selected))
+    span_end = float(max(x[2] for x in selected))
+    if (not math.isfinite(span_start)) or (not math.isfinite(span_end)) or (span_end - span_start) <= 1e-6:
+        _add_bp(
+            code=BP_DRIVEZONE_CLIP_EMPTY,
+            severity="hard",
+            message="drivezone_selected_span_degenerate",
+        )
+        out = _empty_fail_result(
+            nodeid=nodeid,
+            kind=kind,
+            anchor_type=anchor_type,
+            scan_dir=scan_dir_label,
+            line=output_crossline,
+            divstrip_union=divstrip_union,
+            drivezone_union=drivezone_union,
+            stop_reason="drivezone_selected_span_degenerate",
+            id_fields=node.id_fields,
+            resolved_from=resolved_from,
+        )
+        out.update(
+            {
+                "stop_dist_m": float(stop_dist),
+                "next_intersection_dist_m": None if next_inter is None else float(next_inter),
+                "tip_s_m": None if tip_s is None else float(tip_s),
+                "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
+                "best_divstrip_dz_dist_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "clip_empty": True,
+                "clip_piece_type": "none",
+                "clip_input_len_m": float(output_crossline.length),
+                "stop_diag": stop_diag,
+                "s_divstrip_m": None if divstrip_ref_s is None else float(divstrip_ref_s),
+                "s_drivezone_split_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "s_chosen_m": float(scan_dist),
+                "split_pick_source": f"{split_pick_source}_span_degenerate",
+                "divstrip_ref_source": str(divstrip_ref_source),
+                "divstrip_ref_offset_m": divstrip_ref_offset,
+                "output_cross_half_len_m": float(output_cross_half_len_m),
+                "branch_a_id": branch_a_id,
+                "branch_b_id": branch_b_id,
+                "branch_axis_id": axis_id,
+                "has_divstrip_nearby": False,
+                "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
+                "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+            }
+        )
+        return out
+
+    p0 = output_crossline.interpolate(span_start)
+    p1 = output_crossline.interpolate(span_end)
+    final_geom = LineString([(float(p0.x), float(p0.y)), (float(p1.x), float(p1.y))])
+
+    gap_mid, gap_len = gap_midpoint_between_pieces(segment=output_crossline, pieces=selected_lines)
     if gap_mid is None:
-        if len(output_pieces_picked) >= 2:
-            _add_bp(
-                code=BP_ANCHOR_GAP_UNSTABLE,
-                severity="soft",
-                message="anchor_gap_unstable_fallback_crossline_midpoint",
-            )
-            gap_mid = output_crossline.interpolate(0.5, normalized=True) if output_crossline.length > 1e-9 else Point(float(node.point.x), float(node.point.y))
-        else:
-            only = output_pieces_picked[0]
-            gap_mid = only.interpolate(0.5, normalized=True) if only.length > 1e-9 else output_crossline.interpolate(0.5, normalized=True)
+        gap_mid = final_geom.interpolate(0.5, normalized=True) if final_geom.length > 1e-9 else center_pt
+    if len(selected_lines) >= 2 and gap_len is None:
+        _add_bp(
+            code=BP_ANCHOR_GAP_UNSTABLE,
+            severity="soft",
+            message="anchor_gap_unstable_fallback_selected_span_midpoint",
+        )
 
     has_divstrip_nearby = False
     dist_line_to_div = None
     dist_to_div = None
-
-    final_geom: LineString | MultiLineString
-    if len(output_pieces_picked) == 1:
-        final_geom = output_pieces_picked[0]
-    else:
-        final_geom = MultiLineString(output_pieces_picked)
-
     if divstrip_union is not None:
         dist_line_to_div = float(final_geom.distance(divstrip_union))
         has_divstrip_nearby = bool(dist_line_to_div <= float(div_tol))
@@ -968,7 +1102,7 @@ def _evaluate_node(
             pass
 
     piece_lens = [float(ln.length) for ln in output_pieces_raw]
-    clipped_len = float(sum(float(ln.length) for ln in output_pieces_picked))
+    clipped_len = float(final_geom.length)
     flags: list[str] = []
     if scan_dist > float(params.get("scan_near_limit_m", 20.0)):
         flags.append("scan_dist_gt_near_limit")
@@ -996,26 +1130,10 @@ def _evaluate_node(
     conf = compute_confidence(trigger=trigger, scan_dist_m=scan_dist)
     anchor_found = bool((not hard_failed) and status in {"ok", "suspect"})
     dist_line_to_dz_edge = None if drivezone_union is None else float(final_geom.distance(drivezone_union.boundary))
-    clip_piece_type = "single_piece" if len(output_pieces_picked) == 1 else ("two_piece" if len(output_pieces_picked) == 2 else "multi_piece")
+    clip_piece_type = "continuous_selected_single" if len(selected_lines) == 1 else "continuous_selected_two_sides"
 
-    left_edge_dist_m = None
-    right_edge_dist_m = None
-    if output_crossline.length > 1e-9 and output_pieces_raw:
-        center_s = float(output_crossline.project(output_crossline.interpolate(0.5, normalized=True)))
-        starts: list[float] = []
-        ends: list[float] = []
-        for ln in output_pieces_raw:
-            vals: list[float] = []
-            for coord in list(ln.coords):
-                if len(coord) < 2:
-                    continue
-                vals.append(float(output_crossline.project(Point(float(coord[0]), float(coord[1])))))
-            if vals:
-                starts.append(float(min(vals)))
-                ends.append(float(max(vals)))
-        if starts and ends:
-            left_edge_dist_m = float(max(0.0, center_s - float(min(starts))))
-            right_edge_dist_m = float(max(0.0, float(max(ends)) - center_s))
+    left_edge_dist_m = float(max(0.0, center_s - span_start))
+    right_edge_dist_m = float(max(0.0, span_end - center_s))
 
     return {
         "nodeid": int(nodeid),
@@ -1043,7 +1161,7 @@ def _evaluate_node(
         "evidence_source": evidence_source,
         "anchor_point": gap_mid,
         "crossline_opt": final_geom,
-        "crossline_opt_pieces": output_pieces_picked,
+        "crossline_opt_pieces": [],
         "tip_s_m": None if tip_s is None else float(tip_s),
         "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
         "best_divstrip_dz_dist_m": float(scan_dist),
@@ -1059,6 +1177,8 @@ def _evaluate_node(
         "stop_diag": stop_diag,
         "pieces_count": int(len(output_pieces_raw)),
         "piece_lens_m": piece_lens,
+        "selected_piece_count": int(len(selected_lines)),
+        "selected_piece_lens_m": selected_piece_lens,
         "gap_len_m": None if gap_len is None else float(gap_len),
         "seg_len_m": float(found_diag.get("seg_len_m", found_seg.length)),
         "s_divstrip_m": None if divstrip_ref_s is None else float(divstrip_ref_s),
