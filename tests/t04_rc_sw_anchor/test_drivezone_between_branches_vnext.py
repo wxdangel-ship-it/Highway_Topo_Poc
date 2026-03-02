@@ -141,6 +141,10 @@ def _rewrite_drivezone_three_pieces(path: Path) -> None:
 
 
 def _rewrite_divstrip_far_only(path: Path) -> None:
+    _rewrite_divstrip_offset(path, dy=150.0)
+
+
+def _rewrite_divstrip_offset(path: Path, *, dy: float) -> None:
     payload = _read_json(path)
     cx, cy = _layer_center_xy(path)
     payload["features"] = [
@@ -149,7 +153,7 @@ def _rewrite_divstrip_far_only(path: Path) -> None:
             "properties": {"name": "far_divstrip"},
             "geometry": {
                 "type": "Polygon",
-                "coordinates": [_box(cx, cy + 150.0, -2.0, -3.0, 2.0, 3.0)],
+                "coordinates": [_box(cx, cy + float(dy), -2.0, -3.0, 2.0, 3.0)],
             },
         }
     ]
@@ -290,6 +294,34 @@ def test_divstrip_priority_over_earliest_split(tmp_path: Path) -> None:
     pref_scan = float(pref_item.get("scan_dist_m", 0.0))
     assert pref_scan >= base_scan + 5.0
     assert str(pref_item.get("split_pick_source", "")).startswith("divstrip_")
+
+
+def test_divstrip_far_reference_must_not_override_earliest(tmp_path: Path) -> None:
+    base_data = create_synth_patch(tmp_path / "base_far", kind_key="kind", id_mode="id", crs_mode="3857")
+    base_data["divstrip_path"].unlink()
+    _data0, out0 = _run_runtime(
+        tmp_path / "base_far",
+        run_id="divstrip_far_base",
+        data=base_data,
+        focus_node_ids=[str(base_data["node_merge"])],
+    )
+    base_item = _read_json(out0 / "anchors.json")["items"][0]
+    base_scan = float(base_item.get("scan_dist_m", 0.0))
+
+    far_data = create_synth_patch(tmp_path / "far_case", kind_key="kind", id_mode="id", crs_mode="3857")
+    # Keep divstrip within stop_dist but far from earliest split, to verify guard.
+    _rewrite_divstrip_offset(far_data["divstrip_path"], dy=-75.0)
+    _data1, out1 = _run_runtime(
+        tmp_path / "far_case",
+        run_id="divstrip_far_guard",
+        data=far_data,
+        focus_node_ids=[str(far_data["node_merge"])],
+    )
+    far_item = _read_json(out1 / "anchors.json")["items"][0]
+
+    far_scan = float(far_item.get("scan_dist_m", 0.0))
+    assert abs(far_scan - base_scan) <= 2.0
+    assert str(far_item.get("split_pick_source")) == "drivezone_earliest_divstrip_far_ignored"
 
 
 def test_drivezone_clip_more_than_two_pieces(tmp_path: Path) -> None:
