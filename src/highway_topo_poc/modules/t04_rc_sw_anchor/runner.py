@@ -707,10 +707,13 @@ def _evaluate_node(
         ref_s = float(max(0.0, min(float(stop_dist), float(divstrip_ref_s))))
         position_source = "divstrip_ref"
         split_pick_source = f"divstrip_{divstrip_ref_source}_window"
-        if s_drivezone_split is not None and abs(float(s_drivezone_split) - float(ref_s)) > float(divstrip_drivezone_max_offset_m):
-            ref_s = float(max(0.0, min(float(stop_dist), float(s_drivezone_split))))
-            position_source = "drivezone_split"
-            split_pick_source = "drivezone_split_window_divstrip_far_ignored"
+        if s_drivezone_split is not None:
+            # Directional guard:
+            # only fallback to drivezone when divstrip reference is much farther than drivezone split.
+            if (float(ref_s) - float(s_drivezone_split)) > float(divstrip_drivezone_max_offset_m):
+                ref_s = float(max(0.0, min(float(stop_dist), float(s_drivezone_split))))
+                position_source = "drivezone_split"
+                split_pick_source = "drivezone_split_window_divstrip_far_ignored"
     elif s_drivezone_split is not None:
         ref_s = float(max(0.0, min(float(stop_dist), float(s_drivezone_split))))
         position_source = "drivezone_split"
