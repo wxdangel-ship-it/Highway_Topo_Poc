@@ -158,6 +158,24 @@ def _rewrite_divstrip_far_only(path: Path) -> None:
     _write_json(path, payload)
 
 
+def _rewrite_divstrip_merge_priority(path: Path) -> None:
+    payload = _read_json(path)
+    cx, cy = _layer_center_xy(path)
+    payload["features"] = [
+        {
+            "type": "Feature",
+            "properties": {"name": "merge_priority"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [_box(cx, cy + 25.0, -2.0, -3.0, 2.0, 3.0)],
+            },
+        }
+    ]
+    payload.pop("crs", None)
+    payload["crs"] = {"type": "name", "properties": {"name": "EPSG:3857"}}
+    _write_json(path, payload)
+
+
 def _rewrite_drivezone_crs_unknown(path: Path) -> None:
     payload = _read_json(path)
     payload.pop("crs", None)
@@ -241,6 +259,37 @@ def test_drivezone_clip_multifeature_output_two_lines(tmp_path: Path) -> None:
     assert {int(f["properties"]["piece_idx"]) for f in feats} == {0, 1}
     assert {str(f["properties"].get("piece_role")) for f in feats} == {"branch_a_side", "branch_b_side"}
     assert all(str(f.get("geometry", {}).get("type")) == "LineString" for f in feats)
+    anchors = _read_json(out_dir / "anchors.json")
+    item = anchors["items"][0]
+    assert float(item.get("clipped_len_m", 0.0)) > float(item.get("seg_len_m", 0.0))
+    assert float(item.get("output_cross_half_len_m", 0.0)) >= 120.0
+
+
+def test_divstrip_priority_over_earliest_split(tmp_path: Path) -> None:
+    base_data = create_synth_patch(tmp_path / "base", kind_key="kind", id_mode="id", crs_mode="3857")
+    base_data["divstrip_path"].unlink()
+    _data0, out0 = _run_runtime(
+        tmp_path / "base",
+        run_id="divstrip_priority_base",
+        data=base_data,
+        focus_node_ids=[str(base_data["node_merge"])],
+    )
+    base_item = _read_json(out0 / "anchors.json")["items"][0]
+    base_scan = float(base_item.get("scan_dist_m", 0.0))
+
+    pref_data = create_synth_patch(tmp_path / "pref", kind_key="kind", id_mode="id", crs_mode="3857")
+    _rewrite_divstrip_merge_priority(pref_data["divstrip_path"])
+    _data1, out1 = _run_runtime(
+        tmp_path / "pref",
+        run_id="divstrip_priority_pref",
+        data=pref_data,
+        focus_node_ids=[str(pref_data["node_merge"])],
+    )
+    pref_item = _read_json(out1 / "anchors.json")["items"][0]
+
+    pref_scan = float(pref_item.get("scan_dist_m", 0.0))
+    assert pref_scan >= base_scan + 5.0
+    assert str(pref_item.get("split_pick_source", "")).startswith("divstrip_")
 
 
 def test_drivezone_clip_more_than_two_pieces(tmp_path: Path) -> None:

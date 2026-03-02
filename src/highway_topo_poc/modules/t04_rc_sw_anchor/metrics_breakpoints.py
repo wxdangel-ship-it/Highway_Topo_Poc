@@ -245,7 +245,7 @@ def build_summary_text(
         else:
             focus_text = "na"
         lines.append(
-            "- nodeid={nodeid} kind={kind} kind_bits(merge={is_merge},diverge={is_diverge}) anchor_type={anchor_type} status={status} found_split={found_split} scan_dist_m={scan_dist} trigger={trigger} evidence_source={evidence_source} stop_dist_m={stop} stop_reason={stop_reason} pieces_count={pieces_count} piece_lens_m={piece_lens} gap_len_m={gap_len} seg_len_m={seg_len} dist_line_to_divstrip_m={dist_line_to_divstrip} dist_line_to_drivezone_edge_m={dist_line_to_drivezone_edge} branchA={branch_a} branchB={branch_b} focus_resolve={focus_resolve}".format(
+            "- nodeid={nodeid} kind={kind} kind_bits(merge={is_merge},diverge={is_diverge}) anchor_type={anchor_type} status={status} found_split={found_split} scan_dist_m={scan_dist} trigger={trigger} evidence_source={evidence_source} stop_dist_m={stop} stop_reason={stop_reason} pieces_count={pieces_count} piece_lens_m={piece_lens} gap_len_m={gap_len} seg_len_m={seg_len} s_divstrip_m={s_divstrip} s_drivezone_split_m={s_dz} s_chosen_m={s_chosen} split_pick_source={pick_src} dist_line_to_divstrip_m={dist_line_to_divstrip} dist_line_to_drivezone_edge_m={dist_line_to_drivezone_edge} branchA={branch_a} branchB={branch_b} focus_resolve={focus_resolve}".format(
                 nodeid=item.get("nodeid"),
                 kind=item.get("kind"),
                 is_merge=item.get("is_merge_kind"),
@@ -262,6 +262,10 @@ def build_summary_text(
                 piece_lens=item.get("piece_lens_m"),
                 gap_len=item.get("gap_len_m"),
                 seg_len=item.get("seg_len_m"),
+                s_divstrip=item.get("s_divstrip_m"),
+                s_dz=item.get("s_drivezone_split_m"),
+                s_chosen=item.get("s_chosen_m"),
+                pick_src=item.get("split_pick_source"),
                 dist_line_to_divstrip=item.get("dist_line_to_divstrip_m"),
                 dist_line_to_drivezone_edge=item.get("dist_line_to_drivezone_edge_m"),
                 branch_a=item.get("branch_a_id"),
