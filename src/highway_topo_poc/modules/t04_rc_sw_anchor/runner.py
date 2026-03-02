@@ -9,19 +9,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from shapely.geometry import LineString, Point, box
+from shapely.geometry import LineString, MultiLineString, Point, box
 from shapely.geometry.base import BaseGeometry
 
 from .between_branches import build_between_branches_segment, select_branch_pair_and_axis
 from .crs_norm import guess_crs_from_bbox, normalize_epsg_name, transform_xy_arrays
 from .divstrip_ops import anchor_point_from_crossline, tip_point_from_divstrip
-from .drivezone_ops import (
-    build_drivezone_edge_span,
-    gap_midpoint_between_pieces,
-    pick_segment_pieces_by_center_sides,
-    pick_top_two_segment_pieces,
-    segment_drivezone_pieces,
-)
+from .drivezone_ops import gap_midpoint_between_pieces, pick_segment_pieces_by_center_sides, pick_top_two_segment_pieces, segment_drivezone_pieces
 from .io_geojson import NodeRecord, RoadRecord, load_divstrip_union, load_drivezone_union, load_nodes, load_roads
 from .local_frame import LocalFrame
 from .metrics_breakpoints import (
@@ -827,9 +821,9 @@ def _evaluate_node(
 
     chosen_scan_dist: float | None = None
     output_crossline: LineString | None = None
-    output_span_line: LineString | None = None
     output_pieces_raw: list[LineString] = []
-    output_span_diag: dict[str, Any] = {}
+    output_pieces_picked: list[LineString] = []
+    has_extra_piece = False
     for s_probe in scan_candidates:
         crossline_probe = LocalFrame.from_tangent(
             origin_xy=(float(node.point.x), float(node.point.y)),
@@ -838,18 +832,24 @@ def _evaluate_node(
             scan_dist_m=float(s_probe),
             cross_half_len_m=float(output_cross_half_len_m),
         )
-        span_line, pieces_probe, span_diag = build_drivezone_edge_span(
+        pieces_probe = segment_drivezone_pieces(
             segment=crossline_probe,
             drivezone_union=drivezone_union,
             min_piece_len_m=min_piece_len_m,
         )
-        if span_line is None:
+        if not pieces_probe:
+            continue
+        picked_probe, _extra = pick_segment_pieces_by_center_sides(segment=crossline_probe, pieces=pieces_probe)
+        if len(picked_probe) < 2:
+            picked_probe, _extra2 = pick_top_two_segment_pieces(segment=crossline_probe, pieces=pieces_probe)
+            _extra = bool(_extra or _extra2)
+        if not picked_probe:
             continue
         chosen_scan_dist = float(s_probe)
         output_crossline = crossline_probe
-        output_span_line = span_line
         output_pieces_raw = list(pieces_probe)
-        output_span_diag = dict(span_diag)
+        output_pieces_picked = list(picked_probe)
+        has_extra_piece = bool(_extra or (len(output_pieces_raw) > len(output_pieces_picked)))
         break
 
     if output_crossline is None:
@@ -861,11 +861,11 @@ def _evaluate_node(
             cross_half_len_m=float(output_cross_half_len_m),
         )
 
-    if output_span_line is None or chosen_scan_dist is None:
+    if (not output_pieces_picked) or chosen_scan_dist is None:
         _add_bp(
             code=BP_DRIVEZONE_CLIP_EMPTY,
             severity="hard",
-            message="drivezone_edge_span_not_found_within_ref_window",
+            message="drivezone_piece_not_found_within_ref_window",
             extra={"window_lo_m": float(window_lo), "window_hi_m": float(window_hi)},
         )
         out = _empty_fail_result(
@@ -876,7 +876,7 @@ def _evaluate_node(
             line=output_crossline,
             divstrip_union=divstrip_union,
             drivezone_union=drivezone_union,
-            stop_reason="drivezone_span_not_found_in_window",
+            stop_reason="drivezone_piece_not_found_in_window",
             id_fields=node.id_fields,
             resolved_from=resolved_from,
         )
@@ -894,7 +894,7 @@ def _evaluate_node(
                 "s_divstrip_m": None if divstrip_ref_s is None else float(divstrip_ref_s),
                 "s_drivezone_split_m": None if s_drivezone_split is None else float(s_drivezone_split),
                 "s_chosen_m": None,
-                "split_pick_source": f"{split_pick_source}_no_span",
+                "split_pick_source": f"{split_pick_source}_no_piece",
                 "divstrip_ref_source": str(divstrip_ref_source),
                 "divstrip_ref_offset_m": None,
                 "output_cross_half_len_m": float(output_cross_half_len_m),
@@ -909,7 +909,6 @@ def _evaluate_node(
         return out
 
     scan_dist = float(chosen_scan_dist)
-    output_span_line = LineString([(float(output_span_line.coords[0][0]), float(output_span_line.coords[0][1])), (float(output_span_line.coords[-1][0]), float(output_span_line.coords[-1][1]))])
     divstrip_ref_offset = None if divstrip_ref_s is None else float(abs(float(scan_dist) - float(divstrip_ref_s)))
     center_xy = (
         float(node.point.x) + float(scan_vec[0]) * float(scan_dist),
@@ -923,33 +922,39 @@ def _evaluate_node(
         crossline_half_len_m=half_len,
     )
 
-    has_extra_piece = bool(len(output_pieces_raw) > 2)
     if has_extra_piece:
         _add_bp(
             code=BP_DRIVEZONE_CLIP_MULTIPIECE,
             severity="soft",
-            message="drivezone_clip_multipiece_continuous_span",
+            message="drivezone_clip_multipiece_piecewise_output",
             extra={"piece_count": int(len(output_pieces_raw))},
         )
 
-    diag_pieces, _ = pick_segment_pieces_by_center_sides(segment=output_crossline, pieces=output_pieces_raw)
-    if len(diag_pieces) < 2:
-        diag_pieces, _ = pick_top_two_segment_pieces(segment=output_crossline, pieces=output_pieces_raw)
-    gap_mid, gap_len = gap_midpoint_between_pieces(segment=output_crossline, pieces=diag_pieces)
+    gap_mid, gap_len = gap_midpoint_between_pieces(segment=output_crossline, pieces=output_pieces_picked)
     if gap_mid is None:
-        if len(output_pieces_raw) >= 2:
+        if len(output_pieces_picked) >= 2:
             _add_bp(
                 code=BP_ANCHOR_GAP_UNSTABLE,
                 severity="soft",
-                message="anchor_gap_unstable_fallback_span_midpoint",
+                message="anchor_gap_unstable_fallback_crossline_midpoint",
             )
-        gap_mid = output_span_line.interpolate(0.5, normalized=True) if output_span_line.length > 1e-9 else Point(float(node.point.x), float(node.point.y))
+            gap_mid = output_crossline.interpolate(0.5, normalized=True) if output_crossline.length > 1e-9 else Point(float(node.point.x), float(node.point.y))
+        else:
+            only = output_pieces_picked[0]
+            gap_mid = only.interpolate(0.5, normalized=True) if only.length > 1e-9 else output_crossline.interpolate(0.5, normalized=True)
 
     has_divstrip_nearby = False
     dist_line_to_div = None
     dist_to_div = None
+
+    final_geom: LineString | MultiLineString
+    if len(output_pieces_picked) == 1:
+        final_geom = output_pieces_picked[0]
+    else:
+        final_geom = MultiLineString(output_pieces_picked)
+
     if divstrip_union is not None:
-        dist_line_to_div = float(output_span_line.distance(divstrip_union))
+        dist_line_to_div = float(final_geom.distance(divstrip_union))
         has_divstrip_nearby = bool(dist_line_to_div <= float(div_tol))
         dist_to_div = float(gap_mid.distance(divstrip_union))
 
@@ -963,7 +968,7 @@ def _evaluate_node(
             pass
 
     piece_lens = [float(ln.length) for ln in output_pieces_raw]
-    clipped_len = float(output_span_line.length)
+    clipped_len = float(sum(float(ln.length) for ln in output_pieces_picked))
     flags: list[str] = []
     if scan_dist > float(params.get("scan_near_limit_m", 20.0)):
         flags.append("scan_dist_gt_near_limit")
@@ -990,12 +995,28 @@ def _evaluate_node(
         evidence_source = "drivezone_split"
     conf = compute_confidence(trigger=trigger, scan_dist_m=scan_dist)
     anchor_found = bool((not hard_failed) and status in {"ok", "suspect"})
-    dist_line_to_dz_edge = None if drivezone_union is None else float(output_span_line.distance(drivezone_union.boundary))
-    clip_piece_type = "continuous_span_single_piece"
-    if len(output_pieces_raw) == 2:
-        clip_piece_type = "continuous_span_two_piece"
-    elif len(output_pieces_raw) > 2:
-        clip_piece_type = "continuous_span_multi_piece"
+    dist_line_to_dz_edge = None if drivezone_union is None else float(final_geom.distance(drivezone_union.boundary))
+    clip_piece_type = "single_piece" if len(output_pieces_picked) == 1 else ("two_piece" if len(output_pieces_picked) == 2 else "multi_piece")
+
+    left_edge_dist_m = None
+    right_edge_dist_m = None
+    if output_crossline.length > 1e-9 and output_pieces_raw:
+        center_s = float(output_crossline.project(output_crossline.interpolate(0.5, normalized=True)))
+        starts: list[float] = []
+        ends: list[float] = []
+        for ln in output_pieces_raw:
+            vals: list[float] = []
+            for coord in list(ln.coords):
+                if len(coord) < 2:
+                    continue
+                vals.append(float(output_crossline.project(Point(float(coord[0]), float(coord[1])))))
+            if vals:
+                starts.append(float(min(vals)))
+                ends.append(float(max(vals)))
+        if starts and ends:
+            left_edge_dist_m = float(max(0.0, center_s - float(min(starts))))
+            right_edge_dist_m = float(max(0.0, float(max(ends)) - center_s))
+
     return {
         "nodeid": int(nodeid),
         "id": id_map.get("id"),
@@ -1021,8 +1042,8 @@ def _evaluate_node(
         "flags": flags,
         "evidence_source": evidence_source,
         "anchor_point": gap_mid,
-        "crossline_opt": output_span_line,
-        "crossline_opt_pieces": [],
+        "crossline_opt": final_geom,
+        "crossline_opt_pieces": output_pieces_picked,
         "tip_s_m": None if tip_s is None else float(tip_s),
         "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
         "best_divstrip_dz_dist_m": float(scan_dist),
@@ -1054,8 +1075,8 @@ def _evaluate_node(
         "branch_b_crossline_hit": bool(found_diag.get("branch_b_crossline_hit", False)),
         "pa_center_dist_m": found_diag.get("pa_center_dist_m"),
         "pb_center_dist_m": found_diag.get("pb_center_dist_m"),
-        "left_edge_dist_m": output_span_diag.get("left_edge_dist_m"),
-        "right_edge_dist_m": output_span_diag.get("right_edge_dist_m"),
+        "left_edge_dist_m": left_edge_dist_m,
+        "right_edge_dist_m": right_edge_dist_m,
         "has_divstrip_nearby": bool(has_divstrip_nearby),
         "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
         "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
