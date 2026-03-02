@@ -826,7 +826,8 @@ def _evaluate_node(
     output_pieces_raw: list[LineString] = []
     output_pieces_picked: list[LineString] = []
     has_extra_piece = False
-    for s_probe in scan_candidates:
+    candidate_hits: list[dict[str, Any]] = []
+    for rank, s_probe in enumerate(scan_candidates):
         crossline_probe = LocalFrame.from_tangent(
             origin_xy=(float(node.point.x), float(node.point.y)),
             tangent_xy=scan_vec,
@@ -847,12 +848,32 @@ def _evaluate_node(
             _extra = bool(_extra or _extra2)
         if not picked_probe:
             continue
-        chosen_scan_dist = float(s_probe)
-        output_crossline = crossline_probe
-        output_pieces_raw = list(pieces_probe)
-        output_pieces_picked = list(picked_probe)
-        has_extra_piece = bool(_extra or (len(output_pieces_raw) > len(output_pieces_picked)))
-        break
+        candidate_hits.append(
+            {
+                "rank": int(rank),
+                "s": float(s_probe),
+                "crossline": crossline_probe,
+                "pieces_raw": list(pieces_probe),
+                "pieces_picked": list(picked_probe),
+                "has_extra": bool(_extra or (len(pieces_probe) > len(picked_probe))),
+                "raw_count": int(len(pieces_probe)),
+            }
+        )
+
+    if candidate_hits:
+        best_hit = min(
+            candidate_hits,
+            key=lambda x: (
+                0 if int(x.get("raw_count", 0)) == 1 else 1,
+                int(x.get("raw_count", 0)),
+                int(x.get("rank", 0)),
+            ),
+        )
+        chosen_scan_dist = float(best_hit["s"])
+        output_crossline = best_hit["crossline"]
+        output_pieces_raw = list(best_hit["pieces_raw"])
+        output_pieces_picked = list(best_hit["pieces_picked"])
+        has_extra_piece = bool(best_hit["has_extra"])
 
     if output_crossline is None:
         output_crossline = LocalFrame.from_tangent(
@@ -998,26 +1019,48 @@ def _evaluate_node(
         )
         return out
 
-    def _pick_piece_for_anchor(anchor_pt: Point, candidates: list[tuple[LineString, float, float, float]]) -> tuple[LineString, float, float, float]:
+    pa_s = float(output_crossline.project(pa_pt))
+    pb_s = float(output_crossline.project(pb_pt))
+    if pa_s <= pb_s:
+        left_anchor, right_anchor = pa_pt, pb_pt
+        left_ref_s, right_ref_s = pa_s, pb_s
+    else:
+        left_anchor, right_anchor = pb_pt, pa_pt
+        left_ref_s, right_ref_s = pb_s, pa_s
+
+    side_tol = 0.25
+    left_candidates = [x for x in piece_info if float(x[3]) <= center_s + side_tol]
+    right_candidates = [x for x in piece_info if float(x[3]) >= center_s - side_tol]
+    if not left_candidates:
+        left_candidates = list(piece_info)
+    if not right_candidates:
+        right_candidates = list(piece_info)
+
+    def _pick_piece_for_anchor(
+        *,
+        anchor_pt: Point,
+        ref_s: float,
+        candidates: list[tuple[LineString, float, float, float]],
+    ) -> tuple[LineString, float, float, float]:
         return min(
             candidates,
             key=lambda x: (
                 float(x[0].distance(anchor_pt)),
+                abs(float(x[3]) - float(ref_s)),
                 abs(float(x[3]) - center_s),
                 -float(x[0].length),
             ),
         )
 
-    piece_a = _pick_piece_for_anchor(pa_pt, piece_info)
-    rem = [x for x in piece_info if x[0] is not piece_a[0]]
-    if rem:
-        piece_b = _pick_piece_for_anchor(pb_pt, rem)
-    else:
-        piece_b = piece_a
+    left_piece = _pick_piece_for_anchor(anchor_pt=left_anchor, ref_s=left_ref_s, candidates=left_candidates)
+    right_pool = [x for x in right_candidates if x[0] is not left_piece[0]]
+    if not right_pool:
+        right_pool = list(right_candidates)
+    right_piece = _pick_piece_for_anchor(anchor_pt=right_anchor, ref_s=right_ref_s, candidates=right_pool)
 
-    selected = [piece_a]
-    if piece_b[0] is not piece_a[0]:
-        selected.append(piece_b)
+    selected = [left_piece]
+    if right_piece[0] is not left_piece[0]:
+        selected.append(right_piece)
     selected = sorted(selected, key=lambda x: float(x[1]))
     selected_lines = [x[0] for x in selected]
     selected_piece_lens = [float(x[0].length) for x in selected]
@@ -1179,6 +1222,7 @@ def _evaluate_node(
         "piece_lens_m": piece_lens,
         "selected_piece_count": int(len(selected_lines)),
         "selected_piece_lens_m": selected_piece_lens,
+        "position_source": str(position_source),
         "gap_len_m": None if gap_len is None else float(gap_len),
         "seg_len_m": float(found_diag.get("seg_len_m", found_seg.length)),
         "s_divstrip_m": None if divstrip_ref_s is None else float(divstrip_ref_s),
