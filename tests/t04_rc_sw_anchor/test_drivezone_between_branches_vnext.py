@@ -307,7 +307,9 @@ def test_drivezone_clip_multifeature_output_single_continuous_line(tmp_path: Pat
     assert str(feats[0].get("geometry", {}).get("type")) == "LineString"
     anchors = _read_json(out_dir / "anchors.json")
     item = anchors["items"][0]
-    assert float(item.get("clipped_len_m", 0.0)) > float(item.get("seg_len_m", 0.0))
+    assert float(item.get("clipped_len_m", 0.0)) > 0.0
+    assert float(item.get("clipped_len_m", 0.0)) <= float(item.get("clip_input_len_m", 0.0))
+    assert int(item.get("selected_piece_count", 0)) == 1
     assert float(item.get("output_cross_half_len_m", 0.0)) >= 120.0
 
 
@@ -443,7 +445,7 @@ def test_status_not_overwritten(tmp_path: Path) -> None:
     assert str(item.get("trigger")) == "divstrip_ref"
     s_div = float(item.get("s_divstrip_m", 0.0))
     s_chosen = float(item.get("s_chosen_m", -1.0))
-    assert s_div <= s_chosen <= s_div + 1.0
+    assert (s_div - 1.0) <= s_chosen <= s_div
 
 
 def test_crs_fail_closed(tmp_path: Path) -> None:

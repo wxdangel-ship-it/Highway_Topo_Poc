@@ -32,6 +32,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "divstrip_ref_hard_window_m": 1.0,
     "divstrip_drivezone_max_offset_m": 30.0,
     "output_cross_half_len_m": 120.0,
+    "current_road_edge_pad_m": 4.0,
     "next_intersection_degree_min": 3,
     "stop_intersection_require_connected": True,
     "disable_geometric_stop_fallback": True,

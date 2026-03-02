@@ -15,11 +15,10 @@ from shapely.geometry.base import BaseGeometry
 from .between_branches import build_between_branches_segment, select_branch_pair_and_axis
 from .crs_norm import guess_crs_from_bbox, normalize_epsg_name, transform_xy_arrays
 from .divstrip_ops import anchor_point_from_crossline, tip_point_from_divstrip
-from .drivezone_ops import gap_midpoint_between_pieces, pick_segment_pieces_by_center_sides, pick_top_two_segment_pieces, segment_drivezone_pieces
+from .drivezone_ops import segment_drivezone_pieces
 from .io_geojson import NodeRecord, RoadRecord, load_divstrip_union, load_drivezone_union, load_nodes, load_roads
 from .local_frame import LocalFrame
 from .metrics_breakpoints import (
-    BP_ANCHOR_GAP_UNSTABLE,
     BP_AMBIGUOUS_KIND,
     BP_CRS_UNKNOWN,
     BP_DIVSTRIPZONE_MISSING,
@@ -781,12 +780,9 @@ def _evaluate_node(
         return out
 
     window_m = float(divstrip_ref_hard_window_m)
-    if is_diverge:
-        window_lo = max(0.0, float(ref_s) - window_m)
-        window_hi = min(float(stop_dist), float(ref_s))
-    else:
-        window_lo = max(0.0, float(ref_s))
-        window_hi = min(float(stop_dist), float(ref_s) + window_m)
+    # For both diverge(尖前) and merge(尖后), choose the node-side 1m window.
+    window_lo = max(0.0, float(ref_s) - window_m)
+    window_hi = min(float(stop_dist), float(ref_s))
     if window_hi + 1e-9 < window_lo:
         anchor_s = max(0.0, min(float(stop_dist), float(ref_s)))
         window_lo = anchor_s
@@ -794,18 +790,10 @@ def _evaluate_node(
 
     probe_step = min(0.25, max(0.05, float(step)))
     scan_candidates: list[float] = []
-    if is_diverge:
-        # Prefer the near-tip upstream boundary first (s_ref-1 for diverge).
-        cur = float(window_lo)
-        while cur <= float(window_hi) + 1e-9:
-            scan_candidates.append(float(max(window_lo, min(window_hi, cur))))
-            cur += probe_step
-    else:
-        # Prefer the near-tip downstream boundary first (s_ref+1 for merge).
-        cur = float(window_hi)
-        while cur >= float(window_lo) - 1e-9:
-            scan_candidates.append(float(max(window_lo, min(window_hi, cur))))
-            cur -= probe_step
+    cur = float(window_lo)
+    while cur <= float(window_hi) + 1e-9:
+        scan_candidates.append(float(max(window_lo, min(window_hi, cur))))
+        cur += probe_step
     if not scan_candidates:
         scan_candidates = [float(max(window_lo, min(window_hi, float(ref_s))))]
     ref_in_window = float(max(window_lo, min(window_hi, float(ref_s))))
@@ -824,8 +812,8 @@ def _evaluate_node(
     chosen_scan_dist: float | None = None
     output_crossline: LineString | None = None
     output_pieces_raw: list[LineString] = []
-    output_pieces_picked: list[LineString] = []
     has_extra_piece = False
+    target_s = float(window_lo)
     candidate_hits: list[dict[str, Any]] = []
     for rank, s_probe in enumerate(scan_candidates):
         crossline_probe = LocalFrame.from_tangent(
@@ -842,20 +830,33 @@ def _evaluate_node(
         )
         if not pieces_probe:
             continue
-        picked_probe, _extra = pick_segment_pieces_by_center_sides(segment=crossline_probe, pieces=pieces_probe)
-        if len(picked_probe) < 2:
-            picked_probe, _extra2 = pick_top_two_segment_pieces(segment=crossline_probe, pieces=pieces_probe)
-            _extra = bool(_extra or _extra2)
-        if not picked_probe:
-            continue
+        center_probe = Point(
+            float(node.point.x) + float(scan_vec[0]) * float(s_probe),
+            float(node.point.y) + float(scan_vec[1]) * float(s_probe),
+        )
+        center_s_probe = float(crossline_probe.project(center_probe))
+        has_center_piece = False
+        for piece in pieces_probe:
+            vals: list[float] = []
+            for coord in list(piece.coords):
+                if len(coord) < 2:
+                    continue
+                vals.append(float(crossline_probe.project(Point(float(coord[0]), float(coord[1])))))
+            if not vals:
+                continue
+            s0 = float(min(vals))
+            s1 = float(max(vals))
+            if s0 - 1e-6 <= center_s_probe <= s1 + 1e-6:
+                has_center_piece = True
+                break
         candidate_hits.append(
             {
                 "rank": int(rank),
                 "s": float(s_probe),
                 "crossline": crossline_probe,
                 "pieces_raw": list(pieces_probe),
-                "pieces_picked": list(picked_probe),
-                "has_extra": bool(_extra or (len(pieces_probe) > len(picked_probe))),
+                "has_center_piece": bool(has_center_piece),
+                "has_extra": bool(len(pieces_probe) > 1),
                 "raw_count": int(len(pieces_probe)),
             }
         )
@@ -864,15 +865,16 @@ def _evaluate_node(
         best_hit = min(
             candidate_hits,
             key=lambda x: (
+                0 if bool(x.get("has_center_piece", False)) else 1,
                 0 if int(x.get("raw_count", 0)) == 1 else 1,
                 int(x.get("raw_count", 0)),
+                abs(float(x.get("s", 0.0)) - float(target_s)),
                 int(x.get("rank", 0)),
             ),
         )
         chosen_scan_dist = float(best_hit["s"])
         output_crossline = best_hit["crossline"]
         output_pieces_raw = list(best_hit["pieces_raw"])
-        output_pieces_picked = list(best_hit["pieces_picked"])
         has_extra_piece = bool(best_hit["has_extra"])
 
     if output_crossline is None:
@@ -884,7 +886,7 @@ def _evaluate_node(
             cross_half_len_m=float(output_cross_half_len_m),
         )
 
-    if (not output_pieces_picked) or chosen_scan_dist is None:
+    if (not output_pieces_raw) or chosen_scan_dist is None:
         _add_bp(
             code=BP_DRIVEZONE_CLIP_EMPTY,
             severity="hard",
@@ -953,10 +955,10 @@ def _evaluate_node(
             extra={"piece_count": int(len(output_pieces_raw))},
         )
 
-    # Use branch endpoints to pick current-road pieces, then connect as a continuous span.
+    # Build continuous span on current roadbed: center-containing piece first, then branch-bounded clamp.
     pa_pt = Point(float(found_seg.coords[0][0]), float(found_seg.coords[0][1]))
     pb_pt = Point(float(found_seg.coords[-1][0]), float(found_seg.coords[-1][1]))
-    center_pt = output_crossline.interpolate(0.5, normalized=True) if output_crossline.length > 1e-9 else Point(float(node.point.x), float(node.point.y))
+    center_pt = Point(float(center_xy[0]), float(center_xy[1]))
     center_s = float(output_crossline.project(center_pt))
 
     piece_info: list[tuple[LineString, float, float, float]] = []
@@ -1021,52 +1023,41 @@ def _evaluate_node(
 
     pa_s = float(output_crossline.project(pa_pt))
     pb_s = float(output_crossline.project(pb_pt))
-    if pa_s <= pb_s:
-        left_anchor, right_anchor = pa_pt, pb_pt
-        left_ref_s, right_ref_s = pa_s, pb_s
-    else:
-        left_anchor, right_anchor = pb_pt, pa_pt
-        left_ref_s, right_ref_s = pb_s, pa_s
+    left_ref_s, right_ref_s = (pa_s, pb_s) if pa_s <= pb_s else (pb_s, pa_s)
 
-    side_tol = 0.25
-    left_candidates = [x for x in piece_info if float(x[3]) <= center_s + side_tol]
-    right_candidates = [x for x in piece_info if float(x[3]) >= center_s - side_tol]
-    if not left_candidates:
-        left_candidates = list(piece_info)
-    if not right_candidates:
-        right_candidates = list(piece_info)
-
-    def _pick_piece_for_anchor(
-        *,
-        anchor_pt: Point,
-        ref_s: float,
-        candidates: list[tuple[LineString, float, float, float]],
-    ) -> tuple[LineString, float, float, float]:
-        return min(
-            candidates,
+    center_hits = [x for x in piece_info if float(x[1]) - 1e-6 <= center_s <= float(x[2]) + 1e-6]
+    if center_hits:
+        selected_piece = min(
+            center_hits,
             key=lambda x: (
-                float(x[0].distance(anchor_pt)),
-                abs(float(x[3]) - float(ref_s)),
+                abs(float(x[3]) - center_s),
+                abs(float(x[3]) - 0.5 * (left_ref_s + right_ref_s)),
+                -float(x[0].length),
+            ),
+        )
+        center_piece_hit = True
+    else:
+        selected_piece = min(
+            piece_info,
+            key=lambda x: (
+                min(abs(center_s - float(x[1])), abs(center_s - float(x[2])), abs(center_s - float(x[3]))),
                 abs(float(x[3]) - center_s),
                 -float(x[0].length),
             ),
         )
+        center_piece_hit = False
 
-    left_piece = _pick_piece_for_anchor(anchor_pt=left_anchor, ref_s=left_ref_s, candidates=left_candidates)
-    right_pool = [x for x in right_candidates if x[0] is not left_piece[0]]
-    if not right_pool:
-        right_pool = list(right_candidates)
-    right_piece = _pick_piece_for_anchor(anchor_pt=right_anchor, ref_s=right_ref_s, candidates=right_pool)
+    base_s0 = float(selected_piece[1])
+    base_s1 = float(selected_piece[2])
+    edge_pad_m = max(0.0, float(params.get("current_road_edge_pad_m", 4.0)))
+    span_start = max(base_s0, float(left_ref_s) - edge_pad_m)
+    span_end = min(base_s1, float(right_ref_s) + edge_pad_m)
+    span_start = max(base_s0, min(span_start, center_s))
+    span_end = min(base_s1, max(span_end, center_s))
+    if span_end - span_start <= 1e-6:
+        span_start = base_s0
+        span_end = base_s1
 
-    selected = [left_piece]
-    if right_piece[0] is not left_piece[0]:
-        selected.append(right_piece)
-    selected = sorted(selected, key=lambda x: float(x[1]))
-    selected_lines = [x[0] for x in selected]
-    selected_piece_lens = [float(x[0].length) for x in selected]
-
-    span_start = float(min(x[1] for x in selected))
-    span_end = float(max(x[2] for x in selected))
     if (not math.isfinite(span_start)) or (not math.isfinite(span_end)) or (span_end - span_start) <= 1e-6:
         _add_bp(
             code=BP_DRIVEZONE_CLIP_EMPTY,
@@ -1116,16 +1107,10 @@ def _evaluate_node(
     p0 = output_crossline.interpolate(span_start)
     p1 = output_crossline.interpolate(span_end)
     final_geom = LineString([(float(p0.x), float(p0.y)), (float(p1.x), float(p1.y))])
-
-    gap_mid, gap_len = gap_midpoint_between_pieces(segment=output_crossline, pieces=selected_lines)
-    if gap_mid is None:
-        gap_mid = final_geom.interpolate(0.5, normalized=True) if final_geom.length > 1e-9 else center_pt
-    if len(selected_lines) >= 2 and gap_len is None:
-        _add_bp(
-            code=BP_ANCHOR_GAP_UNSTABLE,
-            severity="soft",
-            message="anchor_gap_unstable_fallback_selected_span_midpoint",
-        )
+    gap_mid = final_geom.interpolate(0.5, normalized=True) if final_geom.length > 1e-9 else center_pt
+    gap_len = None
+    selected_lines = [selected_piece[0]]
+    selected_piece_lens = [float(selected_piece[0].length)]
 
     has_divstrip_nearby = False
     dist_line_to_div = None
@@ -1157,6 +1142,8 @@ def _evaluate_node(
         flags.append("divstrip_ref_used")
     if divstrip_ref_offset is not None and divstrip_ref_offset > float(divstrip_preferred_window_m):
         flags.append("divstrip_ref_offset_gt_window")
+    if not center_piece_hit:
+        flags.append("center_piece_missing_fallback")
 
     status = "suspect" if flags else "ok"
     if hard_failed:
@@ -1173,7 +1160,7 @@ def _evaluate_node(
     conf = compute_confidence(trigger=trigger, scan_dist_m=scan_dist)
     anchor_found = bool((not hard_failed) and status in {"ok", "suspect"})
     dist_line_to_dz_edge = None if drivezone_union is None else float(final_geom.distance(drivezone_union.boundary))
-    clip_piece_type = "continuous_selected_single" if len(selected_lines) == 1 else "continuous_selected_two_sides"
+    clip_piece_type = "continuous_center_piece" if center_piece_hit else "continuous_nearest_piece_fallback"
 
     left_edge_dist_m = float(max(0.0, center_s - span_start))
     right_edge_dist_m = float(max(0.0, span_end - center_s))
