@@ -140,6 +140,32 @@ def _rewrite_drivezone_three_pieces(path: Path) -> None:
     _write_json(path, payload)
 
 
+def _rewrite_drivezone_split_band(path: Path) -> None:
+    payload = _read_json(path)
+    cx, cy = _layer_center_xy(path)
+    payload["features"] = [
+        {
+            "type": "Feature",
+            "properties": {"name": "left_band"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [_box(cx, cy, -30.0, 10.0, -4.0, 24.0)],
+            },
+        },
+        {
+            "type": "Feature",
+            "properties": {"name": "right_band"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [_box(cx, cy, 4.0, 10.0, 30.0, 24.0)],
+            },
+        },
+    ]
+    payload.pop("crs", None)
+    payload["crs"] = {"type": "name", "properties": {"name": "EPSG:3857"}}
+    _write_json(path, payload)
+
+
 def _rewrite_divstrip_far_only(path: Path) -> None:
     _rewrite_divstrip_offset(path, dy=150.0)
 
@@ -251,6 +277,7 @@ def test_prevent_cross_intersection_drift(tmp_path: Path) -> None:
 
 def test_drivezone_clip_multifeature_output_two_lines(tmp_path: Path) -> None:
     data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    data["divstrip_path"].unlink()
     data, out_dir = _run_runtime(
         tmp_path,
         run_id="multifeature_two_lines",
@@ -322,6 +349,26 @@ def test_divstrip_far_reference_must_not_override_earliest(tmp_path: Path) -> No
     far_scan = float(far_item.get("scan_dist_m", 0.0))
     assert abs(far_scan - base_scan) <= 2.0
     assert str(far_item.get("split_pick_source")) == "drivezone_earliest_divstrip_far_ignored"
+
+
+def test_divstrip_hard_window_requires_split_within_1m(tmp_path: Path) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    _rewrite_drivezone_split_band(data["drivezone_path"])
+    _data, out_dir = _run_runtime(
+        tmp_path,
+        run_id="divstrip_hard_window_requires_split_within_1m",
+        data=data,
+        focus_node_ids=[str(data["node_merge"])],
+    )
+    item = _read_json(out_dir / "anchors.json")["items"][0]
+    assert str(item.get("status")) == "fail"
+    assert bool(item.get("anchor_found", True)) is False
+    assert bool(item.get("found_split", True)) is False
+    assert str(item.get("split_pick_source")) == "rejected_no_split_in_divstrip_ref_window_1m"
+    assert float(item.get("s_drivezone_split_m", 0.0)) >= float(item.get("s_divstrip_m", 0.0)) + 5.0
+    bp = _read_json(out_dir / "breakpoints.json")
+    by_code = {str(x.get("code")): int(x.get("count", 0)) for x in bp.get("by_code", [])}
+    assert by_code.get("DRIVEZONE_SPLIT_NOT_FOUND", 0) >= 1
 
 
 def test_drivezone_clip_more_than_two_pieces(tmp_path: Path) -> None:

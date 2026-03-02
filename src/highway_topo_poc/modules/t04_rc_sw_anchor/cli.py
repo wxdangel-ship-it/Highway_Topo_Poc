@@ -40,6 +40,7 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--min_piece_len_m", default=None)
     p.add_argument("--divstrip_anchor_snap_enabled", default=None)
     p.add_argument("--divstrip_preferred_window_m", default=None)
+    p.add_argument("--divstrip_ref_hard_window_m", default=None)
     p.add_argument("--divstrip_drivezone_max_offset_m", default=None)
     p.add_argument("--output_cross_half_len_m", default=None)
     p.add_argument("--next_intersection_degree_min", default=None)
@@ -82,6 +83,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "min_piece_len_m": args.min_piece_len_m,
             "divstrip_anchor_snap_enabled": args.divstrip_anchor_snap_enabled,
             "divstrip_preferred_window_m": args.divstrip_preferred_window_m,
+            "divstrip_ref_hard_window_m": args.divstrip_ref_hard_window_m,
             "divstrip_drivezone_max_offset_m": args.divstrip_drivezone_max_offset_m,
             "output_cross_half_len_m": args.output_cross_half_len_m,
             "next_intersection_degree_min": args.next_intersection_degree_min,

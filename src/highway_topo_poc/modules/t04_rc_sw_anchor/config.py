@@ -29,6 +29,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "min_piece_len_m": 1.0,
     "divstrip_anchor_snap_enabled": False,
     "divstrip_preferred_window_m": 8.0,
+    "divstrip_ref_hard_window_m": 1.0,
     "divstrip_drivezone_max_offset_m": 30.0,
     "output_cross_half_len_m": 120.0,
     "next_intersection_degree_min": 3,
