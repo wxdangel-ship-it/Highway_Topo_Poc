@@ -14,8 +14,8 @@
 4. 分支选择：按 `kind` 分 merge/diverge，分支对用“最大夹角对”，多分支记 `MULTI_BRANCH_TODO`。
 5. 扫描与 stop：沿 `scan_axis_road` 扫描到 `next_intersection_connected_deg3` 或 `scan_max_limit_m`。
 6. split 判定：`SEG(s)` 与 DriveZone 的交段数 `>=2` 的最早 `s*` 触发。
-7. 输出构造：在 `s*` 输出两条 LineString（`piece_idx=0/1`）；anchor 用 gap 中点，失败时回退 SEG 中点并写断点。
-8. 可选 divstrip 证据：仅在 `s*` 邻域做解释/吸附，不允许驱动远距离扫描。
+7. 输出构造：检测用 `SEG(s)`，输出用同方向“长横截线”与 DriveZone 截断后两条 LineString（`piece_idx=0/1`）；anchor 用 gap 中点，失败时回退横截线中点并写断点。
+8. divstrip 优先：有导流带参考时优先在其邻域选择 `s*`；无导流带时回退到 DriveZone 最早 split，不允许跨路口漂移。
 
 ## 3. 运行入口
 ```bash

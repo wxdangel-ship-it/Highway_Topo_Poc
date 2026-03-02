@@ -55,7 +55,7 @@
 
 ### 5.1 DriveZone-first
 - 主触发仅基于 `SEG(s) ∩ DriveZone` 的片段数。
-- `divstrip` 仅做邻域强证据/可选吸附，不得作为远距离驱动条件。
+- `divstrip` 存在时优先用于 `s*` 选点（邻域窗口内优先），但不得驱动远距离漂移。
 - `pointcloud` 默认不参与主触发，仅保留诊断字段。
 
 ### 5.2 Between-Branches(B)
@@ -66,6 +66,7 @@
 ### 5.3 split 定义
 - `pieces = SEG(s) ∩ DriveZone` 的线段片段（过滤 `< min_piece_len_m`）。
 - 最早满足 `len(pieces) >= 2` 的 `s*` 为分割位置。
+- 若存在 divstrip 参考点，则优先在 `divstrip_preferred_window_m` 窗口内选择 `s*`（无则回退最早 split）。
 - stop 范围内无 `s*`：`status=fail` + `DRIVEZONE_SPLIT_NOT_FOUND`。
 
 ### 5.4 stop（hard-only）
@@ -85,6 +86,9 @@
 - `next_intersection_degree_min`：默认 `3`
 - `disable_geometric_stop_fallback`：默认 `true`
 - `divstrip_anchor_snap_enabled`：默认 `false`
+- `divstrip_preferred_window_m`：默认 `8.0`
+- `divstrip_drivezone_max_offset_m`：默认 `30.0`
+- `output_cross_half_len_m`：默认 `120.0`
 - patch/focus 门禁阈值分开：
   - `min_anchor_found_ratio_focus/min_anchor_found_ratio_patch`
   - `no_trigger_count_max_focus/no_trigger_count_max_patch`

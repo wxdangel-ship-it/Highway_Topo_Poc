@@ -167,6 +167,44 @@ def pick_top_two_segment_pieces(
     return top, True
 
 
+def pick_segment_pieces_by_center_sides(
+    *,
+    segment: LineString,
+    pieces: list[LineString],
+) -> tuple[list[LineString], bool]:
+    if not pieces:
+        return [], False
+
+    has_extra = bool(len(pieces) > 2)
+    if len(pieces) <= 2:
+        return sorted(pieces, key=lambda ln: _piece_interval_on_segment(segment=segment, piece=ln)[0]), has_extra
+
+    center_s = float(segment.project(segment.interpolate(0.5, normalized=True)))
+    info: list[tuple[LineString, tuple[float, float], float]] = []
+    for ln in pieces:
+        a, b = _piece_interval_on_segment(segment=segment, piece=ln)
+        mid = 0.5 * (float(a) + float(b))
+        info.append((ln, (float(a), float(b)), float(mid)))
+
+    left = [x for x in info if x[2] <= center_s]
+    right = [x for x in info if x[2] >= center_s]
+
+    chosen: list[tuple[LineString, tuple[float, float], float]] = []
+    if left:
+        # Left side piece closest to center.
+        chosen.append(min(left, key=lambda x: abs(center_s - x[2])))
+    if right:
+        cand = min(right, key=lambda x: abs(x[2] - center_s))
+        if not chosen or cand[0] is not chosen[0][0]:
+            chosen.append(cand)
+
+    if len(chosen) < 2:
+        chosen = sorted(info, key=lambda x: (abs(x[2] - center_s), -float(x[0].length)))[:2]
+
+    chosen = sorted(chosen, key=lambda x: x[1][0])
+    return [x[0] for x in chosen], has_extra
+
+
 def gap_midpoint_between_pieces(
     *,
     segment: LineString,
@@ -291,6 +329,7 @@ __all__ = [
     "detect_non_drivezone_in_fan",
     "extend_line_to_half_len",
     "gap_midpoint_between_pieces",
+    "pick_segment_pieces_by_center_sides",
     "pick_top_two_segment_pieces",
     "segment_drivezone_pieces",
 ]
