@@ -36,6 +36,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "continuous_enable": True,
     "continuous_dist_max_m": 50.0,
     "continuous_merge_max_gap_m": 5.0,
+    "continuous_merge_geom_tol_m": 1.0,
     "next_intersection_degree_min": 3,
     "stop_intersection_require_connected": True,
     "disable_geometric_stop_fallback": True,

@@ -427,6 +427,11 @@ def _empty_fail_result(
         "merged_output_kinds": None,
         "merged_output_roles": None,
         "merged_output_anchor_types": None,
+        "merge_reason": None,
+        "merge_geom_dist_m": None,
+        "merge_abs_diff_m": None,
+        "merge_abs_gap_cfg_m": None,
+        "merge_abs_gate_skipped": None,
         "suppress_intersection_feature": False,
         "resolved_from": resolved_from,
     }
@@ -494,6 +499,7 @@ def _apply_continuous_merges(
     seed_results: list[dict[str, Any]],
     components: list[ChainComponent],
     merge_gap_m: float,
+    geom_tol_m: float = 1.0,
 ) -> None:
     item_by_id: dict[int, dict[str, Any]] = {}
     for item in seed_results:
@@ -534,27 +540,27 @@ def _apply_continuous_merges(
             if int(primary_pred) != int(src):
                 continue
 
+            line_src = src_item.get("crossline_opt")
+            line_dst = dst_item.get("crossline_opt")
+            if not isinstance(line_src, LineString) or not isinstance(line_dst, LineString):
+                continue
+            geom_dist = float(line_src.distance(line_dst))
+            geom_intersects = bool(line_src.intersects(line_dst))
+            if (not geom_intersects) and (geom_dist > float(geom_tol_m) + tol):
+                continue
+
             abs_src = src_item.get("abs_s_chosen_m")
             abs_dst = dst_item.get("abs_s_chosen_m")
-            if abs_src is None or abs_dst is None:
-                continue
-            abs_src_f = float(abs_src)
-            abs_dst_f = float(abs_dst)
-            if abs(abs_src_f - abs_dst_f) > float(merge_gap_m) + tol:
-                continue
-
-            abs_mean = 0.5 * (abs_src_f + abs_dst_f)
-            src_win = _abs_window_from_item(src_item, window_m=1.0)
-            dst_win = _abs_window_from_item(dst_item, window_m=1.0)
-            if src_win is None or dst_win is None:
-                continue
-            if not (float(src_win[0]) - tol <= abs_mean <= float(src_win[1]) + tol):
-                continue
-            if not (float(dst_win[0]) - tol <= abs_mean <= float(dst_win[1]) + tol):
-                continue
+            abs_src_f = None if abs_src is None else float(abs_src)
+            abs_dst_f = None if abs_dst is None else float(abs_dst)
+            abs_diff = None
+            abs_mean = None
+            if abs_src_f is not None and abs_dst_f is not None:
+                abs_diff = float(abs(abs_src_f - abs_dst_f))
+                abs_mean = float(0.5 * (abs_src_f + abs_dst_f))
 
             group_id = f"{comp.component_id}:{src}->{dst}"
-            keep_src = abs(abs_src_f - abs_mean) <= abs(abs_dst_f - abs_mean)
+            keep_src = float(line_src.length) >= float(line_dst.length)
             keeper = src_item if keep_src else dst_item
             suppressed = dst_item if keep_src else src_item
 
@@ -567,8 +573,13 @@ def _apply_continuous_merges(
                 item["merged"] = True
                 item["merged_group_id"] = str(group_id)
                 item["merged_with_nodeids"] = list(merged_nodeids)
-                item["abs_s_merged_m"] = float(abs_mean)
+                item["abs_s_merged_m"] = None if abs_mean is None else float(abs_mean)
                 item["merged_crossline_id"] = str(group_id)
+                item["merge_reason"] = "geom_intersects" if geom_intersects else "geom_near_tol"
+                item["merge_geom_dist_m"] = float(geom_dist)
+                item["merge_abs_diff_m"] = abs_diff
+                item["merge_abs_gap_cfg_m"] = float(merge_gap_m)
+                item["merge_abs_gate_skipped"] = True
 
             keeper["merged_output_nodeids"] = list(merged_nodeids)
             keeper["merged_output_kinds"] = list(merged_kinds)
@@ -1576,6 +1587,11 @@ def _evaluate_node(
         "merged_output_kinds": None,
         "merged_output_roles": None,
         "merged_output_anchor_types": None,
+        "merge_reason": None,
+        "merge_geom_dist_m": None,
+        "merge_abs_diff_m": None,
+        "merge_abs_gap_cfg_m": None,
+        "merge_abs_gate_skipped": None,
         "suppress_intersection_feature": False,
         "resolved_from": resolved_from,
     }
@@ -2097,6 +2113,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             seed_results=seed_results,
             components=chain_components,
             merge_gap_m=float(params.get("continuous_merge_max_gap_m", 5.0)),
+            geom_tol_m=float(params.get("continuous_merge_geom_tol_m", 1.0)),
         )
 
     dst_tag = "3857" if str(dst_crs).upper() == "EPSG:3857" else str(dst_crs).split(":")[-1].lower()

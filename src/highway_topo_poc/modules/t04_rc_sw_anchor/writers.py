@@ -89,6 +89,11 @@ def _props_min(item: dict[str, Any]) -> dict[str, Any]:
         "merged_with_nodeids": item.get("merged_with_nodeids"),
         "abs_s_merged_m": item.get("abs_s_merged_m"),
         "merged_crossline_id": item.get("merged_crossline_id"),
+        "merge_reason": item.get("merge_reason"),
+        "merge_geom_dist_m": item.get("merge_geom_dist_m"),
+        "merge_abs_diff_m": item.get("merge_abs_diff_m"),
+        "merge_abs_gap_cfg_m": item.get("merge_abs_gap_cfg_m"),
+        "merge_abs_gate_skipped": item.get("merge_abs_gate_skipped"),
     }
 
 

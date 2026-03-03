@@ -46,6 +46,7 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--continuous_enable", default=None)
     p.add_argument("--continuous_dist_max_m", default=None)
     p.add_argument("--continuous_merge_max_gap_m", default=None)
+    p.add_argument("--continuous_merge_geom_tol_m", default=None)
     p.add_argument("--next_intersection_degree_min", default=None)
     p.add_argument("--stop_intersection_require_connected", default=None)
     p.add_argument("--disable_geometric_stop_fallback", default=None)
@@ -92,6 +93,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "continuous_enable": args.continuous_enable,
             "continuous_dist_max_m": args.continuous_dist_max_m,
             "continuous_merge_max_gap_m": args.continuous_merge_max_gap_m,
+            "continuous_merge_geom_tol_m": args.continuous_merge_geom_tol_m,
             "next_intersection_degree_min": args.next_intersection_degree_min,
             "stop_intersection_require_connected": args.stop_intersection_require_connected,
             "disable_geometric_stop_fallback": args.disable_geometric_stop_fallback,

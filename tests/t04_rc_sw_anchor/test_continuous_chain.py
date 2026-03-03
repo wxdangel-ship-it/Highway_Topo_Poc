@@ -225,7 +225,7 @@ def test_chain_merge_diverge_to_merge_within_5m_merges(tmp_path: Path) -> None:
     assert feats[0].get("properties", {}).get("nodeids") == [100, 200]
 
 
-def test_chain_merge_not_triggered_when_mean_outside_windows() -> None:
+def test_chain_merge_not_triggered_when_geometry_far() -> None:
     comp = ChainComponent(
         component_id="chain_001",
         node_ids=(10, 20),
@@ -260,7 +260,7 @@ def test_chain_merge_not_triggered_when_mean_outside_windows() -> None:
             "is_merge_kind": True,
             "status": "suspect",
             "anchor_type": "merge",
-            "crossline_opt": LineString([(0.0, 1.0), (5.0, 1.0)]),
+            "crossline_opt": LineString([(0.0, 3.0), (5.0, 3.0)]),
             "is_in_continuous_chain": True,
             "chain_component_id": "chain_001",
             "chain_node_offset_m": 6.0,
@@ -272,7 +272,12 @@ def test_chain_merge_not_triggered_when_mean_outside_windows() -> None:
             "suppress_intersection_feature": False,
         },
     ]
-    _apply_continuous_merges(seed_results=seed_results, components=[comp], merge_gap_m=5.0)
+    _apply_continuous_merges(
+        seed_results=seed_results,
+        components=[comp],
+        merge_gap_m=5.0,
+        geom_tol_m=1.0,
+    )
     assert all(bool(x.get("merged")) is False for x in seed_results)
     assert all(bool(x.get("suppress_intersection_feature")) is False for x in seed_results)
 

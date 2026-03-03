@@ -91,8 +91,8 @@
   - `abs_s` 定义：`diverge=offset+s_chosen`，`merge=offset-s_chosen`。
   - 对每节点仅接受 `abs_s_candidate > max(predecessors_abs_s)` 的候选；否则节点 fail 并打 `SEQUENTIAL_ORDER_VIOLATION`。
 - `diverge->merge` 合并：
-  - 相邻边上、merge 的主要前驱为该 diverge，且 `|abs_s_diff|<=continuous_merge_max_gap_m(默认5)` 才允许合并。
-  - 合并位置采用两者 `abs_s` 平均值，且必须落在两节点各自 1m window 的交集内。
+  - 相邻边上、merge 的主要前驱为该 diverge，且两条 `crossline_opt` 几何相交或近邻（`distance<=continuous_merge_geom_tol_m`）时允许合并。
+  - `continuous_merge_max_gap_m` 与 window 交集仅保留诊断，不作为阻断门槛。
 
 ## 6. 参数契约（关键）
 - `min_piece_len_m`：DriveZone 交段最小长度过滤（数值噪声抑制）
@@ -104,7 +104,8 @@
 - `output_cross_half_len_m`：默认 `120.0`
 - `continuous_enable`：默认 `true`（仅连续链节点生效）
 - `continuous_dist_max_m`：默认 `50.0`
-- `continuous_merge_max_gap_m`：默认 `5.0`
+- `continuous_merge_max_gap_m`：默认 `5.0`（诊断阈值，不阻断合并）
+- `continuous_merge_geom_tol_m`：默认 `1.0`（几何近邻合并阈值）
 - patch/focus 门禁阈值分开：
   - `min_anchor_found_ratio_focus/min_anchor_found_ratio_patch`
   - `no_trigger_count_max_focus/no_trigger_count_max_patch`

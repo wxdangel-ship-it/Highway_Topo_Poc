@@ -17,7 +17,7 @@
 7. 输出构造：检测用 `SEG(s)`，输出用同方向“长横截线”与 DriveZone 截断后两条 LineString（`piece_idx=0/1`）；anchor 用 gap 中点，失败时回退横截线中点并写断点。
 8. divstrip 优先：有导流带参考时优先在其邻域选择 `s*`；无导流带时回退到 DriveZone 最早 split，不允许跨路口漂移。
 9. 连续分合流顺序化（v1）：识别 `<50m` 连续链（仅 `direction=2/3`，跳过 `degree=2` 过路点），链内按 `abs_s` 顺序约束，必要时节点级 fail（`SEQUENTIAL_ORDER_VIOLATION`）。
-10. 连续链合并：相邻 `diverge->merge` 且 `|abs_s_diverge-abs_s_merge|<=5m` 时可合并为一个横截线输出。
+10. 连续链合并：相邻 `diverge->merge` 以横截线几何关系为主（相交或近邻）触发合并；`abs_s` 差值仅保留诊断，不作为阻断门槛。
 
 ## 3. 运行入口
 ```bash
