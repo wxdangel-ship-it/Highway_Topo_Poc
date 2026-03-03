@@ -18,7 +18,7 @@
 8. divstrip 优先：有导流带参考时优先在其邻域选择 `s*`；无导流带时回退到 DriveZone 最早 split，不允许跨路口漂移。
 9. 连续分合流顺序化（v1）：识别 `<50m` 连续链（仅 `direction=2/3`，跳过 `degree=2` 过路点），链内按 `abs_s` 顺序约束，必要时节点级 fail（`SEQUENTIAL_ORDER_VIOLATION`）。
 10. 连续链合并：相邻 `diverge->merge` 以横截线几何关系为主（相交或近邻）触发合并；`abs_s` 差值仅保留诊断，不作为阻断门槛。
-11. 异常分支（reverse tip/ref_s）：仅在默认方向缺参考或 `s≈0` 命中不可信 divstrip 时触发，反向最多 10m 查找；窗口口径仍为 `[ref_s-1m, ref_s]`，允许 `ref_s<0`。
+11. 异常分支（reverse tip/ref_s）：在默认方向缺参考、`s≈0` 命中不可信 divstrip、或 `divstrip_first_hit` 且无 drivezone split 时触发，反向最多 10m 查找；窗口口径仍为 `[ref_s-1m, ref_s]`，允许 `ref_s<0`。
 
 ## 3. 运行入口
 ```bash

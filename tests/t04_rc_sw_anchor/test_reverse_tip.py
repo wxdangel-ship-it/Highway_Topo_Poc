@@ -105,6 +105,38 @@ def _rewrite_divstrip_untrusted_with_reverse(path: Path, *, node_x: float, node_
     _write_json(path, payload)
 
 
+def _rewrite_divstrip_forward_and_reverse(
+    path: Path,
+    *,
+    node_x: float,
+    node_y: float,
+    forward_dy: float,
+    reverse_dy: float,
+) -> None:
+    payload = _read_json(path)
+    payload["features"] = [
+        {
+            "type": "Feature",
+            "properties": {"name": "forward_first_hit"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [_box(node_x, node_y + float(forward_dy), -2.0, -1.5, 2.0, 1.5)],
+            },
+        },
+        {
+            "type": "Feature",
+            "properties": {"name": "reverse_candidate"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [_box(node_x, node_y + float(reverse_dy), -2.0, -1.5, 2.0, 1.5)],
+            },
+        },
+    ]
+    payload.pop("crs", None)
+    payload["crs"] = {"type": "name", "properties": {"name": "EPSG:3857"}}
+    _write_json(path, payload)
+
+
 def _run_runtime(
     tmp_path: Path,
     *,
@@ -201,3 +233,60 @@ def test_regression_normal_case_not_affected(tmp_path: Path) -> None:
     ref_s = float(item.get("ref_s_final_m"))
     assert (ref_s - 1.0) <= s_chosen <= ref_s
 
+
+def test_reverse_tip_first_hit_no_split_diverge(tmp_path: Path) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    node_x, node_y = _node_xy(Path(data["global_node_path"]), int(data["node_diverge"]))
+    _rewrite_drivezone_single_polygon(Path(data["drivezone_path"]), cx=node_x, cy=node_y + 40.0)
+    _rewrite_divstrip_forward_and_reverse(
+        Path(data["divstrip_path"]),
+        node_x=node_x,
+        node_y=node_y,
+        forward_dy=6.0,
+        reverse_dy=-6.0,
+    )
+    out_dir = _run_runtime(
+        tmp_path,
+        run_id="reverse_tip_first_hit_no_split_diverge",
+        data=data,
+        focus_node_ids=[str(data["node_diverge"])],
+    )
+    item = _read_json(out_dir / "anchors.json")["items"][0]
+    assert str(item.get("anchor_type")) == "diverge"
+    assert bool(item.get("reverse_tip_attempted", False)) is True
+    assert str(item.get("reverse_trigger")) == "first_hit_no_split"
+    if bool(item.get("reverse_tip_used", False)):
+        assert float(item.get("ref_s_final_m")) < 0.0
+    else:
+        assert bool(item.get("reverse_tip_not_improved", False)) is True
+        assert item.get("ref_s_final_m") == item.get("ref_s_forward_m")
+    assert float(item.get("ref_s_forward_m")) > 0.0
+
+
+def test_reverse_tip_first_hit_no_split_merge(tmp_path: Path) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    node_x, node_y = _node_xy(Path(data["global_node_path"]), int(data["node_merge"]))
+    _rewrite_drivezone_single_polygon(Path(data["drivezone_path"]), cx=node_x, cy=node_y + 40.0)
+    _rewrite_divstrip_forward_and_reverse(
+        Path(data["divstrip_path"]),
+        node_x=node_x,
+        node_y=node_y,
+        forward_dy=-6.0,
+        reverse_dy=6.0,
+    )
+    out_dir = _run_runtime(
+        tmp_path,
+        run_id="reverse_tip_first_hit_no_split_merge",
+        data=data,
+        focus_node_ids=[str(data["node_merge"])],
+    )
+    item = _read_json(out_dir / "anchors.json")["items"][0]
+    assert str(item.get("anchor_type")) == "merge"
+    assert bool(item.get("reverse_tip_attempted", False)) is True
+    assert str(item.get("reverse_trigger")) == "first_hit_no_split"
+    if bool(item.get("reverse_tip_used", False)):
+        assert float(item.get("ref_s_final_m")) < 0.0
+    else:
+        assert bool(item.get("reverse_tip_not_improved", False)) is True
+        assert item.get("ref_s_final_m") == item.get("ref_s_forward_m")
+    assert float(item.get("ref_s_forward_m")) > 0.0

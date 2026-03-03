@@ -996,9 +996,19 @@ def _evaluate_node(
     best_divstrip_dist_m_rev: float | None = None
 
     forward_missing_ref = bool(divstrip_ref_s is None and s_drivezone_split is None)
-    if forward_missing_ref or untrusted_divstrip_at_node:
+    first_hit_no_split = bool(
+        divstrip_ref_s is not None
+        and str(divstrip_ref_source) == "first_hit"
+        and s_drivezone_split is None
+    )
+    if forward_missing_ref or untrusted_divstrip_at_node or first_hit_no_split:
         reverse_tip_attempted = True
-        reverse_trigger = "missing_ref" if forward_missing_ref else "untrusted_divstrip_at_node"
+        if forward_missing_ref:
+            reverse_trigger = "missing_ref"
+        elif untrusted_divstrip_at_node:
+            reverse_trigger = "untrusted_divstrip_at_node"
+        else:
+            reverse_trigger = "first_hit_no_split"
         _add_bp(
             code=BP_REVERSE_TIP_ATTEMPTED,
             severity="soft",
@@ -1078,7 +1088,7 @@ def _evaluate_node(
                 message="reverse_tip_not_found_in_window",
                 extra={"reverse_tip_max_m": float(reverse_tip_max_m)},
             )
-            if untrusted_divstrip_at_node and ref_s_forward is not None:
+            if (not forward_missing_ref) and ref_s_forward is not None:
                 reverse_tip_not_improved = True
 
     ref_s = ref_s_forward

@@ -98,6 +98,7 @@
 - 仅在以下条件触发反向搜索：
   - A) 默认方向 `forward_divstrip_ref` 与 `forward_drivezone_split` 均缺失
   - B) `SEG(0)` 与 divstrip 相交且 `node->divstrip` 距离 `<= divstrip_hit_tol_m`（`untrusted_divstrip_at_node`）
+  - C) 默认方向命中 `divstrip_first_hit` 且不存在 `forward_drivezone_split`（`first_hit_no_split`，分歧/合流均适用）
 - 反向范围：`s ∈ [-reverse_tip_max_m, 0]`，默认 `10m`
 - 反向仲裁与正向一致：divstrip 优先，drivezone 次之；禁止 drivezone 远于 divstrip 覆盖近 divstrip
 - 最终位置窗口口径不变：`[ref_s-1m, ref_s]`，仅允许 `ref_s` 为负（反向）
