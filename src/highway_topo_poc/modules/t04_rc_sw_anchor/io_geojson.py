@@ -30,6 +30,7 @@ class RoadRecord:
     enodeid: int
     line: LineString
     length_m: float
+    direction: int | None = None
 
 
 @dataclass(frozen=True)
@@ -257,6 +258,7 @@ def load_roads(
 
         snodeid = _int_field(props_norm, ["snodeid", "startnodeid", "fromnodeid", "startid", "snode"])
         enodeid = _int_field(props_norm, ["enodeid", "endnodeid", "tonodeid", "endid", "enode"])
+        direction = _int_field(props_norm, ["direction", "dir", "flowdir"])
         if snodeid is None or enodeid is None:
             errors.append(f"road_field_missing:{idx}:snodeid_or_enodeid")
             continue
@@ -267,6 +269,7 @@ def load_roads(
                 enodeid=int(enodeid),
                 line=g,
                 length_m=float(g.length),
+                direction=None if direction is None else int(direction),
             )
         )
 

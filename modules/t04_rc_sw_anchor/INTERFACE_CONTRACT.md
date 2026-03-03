@@ -81,6 +81,19 @@
   - `found_split=true -> ok/suspect`（受软标记影响）
 - `anchor_found` 基于 `found_split` 与 hard-fail 结果，不允许 fail 被后续覆盖。
 
+### 5.6 连续分合流顺序化（v1）
+- 连续链识别：
+  - 起点集合：当前运行 seeds（`global_focus` 为 `focus_node_ids`）。
+  - 仅 `direction=2/3` 参与扩展；`direction=0/1` 直接停止该路扩展。
+  - 沿有效方向追踪到下一个 `degree>=3` 节点，允许跨过 `degree=2` 过路点。
+  - `dist < continuous_dist_max_m(默认50)` 且目标节点也在 seeds 且 kind 为 merge/diverge 时，记为连续边。
+- 链内顺序约束：
+  - `abs_s` 定义：`diverge=offset+s_chosen`，`merge=offset-s_chosen`。
+  - 对每节点仅接受 `abs_s_candidate > max(predecessors_abs_s)` 的候选；否则节点 fail 并打 `SEQUENTIAL_ORDER_VIOLATION`。
+- `diverge->merge` 合并：
+  - 相邻边上、merge 的主要前驱为该 diverge，且 `|abs_s_diff|<=continuous_merge_max_gap_m(默认5)` 才允许合并。
+  - 合并位置采用两者 `abs_s` 平均值，且必须落在两节点各自 1m window 的交集内。
+
 ## 6. 参数契约（关键）
 - `min_piece_len_m`：DriveZone 交段最小长度过滤（数值噪声抑制）
 - `next_intersection_degree_min`：默认 `3`
@@ -89,6 +102,9 @@
 - `divstrip_preferred_window_m`：默认 `8.0`
 - `divstrip_drivezone_max_offset_m`：默认 `30.0`
 - `output_cross_half_len_m`：默认 `120.0`
+- `continuous_enable`：默认 `true`（仅连续链节点生效）
+- `continuous_dist_max_m`：默认 `50.0`
+- `continuous_merge_max_gap_m`：默认 `5.0`
 - patch/focus 门禁阈值分开：
   - `min_anchor_found_ratio_focus/min_anchor_found_ratio_patch`
   - `no_trigger_count_max_focus/no_trigger_count_max_patch`
@@ -111,9 +127,14 @@
 - `chosen_config.json`
 
 `intersection_l_opt*.geojson`：
-- 每个有效 node 输出两条 feature：
-  - `piece_idx=0/1`
-  - `piece_role=branch_a_side/branch_b_side`
+- 默认每个有效 node 输出一条连续 LineString。
+- 连续链合并触发时输出一条合并 feature，properties 额外包含：
+  - `nodeids[]`
+  - `kinds[]`
+  - `roles[]`（`["diverge","merge"]`）
+  - `merged=true`
+  - `merged_group_id`
+  - `abs_s_merged_m`
 - properties 必含：
   - `nodeid/id/mainid/mainnodeid`
   - `kind/kind_bits`
@@ -127,6 +148,10 @@
   - `branch_a_id/branch_b_id/branch_axis_id`
   - `pieces_count/piece_lens_m/gap_len_m/seg_len_m`
   - `stop_reason`
+  - `is_in_continuous_chain/chain_component_id/chain_node_offset_m`
+  - `abs_s_chosen_m/abs_s_prev_required_m`
+  - `sequential_ok/sequential_violation_reason`
+  - `merged/merged_group_id/merged_with_nodeids/abs_s_merged_m`
 
 ## 8. Breakpoints（最小集合）
 - `DRIVEZONE_SPLIT_NOT_FOUND`
@@ -137,6 +162,7 @@
 - `NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED`
 - `MULTI_BRANCH_TODO`
 - `ANCHOR_GAP_UNSTABLE`
+- `SEQUENTIAL_ORDER_VIOLATION`
 - `POINTCLOUD_CRS_UNKNOWN_UNUSABLE`
 - `POINTCLOUD_MISSING_OR_UNUSABLE`
 

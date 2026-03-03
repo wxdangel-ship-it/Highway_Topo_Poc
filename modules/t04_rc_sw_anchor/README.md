@@ -16,6 +16,8 @@
 6. split 判定：`SEG(s)` 与 DriveZone 的交段数 `>=2` 的最早 `s*` 触发。
 7. 输出构造：检测用 `SEG(s)`，输出用同方向“长横截线”与 DriveZone 截断后两条 LineString（`piece_idx=0/1`）；anchor 用 gap 中点，失败时回退横截线中点并写断点。
 8. divstrip 优先：有导流带参考时优先在其邻域选择 `s*`；无导流带时回退到 DriveZone 最早 split，不允许跨路口漂移。
+9. 连续分合流顺序化（v1）：识别 `<50m` 连续链（仅 `direction=2/3`，跳过 `degree=2` 过路点），链内按 `abs_s` 顺序约束，必要时节点级 fail（`SEQUENTIAL_ORDER_VIOLATION`）。
+10. 连续链合并：相邻 `diverge->merge` 且 `|abs_s_diverge-abs_s_merge|<=5m` 时可合并为一个横截线输出。
 
 ## 3. 运行入口
 ```bash
@@ -57,7 +59,8 @@ python -m highway_topo_poc.modules.t04_rc_sw_anchor \
 - `chosen_config.json`
 
 `intersection_l_opt*.geojson` 约定：
-- 同一 `nodeid` 输出两条 feature（`piece_idx=0/1`，`piece_role=branch_a_side/branch_b_side`）。
+- 默认每个 `nodeid` 输出 1 条连续 LineString（当前位置所在路面 piece 内扩边后结果）。
+- 若触发连续链 `diverge->merge` 合并，输出 1 条合并 feature，properties 含 `nodeids[]/kinds[]/roles[]`。
 - properties 必含 `nodeid/kind/kind_bits/anchor_type/scan_dist_m/stop_reason/evidence_source` 与关键诊断字段。
 
 ## 6. 已知边界

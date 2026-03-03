@@ -77,6 +77,18 @@ def _props_min(item: dict[str, Any]) -> dict[str, Any]:
         "pb_center_dist_m": item.get("pb_center_dist_m"),
         "has_divstrip_nearby": item.get("has_divstrip_nearby"),
         "stop_reason": item.get("stop_reason"),
+        "is_in_continuous_chain": item.get("is_in_continuous_chain"),
+        "chain_component_id": item.get("chain_component_id"),
+        "chain_node_offset_m": item.get("chain_node_offset_m"),
+        "abs_s_chosen_m": item.get("abs_s_chosen_m"),
+        "abs_s_prev_required_m": item.get("abs_s_prev_required_m"),
+        "sequential_ok": item.get("sequential_ok"),
+        "sequential_violation_reason": item.get("sequential_violation_reason"),
+        "merged": item.get("merged"),
+        "merged_group_id": item.get("merged_group_id"),
+        "merged_with_nodeids": item.get("merged_with_nodeids"),
+        "abs_s_merged_m": item.get("abs_s_merged_m"),
+        "merged_crossline_id": item.get("merged_crossline_id"),
     }
 
 
@@ -146,7 +158,19 @@ def write_intersection_opt_geojson(
         return f"piece_{int(idx)}"
 
     for item in seed_results:
+        if bool(item.get("suppress_intersection_feature", False)):
+            continue
         props = _props_min(item)
+        merged_nodeids = item.get("merged_output_nodeids")
+        if isinstance(merged_nodeids, list) and merged_nodeids:
+            props.update(
+                {
+                    "nodeids": [int(x) for x in merged_nodeids],
+                    "kinds": list(item.get("merged_output_kinds") or []),
+                    "roles": list(item.get("merged_output_roles") or []),
+                    "anchor_types": list(item.get("merged_output_anchor_types") or []),
+                }
+            )
         pieces = item.get("crossline_opt_pieces")
         if isinstance(pieces, list) and pieces:
             for idx, piece in enumerate(pieces):

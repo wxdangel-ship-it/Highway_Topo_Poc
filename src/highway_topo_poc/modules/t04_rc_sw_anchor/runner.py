@@ -13,6 +13,7 @@ from shapely.geometry import LineString, Point, box
 from shapely.geometry.base import BaseGeometry
 
 from .between_branches import build_between_branches_segment, select_branch_pair_and_axis
+from .continuous_chain import ChainComponent, build_continuous_graph
 from .crs_norm import guess_crs_from_bbox, normalize_epsg_name, transform_xy_arrays
 from .divstrip_ops import anchor_point_from_crossline, tip_point_from_divstrip
 from .drivezone_ops import segment_drivezone_pieces
@@ -26,6 +27,7 @@ from .metrics_breakpoints import (
     BP_DRIVEZONE_CLIP_MULTIPIECE,
     BP_DRIVEZONE_CRS_UNKNOWN,
     BP_DRIVEZONE_MISSING,
+    BP_SEQUENTIAL_ORDER_VIOLATION,
     BP_MULTI_BRANCH_TODO,
     BP_NEXT_INTERSECTION_NOT_FOUND_DEG3,
     BP_DRIVEZONE_SPLIT_NOT_FOUND,
@@ -340,6 +342,11 @@ def _empty_fail_result(
     stop_reason: str,
     id_fields: tuple[tuple[str, int], ...] = (),
     resolved_from: dict[str, Any] | None = None,
+    is_in_continuous_chain: bool = False,
+    chain_component_id: str | None = None,
+    chain_node_offset_m: float | None = None,
+    abs_s_prev_required_m: float | None = None,
+    sequential_violation_reason: str | None = None,
 ) -> dict[str, Any]:
     pt, dist = anchor_point_from_crossline(line=line, divstrip_union=divstrip_union)
     dist_line = None if divstrip_union is None else float(line.distance(divstrip_union))
@@ -404,8 +411,179 @@ def _empty_fail_result(
         "has_divstrip_nearby": False,
         "ng_candidates_before_suppress": 0,
         "ng_candidates_after_suppress": 0,
+        "is_in_continuous_chain": bool(is_in_continuous_chain),
+        "chain_component_id": chain_component_id,
+        "chain_node_offset_m": None if chain_node_offset_m is None else float(chain_node_offset_m),
+        "abs_s_chosen_m": None,
+        "abs_s_prev_required_m": None if abs_s_prev_required_m is None else float(abs_s_prev_required_m),
+        "sequential_ok": False,
+        "sequential_violation_reason": sequential_violation_reason,
+        "merged": False,
+        "merged_group_id": None,
+        "merged_with_nodeids": None,
+        "abs_s_merged_m": None,
+        "merged_crossline_id": None,
+        "merged_output_nodeids": None,
+        "merged_output_kinds": None,
+        "merged_output_roles": None,
+        "merged_output_anchor_types": None,
+        "suppress_intersection_feature": False,
         "resolved_from": resolved_from,
     }
+
+
+def _compute_abs_s(
+    *,
+    is_diverge: bool,
+    is_merge: bool,
+    node_offset_m: float | None,
+    s_local: float | None,
+) -> float | None:
+    if node_offset_m is None or s_local is None:
+        return None
+    if is_diverge:
+        return float(node_offset_m + float(s_local))
+    if is_merge:
+        return float(node_offset_m - float(s_local))
+    return None
+
+
+def _resolve_ref_s_local(item: dict[str, Any]) -> float | None:
+    s_div = item.get("s_divstrip_m")
+    s_dz = item.get("s_drivezone_split_m")
+    src = str(item.get("position_source") or "")
+    if src == "divstrip_ref" and s_div is not None:
+        return float(s_div)
+    if s_dz is not None:
+        return float(s_dz)
+    if s_div is not None:
+        return float(s_div)
+    s_chosen = item.get("s_chosen_m")
+    if s_chosen is not None:
+        return float(s_chosen)
+    return None
+
+
+def _abs_window_from_item(item: dict[str, Any], *, window_m: float = 1.0) -> tuple[float, float] | None:
+    if not bool(item.get("is_in_continuous_chain", False)):
+        return None
+    offset = item.get("chain_node_offset_m")
+    if offset is None:
+        return None
+    ref_s = _resolve_ref_s_local(item)
+    if ref_s is None:
+        return None
+    lo = max(0.0, float(ref_s) - float(window_m))
+    hi = float(ref_s)
+    if hi + 1e-9 < lo:
+        lo, hi = hi, lo
+
+    if bool(item.get("is_diverge_kind", False)):
+        a0 = float(offset) + float(lo)
+        a1 = float(offset) + float(hi)
+    elif bool(item.get("is_merge_kind", False)):
+        a0 = float(offset) - float(hi)
+        a1 = float(offset) - float(lo)
+    else:
+        return None
+    return (float(min(a0, a1)), float(max(a0, a1)))
+
+
+def _apply_continuous_merges(
+    *,
+    seed_results: list[dict[str, Any]],
+    components: list[ChainComponent],
+    merge_gap_m: float,
+) -> None:
+    item_by_id: dict[int, dict[str, Any]] = {}
+    for item in seed_results:
+        try:
+            nodeid = int(item.get("nodeid"))
+        except Exception:
+            continue
+        item_by_id[nodeid] = item
+
+    used_nodeids: set[int] = set()
+    tol = 1e-6
+
+    for comp in components:
+        incoming: dict[int, list[tuple[int, float]]] = {}
+        for edge in comp.edges:
+            incoming.setdefault(int(edge.dst), []).append((int(edge.src), float(edge.dist_m)))
+
+        for edge in sorted(comp.edges, key=lambda x: (float(x.dist_m), int(x.src), int(x.dst))):
+            src = int(edge.src)
+            dst = int(edge.dst)
+            if src in used_nodeids or dst in used_nodeids:
+                continue
+            src_item = item_by_id.get(src)
+            dst_item = item_by_id.get(dst)
+            if src_item is None or dst_item is None:
+                continue
+            if str(src_item.get("status")) == "fail" or str(dst_item.get("status")) == "fail":
+                continue
+            if not bool(src_item.get("is_diverge_kind", False)):
+                continue
+            if not bool(dst_item.get("is_merge_kind", False)):
+                continue
+
+            preds = incoming.get(dst, [])
+            if not preds:
+                continue
+            primary_pred = min(preds, key=lambda x: (float(x[1]), int(x[0])))[0]
+            if int(primary_pred) != int(src):
+                continue
+
+            abs_src = src_item.get("abs_s_chosen_m")
+            abs_dst = dst_item.get("abs_s_chosen_m")
+            if abs_src is None or abs_dst is None:
+                continue
+            abs_src_f = float(abs_src)
+            abs_dst_f = float(abs_dst)
+            if abs(abs_src_f - abs_dst_f) > float(merge_gap_m) + tol:
+                continue
+
+            abs_mean = 0.5 * (abs_src_f + abs_dst_f)
+            src_win = _abs_window_from_item(src_item, window_m=1.0)
+            dst_win = _abs_window_from_item(dst_item, window_m=1.0)
+            if src_win is None or dst_win is None:
+                continue
+            if not (float(src_win[0]) - tol <= abs_mean <= float(src_win[1]) + tol):
+                continue
+            if not (float(dst_win[0]) - tol <= abs_mean <= float(dst_win[1]) + tol):
+                continue
+
+            group_id = f"{comp.component_id}:{src}->{dst}"
+            keep_src = abs(abs_src_f - abs_mean) <= abs(abs_dst_f - abs_mean)
+            keeper = src_item if keep_src else dst_item
+            suppressed = dst_item if keep_src else src_item
+
+            merged_nodeids = [int(src), int(dst)]
+            merged_kinds = [src_item.get("kind"), dst_item.get("kind")]
+            merged_roles = ["diverge", "merge"]
+            merged_anchor_types = [src_item.get("anchor_type"), dst_item.get("anchor_type")]
+
+            for item in [src_item, dst_item]:
+                item["merged"] = True
+                item["merged_group_id"] = str(group_id)
+                item["merged_with_nodeids"] = list(merged_nodeids)
+                item["abs_s_merged_m"] = float(abs_mean)
+                item["merged_crossline_id"] = str(group_id)
+
+            keeper["merged_output_nodeids"] = list(merged_nodeids)
+            keeper["merged_output_kinds"] = list(merged_kinds)
+            keeper["merged_output_roles"] = list(merged_roles)
+            keeper["merged_output_anchor_types"] = list(merged_anchor_types)
+            keeper["suppress_intersection_feature"] = False
+
+            suppressed["merged_output_nodeids"] = None
+            suppressed["merged_output_kinds"] = None
+            suppressed["merged_output_roles"] = None
+            suppressed["merged_output_anchor_types"] = None
+            suppressed["suppress_intersection_feature"] = True
+
+            used_nodeids.add(int(src))
+            used_nodeids.add(int(dst))
 
 
 def _evaluate_node(
@@ -420,11 +598,17 @@ def _evaluate_node(
     breakpoints: list[dict[str, Any]],
     pointcloud_usable: bool,
     resolved_from: dict[str, Any] | None = None,
+    is_in_continuous_chain: bool = False,
+    chain_component_id: str | None = None,
+    chain_node_offset_m: float | None = None,
+    required_prev_abs_s: float | None = None,
 ) -> dict[str, Any]:
     nodeid = int(node.nodeid)
     kind = None if node.kind is None else int(node.kind)
     is_merge = bool(kind is not None and (int(kind) & (1 << 3)) != 0)
     is_diverge = bool(kind is not None and (int(kind) & (1 << 4)) != 0)
+    chain_offset = None if chain_node_offset_m is None else float(chain_node_offset_m)
+    required_prev_abs = None if required_prev_abs_s is None else float(required_prev_abs_s)
     hard_failed = False
 
     def _add_bp(
@@ -465,6 +649,10 @@ def _evaluate_node(
             stop_reason="kind_missing",
             id_fields=node.id_fields,
             resolved_from=resolved_from,
+            is_in_continuous_chain=bool(is_in_continuous_chain),
+            chain_component_id=chain_component_id,
+            chain_node_offset_m=chain_offset,
+            abs_s_prev_required_m=required_prev_abs,
         )
 
     if is_merge and is_diverge:
@@ -480,6 +668,10 @@ def _evaluate_node(
             stop_reason="ambiguous_kind",
             id_fields=node.id_fields,
             resolved_from=resolved_from,
+            is_in_continuous_chain=bool(is_in_continuous_chain),
+            chain_component_id=chain_component_id,
+            chain_node_offset_m=chain_offset,
+            abs_s_prev_required_m=required_prev_abs,
         )
 
     if not is_merge and not is_diverge:
@@ -500,6 +692,10 @@ def _evaluate_node(
             stop_reason="unsupported_kind",
             id_fields=node.id_fields,
             resolved_from=resolved_from,
+            is_in_continuous_chain=bool(is_in_continuous_chain),
+            chain_component_id=chain_component_id,
+            chain_node_offset_m=chain_offset,
+            abs_s_prev_required_m=required_prev_abs,
         )
 
     try:
@@ -525,6 +721,10 @@ def _evaluate_node(
             stop_reason="road_link_missing",
             id_fields=node.id_fields,
             resolved_from=resolved_from,
+            is_in_continuous_chain=bool(is_in_continuous_chain),
+            chain_component_id=chain_component_id,
+            chain_node_offset_m=chain_offset,
+            abs_s_prev_required_m=required_prev_abs,
         )
 
     if branch_sel.multi_branch_todo:
@@ -562,6 +762,10 @@ def _evaluate_node(
             stop_reason="drivezone_missing",
             id_fields=node.id_fields,
             resolved_from=resolved_from,
+            is_in_continuous_chain=bool(is_in_continuous_chain),
+            chain_component_id=chain_component_id,
+            chain_node_offset_m=chain_offset,
+            abs_s_prev_required_m=required_prev_abs,
         )
         out.update(
             {
@@ -749,6 +953,10 @@ def _evaluate_node(
             stop_reason="position_reference_missing",
             id_fields=node.id_fields,
             resolved_from=resolved_from,
+            is_in_continuous_chain=bool(is_in_continuous_chain),
+            chain_component_id=chain_component_id,
+            chain_node_offset_m=chain_offset,
+            abs_s_prev_required_m=required_prev_abs,
         )
         out.update(
             {
@@ -818,6 +1026,8 @@ def _evaluate_node(
     has_extra_piece = False
     target_s = float(window_lo)
     candidate_hits: list[dict[str, Any]] = []
+    seq_pre_candidates = 0
+    seq_filtered_out = 0
     for rank, s_probe in enumerate(scan_candidates):
         crossline_probe = LocalFrame.from_tangent(
             origin_xy=(float(node.point.x), float(node.point.y)),
@@ -833,6 +1043,17 @@ def _evaluate_node(
         )
         if not pieces_probe:
             continue
+        seq_pre_candidates += 1
+        if required_prev_abs is not None and chain_offset is not None:
+            abs_s_candidate = _compute_abs_s(
+                is_diverge=bool(is_diverge),
+                is_merge=bool(is_merge),
+                node_offset_m=float(chain_offset),
+                s_local=float(s_probe),
+            )
+            if abs_s_candidate is None or float(abs_s_candidate) <= float(required_prev_abs) + 1e-9:
+                seq_filtered_out += 1
+                continue
         center_probe = Point(
             float(node.point.x) + float(scan_vec[0]) * float(s_probe),
             float(node.point.y) + float(scan_vec[1]) * float(s_probe),
@@ -889,6 +1110,64 @@ def _evaluate_node(
             cross_half_len_m=float(output_cross_half_len_m),
         )
 
+    if (
+        required_prev_abs is not None
+        and chain_offset is not None
+        and seq_pre_candidates > 0
+        and seq_filtered_out > 0
+        and not candidate_hits
+    ):
+        _add_bp(
+            code=BP_SEQUENTIAL_ORDER_VIOLATION,
+            severity="hard",
+            message="sequential_order_violation_no_candidate_gt_prev",
+            extra={"required_prev_abs_s": float(required_prev_abs), "filtered_out": int(seq_filtered_out)},
+        )
+        out = _empty_fail_result(
+            nodeid=nodeid,
+            kind=kind,
+            anchor_type=anchor_type,
+            scan_dir=scan_dir_label,
+            line=output_crossline,
+            divstrip_union=divstrip_union,
+            drivezone_union=drivezone_union,
+            stop_reason="sequential_order_violation",
+            id_fields=node.id_fields,
+            resolved_from=resolved_from,
+            is_in_continuous_chain=bool(is_in_continuous_chain),
+            chain_component_id=chain_component_id,
+            chain_node_offset_m=chain_offset,
+            abs_s_prev_required_m=required_prev_abs,
+            sequential_violation_reason="no_candidate_abs_gt_prev",
+        )
+        out.update(
+            {
+                "stop_dist_m": float(stop_dist),
+                "next_intersection_dist_m": None if next_inter is None else float(next_inter),
+                "tip_s_m": None if tip_s is None else float(tip_s),
+                "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
+                "best_divstrip_dz_dist_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "clip_empty": True,
+                "clip_piece_type": "none",
+                "clip_input_len_m": float(output_crossline.length),
+                "stop_diag": stop_diag,
+                "s_divstrip_m": None if divstrip_ref_s is None else float(divstrip_ref_s),
+                "s_drivezone_split_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "s_chosen_m": None,
+                "split_pick_source": f"{split_pick_source}_seq_violation",
+                "divstrip_ref_source": str(divstrip_ref_source),
+                "divstrip_ref_offset_m": None,
+                "output_cross_half_len_m": float(output_cross_half_len_m),
+                "branch_a_id": branch_a_id,
+                "branch_b_id": branch_b_id,
+                "branch_axis_id": axis_id,
+                "has_divstrip_nearby": False,
+                "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
+                "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+            }
+        )
+        return out
+
     if (not output_pieces_raw) or chosen_scan_dist is None:
         _add_bp(
             code=BP_DRIVEZONE_CLIP_EMPTY,
@@ -907,6 +1186,10 @@ def _evaluate_node(
             stop_reason="drivezone_piece_not_found_in_window",
             id_fields=node.id_fields,
             resolved_from=resolved_from,
+            is_in_continuous_chain=bool(is_in_continuous_chain),
+            chain_component_id=chain_component_id,
+            chain_node_offset_m=chain_offset,
+            abs_s_prev_required_m=required_prev_abs,
         )
         out.update(
             {
@@ -995,6 +1278,10 @@ def _evaluate_node(
             stop_reason="drivezone_piece_interval_empty",
             id_fields=node.id_fields,
             resolved_from=resolved_from,
+            is_in_continuous_chain=bool(is_in_continuous_chain),
+            chain_component_id=chain_component_id,
+            chain_node_offset_m=chain_offset,
+            abs_s_prev_required_m=required_prev_abs,
         )
         out.update(
             {
@@ -1093,6 +1380,10 @@ def _evaluate_node(
             stop_reason="drivezone_selected_span_degenerate",
             id_fields=node.id_fields,
             resolved_from=resolved_from,
+            is_in_continuous_chain=bool(is_in_continuous_chain),
+            chain_component_id=chain_component_id,
+            chain_node_offset_m=chain_offset,
+            abs_s_prev_required_m=required_prev_abs,
         )
         out.update(
             {
@@ -1185,6 +1476,16 @@ def _evaluate_node(
     anchor_found = bool((not hard_failed) and status in {"ok", "suspect"})
     dist_line_to_dz_edge = None if drivezone_union is None else float(final_geom.distance(drivezone_union.boundary))
     clip_piece_type = "continuous_center_piece" if center_piece_hit else "continuous_nearest_piece_fallback"
+    abs_s_chosen = _compute_abs_s(
+        is_diverge=bool(is_diverge),
+        is_merge=bool(is_merge),
+        node_offset_m=chain_offset,
+        s_local=float(scan_dist),
+    )
+    sequential_ok = bool(
+        (required_prev_abs is None)
+        or (abs_s_chosen is not None and float(abs_s_chosen) > float(required_prev_abs) + 1e-9)
+    )
 
     left_edge_dist_m = float(max(0.0, center_s - span_start))
     right_edge_dist_m = float(max(0.0, span_end - center_s))
@@ -1259,6 +1560,23 @@ def _evaluate_node(
         "has_divstrip_nearby": bool(has_divstrip_nearby),
         "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
         "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+        "is_in_continuous_chain": bool(is_in_continuous_chain),
+        "chain_component_id": chain_component_id,
+        "chain_node_offset_m": chain_offset,
+        "abs_s_chosen_m": None if abs_s_chosen is None else float(abs_s_chosen),
+        "abs_s_prev_required_m": None if required_prev_abs is None else float(required_prev_abs),
+        "sequential_ok": bool(sequential_ok),
+        "sequential_violation_reason": None,
+        "merged": False,
+        "merged_group_id": None,
+        "merged_with_nodeids": None,
+        "abs_s_merged_m": None,
+        "merged_crossline_id": None,
+        "merged_output_nodeids": None,
+        "merged_output_kinds": None,
+        "merged_output_roles": None,
+        "merged_output_anchor_types": None,
+        "suppress_intersection_feature": False,
         "resolved_from": resolved_from,
     }
 
@@ -1678,8 +1996,86 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             }
         )
 
+    continuous_enable = bool(params.get("continuous_enable", True))
+    chain_edges = []
+    chain_components: list[ChainComponent] = []
+    chain_diag: dict[str, Any] = {"enabled": bool(continuous_enable), "edge_count": 0, "component_count": 0}
+    if continuous_enable and seeds:
+        try:
+            chain_edges, chain_components, chain_diag_raw = build_continuous_graph(
+                starts_set={int(n.nodeid) for n in seeds},
+                nodes_kind=node_kinds,
+                roads=roads,
+                continuous_dist_max_m=float(params.get("continuous_dist_max_m", 50.0)),
+            )
+            chain_diag = {"enabled": True, **dict(chain_diag_raw)}
+            if chain_diag.get("dir_errors"):
+                for err in chain_diag.get("dir_errors", []):
+                    breakpoints.append(
+                        make_breakpoint(
+                            code=BP_ROAD_FIELD_MISSING,
+                            severity="soft",
+                            nodeid=None,
+                            message=f"continuous_chain_direction:{err}",
+                        )
+                    )
+        except Exception as exc:  # noqa: BLE001
+            chain_diag = {"enabled": True, "error": f"{type(exc).__name__}:{exc}"}
+            chain_edges = []
+            chain_components = []
+
     seed_results: list[dict[str, Any]] = []
-    for node in seeds:
+    seed_by_id = {int(n.nodeid): n for n in seeds}
+    seed_order = [int(n.nodeid) for n in seeds]
+    processed_ids: set[int] = set()
+
+    if continuous_enable and chain_components:
+        for comp in sorted(chain_components, key=lambda c: str(c.component_id)):
+            comp_seed_ids = [int(x) for x in comp.node_ids if int(x) in seed_by_id]
+            if not comp_seed_ids:
+                continue
+            abs_selected: dict[int, float] = {}
+            ordered_ids = sorted(
+                comp_seed_ids,
+                key=lambda nid: (
+                    float(comp.offsets_m.get(int(nid), 0.0)),
+                    int(nid),
+                ),
+            )
+            for nid in ordered_ids:
+                node = seed_by_id[int(nid)]
+                pred_ids = [int(x) for x in comp.predecessors.get(int(nid), tuple()) if int(x) in comp_seed_ids]
+                pred_abs = [float(abs_selected[p]) for p in pred_ids if p in abs_selected]
+                required_prev_abs = max(pred_abs) if pred_abs else None
+                res = _evaluate_node(
+                    node=node,
+                    road_graph=road_graph,
+                    divstrip_union=divstrip_union,
+                    drivezone_union=drivezone_union,
+                    drivezone_usable=bool(drivezone_usable and use_drivezone_cfg),
+                    ng_points_xy=ng_points_xy,
+                    params=params,
+                    breakpoints=breakpoints,
+                    pointcloud_usable=pointcloud_usable,
+                    resolved_from=resolved_from_map.get(int(node.nodeid)),
+                    is_in_continuous_chain=True,
+                    chain_component_id=str(comp.component_id),
+                    chain_node_offset_m=comp.offsets_m.get(int(nid)),
+                    required_prev_abs_s=None if required_prev_abs is None else float(required_prev_abs),
+                )
+                res["ng_candidates_before_suppress"] = int(ng_before_suppress)
+                res["ng_candidates_after_suppress"] = int(ng_after_suppress)
+                nodeid = int(node.nodeid)
+                processed_ids.add(nodeid)
+                seed_results.append(res)
+                abs_chosen = res.get("abs_s_chosen_m")
+                if str(res.get("status")) != "fail" and abs_chosen is not None:
+                    abs_selected[nodeid] = float(abs_chosen)
+
+    for nid in seed_order:
+        if nid in processed_ids:
+            continue
+        node = seed_by_id[nid]
         res = _evaluate_node(
             node=node,
             road_graph=road_graph,
@@ -1695,6 +2091,13 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
         res["ng_candidates_before_suppress"] = int(ng_before_suppress)
         res["ng_candidates_after_suppress"] = int(ng_after_suppress)
         seed_results.append(res)
+
+    if continuous_enable and chain_components:
+        _apply_continuous_merges(
+            seed_results=seed_results,
+            components=chain_components,
+            merge_gap_m=float(params.get("continuous_merge_max_gap_m", 5.0)),
+        )
 
     dst_tag = "3857" if str(dst_crs).upper() == "EPSG:3857" else str(dst_crs).split(":")[-1].lower()
     anchors_dst_path = out_dir / f"anchors_{dst_tag}.geojson"
@@ -1764,6 +2167,22 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
             "roads": road_meta,
             "divstrip": divstrip_meta,
             "drivezone": drivezone_meta,
+            "continuous_chain": {
+                "diag": chain_diag,
+                "components": [
+                    {
+                        "component_id": str(comp.component_id),
+                        "node_ids": [int(x) for x in comp.node_ids],
+                        "edges": [
+                            {"src": int(e.src), "dst": int(e.dst), "dist_m": float(e.dist_m)}
+                            for e in comp.edges
+                        ],
+                        "offsets_m": {str(k): float(v) for k, v in comp.offsets_m.items()},
+                        "predecessors": {str(k): [int(x) for x in v] for k, v in comp.predecessors.items()},
+                    }
+                    for comp in chain_components
+                ],
+            },
             "pointcloud": pointcloud_meta,
             "traj": {
                 "path_count": len(traj.paths),
