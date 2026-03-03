@@ -42,6 +42,7 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--divstrip_preferred_window_m", default=None)
     p.add_argument("--divstrip_ref_hard_window_m", default=None)
     p.add_argument("--divstrip_drivezone_max_offset_m", default=None)
+    p.add_argument("--reverse_tip_max_m", default=None)
     p.add_argument("--output_cross_half_len_m", default=None)
     p.add_argument("--continuous_enable", default=None)
     p.add_argument("--continuous_dist_max_m", default=None)
@@ -89,6 +90,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "divstrip_preferred_window_m": args.divstrip_preferred_window_m,
             "divstrip_ref_hard_window_m": args.divstrip_ref_hard_window_m,
             "divstrip_drivezone_max_offset_m": args.divstrip_drivezone_max_offset_m,
+            "reverse_tip_max_m": args.reverse_tip_max_m,
             "output_cross_half_len_m": args.output_cross_half_len_m,
             "continuous_enable": args.continuous_enable,
             "continuous_dist_max_m": args.continuous_dist_max_m,

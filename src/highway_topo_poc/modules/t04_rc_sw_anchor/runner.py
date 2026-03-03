@@ -39,10 +39,14 @@ from .metrics_breakpoints import (
     BP_NEXT_INTERSECTION_DISABLED,
     BP_POINTCLOUD_CRS_UNKNOWN_UNUSABLE,
     BP_POINTCLOUD_MISSING_OR_UNUSABLE,
+    BP_REVERSE_TIP_ATTEMPTED,
+    BP_REVERSE_TIP_NOT_FOUND,
+    BP_REVERSE_TIP_USED,
     BP_ROAD_FIELD_MISSING,
     BP_ROAD_LINK_NOT_FOUND,
     BP_SCAN_EXCEED_200M,
     BP_TRAJ_MISSING,
+    BP_UNTRUSTED_DIVSTRIP_AT_NODE,
     BP_UNSUPPORTED_KIND,
     build_metrics,
     build_summary_text,
@@ -409,6 +413,20 @@ def _empty_fail_result(
         "pa_center_dist_m": None,
         "pb_center_dist_m": None,
         "has_divstrip_nearby": False,
+        "reverse_tip_attempted": False,
+        "reverse_tip_used": False,
+        "reverse_tip_not_improved": False,
+        "reverse_search_max_m": None,
+        "reverse_trigger": None,
+        "ref_s_forward_m": None,
+        "position_source_forward": None,
+        "ref_s_reverse_m": None,
+        "position_source_reverse": None,
+        "ref_s_final_m": None,
+        "position_source_final": None,
+        "untrusted_divstrip_at_node": False,
+        "node_to_divstrip_m_at_s0": None,
+        "seg0_intersects_divstrip": None,
         "ng_candidates_before_suppress": 0,
         "ng_candidates_after_suppress": 0,
         "is_in_continuous_chain": bool(is_in_continuous_chain),
@@ -595,6 +613,37 @@ def _apply_continuous_merges(
 
             used_nodeids.add(int(src))
             used_nodeids.add(int(dst))
+
+
+def _should_fallback_to_drivezone(
+    *,
+    divstrip_ref_s: float,
+    drivezone_split_s: float,
+    max_offset_m: float,
+) -> bool:
+    return (abs(float(divstrip_ref_s)) - abs(float(drivezone_split_s))) > float(max_offset_m)
+
+
+def _pick_reference_s(
+    *,
+    divstrip_ref_s: float | None,
+    divstrip_ref_source: str,
+    drivezone_split_s: float | None,
+    max_offset_m: float,
+) -> tuple[float | None, str, str]:
+    if divstrip_ref_s is not None:
+        ref_s = float(divstrip_ref_s)
+        pick = f"divstrip_{str(divstrip_ref_source)}_window"
+        if drivezone_split_s is not None and _should_fallback_to_drivezone(
+            divstrip_ref_s=float(ref_s),
+            drivezone_split_s=float(drivezone_split_s),
+            max_offset_m=float(max_offset_m),
+        ):
+            return float(drivezone_split_s), "drivezone_split", "drivezone_split_window_divstrip_far_ignored"
+        return float(ref_s), "divstrip_ref", str(pick)
+    if drivezone_split_s is not None:
+        return float(drivezone_split_s), "drivezone_split", "drivezone_split_window"
+    return None, "none", "none"
 
 
 def _evaluate_node(
@@ -838,6 +887,7 @@ def _evaluate_node(
     divstrip_preferred_window_m = max(0.0, float(params.get("divstrip_preferred_window_m", 8.0)))
     divstrip_ref_hard_window_m = max(0.0, float(params.get("divstrip_ref_hard_window_m", 1.0)))
     divstrip_drivezone_max_offset_m = max(0.0, float(params.get("divstrip_drivezone_max_offset_m", 30.0)))
+    reverse_tip_max_m = max(0.0, float(params.get("reverse_tip_max_m", 10.0)))
     output_cross_half_len_m = max(float(half_len), float(params.get("output_cross_half_len_m", 120.0)))
 
     tip_s: float | None = None
@@ -859,6 +909,8 @@ def _evaluate_node(
     split_hits: list[dict[str, Any]] = []
     first_divstrip_hit_s: float | None = None
     best_divstrip_dist_m: float | None = None
+    seg0_intersects_divstrip: bool | None = None
+    node_to_divstrip_m_at_s0: float | None = None
     last_seg = dummy_line
     last_diag: dict[str, Any] = {"seg_len_m": float(dummy_line.length), "pa_center_dist_m": None, "pb_center_dist_m": None}
 
@@ -885,6 +937,9 @@ def _evaluate_node(
                 best_divstrip_dist_m = float(dist_div)
             if first_divstrip_hit_s is None and dist_div <= float(div_tol):
                 first_divstrip_hit_s = float(s)
+            if i == 0:
+                seg0_intersects_divstrip = bool(seg.intersects(divstrip_union) or float(dist_div) <= 1e-9)
+                node_to_divstrip_m_at_s0 = float(node.point.distance(divstrip_union))
 
         pieces = segment_drivezone_pieces(
             segment=seg,
@@ -915,25 +970,148 @@ def _evaluate_node(
         divstrip_ref_s = float(max(0.0, min(float(stop_dist), float(tip_s))))
         divstrip_ref_source = "tip_projection"
 
-    split_pick_source = "none"
-    ref_s: float | None = None
-    position_source = "none"
-    if divstrip_ref_s is not None:
-        ref_s = float(max(0.0, min(float(stop_dist), float(divstrip_ref_s))))
-        position_source = "divstrip_ref"
-        split_pick_source = f"divstrip_{divstrip_ref_source}_window"
-        if s_drivezone_split is not None:
-            # Directional guard:
-            # only fallback to drivezone when divstrip reference is much farther than drivezone split.
-            if (float(ref_s) - float(s_drivezone_split)) > float(divstrip_drivezone_max_offset_m):
-                ref_s = float(max(0.0, min(float(stop_dist), float(s_drivezone_split))))
-                position_source = "drivezone_split"
-                split_pick_source = "drivezone_split_window_divstrip_far_ignored"
-    elif s_drivezone_split is not None:
-        ref_s = float(max(0.0, min(float(stop_dist), float(s_drivezone_split))))
-        position_source = "drivezone_split"
-        split_pick_source = "drivezone_split_window"
-    else:
+    ref_s_forward, position_source_forward, split_pick_source_forward = _pick_reference_s(
+        divstrip_ref_s=divstrip_ref_s,
+        divstrip_ref_source=divstrip_ref_source,
+        drivezone_split_s=s_drivezone_split,
+        max_offset_m=divstrip_drivezone_max_offset_m,
+    )
+
+    untrusted_divstrip_at_node = bool(
+        seg0_intersects_divstrip is True
+        and node_to_divstrip_m_at_s0 is not None
+        and float(node_to_divstrip_m_at_s0) <= float(div_tol) + 1e-9
+    )
+    reverse_tip_attempted = False
+    reverse_tip_used = False
+    reverse_tip_not_improved = False
+    reverse_trigger: str | None = None
+    ref_s_reverse: float | None = None
+    position_source_reverse: str | None = None
+    split_pick_source_reverse = "none"
+    divstrip_ref_s_rev: float | None = None
+    divstrip_ref_source_rev = "none"
+    s_drivezone_split_rev: float | None = None
+    first_divstrip_hit_s_rev: float | None = None
+    best_divstrip_dist_m_rev: float | None = None
+
+    forward_missing_ref = bool(divstrip_ref_s is None and s_drivezone_split is None)
+    if forward_missing_ref or untrusted_divstrip_at_node:
+        reverse_tip_attempted = True
+        reverse_trigger = "missing_ref" if forward_missing_ref else "untrusted_divstrip_at_node"
+        _add_bp(
+            code=BP_REVERSE_TIP_ATTEMPTED,
+            severity="soft",
+            message=f"reverse_tip_attempted:{reverse_trigger}",
+            extra={"reverse_tip_max_m": float(reverse_tip_max_m)},
+        )
+        if untrusted_divstrip_at_node:
+            _add_bp(
+                code=BP_UNTRUSTED_DIVSTRIP_AT_NODE,
+                severity="soft",
+                message="untrusted_divstrip_at_node",
+                extra={
+                    "node_to_divstrip_m_at_s0": None if node_to_divstrip_m_at_s0 is None else float(node_to_divstrip_m_at_s0),
+                    "divstrip_hit_tol_m": float(div_tol),
+                },
+            )
+
+        reverse_start_m = float(step) if untrusted_divstrip_at_node else 0.0
+        n_rev = max(1, int(math.floor(reverse_tip_max_m / step)) + 1)
+        for i_rev in range(n_rev + 1):
+            rev_abs = reverse_start_m + float(i_rev) * float(step)
+            if rev_abs > float(reverse_tip_max_m) + 1e-9:
+                break
+            s_rev = -float(rev_abs)
+            center_xy_rev = (
+                float(node.point.x) + float(scan_vec[0]) * float(s_rev),
+                float(node.point.y) + float(scan_vec[1]) * float(s_rev),
+            )
+            seg_rev, _seg_diag_rev = build_between_branches_segment(
+                center_xy=center_xy_rev,
+                scan_dir=scan_vec,
+                branch_a=branch_a,
+                branch_b=branch_b,
+                crossline_half_len_m=half_len,
+            )
+            if divstrip_union is not None:
+                dist_div_rev = float(seg_rev.distance(divstrip_union))
+                if best_divstrip_dist_m_rev is None or dist_div_rev < best_divstrip_dist_m_rev:
+                    best_divstrip_dist_m_rev = float(dist_div_rev)
+                if first_divstrip_hit_s_rev is None and dist_div_rev <= float(div_tol):
+                    first_divstrip_hit_s_rev = float(s_rev)
+            pieces_rev = segment_drivezone_pieces(
+                segment=seg_rev,
+                drivezone_union=drivezone_union,
+                min_piece_len_m=min_piece_len_m,
+            )
+            if s_drivezone_split_rev is None and len(pieces_rev) >= 2:
+                s_drivezone_split_rev = float(s_rev)
+
+        if first_divstrip_hit_s_rev is not None:
+            divstrip_ref_s_rev = float(first_divstrip_hit_s_rev)
+            divstrip_ref_source_rev = "first_hit"
+        elif tip_s is not None and float(tip_s) >= -float(reverse_tip_max_m) - 1e-6 and float(tip_s) <= 1e-6:
+            tip_s_rev = float(max(-float(reverse_tip_max_m), min(0.0, float(tip_s))))
+            if (not untrusted_divstrip_at_node) or tip_s_rev < -1e-6:
+                divstrip_ref_s_rev = float(tip_s_rev)
+                divstrip_ref_source_rev = "tip_projection"
+
+        ref_s_reverse, position_source_reverse, split_pick_source_reverse = _pick_reference_s(
+            divstrip_ref_s=divstrip_ref_s_rev,
+            divstrip_ref_source=divstrip_ref_source_rev,
+            drivezone_split_s=s_drivezone_split_rev,
+            max_offset_m=divstrip_drivezone_max_offset_m,
+        )
+        if ref_s_reverse is not None:
+            reverse_tip_used = True
+            _add_bp(
+                code=BP_REVERSE_TIP_USED,
+                severity="soft",
+                message=f"reverse_tip_used:{position_source_reverse}",
+                extra={"ref_s_reverse_m": float(ref_s_reverse)},
+            )
+        else:
+            _add_bp(
+                code=BP_REVERSE_TIP_NOT_FOUND,
+                severity="soft",
+                message="reverse_tip_not_found_in_window",
+                extra={"reverse_tip_max_m": float(reverse_tip_max_m)},
+            )
+            if untrusted_divstrip_at_node and ref_s_forward is not None:
+                reverse_tip_not_improved = True
+
+    ref_s = ref_s_forward
+    position_source = position_source_forward
+    split_pick_source = split_pick_source_forward
+    if reverse_tip_used and ref_s_reverse is not None:
+        ref_s = float(ref_s_reverse)
+        position_source = str(position_source_reverse or "none")
+        split_pick_source = f"reverse_{split_pick_source_reverse}"
+
+    ref_s_final = ref_s
+    position_source_final = position_source
+    s_divstrip_out = divstrip_ref_s_rev if reverse_tip_used else divstrip_ref_s
+    s_drivezone_split_out = s_drivezone_split_rev if reverse_tip_used else s_drivezone_split
+    divstrip_ref_source_out = divstrip_ref_source_rev if reverse_tip_used else divstrip_ref_source
+    reverse_diag_payload = {
+        "reverse_tip_attempted": bool(reverse_tip_attempted),
+        "reverse_tip_used": bool(reverse_tip_used),
+        "reverse_tip_not_improved": bool(reverse_tip_not_improved),
+        "reverse_search_max_m": float(reverse_tip_max_m),
+        "reverse_trigger": reverse_trigger,
+        "ref_s_forward_m": None if ref_s_forward is None else float(ref_s_forward),
+        "position_source_forward": None if position_source_forward == "none" else str(position_source_forward),
+        "ref_s_reverse_m": None if ref_s_reverse is None else float(ref_s_reverse),
+        "position_source_reverse": position_source_reverse,
+        "ref_s_final_m": None if ref_s_final is None else float(ref_s_final),
+        "position_source_final": None if position_source_final == "none" else str(position_source_final),
+        "untrusted_divstrip_at_node": bool(untrusted_divstrip_at_node),
+        "node_to_divstrip_m_at_s0": None if node_to_divstrip_m_at_s0 is None else float(node_to_divstrip_m_at_s0),
+        "seg0_intersects_divstrip": seg0_intersects_divstrip,
+    }
+
+    if ref_s is None:
         _add_bp(
             code=BP_DRIVEZONE_SPLIT_NOT_FOUND,
             severity="hard",
@@ -975,16 +1153,16 @@ def _evaluate_node(
                 "next_intersection_dist_m": None if next_inter is None else float(next_inter),
                 "tip_s_m": None if tip_s is None else float(tip_s),
                 "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
-                "best_divstrip_dz_dist_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "best_divstrip_dz_dist_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
                 "clip_empty": True,
                 "clip_piece_type": "none",
                 "stop_diag": stop_diag,
                 "seg_len_m": float(last_diag.get("seg_len_m", last_seg.length)),
-                "s_divstrip_m": None if divstrip_ref_s is None else float(divstrip_ref_s),
-                "s_drivezone_split_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "s_divstrip_m": None if s_divstrip_out is None else float(s_divstrip_out),
+                "s_drivezone_split_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
                 "s_chosen_m": None,
                 "split_pick_source": "none",
-                "divstrip_ref_source": str(divstrip_ref_source),
+                "divstrip_ref_source": str(divstrip_ref_source_out),
                 "divstrip_ref_offset_m": None,
                 "output_cross_half_len_m": float(output_cross_half_len_m),
                 "branch_a_id": branch_a_id,
@@ -997,16 +1175,17 @@ def _evaluate_node(
                 "has_divstrip_nearby": False,
                 "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
                 "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+                **reverse_diag_payload,
             }
         )
         return out
 
     window_m = float(divstrip_ref_hard_window_m)
     # For both diverge(尖前) and merge(尖后), choose the node-side 1m window.
-    window_lo = max(0.0, float(ref_s) - window_m)
-    window_hi = min(float(stop_dist), float(ref_s))
+    window_lo = float(ref_s) - window_m
+    window_hi = float(ref_s)
     if window_hi + 1e-9 < window_lo:
-        anchor_s = max(0.0, min(float(stop_dist), float(ref_s)))
+        anchor_s = float(ref_s)
         window_lo = anchor_s
         window_hi = anchor_s
 
@@ -1157,16 +1336,16 @@ def _evaluate_node(
                 "next_intersection_dist_m": None if next_inter is None else float(next_inter),
                 "tip_s_m": None if tip_s is None else float(tip_s),
                 "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
-                "best_divstrip_dz_dist_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "best_divstrip_dz_dist_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
                 "clip_empty": True,
                 "clip_piece_type": "none",
                 "clip_input_len_m": float(output_crossline.length),
                 "stop_diag": stop_diag,
-                "s_divstrip_m": None if divstrip_ref_s is None else float(divstrip_ref_s),
-                "s_drivezone_split_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "s_divstrip_m": None if s_divstrip_out is None else float(s_divstrip_out),
+                "s_drivezone_split_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
                 "s_chosen_m": None,
                 "split_pick_source": f"{split_pick_source}_seq_violation",
-                "divstrip_ref_source": str(divstrip_ref_source),
+                "divstrip_ref_source": str(divstrip_ref_source_out),
                 "divstrip_ref_offset_m": None,
                 "output_cross_half_len_m": float(output_cross_half_len_m),
                 "branch_a_id": branch_a_id,
@@ -1175,6 +1354,7 @@ def _evaluate_node(
                 "has_divstrip_nearby": False,
                 "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
                 "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+                **reverse_diag_payload,
             }
         )
         return out
@@ -1208,16 +1388,16 @@ def _evaluate_node(
                 "next_intersection_dist_m": None if next_inter is None else float(next_inter),
                 "tip_s_m": None if tip_s is None else float(tip_s),
                 "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
-                "best_divstrip_dz_dist_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "best_divstrip_dz_dist_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
                 "clip_empty": True,
                 "clip_piece_type": "none",
                 "clip_input_len_m": float(output_crossline.length),
                 "stop_diag": stop_diag,
-                "s_divstrip_m": None if divstrip_ref_s is None else float(divstrip_ref_s),
-                "s_drivezone_split_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "s_divstrip_m": None if s_divstrip_out is None else float(s_divstrip_out),
+                "s_drivezone_split_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
                 "s_chosen_m": None,
                 "split_pick_source": f"{split_pick_source}_no_piece",
-                "divstrip_ref_source": str(divstrip_ref_source),
+                "divstrip_ref_source": str(divstrip_ref_source_out),
                 "divstrip_ref_offset_m": None,
                 "output_cross_half_len_m": float(output_cross_half_len_m),
                 "branch_a_id": branch_a_id,
@@ -1226,12 +1406,13 @@ def _evaluate_node(
                 "has_divstrip_nearby": False,
                 "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
                 "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+                **reverse_diag_payload,
             }
         )
         return out
 
     scan_dist = float(chosen_scan_dist)
-    divstrip_ref_offset = None if divstrip_ref_s is None else float(abs(float(scan_dist) - float(divstrip_ref_s)))
+    divstrip_ref_offset = None if s_divstrip_out is None else float(abs(float(scan_dist) - float(s_divstrip_out)))
     center_xy = (
         float(node.point.x) + float(scan_vec[0]) * float(scan_dist),
         float(node.point.y) + float(scan_vec[1]) * float(scan_dist),
@@ -1300,16 +1481,16 @@ def _evaluate_node(
                 "next_intersection_dist_m": None if next_inter is None else float(next_inter),
                 "tip_s_m": None if tip_s is None else float(tip_s),
                 "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
-                "best_divstrip_dz_dist_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "best_divstrip_dz_dist_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
                 "clip_empty": True,
                 "clip_piece_type": "none",
                 "clip_input_len_m": float(output_crossline.length),
                 "stop_diag": stop_diag,
-                "s_divstrip_m": None if divstrip_ref_s is None else float(divstrip_ref_s),
-                "s_drivezone_split_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "s_divstrip_m": None if s_divstrip_out is None else float(s_divstrip_out),
+                "s_drivezone_split_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
                 "s_chosen_m": float(scan_dist),
                 "split_pick_source": f"{split_pick_source}_interval_empty",
-                "divstrip_ref_source": str(divstrip_ref_source),
+                "divstrip_ref_source": str(divstrip_ref_source_out),
                 "divstrip_ref_offset_m": divstrip_ref_offset,
                 "output_cross_half_len_m": float(output_cross_half_len_m),
                 "branch_a_id": branch_a_id,
@@ -1318,6 +1499,7 @@ def _evaluate_node(
                 "has_divstrip_nearby": False,
                 "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
                 "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+                **reverse_diag_payload,
             }
         )
         return out
@@ -1402,16 +1584,16 @@ def _evaluate_node(
                 "next_intersection_dist_m": None if next_inter is None else float(next_inter),
                 "tip_s_m": None if tip_s is None else float(tip_s),
                 "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
-                "best_divstrip_dz_dist_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "best_divstrip_dz_dist_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
                 "clip_empty": True,
                 "clip_piece_type": "none",
                 "clip_input_len_m": float(output_crossline.length),
                 "stop_diag": stop_diag,
-                "s_divstrip_m": None if divstrip_ref_s is None else float(divstrip_ref_s),
-                "s_drivezone_split_m": None if s_drivezone_split is None else float(s_drivezone_split),
+                "s_divstrip_m": None if s_divstrip_out is None else float(s_divstrip_out),
+                "s_drivezone_split_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
                 "s_chosen_m": float(scan_dist),
                 "split_pick_source": f"{split_pick_source}_span_degenerate",
-                "divstrip_ref_source": str(divstrip_ref_source),
+                "divstrip_ref_source": str(divstrip_ref_source_out),
                 "divstrip_ref_offset_m": divstrip_ref_offset,
                 "output_cross_half_len_m": float(output_cross_half_len_m),
                 "branch_a_id": branch_a_id,
@@ -1420,6 +1602,7 @@ def _evaluate_node(
                 "has_divstrip_nearby": False,
                 "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
                 "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+                **reverse_diag_payload,
             }
         )
         return out
@@ -1475,7 +1658,7 @@ def _evaluate_node(
     if hard_failed:
         status = "fail"
 
-    found_split = bool(s_drivezone_split is not None)
+    found_split = bool(s_drivezone_split_out is not None)
     trigger = "drivezone_split" if found_split else "divstrip_ref"
     if position_source == "divstrip_ref" and found_split:
         evidence_source = "drivezone_split+divstrip"
@@ -1545,14 +1728,14 @@ def _evaluate_node(
         "piece_lens_m": piece_lens,
         "selected_piece_count": int(len(selected_lines)),
         "selected_piece_lens_m": selected_piece_lens,
-        "position_source": str(position_source),
+        "position_source": str(position_source_final),
         "gap_len_m": None if gap_len is None else float(gap_len),
         "seg_len_m": float(found_diag.get("seg_len_m", found_seg.length)),
-        "s_divstrip_m": None if divstrip_ref_s is None else float(divstrip_ref_s),
-        "s_drivezone_split_m": None if s_drivezone_split is None else float(s_drivezone_split),
+        "s_divstrip_m": None if s_divstrip_out is None else float(s_divstrip_out),
+        "s_drivezone_split_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
         "s_chosen_m": float(scan_dist),
         "split_pick_source": str(split_pick_source),
-        "divstrip_ref_source": str(divstrip_ref_source),
+        "divstrip_ref_source": str(divstrip_ref_source_out),
         "divstrip_ref_offset_m": divstrip_ref_offset,
         "output_cross_half_len_m": float(output_cross_half_len_m),
         "branch_a_id": branch_a_id,
@@ -1569,6 +1752,20 @@ def _evaluate_node(
         "left_extended_to_piece_edge": bool(left_extended_to_piece_edge),
         "right_extended_to_piece_edge": bool(right_extended_to_piece_edge),
         "has_divstrip_nearby": bool(has_divstrip_nearby),
+        "reverse_tip_attempted": bool(reverse_tip_attempted),
+        "reverse_tip_used": bool(reverse_tip_used),
+        "reverse_tip_not_improved": bool(reverse_tip_not_improved),
+        "reverse_search_max_m": float(reverse_tip_max_m),
+        "reverse_trigger": reverse_trigger,
+        "ref_s_forward_m": None if ref_s_forward is None else float(ref_s_forward),
+        "position_source_forward": None if position_source_forward == "none" else str(position_source_forward),
+        "ref_s_reverse_m": None if ref_s_reverse is None else float(ref_s_reverse),
+        "position_source_reverse": position_source_reverse,
+        "ref_s_final_m": None if ref_s_final is None else float(ref_s_final),
+        "position_source_final": None if position_source_final == "none" else str(position_source_final),
+        "untrusted_divstrip_at_node": bool(untrusted_divstrip_at_node),
+        "node_to_divstrip_m_at_s0": None if node_to_divstrip_m_at_s0 is None else float(node_to_divstrip_m_at_s0),
+        "seg0_intersects_divstrip": seg0_intersects_divstrip,
         "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
         "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
         "is_in_continuous_chain": bool(is_in_continuous_chain),

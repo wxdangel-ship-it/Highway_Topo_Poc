@@ -94,6 +94,14 @@
   - 相邻边上、merge 的主要前驱为该 diverge，且两条 `crossline_opt` 几何相交或近邻（`distance<=continuous_merge_geom_tol_m`）时允许合并。
   - `continuous_merge_max_gap_m` 与 window 交集仅保留诊断，不作为阻断门槛。
 
+### 5.7 异常分支：reverse tip/ref_s（10m）
+- 仅在以下条件触发反向搜索：
+  - A) 默认方向 `forward_divstrip_ref` 与 `forward_drivezone_split` 均缺失
+  - B) `SEG(0)` 与 divstrip 相交且 `node->divstrip` 距离 `<= divstrip_hit_tol_m`（`untrusted_divstrip_at_node`）
+- 反向范围：`s ∈ [-reverse_tip_max_m, 0]`，默认 `10m`
+- 反向仲裁与正向一致：divstrip 优先，drivezone 次之；禁止 drivezone 远于 divstrip 覆盖近 divstrip
+- 最终位置窗口口径不变：`[ref_s-1m, ref_s]`，仅允许 `ref_s` 为负（反向）
+
 ## 6. 参数契约（关键）
 - `min_piece_len_m`：DriveZone 交段最小长度过滤（数值噪声抑制）
 - `next_intersection_degree_min`：默认 `3`
@@ -106,6 +114,7 @@
 - `continuous_dist_max_m`：默认 `50.0`
 - `continuous_merge_max_gap_m`：默认 `5.0`（诊断阈值，不阻断合并）
 - `continuous_merge_geom_tol_m`：默认 `1.0`（几何近邻合并阈值）
+- `reverse_tip_max_m`：默认 `10.0`（反向 tip/ref 搜索范围）
 - patch/focus 门禁阈值分开：
   - `min_anchor_found_ratio_focus/min_anchor_found_ratio_patch`
   - `no_trigger_count_max_focus/no_trigger_count_max_patch`
@@ -153,6 +162,10 @@
   - `abs_s_chosen_m/abs_s_prev_required_m`
   - `sequential_ok/sequential_violation_reason`
   - `merged/merged_group_id/merged_with_nodeids/abs_s_merged_m`
+  - `reverse_tip_attempted/reverse_tip_used/reverse_trigger/reverse_search_max_m`
+  - `ref_s_forward_m/ref_s_reverse_m/ref_s_final_m`
+  - `position_source_forward/position_source_reverse/position_source_final`
+  - `untrusted_divstrip_at_node/node_to_divstrip_m_at_s0/seg0_intersects_divstrip`
 
 ## 8. Breakpoints（最小集合）
 - `DRIVEZONE_SPLIT_NOT_FOUND`
@@ -164,6 +177,10 @@
 - `MULTI_BRANCH_TODO`
 - `ANCHOR_GAP_UNSTABLE`
 - `SEQUENTIAL_ORDER_VIOLATION`
+- `REVERSE_TIP_ATTEMPTED`
+- `REVERSE_TIP_USED`
+- `REVERSE_TIP_NOT_FOUND`
+- `UNTRUSTED_DIVSTRIP_AT_NODE`
 - `POINTCLOUD_CRS_UNKNOWN_UNUSABLE`
 - `POINTCLOUD_MISSING_OR_UNUSABLE`
 
