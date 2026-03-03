@@ -891,6 +891,7 @@ def _evaluate_node(
     output_cross_half_len_m = max(float(half_len), float(params.get("output_cross_half_len_m", 120.0)))
 
     tip_s: float | None = None
+    tip_s_reverse: float | None = None
     tip_pt = None
     if divstrip_union is not None and (not divstrip_union.is_empty):
         tip_pt = tip_point_from_divstrip(
@@ -905,6 +906,18 @@ def _evaluate_node(
             )
             if math.isfinite(tip_proj):
                 tip_s = float(tip_proj)
+        tip_pt_rev = tip_point_from_divstrip(
+            divstrip_union=divstrip_union,
+            scan_vec=(-float(scan_vec[0]), -float(scan_vec[1])),
+            origin_xy=(float(node.point.x), float(node.point.y)),
+        )
+        if tip_pt_rev is not None and (not tip_pt_rev.is_empty):
+            tip_proj_rev = (
+                (float(tip_pt_rev.x) - float(node.point.x)) * float(scan_vec[0])
+                + (float(tip_pt_rev.y) - float(node.point.y)) * float(scan_vec[1])
+            )
+            if math.isfinite(tip_proj_rev):
+                tip_s_reverse = float(tip_proj_rev)
 
     split_hits: list[dict[str, Any]] = []
     first_divstrip_hit_s: float | None = None
@@ -1061,8 +1074,8 @@ def _evaluate_node(
         if first_divstrip_hit_s_rev is not None:
             divstrip_ref_s_rev = float(first_divstrip_hit_s_rev)
             divstrip_ref_source_rev = "first_hit"
-        elif tip_s is not None and float(tip_s) >= -float(reverse_tip_max_m) - 1e-6 and float(tip_s) <= 1e-6:
-            tip_s_rev = float(max(-float(reverse_tip_max_m), min(0.0, float(tip_s))))
+        elif tip_s_reverse is not None and float(tip_s_reverse) >= -float(reverse_tip_max_m) - 1e-6 and float(tip_s_reverse) <= 1e-6:
+            tip_s_rev = float(max(-float(reverse_tip_max_m), min(0.0, float(tip_s_reverse))))
             if (not untrusted_divstrip_at_node) or tip_s_rev < -1e-6:
                 divstrip_ref_s_rev = float(tip_s_rev)
                 divstrip_ref_source_rev = "tip_projection"
