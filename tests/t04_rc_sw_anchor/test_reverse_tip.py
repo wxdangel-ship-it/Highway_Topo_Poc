@@ -18,6 +18,13 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _assert_away_from_node_window(*, s_chosen: float, ref_s: float, window_m: float = 1.0) -> None:
+    if float(ref_s) < 0.0:
+        assert (float(ref_s) - float(window_m)) <= float(s_chosen) <= float(ref_s)
+        return
+    assert float(ref_s) <= float(s_chosen) <= (float(ref_s) + float(window_m))
+
+
 def _node_xy(node_path: Path, nodeid: int) -> tuple[float, float]:
     payload = _read_json(node_path)
     for feat in payload.get("features", []):
@@ -190,7 +197,7 @@ def test_reverse_tip_missing_ref_finds_reverse(tmp_path: Path) -> None:
     assert float(item.get("ref_s_final_m")) < 0.0
     s_chosen = float(item.get("s_chosen_m"))
     ref_s = float(item.get("ref_s_final_m"))
-    assert (ref_s - 1.0) <= s_chosen <= ref_s
+    _assert_away_from_node_window(s_chosen=s_chosen, ref_s=ref_s)
 
 
 def test_reverse_tip_untrusted_divstrip_at_node_overrides(tmp_path: Path) -> None:
@@ -231,7 +238,7 @@ def test_regression_normal_case_not_affected(tmp_path: Path) -> None:
     assert str(item.get("position_source")) == str(item.get("position_source_forward"))
     s_chosen = float(item.get("s_chosen_m"))
     ref_s = float(item.get("ref_s_final_m"))
-    assert (ref_s - 1.0) <= s_chosen <= ref_s
+    _assert_away_from_node_window(s_chosen=s_chosen, ref_s=ref_s)
 
 
 def test_reverse_tip_first_hit_no_split_diverge(tmp_path: Path) -> None:

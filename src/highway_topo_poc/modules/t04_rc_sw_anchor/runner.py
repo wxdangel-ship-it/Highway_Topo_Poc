@@ -646,6 +646,16 @@ def _pick_reference_s(
     return None, "none", "none"
 
 
+def _build_ref_window_away_from_node(*, ref_s: float, window_m: float) -> tuple[float, float, float]:
+    w = max(0.0, float(window_m))
+    ref = float(ref_s)
+    sign = -1.0 if ref < 0.0 else 1.0
+    far_s = ref + sign * w
+    lo = min(ref, far_s)
+    hi = max(ref, far_s)
+    return float(lo), float(hi), float(far_s)
+
+
 def _evaluate_node(
     *,
     node: NodeRecord,
@@ -1204,13 +1214,11 @@ def _evaluate_node(
         return out
 
     window_m = float(divstrip_ref_hard_window_m)
-    # For both diverge(尖前) and merge(尖后), choose the node-side 1m window.
-    window_lo = float(ref_s) - window_m
-    window_hi = float(ref_s)
-    if window_hi + 1e-9 < window_lo:
-        anchor_s = float(ref_s)
-        window_lo = anchor_s
-        window_hi = anchor_s
+    # For both diverge and merge, probe within the 1m band farther from node.
+    window_lo, window_hi, target_s = _build_ref_window_away_from_node(
+        ref_s=float(ref_s),
+        window_m=window_m,
+    )
 
     probe_step = min(0.25, max(0.05, float(step)))
     scan_candidates: list[float] = []
@@ -1220,9 +1228,9 @@ def _evaluate_node(
         cur += probe_step
     if not scan_candidates:
         scan_candidates = [float(max(window_lo, min(window_hi, float(ref_s))))]
-    ref_in_window = float(max(window_lo, min(window_hi, float(ref_s))))
-    if all(abs(float(x) - ref_in_window) > 1e-6 for x in scan_candidates):
-        scan_candidates.append(ref_in_window)
+    target_in_window = float(max(window_lo, min(window_hi, float(target_s))))
+    if all(abs(float(x) - target_in_window) > 1e-6 for x in scan_candidates):
+        scan_candidates.append(target_in_window)
     dedup_candidates: list[float] = []
     seen_key: set[float] = set()
     for s_val in scan_candidates:
@@ -1237,7 +1245,6 @@ def _evaluate_node(
     output_crossline: LineString | None = None
     output_pieces_raw: list[LineString] = []
     has_extra_piece = False
-    target_s = float(window_lo)
     candidate_hits: list[dict[str, Any]] = []
     seq_pre_candidates = 0
     seq_filtered_out = 0
@@ -1319,7 +1326,7 @@ def _evaluate_node(
             origin_xy=(float(node.point.x), float(node.point.y)),
             tangent_xy=scan_vec,
         ).crossline(
-            scan_dist_m=float(ref_in_window),
+            scan_dist_m=float(target_in_window),
             cross_half_len_m=float(output_cross_half_len_m),
         )
 
