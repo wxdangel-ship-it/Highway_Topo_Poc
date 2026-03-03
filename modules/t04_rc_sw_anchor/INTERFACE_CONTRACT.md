@@ -101,7 +101,9 @@
   - C) 默认方向命中 `divstrip_first_hit` 且不存在 `forward_drivezone_split`（`first_hit_no_split`，分歧/合流均适用）
 - 反向范围：`s ∈ [-reverse_tip_max_m, 0]`，默认 `10m`
 - 反向仲裁与正向一致：divstrip 优先，drivezone 次之；禁止 drivezone 远于 divstrip 覆盖近 divstrip
-- 最终位置窗口统一为“远离节点 1m”：`ref_s>=0 -> [ref_s, ref_s+1m]`；`ref_s<0 -> [ref_s-1m, ref_s]`
+- 最终位置窗口按场景区分：
+  - 常规（非 reverse）：靠近节点 1m（`ref_s>=0 -> [ref_s-1m, ref_s]`；`ref_s<0 -> [ref_s, ref_s+1m]`）
+  - 异常 reverse：远离节点 1m（`ref_s>=0 -> [ref_s, ref_s+1m]`；`ref_s<0 -> [ref_s-1m, ref_s]`）
 
 ## 6. 参数契约（关键）
 - `min_piece_len_m`：DriveZone 交段最小长度过滤（数值噪声抑制）

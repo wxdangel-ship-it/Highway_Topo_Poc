@@ -656,6 +656,16 @@ def _build_ref_window_away_from_node(*, ref_s: float, window_m: float) -> tuple[
     return float(lo), float(hi), float(far_s)
 
 
+def _build_ref_window_toward_node(*, ref_s: float, window_m: float) -> tuple[float, float, float]:
+    w = max(0.0, float(window_m))
+    ref = float(ref_s)
+    sign = -1.0 if ref < 0.0 else 1.0
+    near_s = ref - sign * w
+    lo = min(ref, near_s)
+    hi = max(ref, near_s)
+    return float(lo), float(hi), float(near_s)
+
+
 def _evaluate_node(
     *,
     node: NodeRecord,
@@ -1214,11 +1224,18 @@ def _evaluate_node(
         return out
 
     window_m = float(divstrip_ref_hard_window_m)
-    # For both diverge and merge, probe within the 1m band farther from node.
-    window_lo, window_hi, target_s = _build_ref_window_away_from_node(
-        ref_s=float(ref_s),
-        window_m=window_m,
-    )
+    if bool(reverse_tip_used):
+        # Reverse-tip anomaly branch: probe farther from node to avoid divstrip overlap.
+        window_lo, window_hi, target_s = _build_ref_window_away_from_node(
+            ref_s=float(ref_s),
+            window_m=window_m,
+        )
+    else:
+        # Regular branch: keep anchor near node and in front of divstrip.
+        window_lo, window_hi, target_s = _build_ref_window_toward_node(
+            ref_s=float(ref_s),
+            window_m=window_m,
+        )
 
     probe_step = min(0.25, max(0.05, float(step)))
     scan_candidates: list[float] = []

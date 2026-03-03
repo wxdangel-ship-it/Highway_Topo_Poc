@@ -29,6 +29,13 @@ def _assert_away_from_node_window(*, s_chosen: float, ref_s: float, window_m: fl
     assert float(ref_s) <= float(s_chosen) <= (float(ref_s) + float(window_m))
 
 
+def _assert_toward_node_window(*, s_chosen: float, ref_s: float, window_m: float = 1.0) -> None:
+    if float(ref_s) < 0.0:
+        assert float(ref_s) <= float(s_chosen) <= (float(ref_s) + float(window_m))
+        return
+    assert (float(ref_s) - float(window_m)) <= float(s_chosen) <= float(ref_s)
+
+
 def _layer_center_xy(path: Path) -> tuple[float, float]:
     payload = _read_json(path)
     xs: list[float] = []
@@ -274,7 +281,7 @@ def test_divstrip_window_direction_for_diverge(tmp_path: Path) -> None:
     assert str(item.get("status")) in {"ok", "suspect"}
     s_div = float(item.get("s_divstrip_m", 0.0))
     s_chosen = float(item.get("s_chosen_m", -1.0))
-    _assert_away_from_node_window(s_chosen=s_chosen, ref_s=s_div)
+    _assert_toward_node_window(s_chosen=s_chosen, ref_s=s_div)
 
 
 def test_prevent_cross_intersection_drift(tmp_path: Path) -> None:
@@ -454,7 +461,7 @@ def test_status_not_overwritten(tmp_path: Path) -> None:
     assert str(item.get("trigger")) == "divstrip_ref"
     s_div = float(item.get("s_divstrip_m", 0.0))
     s_chosen = float(item.get("s_chosen_m", -1.0))
-    _assert_away_from_node_window(s_chosen=s_chosen, ref_s=s_div)
+    _assert_toward_node_window(s_chosen=s_chosen, ref_s=s_div)
 
 
 def test_crs_fail_closed(tmp_path: Path) -> None:

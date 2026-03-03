@@ -25,6 +25,13 @@ def _assert_away_from_node_window(*, s_chosen: float, ref_s: float, window_m: fl
     assert float(ref_s) <= float(s_chosen) <= (float(ref_s) + float(window_m))
 
 
+def _assert_toward_node_window(*, s_chosen: float, ref_s: float, window_m: float = 1.0) -> None:
+    if float(ref_s) < 0.0:
+        assert float(ref_s) <= float(s_chosen) <= (float(ref_s) + float(window_m))
+        return
+    assert (float(ref_s) - float(window_m)) <= float(s_chosen) <= float(ref_s)
+
+
 def _node_xy(node_path: Path, nodeid: int) -> tuple[float, float]:
     payload = _read_json(node_path)
     for feat in payload.get("features", []):
@@ -238,7 +245,7 @@ def test_regression_normal_case_not_affected(tmp_path: Path) -> None:
     assert str(item.get("position_source")) == str(item.get("position_source_forward"))
     s_chosen = float(item.get("s_chosen_m"))
     ref_s = float(item.get("ref_s_final_m"))
-    _assert_away_from_node_window(s_chosen=s_chosen, ref_s=ref_s)
+    _assert_toward_node_window(s_chosen=s_chosen, ref_s=ref_s)
 
 
 def test_reverse_tip_first_hit_no_split_diverge(tmp_path: Path) -> None:
