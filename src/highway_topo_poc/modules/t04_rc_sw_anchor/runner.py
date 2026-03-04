@@ -1237,6 +1237,19 @@ def _evaluate_node(
             ref_s=float(ref_s),
             window_m=window_m,
         )
+        # Regular branch must not cross node (keep s sign consistent with ref_s side).
+        if float(ref_s) >= 0.0:
+            window_lo = float(max(0.0, float(window_lo)))
+            window_hi = float(max(0.0, float(window_hi)))
+            target_s = float(max(0.0, float(target_s)))
+        else:
+            window_lo = float(min(0.0, float(window_lo)))
+            window_hi = float(min(0.0, float(window_hi)))
+            target_s = float(min(0.0, float(target_s)))
+        if window_hi + 1e-9 < window_lo:
+            window_lo = float(ref_s)
+            window_hi = float(ref_s)
+            target_s = float(ref_s)
 
     probe_step = min(0.25, max(0.05, float(step)))
     scan_candidates: list[float] = []
@@ -1258,6 +1271,37 @@ def _evaluate_node(
         seen_key.add(key)
         dedup_candidates.append(float(s_val))
     scan_candidates = dedup_candidates
+
+    tip_projection_guard_min_abs_m = max(
+        float(window_m),
+        max(0.0, float(params.get("continuous_tip_projection_min_abs_m", 1.0))),
+    )
+    guard_near_zero_tip_projection = bool(
+        (not reverse_tip_used)
+        and (required_prev_abs is not None)
+        and (s_drivezone_split_out is None)
+        and str(position_source) == "divstrip_ref"
+        and str(divstrip_ref_source_out) == "tip_projection"
+        and abs(float(ref_s)) <= float(tip_projection_guard_min_abs_m) + 1e-9
+    )
+    if guard_near_zero_tip_projection:
+        sign = -1.0 if float(ref_s) < 0.0 else 1.0
+        cur_far = sign * float(tip_projection_guard_min_abs_m)
+        while abs(float(cur_far)) <= float(stop_dist) + 1e-9:
+            scan_candidates.append(float(cur_far))
+            cur_far += sign * float(probe_step)
+        if float(stop_dist) >= float(tip_projection_guard_min_abs_m) - 1e-9:
+            scan_candidates.append(sign * float(stop_dist))
+        dedup_candidates = []
+        seen_key = set()
+        for s_val in scan_candidates:
+            key = round(float(s_val), 6)
+            if key in seen_key:
+                continue
+            seen_key.add(key)
+            dedup_candidates.append(float(s_val))
+        scan_candidates = dedup_candidates
+        split_pick_source = f"{split_pick_source}_seq_tip_projection_guard"
 
     prefer_non_intersect_reverse = bool(
         reverse_tip_used
@@ -1293,6 +1337,8 @@ def _evaluate_node(
     seq_pre_candidates = 0
     seq_filtered_out = 0
     for rank, s_probe in enumerate(scan_candidates):
+        if guard_near_zero_tip_projection and abs(float(s_probe)) < float(tip_projection_guard_min_abs_m) - 1e-9:
+            continue
         crossline_probe = LocalFrame.from_tangent(
             origin_xy=(float(node.point.x), float(node.point.y)),
             tangent_xy=scan_vec,

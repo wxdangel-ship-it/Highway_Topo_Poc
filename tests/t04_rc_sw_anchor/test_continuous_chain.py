@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 from shapely.geometry import LineString, Point
 
+import highway_topo_poc.modules.t04_rc_sw_anchor.runner as runner_mod
 from highway_topo_poc.modules.t04_rc_sw_anchor.config import DEFAULT_PARAMS
 from highway_topo_poc.modules.t04_rc_sw_anchor.continuous_chain import (
     ChainComponent,
@@ -157,6 +158,70 @@ def test_chain_order_enforced_prevents_same_location(tmp_path: Path) -> None:
     assert str(fail_res.get("status")) == "fail"
     assert str(fail_res.get("sequential_violation_reason")) == "no_candidate_abs_gt_prev"
     assert any(str(bp.get("code")) == "SEQUENTIAL_ORDER_VIOLATION" for bp in bp_fail)
+
+
+def test_continuous_successor_near_zero_tip_projection_expands_search(tmp_path: Path, monkeypatch) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    nodes, _node_meta, _node_err = load_nodes(
+        path=Path(data["global_node_path"]),
+        src_crs_override="auto",
+        dst_crs="EPSG:3857",
+        aoi=None,
+    )
+    roads, _road_meta, _road_err = load_roads(
+        path=Path(data["global_road_path"]),
+        src_crs_override="auto",
+        dst_crs="EPSG:3857",
+        aoi=None,
+    )
+    drivezone_union, _dz_meta, _dz_err = load_drivezone_union(
+        path=Path(data["drivezone_path"]),
+        src_crs_override="auto",
+        dst_crs="EPSG:3857",
+        aoi=None,
+    )
+    node_points = {int(n.nodeid): Point(float(n.point.x), float(n.point.y)) for n in nodes}
+    node_kinds = {int(n.nodeid): int(n.kind) if n.kind is not None else 0 for n in nodes}
+    road_graph = RoadGraph(roads=roads, node_points=node_points, node_kinds=node_kinds)
+    node = next(n for n in nodes if int(n.nodeid) == int(data["node_diverge"]))
+
+    def _fake_tip_point_from_divstrip(*, divstrip_union, scan_vec, origin_xy=None):
+        assert origin_xy is not None
+        return Point(
+            float(origin_xy[0]) + float(scan_vec[0]) * 0.05,
+            float(origin_xy[1]) + float(scan_vec[1]) * 0.05,
+        )
+
+    def _fake_segment_drivezone_pieces(*, segment, drivezone_union, min_piece_len_m):
+        return [LineString(list(segment.coords))]
+
+    monkeypatch.setattr(runner_mod, "tip_point_from_divstrip", _fake_tip_point_from_divstrip)
+    monkeypatch.setattr(runner_mod, "segment_drivezone_pieces", _fake_segment_drivezone_pieces)
+
+    params = dict(DEFAULT_PARAMS)
+    params.update({"continuous_tip_projection_min_abs_m": 1.0})
+    breakpoints: list[dict] = []
+    # Use a far divstrip geometry so first-hit stays None; tip_projection comes from patched tip function.
+    divstrip_far = Point(float(node.point.x) + 1000.0, float(node.point.y) + 1000.0).buffer(2.0)
+    res = _evaluate_node(
+        node=node,
+        road_graph=road_graph,
+        divstrip_union=divstrip_far,
+        drivezone_union=drivezone_union,
+        drivezone_usable=True,
+        ng_points_xy=np.zeros((0, 2), dtype=np.float64),
+        params=params,
+        breakpoints=breakpoints,
+        pointcloud_usable=False,
+        is_in_continuous_chain=True,
+        chain_component_id="chain_guard",
+        chain_node_offset_m=0.0,
+        required_prev_abs_s=0.0,
+    )
+    assert str(res.get("divstrip_ref_source")) == "tip_projection"
+    assert res.get("s_drivezone_split_m") is None
+    assert float(res.get("s_chosen_m", 0.0)) >= 1.0 - 1e-6
+    assert str(res.get("split_pick_source", "")).endswith("_seq_tip_projection_guard")
 
 
 def test_chain_merge_diverge_to_merge_within_5m_merges(tmp_path: Path) -> None:

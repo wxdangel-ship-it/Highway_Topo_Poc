@@ -120,6 +120,7 @@
 - `continuous_dist_max_m`：默认 `50.0`
 - `continuous_merge_max_gap_m`：默认 `5.0`（诊断阈值，不阻断合并）
 - `continuous_merge_geom_tol_m`：默认 `1.0`（几何近邻合并阈值）
+- `continuous_tip_projection_min_abs_m`：默认 `1.0`（连续后继节点在 `tip_projection + no_split` 且 near-zero 时的最小 |s| 门槛）
 - `reverse_tip_max_m`：默认 `10.0`（反向 tip/ref 搜索范围）
 - patch/focus 门禁阈值分开：
   - `min_anchor_found_ratio_focus/min_anchor_found_ratio_patch`

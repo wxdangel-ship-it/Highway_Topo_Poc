@@ -20,9 +20,13 @@ def _write_json(path: Path, payload: dict) -> None:
 
 def _assert_toward_node_window(*, s_chosen: float, ref_s: float, window_m: float = 1.0) -> None:
     if float(ref_s) < 0.0:
-        assert float(ref_s) <= float(s_chosen) <= (float(ref_s) + float(window_m))
+        lo = float(ref_s)
+        hi = float(min(0.0, float(ref_s) + float(window_m)))
+        assert lo <= float(s_chosen) <= hi
         return
-    assert (float(ref_s) - float(window_m)) <= float(s_chosen) <= float(ref_s)
+    lo = float(max(0.0, float(ref_s) - float(window_m)))
+    hi = float(ref_s)
+    assert lo <= float(s_chosen) <= hi
 
 
 def _node_xy(node_path: Path, nodeid: int) -> tuple[float, float]:

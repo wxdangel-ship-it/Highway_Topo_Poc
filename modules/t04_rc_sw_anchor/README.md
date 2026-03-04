@@ -18,7 +18,7 @@
 8. divstrip 优先：有导流带参考时优先在其邻域选择 `s*`；无导流带时回退到 DriveZone 最早 split，不允许跨路口漂移。
 9. 连续分合流顺序化（v1）：识别 `<50m` 连续链（仅 `direction=2/3`，跳过 `degree=2` 过路点），链内按 `abs_s` 顺序约束，必要时节点级 fail（`SEQUENTIAL_ORDER_VIOLATION`）。
 10. 连续链合并：相邻 `diverge->merge` 以横截线几何关系为主（相交或近邻）触发合并；`abs_s` 差值仅保留诊断，不作为阻断门槛。
-11. 异常分支（reverse tip/ref_s）：在默认方向缺参考、`s≈0` 命中不可信 divstrip、或 `divstrip_first_hit` 且无 drivezone split 时触发，反向最多 10m 查找；窗口按场景区分：常规（非 reverse）取“靠近节点 1m”，异常 reverse 取“远离节点 1m”。若反向无 split 且仍与 divstrip 相交，则继续向远离节点方向搜索到 `reverse_tip_max_m`；仍无非相交候选则硬失败。
+11. 异常分支（reverse tip/ref_s）：在默认方向缺参考、`s≈0` 命中不可信 divstrip、或 `divstrip_first_hit` 且无 drivezone split 时触发，反向最多 10m 查找；窗口按场景区分：常规（非 reverse）取“靠近节点 1m”（且不跨过 node），异常 reverse 取“远离节点 1m”。若反向无 split 且仍与 divstrip 相交，则继续向远离节点方向搜索到 `reverse_tip_max_m`；仍无非相交候选则硬失败。连续后继节点若出现 `tip_projection + no_split` 且 near-zero，会启用扩展搜索，避免复用上一处物理分割。
 
 ## 3. 运行入口
 ```bash
