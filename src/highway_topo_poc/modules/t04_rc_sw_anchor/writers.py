@@ -108,6 +108,19 @@ def _props_min(item: dict[str, Any]) -> dict[str, Any]:
         "merge_abs_diff_m": item.get("merge_abs_diff_m"),
         "merge_abs_gap_cfg_m": item.get("merge_abs_gap_cfg_m"),
         "merge_abs_gate_skipped": item.get("merge_abs_gate_skipped"),
+        "multibranch_enabled": item.get("multibranch_enabled"),
+        "multibranch_N": item.get("multibranch_N"),
+        "multibranch_expected_events": item.get("multibranch_expected_events"),
+        "split_events_forward": item.get("split_events_forward"),
+        "split_events_reverse": item.get("split_events_reverse"),
+        "s_main_m": item.get("s_main_m"),
+        "main_pick_source": item.get("main_pick_source"),
+        "abnormal_two_sided": item.get("abnormal_two_sided"),
+        "span_extra_m": item.get("span_extra_m"),
+        "direction_filter_applied": item.get("direction_filter_applied"),
+        "branches_used_count": item.get("branches_used_count"),
+        "branches_ignored_due_to_direction": item.get("branches_ignored_due_to_direction"),
+        "s_drivezone_split_first_m": item.get("s_drivezone_split_first_m"),
     }
 
 
@@ -243,4 +256,53 @@ def write_intersection_opt_geojson(
     write_geojson(path, make_feature_collection(features, crs_name=dst_crs_name))
 
 
-__all__ = ["write_anchor_geojson", "write_intersection_opt_geojson", "write_json", "write_text"]
+def write_intersection_multi_geojson(
+    *,
+    path: Path,
+    seed_results: list[dict[str, Any]],
+    src_crs_name: str,
+    dst_crs_name: str,
+) -> None:
+    features: list[dict[str, Any]] = []
+    for item in seed_results:
+        events = item.get("multibranch_event_lines")
+        if not isinstance(events, list) or not events:
+            continue
+        props = _props_min(item)
+        for idx, event in enumerate(events):
+            if not isinstance(event, dict):
+                continue
+            line = event.get("line")
+            if not isinstance(line, LineString):
+                continue
+            geom = mapping(line)
+            geom = _transform_geometry_dict(geom, src_crs=src_crs_name, dst_crs=dst_crs_name)
+            evt_idx = int(event.get("event_idx", idx))
+            evt_s = event.get("event_s_m")
+            evt_dir = str(event.get("event_dir", "unknown"))
+            pieces_at_event = event.get("pieces_count_at_event")
+            features.append(
+                {
+                    "type": "Feature",
+                    "properties": {
+                        **props,
+                        "event_idx": int(evt_idx),
+                        "event_s_m": None if evt_s is None else float(evt_s),
+                        "event_dir": evt_dir,
+                        "pieces_count_at_event": None if pieces_at_event is None else int(pieces_at_event),
+                        "expected_events": item.get("multibranch_expected_events"),
+                        "raw_event": False,
+                    },
+                    "geometry": geom,
+                }
+            )
+    write_geojson(path, make_feature_collection(features, crs_name=dst_crs_name))
+
+
+__all__ = [
+    "write_anchor_geojson",
+    "write_intersection_opt_geojson",
+    "write_intersection_multi_geojson",
+    "write_json",
+    "write_text",
+]

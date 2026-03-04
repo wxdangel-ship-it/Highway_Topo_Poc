@@ -62,6 +62,10 @@
 - 每个扫描步 `s`，构造 `SEG(s)=LineString(PA(s)->PB(s))`：
   - `PA/PB`：分支与 crossline 交点优先，否则 branch 到 crossline 最近点。
 - DriveZone 判定与输出均只在 `SEG(s)` 上进行。
+- 多分支 `N>2` 时：
+  - 横截方向仍由最大夹角 pair 的法向确定；
+  - 用所有有效分支匹配点在横截轴上的 `v_min/v_max` 形成 span，并两端外扩 `multibranch_span_extra_m`；
+  - 基于该扫描线统计 `pieces_count(s)` 并提取多事件。
 
 ### 5.3 split 定义
 - `pieces = SEG(s) ∩ DriveZone` 的线段片段（过滤 `< min_piece_len_m`）。
@@ -108,6 +112,23 @@
   - 沿远离节点方向继续搜索到 `reverse_tip_max_m`
   - 若仍无非相交候选，硬失败 `DIVSTRIP_NON_INTERSECT_NOT_FOUND`
 
+### 5.8 多分支（N>2）事件提取与主结果选择
+- 启用条件：
+  - diverge：按方向过滤后的有效 outgoing 分支数 `N>2`
+  - merge：按方向过滤后的有效 incoming 分支数 `N>2`
+  - 方向过滤：仅 `direction in {2,3}` 计入；`0/1` 忽略并计数诊断
+- 事件提取：
+  - 正向扫描：`s ∈ [0, stop_dist]`
+  - 反向扫描：`s ∈ [-multibranch_reverse_max_m, 0]`
+  - 事件定义：`pieces_count` 从 `k` 增到 `k+Δ` 时，按方案B在同一 `s` 记录 `Δ` 个事件（受 `expected_events=N-1` 截断）
+- 主结果选择（方案X）：
+  - 默认 `forward_first`：取正向最早事件
+  - 若正反两侧均有事件：取反向最远事件（`reverse_farthest_abnormal`，即最负 `s`）
+  - 若仅反向有事件：`reverse_farthest_fallback`
+- 输出分层：
+  - `intersection_l_opt`：仅主结果一条线
+  - `intersection_l_multi`：输出所有事件线（含 `forward/reverse`）
+
 ## 6. 参数契约（关键）
 - `min_piece_len_m`：DriveZone 交段最小长度过滤（数值噪声抑制）
 - `next_intersection_degree_min`：默认 `3`
@@ -122,6 +143,9 @@
 - `continuous_merge_geom_tol_m`：默认 `1.0`（几何近邻合并阈值）
 - `continuous_tip_projection_min_abs_m`：默认 `1.0`（连续后继节点在 `tip_projection + no_split` 且 near-zero 时的最小 |s| 门槛）
 - `reverse_tip_max_m`：默认 `10.0`（反向 tip/ref 搜索范围）
+- `multibranch_enable`：默认 `true`（仅 `N>2` 生效）
+- `multibranch_span_extra_m`：默认 `10.0`（多分支 span 两端外扩）
+- `multibranch_reverse_max_m`：默认 `10.0`（多分支反向扫描范围）
 - patch/focus 门禁阈值分开：
   - `min_anchor_found_ratio_focus/min_anchor_found_ratio_patch`
   - `no_trigger_count_max_focus/no_trigger_count_max_patch`
@@ -137,6 +161,7 @@
 - `intersection_l_opt_wgs84.geojson`
 - `anchors.geojson`
 - `intersection_l_opt.geojson`
+- `intersection_l_multi.geojson`
 - `anchors.json`
 - `metrics.json`
 - `breakpoints.json`
@@ -173,6 +198,17 @@
   - `ref_s_forward_m/ref_s_reverse_m/ref_s_final_m`
   - `position_source_forward/position_source_reverse/position_source_final`
   - `untrusted_divstrip_at_node/node_to_divstrip_m_at_s0/seg0_intersects_divstrip`
+  - `multibranch_enabled/multibranch_N/multibranch_expected_events`
+  - `split_events_forward/split_events_reverse`
+  - `s_main_m/main_pick_source/abnormal_two_sided`
+  - `span_extra_m/direction_filter_applied/branches_used_count/branches_ignored_due_to_direction`
+  - `s_drivezone_split_first_m`
+
+`intersection_l_multi.geojson`：
+- 每个 split-event 1 条 feature，properties 至少包含：
+  - `nodeid/kind/anchor_type`
+  - `event_idx/event_s_m/event_dir`
+  - `pieces_count_at_event/expected_events`
 
 ## 8. Breakpoints（最小集合）
 - `DRIVEZONE_SPLIT_NOT_FOUND`

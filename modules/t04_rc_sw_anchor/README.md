@@ -11,7 +11,10 @@
 1. 输入解析：`global_focus` / `patch`，`focus_node_ids` 优先级 `CLI > file > config_json`。
 2. 字段归一化：`field_norm.normalize_props` + `get_first_int/get_first_raw`。
 3. CRS 归一化：`node/road/divstrip/drivezone/traj/pointcloud` 全部归一化到 `dst_crs`（默认 `EPSG:3857`）。
-4. 分支选择：按 `kind` 分 merge/diverge，分支对用“最大夹角对”，多分支记 `MULTI_BRANCH_TODO`。
+4. 分支选择：
+   - `N<=2`：按基线路径处理，分支对用“最大夹角对”。
+   - `N>2`：启用多分支流程（仅统计 `direction=2/3` 的有效分支，`direction=0/1` 不参与）。
+   - 横截方向仍由“最大夹角对”确定，扫描线改为所有有效分支匹配点形成的 span，并两端外扩 `multibranch_span_extra_m`（默认 10m）。
 5. 扫描与 stop：沿 `scan_axis_road` 扫描到 `next_intersection_connected_deg3` 或 `scan_max_limit_m`。
 6. split 判定：`SEG(s)` 与 DriveZone 的交段数 `>=2` 的最早 `s*` 触发。
 7. 输出构造：检测用 `SEG(s)`，输出用同方向“长横截线”与 DriveZone 截断后两条 LineString（`piece_idx=0/1`）；anchor 用 gap 中点，失败时回退横截线中点并写断点。
@@ -19,6 +22,7 @@
 9. 连续分合流顺序化（v1）：识别 `<50m` 连续链（仅 `direction=2/3`，跳过 `degree=2` 过路点），链内按 `abs_s` 顺序约束，必要时节点级 fail（`SEQUENTIAL_ORDER_VIOLATION`）。
 10. 连续链合并：相邻 `diverge->merge` 以横截线几何关系为主（相交或近邻）触发合并；`abs_s` 差值仅保留诊断，不作为阻断门槛。
 11. 异常分支（reverse tip/ref_s）：在默认方向缺参考、`s≈0` 命中不可信 divstrip、或 `divstrip_first_hit` 且无 drivezone split 时触发，反向最多 10m 查找；窗口按场景区分：常规（非 reverse）取“靠近节点 1m”（且不跨过 node），异常 reverse 取“远离节点 1m”。若反向无 split 且仍与 divstrip 相交，则继续向远离节点方向搜索到 `reverse_tip_max_m`；仍无非相交候选则硬失败。连续后继节点若出现 `tip_projection + no_split` 且 near-zero，会启用扩展搜索，避免复用上一处物理分割。
+12. 多分支异常双向选择（N>2）：默认主结果为正向最早事件；若正反两侧均有事件，则按方案X选择反向最远事件（`s` 最负）；若仅反向有事件则反向兜底。
 
 ## 3. 运行入口
 ```bash
@@ -50,6 +54,7 @@ python -m highway_topo_poc.modules.t04_rc_sw_anchor \
 
 - `anchors_3857.geojson`
 - `intersection_l_opt_3857.geojson`
+- `intersection_l_multi.geojson`
 - `anchors_wgs84.geojson`
 - `intersection_l_opt_wgs84.geojson`
 - `anchors.geojson` / `intersection_l_opt.geojson`（兼容名）
@@ -64,9 +69,14 @@ python -m highway_topo_poc.modules.t04_rc_sw_anchor \
 - 若触发连续链 `diverge->merge` 合并，输出 1 条合并 feature，properties 含 `nodeids[]/kinds[]/roles[]`。
 - properties 必含 `nodeid/kind/kind_bits/anchor_type/scan_dist_m/stop_reason/evidence_source` 与关键诊断字段。
 
+`intersection_l_multi.geojson` 约定：
+- 仅在 `N>2` 多分支节点输出事件线（可同时包含 `forward/reverse`）。
+- 每条 feature 对应一个 split-event，包含 `event_idx/event_s_m/event_dir/pieces_count_at_event/expected_events`。
+- `intersection_l_opt` 仍只输出主结果（单条）。
+
 ## 6. 已知边界
-- 当前稳定支持二分歧/二合流。
-- 多分支采用“最大夹角对”过渡策略，并记录 `MULTI_BRANCH_TODO`（Minor）。
+- `N<=2` 稳定保持基线行为不变。
+- `N>2` 已支持 split-events 提取与主结果选择，但方向基准仍复用“最大夹角对”。
 - `min_piece_len_m` 仅用于数值噪声抑制，不用于业务口径 auto-tune。
 
 ## 7. 配置模板

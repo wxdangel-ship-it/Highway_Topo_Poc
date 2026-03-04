@@ -55,10 +55,23 @@ from .metrics_breakpoints import (
     make_breakpoint,
     summarize_breakpoints,
 )
+from .multibranch_ops import (
+    build_crossline_span,
+    collect_valid_branches_by_direction,
+    compute_pieces_count,
+    crossline_span_points_all_branches,
+    extract_split_events,
+)
 from .pointcloud_io import PointCloudData, default_pointcloud_path, load_pointcloud, pick_non_ground_candidates, pointcloud_bbox
 from .road_graph import RoadGraph
 from .traj_io import TrajLoadResult, build_traj_grid_index, discover_traj_paths, load_traj_points, mark_points_near_traj
-from .writers import write_anchor_geojson, write_intersection_opt_geojson, write_json, write_text
+from .writers import (
+    write_anchor_geojson,
+    write_intersection_multi_geojson,
+    write_intersection_opt_geojson,
+    write_json,
+    write_text,
+)
 
 
 @dataclass(frozen=True)
@@ -452,6 +465,20 @@ def _empty_fail_result(
         "merge_abs_gap_cfg_m": None,
         "merge_abs_gate_skipped": None,
         "suppress_intersection_feature": False,
+        "multibranch_enabled": False,
+        "multibranch_N": 0,
+        "multibranch_expected_events": 0,
+        "split_events_forward": [],
+        "split_events_reverse": [],
+        "s_main_m": None,
+        "main_pick_source": "none",
+        "abnormal_two_sided": False,
+        "span_extra_m": None,
+        "direction_filter_applied": True,
+        "branches_used_count": 0,
+        "branches_ignored_due_to_direction": 0,
+        "s_drivezone_split_first_m": None,
+        "multibranch_event_lines": [],
         "resolved_from": resolved_from,
     }
 
@@ -667,6 +694,282 @@ def _build_ref_window_toward_node(*, ref_s: float, window_m: float) -> tuple[flo
     return float(lo), float(hi), float(near_s)
 
 
+def _build_continuous_line_from_crossline(
+    *,
+    crossline: LineString,
+    pieces_raw: list[LineString],
+    center_xy: tuple[float, float],
+    found_seg: LineString,
+    drivezone_union: BaseGeometry | None,
+    edge_pad_m: float,
+) -> tuple[LineString | None, dict[str, Any]]:
+    out_diag: dict[str, Any] = {
+        "ok": False,
+        "reason": "unknown",
+        "pieces_count": int(len(pieces_raw)),
+        "center_piece_hit": False,
+    }
+    if not pieces_raw:
+        out_diag["reason"] = "pieces_empty"
+        return None, out_diag
+
+    center_pt = Point(float(center_xy[0]), float(center_xy[1]))
+    center_s = float(crossline.project(center_pt))
+
+    piece_info: list[tuple[LineString, float, float, float]] = []
+    for piece in pieces_raw:
+        vals: list[float] = []
+        for coord in list(piece.coords):
+            if len(coord) < 2:
+                continue
+            vals.append(float(crossline.project(Point(float(coord[0]), float(coord[1])))))
+        if not vals:
+            continue
+        s0 = float(min(vals))
+        s1 = float(max(vals))
+        sm = 0.5 * (s0 + s1)
+        piece_info.append((piece, s0, s1, sm))
+
+    if not piece_info:
+        out_diag["reason"] = "piece_interval_empty"
+        return None, out_diag
+
+    pa_pt = Point(float(found_seg.coords[0][0]), float(found_seg.coords[0][1]))
+    pb_pt = Point(float(found_seg.coords[-1][0]), float(found_seg.coords[-1][1]))
+    pa_s = float(crossline.project(pa_pt))
+    pb_s = float(crossline.project(pb_pt))
+    left_ref_s, right_ref_s = (pa_s, pb_s) if pa_s <= pb_s else (pb_s, pa_s)
+
+    center_hits = [x for x in piece_info if float(x[1]) - 1e-6 <= center_s <= float(x[2]) + 1e-6]
+    if center_hits:
+        selected_piece = min(
+            center_hits,
+            key=lambda x: (
+                abs(float(x[3]) - center_s),
+                abs(float(x[3]) - 0.5 * (left_ref_s + right_ref_s)),
+                -float(x[0].length),
+            ),
+        )
+        center_piece_hit = True
+    else:
+        selected_piece = min(
+            piece_info,
+            key=lambda x: (
+                min(abs(center_s - float(x[1])), abs(center_s - float(x[2])), abs(center_s - float(x[3]))),
+                abs(float(x[3]) - center_s),
+                -float(x[0].length),
+            ),
+        )
+        center_piece_hit = False
+
+    base_s0 = float(selected_piece[1])
+    base_s1 = float(selected_piece[2])
+    pad = max(0.0, float(edge_pad_m))
+    span_start = max(base_s0, float(left_ref_s) - pad)
+    span_end = min(base_s1, float(right_ref_s) + pad)
+    span_start = max(base_s0, min(span_start, center_s))
+    span_end = min(base_s1, max(span_end, center_s))
+    if span_end - span_start <= 1e-6:
+        span_start = base_s0
+        span_end = base_s1
+
+    edge_touch_tol_m = 0.1
+    if drivezone_union is not None and (not drivezone_union.is_empty):
+        p0_probe = crossline.interpolate(span_start)
+        p1_probe = crossline.interpolate(span_end)
+        left_probe_dist = float(p0_probe.distance(drivezone_union.boundary))
+        right_probe_dist = float(p1_probe.distance(drivezone_union.boundary))
+        if left_probe_dist > edge_touch_tol_m + 1e-9 and span_start > base_s0 + 1e-9:
+            span_start = base_s0
+        if right_probe_dist > edge_touch_tol_m + 1e-9 and span_end < base_s1 - 1e-9:
+            span_end = base_s1
+
+    if (not math.isfinite(span_start)) or (not math.isfinite(span_end)) or (span_end - span_start) <= 1e-6:
+        out_diag["reason"] = "span_degenerate"
+        return None, out_diag
+
+    p0 = crossline.interpolate(span_start)
+    p1 = crossline.interpolate(span_end)
+    out_diag["ok"] = True
+    out_diag["reason"] = "ok"
+    out_diag["center_piece_hit"] = bool(center_piece_hit)
+    return LineString([(float(p0.x), float(p0.y)), (float(p1.x), float(p1.y))]), out_diag
+
+
+def _extract_multibranch_events(
+    *,
+    node_point: Point,
+    scan_vec: tuple[float, float],
+    branch_a: RoadRecord,
+    branch_b: RoadRecord,
+    branches: list[tuple[int, RoadRecord]],
+    stop_dist_m: float,
+    scan_step_m: float,
+    reverse_max_m: float,
+    span_extra_m: float,
+    drivezone_union: BaseGeometry | None,
+    min_piece_len_m: float,
+    edge_pad_m: float,
+    expected_events: int,
+) -> dict[str, Any]:
+    perp = (-float(scan_vec[1]), float(scan_vec[0]))
+    step = max(0.05, float(scan_step_m))
+    stop_dist = max(0.0, float(stop_dist_m))
+    reverse_max = max(0.0, float(reverse_max_m))
+    expected = max(0, int(expected_events))
+
+    def _build_s_samples(start: float, end: float, step_signed: float) -> list[float]:
+        out: list[float] = []
+        cur = float(start)
+        if step_signed > 0:
+            while cur <= float(end) + 1e-9:
+                out.append(float(cur))
+                cur += float(step_signed)
+        else:
+            while cur >= float(end) - 1e-9:
+                out.append(float(cur))
+                cur += float(step_signed)
+        if not out:
+            out = [float(start)]
+        return out
+
+    s_forward = _build_s_samples(0.0, float(stop_dist), float(step))
+    s_reverse = _build_s_samples(0.0, -float(reverse_max), -float(step))
+
+    rec_forward: dict[float, dict[str, Any]] = {}
+    rec_reverse: dict[float, dict[str, Any]] = {}
+
+    def _scan_one(s_values: list[float], rec_map: dict[float, dict[str, Any]]) -> list[int]:
+        counts: list[int] = []
+        for s in s_values:
+            center_xy = (
+                float(node_point.x) + float(scan_vec[0]) * float(s),
+                float(node_point.y) + float(scan_vec[1]) * float(s),
+            )
+            try:
+                v_min, v_max, _samples = crossline_span_points_all_branches(
+                    branches=branches,
+                    center_xy=center_xy,
+                    perp_vec=perp,
+                )
+                crossline = build_crossline_span(
+                    center_xy=center_xy,
+                    perp_vec=perp,
+                    v_min_m=float(v_min),
+                    v_max_m=float(v_max),
+                    extra_m=float(span_extra_m),
+                )
+                pieces_count = compute_pieces_count(
+                    crossline=crossline,
+                    drivezone_union=drivezone_union,
+                    min_piece_len_m=float(min_piece_len_m),
+                )
+            except Exception:
+                crossline = LineString([center_xy, center_xy])
+                pieces_count = 0
+            counts.append(int(max(0, pieces_count)))
+            rec_map[round(float(s), 6)] = {
+                "s_m": float(s),
+                "crossline": crossline,
+                "pieces_count": int(max(0, pieces_count)),
+                "center_xy": (float(center_xy[0]), float(center_xy[1])),
+            }
+        return counts
+
+    counts_fwd = _scan_one(s_forward, rec_forward)
+    counts_rev = _scan_one(s_reverse, rec_reverse)
+
+    events_fwd, events_fwd_diag = extract_split_events(
+        s_values=[float(x) for x in s_forward],
+        pieces_count_seq=[int(x) for x in counts_fwd],
+        expected_events=int(expected),
+    )
+    events_rev, events_rev_diag = extract_split_events(
+        s_values=[float(x) for x in s_reverse],
+        pieces_count_seq=[int(x) for x in counts_rev],
+        expected_events=int(expected),
+    )
+
+    fwd_pick = [float(x) for x in events_fwd if float(x) > 1e-9] or [float(x) for x in events_fwd]
+    rev_pick = [float(x) for x in events_rev if float(x) < -1e-9] or [float(x) for x in events_rev]
+    abnormal_two_sided = bool(fwd_pick and rev_pick)
+
+    s_main: float | None = None
+    main_pick_source = "none"
+    if fwd_pick and rev_pick:
+        s_main = float(min(rev_pick))
+        main_pick_source = "reverse_farthest_abnormal"
+    elif fwd_pick:
+        s_main = float(min(fwd_pick))
+        main_pick_source = "forward_first"
+    elif rev_pick:
+        s_main = float(min(rev_pick))
+        main_pick_source = "reverse_farthest_fallback"
+
+    event_lines: list[dict[str, Any]] = []
+    event_idx = 0
+    for evt_dir, events, rec_map in [
+        ("forward", events_fwd, rec_forward),
+        ("reverse", events_rev, rec_reverse),
+    ]:
+        for evt_s in events:
+            rec = rec_map.get(round(float(evt_s), 6))
+            if not isinstance(rec, dict):
+                event_idx += 1
+                continue
+            crossline = rec.get("crossline")
+            if not isinstance(crossline, LineString):
+                event_idx += 1
+                continue
+            center_xy = rec.get("center_xy")
+            if not (isinstance(center_xy, tuple) and len(center_xy) == 2):
+                event_idx += 1
+                continue
+            found_seg, _found_diag = build_between_branches_segment(
+                center_xy=(float(center_xy[0]), float(center_xy[1])),
+                scan_dir=scan_vec,
+                branch_a=branch_a,
+                branch_b=branch_b,
+                crossline_half_len_m=max(30.0, 0.5 * float(crossline.length)),
+            )
+            pieces_raw = segment_drivezone_pieces(
+                segment=crossline,
+                drivezone_union=drivezone_union,
+                min_piece_len_m=float(min_piece_len_m),
+            )
+            event_line, event_diag = _build_continuous_line_from_crossline(
+                crossline=crossline,
+                pieces_raw=pieces_raw,
+                center_xy=(float(center_xy[0]), float(center_xy[1])),
+                found_seg=found_seg,
+                drivezone_union=drivezone_union,
+                edge_pad_m=float(edge_pad_m),
+            )
+            if event_line is not None and bool(event_diag.get("ok", False)):
+                event_lines.append(
+                    {
+                        "event_idx": int(event_idx),
+                        "event_s_m": float(evt_s),
+                        "event_dir": str(evt_dir),
+                        "pieces_count_at_event": int(rec.get("pieces_count", 0)),
+                        "line": event_line,
+                    }
+                )
+            event_idx += 1
+
+    return {
+        "split_events_forward": [float(x) for x in events_fwd],
+        "split_events_reverse": [float(x) for x in events_rev],
+        "split_events_forward_diag": list(events_fwd_diag),
+        "split_events_reverse_diag": list(events_rev_diag),
+        "s_main_m": None if s_main is None else float(s_main),
+        "main_pick_source": str(main_pick_source),
+        "abnormal_two_sided": bool(abnormal_two_sided),
+        "s_drivezone_split_first_m": None if not fwd_pick else float(min(fwd_pick)),
+        "event_lines": event_lines,
+    }
+
+
 def _evaluate_node(
     *,
     node: NodeRecord,
@@ -824,6 +1127,42 @@ def _evaluate_node(
     branch_a_id = f"{int(branch_a.snodeid)}->{int(branch_a.enodeid)}"
     branch_b_id = f"{int(branch_b.snodeid)}->{int(branch_b.enodeid)}"
     axis_id = f"{int(axis_road.snodeid)}->{int(axis_road.enodeid)}"
+    valid_branches, branch_filter_diag = collect_valid_branches_by_direction(
+        nodeid=nodeid,
+        roads=road_graph.roads,
+        anchor_type=anchor_type,
+    )
+    branches_used_count = int(branch_filter_diag.get("valid_count", len(valid_branches)))
+    branches_ignored_due_to_direction = int(branch_filter_diag.get("ignored_due_to_direction", 0))
+    multibranch_n = int(branches_used_count)
+    multibranch_expected_events = int(max(0, multibranch_n - 1))
+    multibranch_enabled = bool(params.get("multibranch_enable", True)) and multibranch_n > 2
+    multibranch_span_extra_m = max(0.0, float(params.get("multibranch_span_extra_m", 10.0)))
+    multibranch_reverse_max_m = max(0.0, float(params.get("multibranch_reverse_max_m", 10.0)))
+    split_events_forward: list[float] = []
+    split_events_reverse: list[float] = []
+    split_events_forward_diag: list[dict[str, Any]] = []
+    split_events_reverse_diag: list[dict[str, Any]] = []
+    s_main_m: float | None = None
+    main_pick_source = "none"
+    abnormal_two_sided = False
+    s_drivezone_split_first_m: float | None = None
+    multibranch_event_lines: list[dict[str, Any]] = []
+    multibranch_diag_payload: dict[str, Any] = {
+        "multibranch_enabled": bool(multibranch_enabled),
+        "multibranch_N": int(multibranch_n),
+        "multibranch_expected_events": int(multibranch_expected_events),
+        "split_events_forward": list(split_events_forward),
+        "split_events_reverse": list(split_events_reverse),
+        "s_main_m": None,
+        "main_pick_source": str(main_pick_source),
+        "abnormal_two_sided": bool(abnormal_two_sided),
+        "span_extra_m": float(multibranch_span_extra_m),
+        "direction_filter_applied": True,
+        "branches_used_count": int(branches_used_count),
+        "branches_ignored_due_to_direction": int(branches_ignored_due_to_direction),
+        "s_drivezone_split_first_m": None,
+    }
 
     use_drivezone = bool(params.get("use_drivezone", True))
     if (not use_drivezone) or (drivezone_union is None) or (not drivezone_usable):
@@ -853,6 +1192,7 @@ def _evaluate_node(
                 "branch_a_id": branch_a_id,
                 "branch_b_id": branch_b_id,
                 "branch_axis_id": axis_id,
+                **multibranch_diag_payload,
             }
         )
         return out
@@ -910,6 +1250,47 @@ def _evaluate_node(
     divstrip_drivezone_max_offset_m = max(0.0, float(params.get("divstrip_drivezone_max_offset_m", 30.0)))
     reverse_tip_max_m = max(0.0, float(params.get("reverse_tip_max_m", 10.0)))
     output_cross_half_len_m = max(float(half_len), float(params.get("output_cross_half_len_m", 120.0)))
+    event_edge_pad_m = max(0.0, float(params.get("current_road_edge_pad_m", 4.0)))
+
+    if multibranch_enabled:
+        mb = _extract_multibranch_events(
+            node_point=node.point,
+            scan_vec=scan_vec,
+            branch_a=branch_a,
+            branch_b=branch_b,
+            branches=valid_branches,
+            stop_dist_m=float(stop_dist),
+            scan_step_m=float(step),
+            reverse_max_m=float(multibranch_reverse_max_m),
+            span_extra_m=float(multibranch_span_extra_m),
+            drivezone_union=drivezone_union,
+            min_piece_len_m=float(min_piece_len_m),
+            edge_pad_m=float(event_edge_pad_m),
+            expected_events=int(multibranch_expected_events),
+        )
+        split_events_forward = [float(x) for x in mb.get("split_events_forward", [])]
+        split_events_reverse = [float(x) for x in mb.get("split_events_reverse", [])]
+        split_events_forward_diag = list(mb.get("split_events_forward_diag", []))
+        split_events_reverse_diag = list(mb.get("split_events_reverse_diag", []))
+        s_main_m = None if mb.get("s_main_m") is None else float(mb.get("s_main_m"))
+        main_pick_source = str(mb.get("main_pick_source", "none"))
+        abnormal_two_sided = bool(mb.get("abnormal_two_sided", False))
+        s_drivezone_split_first_m = None if mb.get("s_drivezone_split_first_m") is None else float(mb.get("s_drivezone_split_first_m"))
+        raw_event_lines = mb.get("event_lines")
+        if isinstance(raw_event_lines, list):
+            multibranch_event_lines = [x for x in raw_event_lines if isinstance(x, dict)]
+        multibranch_diag_payload.update(
+            {
+                "split_events_forward": list(split_events_forward),
+                "split_events_reverse": list(split_events_reverse),
+                "s_main_m": None if s_main_m is None else float(s_main_m),
+                "main_pick_source": str(main_pick_source),
+                "abnormal_two_sided": bool(abnormal_two_sided),
+                "s_drivezone_split_first_m": None if s_drivezone_split_first_m is None else float(s_drivezone_split_first_m),
+                "split_events_forward_diag": split_events_forward_diag,
+                "split_events_reverse_diag": split_events_reverse_diag,
+            }
+        )
 
     tip_s: float | None = None
     tip_s_reverse: float | None = None
@@ -994,6 +1375,10 @@ def _evaluate_node(
     id_map = {str(k): int(v) for k, v in node.id_fields}
     first_split = split_hits[0] if split_hits else None
     s_drivezone_split = None if first_split is None else float(first_split["s"])
+    if multibranch_enabled:
+        s_drivezone_split = None if s_main_m is None else float(s_main_m)
+        if s_drivezone_split_first_m is None and first_split is not None:
+            s_drivezone_split_first_m = float(first_split["s"])
 
     divstrip_ref_s: float | None = None
     divstrip_ref_source = "none"
@@ -1003,6 +1388,9 @@ def _evaluate_node(
     elif tip_s is not None and float(tip_s) >= -1e-6 and float(tip_s) <= float(stop_dist) + 1e-6:
         divstrip_ref_s = float(max(0.0, min(float(stop_dist), float(tip_s))))
         divstrip_ref_source = "tip_projection"
+    if multibranch_enabled:
+        divstrip_ref_s = None
+        divstrip_ref_source = "none"
 
     ref_s_forward, position_source_forward, split_pick_source_forward = _pick_reference_s(
         divstrip_ref_s=divstrip_ref_s,
@@ -1010,6 +1398,16 @@ def _evaluate_node(
         drivezone_split_s=s_drivezone_split,
         max_offset_m=divstrip_drivezone_max_offset_m,
     )
+    if multibranch_enabled and ref_s_forward is not None:
+        if str(main_pick_source) == "forward_first":
+            position_source_forward = "drivezone_split_fwd_first"
+            split_pick_source_forward = "drivezone_split_multibranch_fwd_first"
+        elif str(main_pick_source) in {"reverse_farthest_abnormal", "reverse_farthest_fallback"}:
+            position_source_forward = "drivezone_split_rev_far"
+            split_pick_source_forward = "drivezone_split_multibranch_rev_far"
+        else:
+            position_source_forward = "drivezone_split"
+            split_pick_source_forward = "drivezone_split_multibranch"
 
     untrusted_divstrip_at_node = bool(
         seg0_intersects_divstrip is True
@@ -1035,7 +1433,7 @@ def _evaluate_node(
         and str(divstrip_ref_source) == "first_hit"
         and s_drivezone_split is None
     )
-    if forward_missing_ref or untrusted_divstrip_at_node or first_hit_no_split:
+    if (not multibranch_enabled) and (forward_missing_ref or untrusted_divstrip_at_node or first_hit_no_split):
         reverse_tip_attempted = True
         if forward_missing_ref:
             reverse_trigger = "missing_ref"
@@ -1219,6 +1617,7 @@ def _evaluate_node(
                 "has_divstrip_nearby": False,
                 "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
                 "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+                **multibranch_diag_payload,
                 **reverse_diag_payload,
             }
         )
@@ -1493,6 +1892,7 @@ def _evaluate_node(
                 "has_divstrip_nearby": False,
                 "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
                 "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+                **multibranch_diag_payload,
                 **reverse_diag_payload,
             }
         )
@@ -1597,6 +1997,7 @@ def _evaluate_node(
                 "has_divstrip_nearby": False,
                 "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
                 "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+                **multibranch_diag_payload,
                 **reverse_diag_payload,
             }
         )
@@ -1649,6 +2050,7 @@ def _evaluate_node(
                 "has_divstrip_nearby": False,
                 "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
                 "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+                **multibranch_diag_payload,
                 **reverse_diag_payload,
             }
         )
@@ -1742,6 +2144,7 @@ def _evaluate_node(
                 "has_divstrip_nearby": False,
                 "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
                 "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+                **multibranch_diag_payload,
                 **reverse_diag_payload,
             }
         )
@@ -1845,6 +2248,7 @@ def _evaluate_node(
                 "has_divstrip_nearby": False,
                 "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
                 "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+                **multibranch_diag_payload,
                 **reverse_diag_payload,
             }
         )
@@ -2045,6 +2449,20 @@ def _evaluate_node(
         "merge_abs_gap_cfg_m": None,
         "merge_abs_gate_skipped": None,
         "suppress_intersection_feature": False,
+        "multibranch_enabled": bool(multibranch_enabled),
+        "multibranch_N": int(multibranch_n),
+        "multibranch_expected_events": int(multibranch_expected_events),
+        "split_events_forward": list(split_events_forward),
+        "split_events_reverse": list(split_events_reverse),
+        "s_main_m": None if s_main_m is None else float(s_main_m),
+        "main_pick_source": str(main_pick_source),
+        "abnormal_two_sided": bool(abnormal_two_sided),
+        "span_extra_m": float(multibranch_span_extra_m),
+        "direction_filter_applied": True,
+        "branches_used_count": int(branches_used_count),
+        "branches_ignored_due_to_direction": int(branches_ignored_due_to_direction),
+        "s_drivezone_split_first_m": None if s_drivezone_split_first_m is None else float(s_drivezone_split_first_m),
+        "multibranch_event_lines": multibranch_event_lines,
         "resolved_from": resolved_from,
     }
 
@@ -2054,6 +2472,7 @@ def _serialize_seed_result(item: dict[str, Any]) -> dict[str, Any]:
     out.pop("anchor_point", None)
     out.pop("crossline_opt", None)
     out.pop("crossline_opt_pieces", None)
+    out.pop("multibranch_event_lines", None)
     return out
 
 
@@ -2575,6 +2994,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
     inter_opt_wgs84_path = out_dir / "intersection_l_opt_wgs84.geojson"
     anchors_geojson_path = out_dir / "anchors.geojson"
     inter_opt_path = out_dir / "intersection_l_opt.geojson"
+    inter_multi_path = out_dir / "intersection_l_multi.geojson"
     anchors_json_path = out_dir / "anchors.json"
     metrics_path = out_dir / "metrics.json"
     breakpoints_path = out_dir / "breakpoints.json"
@@ -2587,6 +3007,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
     write_intersection_opt_geojson(path=inter_opt_wgs84_path, seed_results=seed_results, src_crs_name=dst_crs, dst_crs_name="EPSG:4326")
     write_anchor_geojson(path=anchors_geojson_path, seed_results=seed_results, src_crs_name=dst_crs, dst_crs_name=dst_crs)
     write_intersection_opt_geojson(path=inter_opt_path, seed_results=seed_results, src_crs_name=dst_crs, dst_crs_name=dst_crs)
+    write_intersection_multi_geojson(path=inter_multi_path, seed_results=seed_results, src_crs_name=dst_crs, dst_crs_name=dst_crs)
 
     anchors_json_payload = {
         "run_id": str(run_id),
@@ -2675,6 +3096,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
         inter_opt_wgs84_path,
         anchors_geojson_path,
         inter_opt_path,
+        inter_multi_path,
         anchors_json_path,
         metrics_path,
         breakpoints_path,
