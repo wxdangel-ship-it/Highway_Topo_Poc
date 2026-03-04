@@ -18,13 +18,6 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _assert_away_from_node_window(*, s_chosen: float, ref_s: float, window_m: float = 1.0) -> None:
-    if float(ref_s) < 0.0:
-        assert (float(ref_s) - float(window_m)) <= float(s_chosen) <= float(ref_s)
-        return
-    assert float(ref_s) <= float(s_chosen) <= (float(ref_s) + float(window_m))
-
-
 def _assert_toward_node_window(*, s_chosen: float, ref_s: float, window_m: float = 1.0) -> None:
     if float(ref_s) < 0.0:
         assert float(ref_s) <= float(s_chosen) <= (float(ref_s) + float(window_m))
@@ -119,6 +112,23 @@ def _rewrite_divstrip_untrusted_with_reverse(path: Path, *, node_x: float, node_
     _write_json(path, payload)
 
 
+def _rewrite_divstrip_reverse_blocked(path: Path, *, node_x: float, node_y: float) -> None:
+    payload = _read_json(path)
+    payload["features"] = [
+        {
+            "type": "Feature",
+            "properties": {"name": "reverse_blocked"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [_box(node_x, node_y - 5.0, -6.0, -6.0, 6.0, 6.0)],
+            },
+        }
+    ]
+    payload.pop("crs", None)
+    payload["crs"] = {"type": "name", "properties": {"name": "EPSG:3857"}}
+    _write_json(path, payload)
+
+
 def _rewrite_divstrip_forward_and_reverse(
     path: Path,
     *,
@@ -204,7 +214,11 @@ def test_reverse_tip_missing_ref_finds_reverse(tmp_path: Path) -> None:
     assert float(item.get("ref_s_final_m")) < 0.0
     s_chosen = float(item.get("s_chosen_m"))
     ref_s = float(item.get("ref_s_final_m"))
-    _assert_away_from_node_window(s_chosen=s_chosen, ref_s=ref_s)
+    assert abs(float(s_chosen)) <= 10.0 + 1e-6
+    if float(ref_s) < 0.0:
+        assert float(s_chosen) <= float(ref_s) + 1e-9
+    else:
+        assert float(s_chosen) >= float(ref_s) - 1e-9
 
 
 def test_reverse_tip_untrusted_divstrip_at_node_overrides(tmp_path: Path) -> None:
@@ -304,3 +318,26 @@ def test_reverse_tip_first_hit_no_split_merge(tmp_path: Path) -> None:
         assert bool(item.get("reverse_tip_not_improved", False)) is True
         assert item.get("ref_s_final_m") == item.get("ref_s_forward_m")
     assert float(item.get("ref_s_forward_m")) > 0.0
+
+
+def test_reverse_tip_no_split_blocked_by_divstrip_hard_fail(tmp_path: Path) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    node_x, node_y = _node_xy(Path(data["global_node_path"]), int(data["node_diverge"]))
+    _rewrite_drivezone_single_polygon(Path(data["drivezone_path"]), cx=node_x, cy=node_y + 40.0)
+    _rewrite_divstrip_reverse_blocked(Path(data["divstrip_path"]), node_x=node_x, node_y=node_y)
+    out_dir = _run_runtime(
+        tmp_path,
+        run_id="reverse_tip_no_split_blocked_by_divstrip_hard_fail",
+        data=data,
+        focus_node_ids=[str(data["node_diverge"])],
+    )
+    item = _read_json(out_dir / "anchors.json")["items"][0]
+    assert bool(item.get("reverse_tip_attempted", False)) is True
+    assert bool(item.get("reverse_tip_used", False)) is True
+    assert bool(item.get("found_split", True)) is False
+    assert str(item.get("status")) == "fail"
+    assert bool(item.get("anchor_found", True)) is False
+    assert float(item.get("dist_line_to_divstrip_m", 99.0)) <= float(DEFAULT_PARAMS["divstrip_hit_tol_m"])
+    bp = _read_json(out_dir / "breakpoints.json")
+    by_code = {str(x.get("code")): int(x.get("count", 0)) for x in bp.get("by_code", [])}
+    assert by_code.get("DIVSTRIP_NON_INTERSECT_NOT_FOUND", 0) >= 1

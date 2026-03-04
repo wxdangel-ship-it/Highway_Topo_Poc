@@ -104,6 +104,9 @@
 - 最终位置窗口按场景区分：
   - 常规（非 reverse）：靠近节点 1m（`ref_s>=0 -> [ref_s-1m, ref_s]`；`ref_s<0 -> [ref_s, ref_s+1m]`）
   - 异常 reverse：远离节点 1m（`ref_s>=0 -> [ref_s, ref_s+1m]`；`ref_s<0 -> [ref_s-1m, ref_s]`）
+- 反向无 split（`found_split=false`）且仍与 divstrip 相交时：
+  - 沿远离节点方向继续搜索到 `reverse_tip_max_m`
+  - 若仍无非相交候选，硬失败 `DIVSTRIP_NON_INTERSECT_NOT_FOUND`
 
 ## 6. 参数契约（关键）
 - `min_piece_len_m`：DriveZone 交段最小长度过滤（数值噪声抑制）

@@ -22,6 +22,7 @@ from .local_frame import LocalFrame
 from .metrics_breakpoints import (
     BP_AMBIGUOUS_KIND,
     BP_CRS_UNKNOWN,
+    BP_DIVSTRIP_NON_INTERSECT_NOT_FOUND,
     BP_DIVSTRIPZONE_MISSING,
     BP_DRIVEZONE_CLIP_EMPTY,
     BP_DRIVEZONE_CLIP_MULTIPIECE,
@@ -1258,6 +1259,32 @@ def _evaluate_node(
         dedup_candidates.append(float(s_val))
     scan_candidates = dedup_candidates
 
+    prefer_non_intersect_reverse = bool(
+        reverse_tip_used
+        and (s_drivezone_split_out is None)
+        and (divstrip_union is not None)
+        and (not divstrip_union.is_empty)
+    )
+    if prefer_non_intersect_reverse:
+        sign = -1.0 if float(ref_s) < 0.0 else 1.0
+        far_bound = -float(reverse_tip_max_m) if sign < 0.0 else float(reverse_tip_max_m)
+        cur_far = float(target_in_window) + sign * float(probe_step)
+        while (cur_far >= far_bound - 1e-9) if sign < 0.0 else (cur_far <= far_bound + 1e-9):
+            if abs(float(cur_far)) <= float(reverse_tip_max_m) + 1e-9:
+                scan_candidates.append(float(cur_far))
+            cur_far += sign * float(probe_step)
+        if abs(float(far_bound)) <= float(reverse_tip_max_m) + 1e-9:
+            scan_candidates.append(float(far_bound))
+        dedup_candidates = []
+        seen_key = set()
+        for s_val in scan_candidates:
+            key = round(float(s_val), 6)
+            if key in seen_key:
+                continue
+            seen_key.add(key)
+            dedup_candidates.append(float(s_val))
+        scan_candidates = dedup_candidates
+
     chosen_scan_dist: float | None = None
     output_crossline: LineString | None = None
     output_pieces_raw: list[LineString] = []
@@ -1297,6 +1324,7 @@ def _evaluate_node(
         )
         center_s_probe = float(crossline_probe.project(center_probe))
         has_center_piece = False
+        piece_info_probe: list[tuple[LineString, float, float, float]] = []
         for piece in pieces_probe:
             vals: list[float] = []
             for coord in list(piece.coords):
@@ -1307,9 +1335,31 @@ def _evaluate_node(
                 continue
             s0 = float(min(vals))
             s1 = float(max(vals))
+            sm = 0.5 * (s0 + s1)
+            piece_info_probe.append((piece, s0, s1, sm))
             if s0 - 1e-6 <= center_s_probe <= s1 + 1e-6:
                 has_center_piece = True
-                break
+        selected_piece_div_dist_m: float | None = None
+        if piece_info_probe and divstrip_union is not None and (not divstrip_union.is_empty):
+            center_hits_probe = [x for x in piece_info_probe if float(x[1]) - 1e-6 <= center_s_probe <= float(x[2]) + 1e-6]
+            if center_hits_probe:
+                selected_piece_probe = min(
+                    center_hits_probe,
+                    key=lambda x: (
+                        abs(float(x[3]) - center_s_probe),
+                        -float(x[0].length),
+                    ),
+                )
+            else:
+                selected_piece_probe = min(
+                    piece_info_probe,
+                    key=lambda x: (
+                        min(abs(center_s_probe - float(x[1])), abs(center_s_probe - float(x[2])), abs(center_s_probe - float(x[3]))),
+                        abs(float(x[3]) - center_s_probe),
+                        -float(x[0].length),
+                    ),
+                )
+            selected_piece_div_dist_m = float(selected_piece_probe[0].distance(divstrip_union))
         candidate_hits.append(
             {
                 "rank": int(rank),
@@ -1319,20 +1369,39 @@ def _evaluate_node(
                 "has_center_piece": bool(has_center_piece),
                 "has_extra": bool(len(pieces_probe) > 1),
                 "raw_count": int(len(pieces_probe)),
+                "selected_piece_div_dist_m": None if selected_piece_div_dist_m is None else float(selected_piece_div_dist_m),
             }
         )
 
     if candidate_hits:
-        best_hit = min(
-            candidate_hits,
-            key=lambda x: (
-                0 if bool(x.get("has_center_piece", False)) else 1,
-                0 if int(x.get("raw_count", 0)) == 1 else 1,
-                int(x.get("raw_count", 0)),
-                abs(float(x.get("s", 0.0)) - float(target_s)),
-                int(x.get("rank", 0)),
-            ),
-        )
+        if prefer_non_intersect_reverse:
+            best_hit = min(
+                candidate_hits,
+                key=lambda x: (
+                    0
+                    if (
+                        x.get("selected_piece_div_dist_m") is not None
+                        and float(x.get("selected_piece_div_dist_m", 0.0)) > float(div_tol) + 1e-9
+                    )
+                    else 1,
+                    0 if bool(x.get("has_center_piece", False)) else 1,
+                    0 if int(x.get("raw_count", 0)) == 1 else 1,
+                    int(x.get("raw_count", 0)),
+                    abs(float(x.get("s", 0.0)) - float(target_s)),
+                    int(x.get("rank", 0)),
+                ),
+            )
+        else:
+            best_hit = min(
+                candidate_hits,
+                key=lambda x: (
+                    0 if bool(x.get("has_center_piece", False)) else 1,
+                    0 if int(x.get("raw_count", 0)) == 1 else 1,
+                    int(x.get("raw_count", 0)),
+                    abs(float(x.get("s", 0.0)) - float(target_s)),
+                    int(x.get("rank", 0)),
+                ),
+            )
         chosen_scan_dist = float(best_hit["s"])
         output_crossline = best_hit["crossline"]
         output_pieces_raw = list(best_hit["pieces_raw"])
@@ -1671,6 +1740,18 @@ def _evaluate_node(
         dist_line_to_div = float(final_geom.distance(divstrip_union))
         has_divstrip_nearby = bool(dist_line_to_div <= float(div_tol))
         dist_to_div = float(gap_mid.distance(divstrip_union))
+        if bool(reverse_tip_used) and (s_drivezone_split_out is None) and has_divstrip_nearby:
+            _add_bp(
+                code=BP_DIVSTRIP_NON_INTERSECT_NOT_FOUND,
+                severity="hard",
+                message="reverse_no_split_non_intersect_not_found",
+                extra={
+                    "reverse_search_max_m": float(reverse_tip_max_m),
+                    "s_ref_m": float(ref_s),
+                    "s_chosen_m": float(scan_dist),
+                    "dist_line_to_divstrip_m": float(dist_line_to_div),
+                },
+            )
 
     if has_divstrip_nearby and bool(params.get("divstrip_anchor_snap_enabled", False)) and divstrip_union is not None:
         try:
