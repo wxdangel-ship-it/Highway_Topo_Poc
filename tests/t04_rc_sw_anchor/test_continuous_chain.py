@@ -160,7 +160,7 @@ def test_chain_order_enforced_prevents_same_location(tmp_path: Path) -> None:
     assert any(str(bp.get("code")) == "SEQUENTIAL_ORDER_VIOLATION" for bp in bp_fail)
 
 
-def test_continuous_successor_near_zero_tip_projection_expands_search(tmp_path: Path, monkeypatch) -> None:
+def test_continuous_successor_near_zero_tip_projection_guard_no_candidate_fallback(tmp_path: Path, monkeypatch) -> None:
     data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
     nodes, _node_meta, _node_err = load_nodes(
         path=Path(data["global_node_path"]),
@@ -220,8 +220,11 @@ def test_continuous_successor_near_zero_tip_projection_expands_search(tmp_path: 
     )
     assert str(res.get("divstrip_ref_source")) == "tip_projection"
     assert res.get("s_drivezone_split_m") is None
-    assert float(res.get("s_chosen_m", 0.0)) >= 1.0 - 1e-6
-    assert str(res.get("split_pick_source", "")).endswith("_seq_tip_projection_guard")
+    assert str(res.get("status")) == "fail"
+    assert bool(res.get("anchor_found")) is False
+    assert float(res.get("s_chosen_m", 0.0)) == 0.0
+    assert str(res.get("stop_reason")) == "continuous_tip_projection_guard_no_candidate"
+    assert str(res.get("split_pick_source", "")).endswith("_seq_tip_projection_guard_guard_no_candidate")
 
 
 def test_chain_merge_diverge_to_merge_within_5m_merges(tmp_path: Path) -> None:

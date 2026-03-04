@@ -1336,6 +1336,8 @@ def _evaluate_node(
     candidate_hits: list[dict[str, Any]] = []
     seq_pre_candidates = 0
     seq_filtered_out = 0
+    guard_reject_no_split_count = 0
+    guard_reject_divstrip_intersect_count = 0
     for rank, s_probe in enumerate(scan_candidates):
         if guard_near_zero_tip_projection and abs(float(s_probe)) < float(tip_projection_guard_min_abs_m) - 1e-9:
             continue
@@ -1406,6 +1408,19 @@ def _evaluate_node(
                     ),
                 )
             selected_piece_div_dist_m = float(selected_piece_probe[0].distance(divstrip_union))
+        raw_count = int(len(pieces_probe))
+        if guard_near_zero_tip_projection:
+            split_ok = bool(raw_count >= 2)
+            div_clear = bool(
+                selected_piece_div_dist_m is not None
+                and float(selected_piece_div_dist_m) > float(div_tol) + 1e-9
+            )
+            if not split_ok:
+                guard_reject_no_split_count += 1
+            if not div_clear:
+                guard_reject_divstrip_intersect_count += 1
+            if not (split_ok and div_clear):
+                continue
         candidate_hits.append(
             {
                 "rank": int(rank),
@@ -1414,10 +1429,74 @@ def _evaluate_node(
                 "pieces_raw": list(pieces_probe),
                 "has_center_piece": bool(has_center_piece),
                 "has_extra": bool(len(pieces_probe) > 1),
-                "raw_count": int(len(pieces_probe)),
+                "raw_count": int(raw_count),
                 "selected_piece_div_dist_m": None if selected_piece_div_dist_m is None else float(selected_piece_div_dist_m),
             }
         )
+
+    if guard_near_zero_tip_projection and (not candidate_hits):
+        output_crossline = LocalFrame.from_tangent(
+            origin_xy=(float(node.point.x), float(node.point.y)),
+            tangent_xy=scan_vec,
+        ).crossline(
+            scan_dist_m=0.0,
+            cross_half_len_m=float(output_cross_half_len_m),
+        )
+        _add_bp(
+            code=BP_DRIVEZONE_SPLIT_NOT_FOUND,
+            severity="hard",
+            message="continuous_tip_projection_guard_no_candidate",
+            extra={
+                "guard_min_abs_m": float(tip_projection_guard_min_abs_m),
+                "rejected_no_split_count": int(guard_reject_no_split_count),
+                "rejected_divstrip_intersect_count": int(guard_reject_divstrip_intersect_count),
+                "stop_dist_m": float(stop_dist),
+            },
+        )
+        out = _empty_fail_result(
+            nodeid=nodeid,
+            kind=kind,
+            anchor_type=anchor_type,
+            scan_dir=scan_dir_label,
+            line=output_crossline,
+            divstrip_union=divstrip_union,
+            drivezone_union=drivezone_union,
+            stop_reason="continuous_tip_projection_guard_no_candidate",
+            id_fields=node.id_fields,
+            resolved_from=resolved_from,
+            is_in_continuous_chain=bool(is_in_continuous_chain),
+            chain_component_id=chain_component_id,
+            chain_node_offset_m=chain_offset,
+            abs_s_prev_required_m=required_prev_abs,
+        )
+        out.update(
+            {
+                "stop_dist_m": float(stop_dist),
+                "next_intersection_dist_m": None if next_inter is None else float(next_inter),
+                "tip_s_m": None if tip_s is None else float(tip_s),
+                "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
+                "best_divstrip_dz_dist_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
+                "clip_empty": True,
+                "clip_piece_type": "none",
+                "clip_input_len_m": float(output_crossline.length),
+                "stop_diag": stop_diag,
+                "s_divstrip_m": None if s_divstrip_out is None else float(s_divstrip_out),
+                "s_drivezone_split_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
+                "s_chosen_m": 0.0,
+                "split_pick_source": f"{split_pick_source}_guard_no_candidate",
+                "divstrip_ref_source": str(divstrip_ref_source_out),
+                "divstrip_ref_offset_m": None,
+                "output_cross_half_len_m": float(output_cross_half_len_m),
+                "branch_a_id": branch_a_id,
+                "branch_b_id": branch_b_id,
+                "branch_axis_id": axis_id,
+                "has_divstrip_nearby": False,
+                "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
+                "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
+                **reverse_diag_payload,
+            }
+        )
+        return out
 
     if candidate_hits:
         if prefer_non_intersect_reverse:
@@ -1452,6 +1531,8 @@ def _evaluate_node(
         output_crossline = best_hit["crossline"]
         output_pieces_raw = list(best_hit["pieces_raw"])
         has_extra_piece = bool(best_hit["has_extra"])
+        if guard_near_zero_tip_projection and s_drivezone_split_out is None and int(best_hit.get("raw_count", 0)) >= 2:
+            s_drivezone_split_out = float(chosen_scan_dist)
 
     if output_crossline is None:
         output_crossline = LocalFrame.from_tangent(
