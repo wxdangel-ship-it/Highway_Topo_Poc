@@ -163,6 +163,7 @@ def build_summary_text(
     hard_breakpoints: Sequence[dict[str, Any]],
     soft_breakpoints: Sequence[dict[str, Any]],
     params: dict[str, Any],
+    lane_boundary_status: dict[str, Any] | None = None,
     max_lines: int = 120,
     max_bytes: int = 8 * 1024,
 ) -> str:
@@ -172,6 +173,11 @@ def build_summary_text(
     lines.append(f"git_sha: {git_sha}")
     lines.append(f"patch_id: {patch_id}")
     lines.append(f"overall_pass: {str(bool(overall_pass)).lower()}")
+    if isinstance(lane_boundary_status, dict):
+        used = str(bool(lane_boundary_status.get("used", False))).lower()
+        method = str(lane_boundary_status.get("method") or "skipped")
+        final_crs = str(lane_boundary_status.get("final_crs") or "none")
+        lines.append(f"lane_boundary: used={used}, method={method}, final_crs={final_crs}")
     lines.append("")
 
     candidate_count = int(road_candidate_count) if road_candidate_count is not None else int(len(roads))

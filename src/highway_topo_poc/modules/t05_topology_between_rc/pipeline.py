@@ -340,6 +340,8 @@ def run_patch(
     write_json(patch_out / "metrics.json", artifacts["metrics_payload"])
     write_json(patch_out / "intervals.json", artifacts["intervals_payload"])
     write_json(patch_out / "gate.json", artifacts["gate_payload"])
+    for rel_path, payload in dict(artifacts.get("debug_json_payloads", {})).items():
+        write_json(patch_out / str(rel_path), payload)
     for rel_path, payload in dict(artifacts.get("debug_feature_collections", {})).items():
         write_json(patch_out / str(rel_path), payload)
     (patch_out / "summary.txt").write_text(str(artifacts["summary_text"]), encoding="utf-8")
@@ -399,6 +401,22 @@ def _run_patch_core(
     drivezone_area_m2 = None
     drivezone_bounds_metric = None
     drivezone_src_crs = patch_inputs.input_summary.get("drivezone_src_crs")
+    lane_boundary_used = bool(
+        patch_inputs.input_summary.get("lane_boundary_used", bool(patch_inputs.lane_boundaries_metric))
+    )
+    lane_boundary_crs_inferred = bool(patch_inputs.input_summary.get("lane_boundary_crs_inferred", False))
+    lane_boundary_crs_method = str(patch_inputs.input_summary.get("lane_boundary_crs_method") or "skipped")
+    lane_boundary_crs_name_final = str(
+        patch_inputs.input_summary.get("lane_boundary_crs_name_final")
+        or patch_inputs.input_summary.get("lane_src_crs")
+        or "EPSG:3857"
+    )
+    lane_boundary_skipped_reason = patch_inputs.input_summary.get("lane_boundary_skipped_reason")
+    lane_boundary_debug_payloads: dict[str, dict[str, Any]] = {}
+    if bool(int(params.get("DEBUG_DUMP", 0))):
+        lane_crs_fix_raw = patch_inputs.input_summary.get("lane_boundary_crs_fix")
+        if isinstance(lane_crs_fix_raw, dict) and lane_crs_fix_raw:
+            lane_boundary_debug_payloads["debug/lane_boundary_crs_fix.json"] = dict(lane_crs_fix_raw)
     if patch_inputs.drivezone_zone_metric is not None and (not patch_inputs.drivezone_zone_metric.is_empty):
         drivezone_geom_type = str(getattr(patch_inputs.drivezone_zone_metric, "geom_type", ""))
         try:
@@ -485,6 +503,11 @@ def _run_patch_core(
         payload["drivezone_area_m2"] = drivezone_area_m2
         payload["drivezone_metric_bounds"] = drivezone_bounds_metric
         payload["drivezone_union_hash"] = _geometry_hash(patch_inputs.drivezone_zone_metric)
+        payload["lane_boundary_used"] = bool(lane_boundary_used)
+        payload["lane_boundary_crs_inferred"] = bool(lane_boundary_crs_inferred)
+        payload["lane_boundary_crs_method"] = str(lane_boundary_crs_method)
+        payload["lane_boundary_crs_name_final"] = str(lane_boundary_crs_name_final)
+        payload["lane_boundary_skipped_reason"] = lane_boundary_skipped_reason
         payload.update(xsec_cross_stats)
         payload.update(pair_cluster_norm_stats)
         return payload
@@ -514,6 +537,7 @@ def _run_patch_core(
             params=params,
             overall_pass=False,
             extra_metrics=_timing_extra_metrics(),
+            debug_json_payloads=lane_boundary_debug_payloads,
         )
 
     # 先用 Node.Kind 建初值，再用图度数二次推断。
@@ -753,6 +777,7 @@ def _run_patch_core(
                 "drivezone_union_hash": _geometry_hash(patch_inputs.drivezone_zone_metric),
                 **_timing_extra_metrics(),
             },
+            debug_json_payloads=lane_boundary_debug_payloads,
         )
 
     pointcloud_enabled = bool(int(params.get("POINTCLOUD_ENABLE", 0)))
@@ -2191,6 +2216,7 @@ def _run_patch_core(
             "neighbor_search_pass2_used": bool(int(neighbor_search_pass) == 2),
             **_timing_extra_metrics(),
         },
+        debug_json_payloads=lane_boundary_debug_payloads,
     )
 
 
@@ -6450,6 +6476,7 @@ def _finalize_payloads(
     overall_pass: bool,
     debug_layers: dict[str, list[dict[str, Any]]] | None = None,
     extra_metrics: dict[str, Any] | None = None,
+    debug_json_payloads: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     git_sha = git_short_sha(repo_root)
     digest = params_digest(params)
@@ -6555,6 +6582,11 @@ def _finalize_payloads(
         hard_breakpoints=hard_breakpoints,
         soft_breakpoints=soft_breakpoints,
         params=summary_params,
+        lane_boundary_status={
+            "used": metrics_payload.get("lane_boundary_used"),
+            "method": metrics_payload.get("lane_boundary_crs_method"),
+            "final_crs": metrics_payload.get("lane_boundary_crs_name_final"),
+        },
     )
 
     debug_feature_collections: dict[str, dict[str, Any]] = {}
@@ -6636,6 +6668,7 @@ def _finalize_payloads(
         "hard_breakpoints": hard_breakpoints,
         "soft_breakpoints": soft_breakpoints,
         "overall_pass": overall_pass,
+        "debug_json_payloads": dict(debug_json_payloads or {}),
         "debug_feature_collections": debug_feature_collections,
     }
 

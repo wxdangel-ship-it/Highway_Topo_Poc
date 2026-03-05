@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import math
 import re
@@ -11,7 +12,7 @@ from typing import Any, Sequence
 
 import numpy as np
 from pyproj import CRS, Transformer
-from shapely.geometry import LineString, Point, shape
+from shapely.geometry import LineString, Point, mapping, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform, unary_union
 
@@ -252,8 +253,10 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
         raise InputDataError(f"drivezone_missing: {drivezone_path}")
 
     inter_payload = _load_geojson(intersection_path)
-    lane_payload = _load_geojson(laneboundary_path) if laneboundary_path.is_file() else {"type": "FeatureCollection", "features": []}
     drive_payload = _load_geojson(drivezone_path)
+    lane_payload_raw = (
+        _load_geojson(laneboundary_path) if laneboundary_path.is_file() else {"type": "FeatureCollection", "features": []}
+    )
     div_payload = _load_geojson(divstrip_path) if divstrip_path.is_file() else {"type": "FeatureCollection", "features": []}
     node_payload = _load_geojson(node_path) if node_path.is_file() else {"type": "FeatureCollection", "features": []}
 
@@ -262,11 +265,35 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
 
     dst_crs = "EPSG:3857"
     inter_crs = _require_geojson_crs(inter_payload, path=intersection_path, allow_empty_if_no_features=False)
-    lane_crs = _require_geojson_crs(lane_payload, path=laneboundary_path, allow_empty_if_no_features=True) or inter_crs
     drive_crs = _require_geojson_crs(drive_payload, path=drivezone_path, allow_empty_if_no_features=False) or inter_crs
+    patch_crs_name = drive_crs
+    lane_fix_info: dict[str, Any]
+    if laneboundary_path.is_file():
+        lane_payload_fixed, lane_fix_info = fix_optional_geojson_crs(
+            lane_payload_raw,
+            path=laneboundary_path,
+            patch_crs_name=patch_crs_name,
+        )
+        if lane_payload_fixed is None:
+            lane_payload = {"type": "FeatureCollection", "features": []}
+            lane_crs = None
+        else:
+            lane_payload = lane_payload_fixed
+            lane_crs = _require_geojson_crs(lane_payload, path=laneboundary_path, allow_empty_if_no_features=True) or patch_crs_name
+    else:
+        lane_payload = {"type": "FeatureCollection", "features": []}
+        lane_crs = None
+        lane_fix_info = {
+            "used": False,
+            "inferred": False,
+            "method": "skipped",
+            "final_crs": patch_crs_name,
+            "skipped_reason": "file_missing",
+            "sample_coord": None,
+        }
     div_crs = _require_geojson_crs(div_payload, path=divstrip_path, allow_empty_if_no_features=True) or inter_crs
     inter_to_metric = _make_transformer(inter_crs, dst_crs)
-    lane_to_metric = _make_transformer(lane_crs, dst_crs)
+    lane_to_metric = _make_transformer(lane_crs or dst_crs, dst_crs)
     drive_to_metric = _make_transformer(drive_crs, dst_crs)
     div_to_metric = _make_transformer(div_crs, dst_crs)
 
@@ -282,6 +309,16 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
 
     intersections = _extract_intersections(inter_payload, inter_to_metric)
     lane_boundaries = _extract_linestrings(lane_payload, lane_to_metric)
+    lane_used = bool(lane_boundaries)
+    lane_fix_info = dict(lane_fix_info)
+    lane_fix_info["used"] = bool(lane_used)
+    lane_fix_info["final_crs"] = str(lane_fix_info.get("final_crs") or lane_crs or dst_crs)
+    if not lane_used:
+        lane_fix_info["method"] = "skipped"
+        if not str(lane_fix_info.get("skipped_reason") or "").strip():
+            lane_fix_info["skipped_reason"] = "lane_boundary_empty_or_unusable"
+    else:
+        lane_fix_info["skipped_reason"] = None
     drivezone_zone = _extract_polygon_union(drive_payload, drive_to_metric)
     divstrip_zone = _extract_polygon_union(div_payload, div_to_metric)
     if drivezone_zone is None or drivezone_zone.is_empty:
@@ -316,6 +353,13 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
             "lane_src_crs": lane_crs,
             "drivezone_src_crs": drive_crs,
             "divstrip_src_crs": div_crs if divstrip_path.is_file() else None,
+            "lane_boundary_used": bool(lane_fix_info.get("used", False)),
+            "lane_boundary_crs_inferred": bool(lane_fix_info.get("inferred", False)),
+            "lane_boundary_crs_method": str(lane_fix_info.get("method") or "skipped"),
+            "lane_boundary_crs_name_final": str(lane_fix_info.get("final_crs") or dst_crs),
+            "lane_boundary_skipped_reason": lane_fix_info.get("skipped_reason"),
+            "lane_boundary_sample_coord": lane_fix_info.get("sample_coord"),
+            "lane_boundary_crs_fix": lane_fix_info,
             "has_drivezone_file": drivezone_path.is_file(),
             "drivezone_feature_count": int(len(drive_payload.get("features", []))),
             "has_divstrip_file": divstrip_path.is_file(),
@@ -633,6 +677,170 @@ def _extract_declared_crs(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _set_geojson_crs(payload: dict[str, Any], crs_name: str) -> None:
+    payload["crs"] = {"type": "name", "properties": {"name": str(crs_name)}}
+
+
+def _sample_coord_from_shape(geom: BaseGeometry) -> tuple[float, float] | None:
+    gtype = str(getattr(geom, "geom_type", ""))
+    if gtype in {"Point", "LineString", "LinearRing"}:
+        coords = getattr(geom, "coords", None)
+        if coords is None:
+            return None
+        for coord in coords:
+            if len(coord) < 2:
+                continue
+            x = _to_float(coord[0])
+            y = _to_float(coord[1])
+            if math.isfinite(x) and math.isfinite(y):
+                return (float(x), float(y))
+        return None
+    if gtype == "Polygon":
+        ext = getattr(geom, "exterior", None)
+        if ext is None:
+            return None
+        for coord in ext.coords:
+            if len(coord) < 2:
+                continue
+            x = _to_float(coord[0])
+            y = _to_float(coord[1])
+            if math.isfinite(x) and math.isfinite(y):
+                return (float(x), float(y))
+        return None
+    for sub in getattr(geom, "geoms", []):
+        sample = _sample_coord_from_shape(sub)
+        if sample is not None:
+            return sample
+    return None
+
+
+def _sample_coord_from_fc(payload: dict[str, Any]) -> tuple[float, float] | None:
+    feats = payload.get("features")
+    if not isinstance(feats, list):
+        return None
+    for feat in feats:
+        if not isinstance(feat, dict):
+            continue
+        geom_raw = feat.get("geometry")
+        if not isinstance(geom_raw, dict):
+            continue
+        try:
+            geom = shape(geom_raw)
+        except Exception:
+            continue
+        if geom is None or geom.is_empty:
+            continue
+        sample = _sample_coord_from_shape(geom)
+        if sample is not None:
+            return sample
+    return None
+
+
+def infer_coord_scale(fc: dict[str, Any]) -> str:
+    sample = _sample_coord_from_fc(fc)
+    if sample is None:
+        return "unknown"
+    x, y = sample
+    if abs(float(x)) <= 180.0 and abs(float(y)) <= 90.0:
+        return "lonlat"
+    return "projected"
+
+
+def reproject_fc(fc: dict[str, Any], src_crs_name: str, dst_crs_name: str) -> dict[str, Any]:
+    src_crs = _normalize_epsg_name(src_crs_name)
+    dst_crs = _normalize_epsg_name(dst_crs_name)
+    if src_crs is None or dst_crs is None:
+        raise InputDataError(f"crs_invalid: src={src_crs_name} dst={dst_crs_name}")
+    out = copy.deepcopy(fc)
+    _set_geojson_crs(out, dst_crs)
+    if src_crs == dst_crs:
+        return out
+    tf = _make_transformer(src_crs, dst_crs)
+    feats = out.get("features")
+    if not isinstance(feats, list):
+        return out
+    for feat in feats:
+        if not isinstance(feat, dict):
+            continue
+        geom_raw = feat.get("geometry")
+        if not isinstance(geom_raw, dict):
+            continue
+        try:
+            geom = shape(geom_raw)
+        except Exception:
+            continue
+        if geom is None or geom.is_empty:
+            continue
+        projected = _transform_geometry(geom, tf)
+        if projected is None or projected.is_empty:
+            continue
+        feat["geometry"] = mapping(projected)
+    return out
+
+
+def fix_optional_geojson_crs(
+    fc: dict[str, Any],
+    *,
+    path: Path,
+    patch_crs_name: str,
+    debug: bool = False,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    del debug
+    patch_crs = _normalize_epsg_name(patch_crs_name)
+    if patch_crs is None:
+        raise InputDataError(f"crs_invalid: src={patch_crs_name} dst={patch_crs_name}")
+    sample = _sample_coord_from_fc(fc)
+    info: dict[str, Any] = {
+        "used": True,
+        "inferred": False,
+        "method": "inherit_drivezone",
+        "final_crs": patch_crs,
+        "skipped_reason": None,
+        "sample_coord": ([float(sample[0]), float(sample[1])] if sample is not None else None),
+    }
+    feats = fc.get("features")
+    has_features = isinstance(feats, list) and len(feats) > 0
+    declared = _extract_declared_crs(fc)
+    if declared is not None:
+        declared_norm = _normalize_epsg_name(declared)
+        if declared_norm is None:
+            raise InputDataError(f"geojson_crs_invalid: {path}: {declared}")
+        normalized = copy.deepcopy(fc)
+        _set_geojson_crs(normalized, declared_norm)
+        if declared_norm == patch_crs:
+            info["method"] = "inherit_drivezone"
+            info["final_crs"] = patch_crs
+            return normalized, info
+        if declared_norm == "EPSG:4326":
+            info["method"] = "coord_scale_crs84_reproject"
+        else:
+            info["method"] = "declared_reproject"
+        info["final_crs"] = patch_crs
+        return reproject_fc(normalized, declared_norm, patch_crs), info
+    if (not has_features) or sample is None:
+        info["used"] = False
+        info["method"] = "skipped"
+        info["skipped_reason"] = "crs_missing_uninferable_or_empty"
+        return None, info
+    coord_scale = infer_coord_scale(fc)
+    if coord_scale == "lonlat":
+        info["inferred"] = True
+        info["method"] = "coord_scale_crs84_reproject"
+        info["final_crs"] = patch_crs
+        return reproject_fc(fc, "EPSG:4326", patch_crs), info
+    if coord_scale == "projected":
+        out = copy.deepcopy(fc)
+        _set_geojson_crs(out, patch_crs)
+        info["inferred"] = True
+        info["method"] = "inherit_drivezone"
+        info["final_crs"] = patch_crs
+        return out, info
+    info["used"] = False
+    info["method"] = "skipped"
+    info["skipped_reason"] = "crs_missing_uninferable_or_empty"
+    return None, info
+
+
 def _extract_intersections(payload: dict[str, Any], to_metric: callable) -> list[CrossSection]:
     out: list[CrossSection] = []
     for feat in payload.get("features", []):
@@ -843,8 +1051,10 @@ def normalize_geojson_crs_name(name: str) -> str:
 
     crs84_aliases = {
         "CRS84",
+        "OGC:CRS84",
         "OGC:1.3:CRS84",
         "URN:OGC:DEF:CRS:OGC:1.3:CRS84",
+        "URN:OGC:DEF:CRS:OGC::CRS84",
     }
     if upper in crs84_aliases:
         return "EPSG:4326"
@@ -942,13 +1152,16 @@ __all__ = [
     "ProjectionInfo",
     "TrajectoryData",
     "discover_patch_dirs",
+    "fix_optional_geojson_crs",
     "git_short_sha",
+    "infer_coord_scale",
     "load_patch_inputs",
     "load_point_cloud_window",
     "make_run_id",
     "metric_lines_to_input_crs",
     "normalize_geojson_crs_name",
     "probe_patch",
+    "reproject_fc",
     "resolve_repo_root",
     "write_geojson_lines",
     "write_json",
