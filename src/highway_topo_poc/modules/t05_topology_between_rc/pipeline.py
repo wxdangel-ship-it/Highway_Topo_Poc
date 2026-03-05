@@ -397,10 +397,14 @@ def _run_patch_core(
     divstrip_area_m2 = None
     divstrip_bounds_metric = None
     divstrip_src_crs = patch_inputs.input_summary.get("divstrip_src_crs")
+    divstrip_crs_inferred = bool(patch_inputs.input_summary.get("divstrip_crs_inferred", False))
     drivezone_geom_type = None
     drivezone_area_m2 = None
     drivezone_bounds_metric = None
     drivezone_src_crs = patch_inputs.input_summary.get("drivezone_src_crs")
+    drivezone_crs_inferred = bool(patch_inputs.input_summary.get("drivezone_crs_inferred", False))
+    intersection_src_crs = patch_inputs.input_summary.get("intersection_src_crs")
+    intersection_crs_inferred = bool(patch_inputs.input_summary.get("intersection_crs_inferred", False))
     lane_boundary_used = bool(
         patch_inputs.input_summary.get("lane_boundary_used", bool(patch_inputs.lane_boundaries_metric))
     )
@@ -499,10 +503,14 @@ def _run_patch_core(
         payload["traj_surface_cache_miss_count"] = int(surface_cache_miss_count)
         payload.update(pointcloud_stats)
         payload["drivezone_src_crs"] = drivezone_src_crs
+        payload["drivezone_crs_inferred"] = bool(drivezone_crs_inferred)
         payload["drivezone_metric_geom_type"] = drivezone_geom_type
         payload["drivezone_area_m2"] = drivezone_area_m2
         payload["drivezone_metric_bounds"] = drivezone_bounds_metric
         payload["drivezone_union_hash"] = _geometry_hash(patch_inputs.drivezone_zone_metric)
+        payload["intersection_src_crs"] = intersection_src_crs
+        payload["intersection_crs_inferred"] = bool(intersection_crs_inferred)
+        payload["divstrip_crs_inferred"] = bool(divstrip_crs_inferred)
         payload["lane_boundary_used"] = bool(lane_boundary_used)
         payload["lane_boundary_crs_inferred"] = bool(lane_boundary_crs_inferred)
         payload["lane_boundary_crs_method"] = str(lane_boundary_crs_method)
@@ -6558,6 +6566,7 @@ def _finalize_payloads(
                 or sk.startswith("slice_half_win_")
                 or sk.startswith("pointcloud_")
                 or sk.startswith("drivezone_")
+                or sk.startswith("intersection_")
                 or sk.startswith("step1_corridor_")
                 or sk.startswith("step1_main_corridor_")
                 or sk.startswith("traj_surface_cache_")

@@ -24,6 +24,12 @@ def _write_fc(path: Path, *, features: list[dict], crs: str | None) -> None:
     _write_json(path, payload)
 
 
+def _drop_crs(path: Path) -> None:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("crs", None)
+    _write_json(path, payload)
+
+
 def _build_patch(
     tmp_path: Path,
     *,
@@ -165,6 +171,32 @@ def test_optional_laneboundary_missing_crs_empty_skipped_and_pipeline_continues(
     assert metrics.get("lane_boundary_crs_method") == "skipped"
     assert str(metrics.get("lane_boundary_skipped_reason") or "") != ""
     assert (result.output_dir / "debug" / "lane_boundary_crs_fix.json").is_file()
+
+
+def test_required_inputs_missing_crs_projected_are_inferred(tmp_path: Path) -> None:
+    lane_payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": [[940_000.0, 6_275_010.0], [940_100.0, 6_275_020.0]]},
+                "properties": {},
+            }
+        ],
+        "crs": {"type": "name", "properties": {"name": "EPSG:3857"}},
+    }
+    patch_dir = _build_patch(tmp_path, patch_id="p_required_infer", lane_payload=lane_payload)
+    _drop_crs(patch_dir / "Vector" / "DriveZone.geojson")
+    _drop_crs(patch_dir / "Vector" / "intersection_l.geojson")
+    _drop_crs(patch_dir / "Traj" / "0001" / "raw_dat_pose.geojson")
+
+    loaded = load_patch_inputs(patch_dir.parent, patch_id=patch_dir.name)
+    assert loaded.input_summary.get("drivezone_src_crs") == "EPSG:3857"
+    assert bool(loaded.input_summary.get("drivezone_crs_inferred")) is True
+    assert loaded.input_summary.get("intersection_src_crs") == "EPSG:3857"
+    assert bool(loaded.input_summary.get("intersection_crs_inferred")) is True
+    assert loaded.trajectories
+    assert all(str(t.source_crs) == "EPSG:3857" for t in loaded.trajectories)
 
 
 @pytest.mark.parametrize(
