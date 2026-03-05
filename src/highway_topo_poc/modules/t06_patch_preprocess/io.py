@@ -94,9 +94,11 @@ def _read_geojson(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _extract_crs_name(payload: dict[str, Any], *, path: Path) -> str:
+def _extract_crs_name(payload: dict[str, Any], *, path: Path, allow_missing: bool = False) -> str | None:
     crs_obj = payload.get("crs")
     if not isinstance(crs_obj, dict):
+        if allow_missing and crs_obj is None:
+            return None
         raise InputDataError(f"crs_missing: {path}")
     props = crs_obj.get("properties")
     if not isinstance(props, dict):
@@ -282,9 +284,9 @@ def _load_roads(path: Path) -> tuple[list[RoadFeature], str]:
     return out, crs_name
 
 
-def _load_drivezone(path: Path) -> tuple[list[BaseGeometry], str]:
+def _load_drivezone(path: Path) -> tuple[list[BaseGeometry], str | None]:
     payload = _read_geojson(path)
-    crs_name = _extract_crs_name(payload, path=path)
+    crs_name = _extract_crs_name(payload, path=path, allow_missing=True)
     out: list[BaseGeometry] = []
     for i, feat in enumerate(payload.get("features", [])):
         if not isinstance(feat, dict):
@@ -321,6 +323,17 @@ def load_inputs(
     nodes, node_crs = _load_nodes(node_path)
     roads, road_crs = _load_roads(road_path)
     drivezones, drivezone_crs = _load_drivezone(drivezone_path)
+
+    if drivezone_crs is None:
+        if node_crs == road_crs:
+            drivezone_crs = node_crs
+            compat_note = f"crs_fallback_from_node_road:{drivezone_crs}"
+            drivezone_note = f"{drivezone_note};{compat_note}" if drivezone_note else compat_note
+        else:
+            raise InputDataError(
+                "drivezone_crs_missing_and_node_road_crs_mismatch: "
+                f"node_crs={node_crs} road_crs={road_crs} path={drivezone_path}"
+            )
 
     if not nodes:
         raise InputDataError(f"node_empty: {node_path}")

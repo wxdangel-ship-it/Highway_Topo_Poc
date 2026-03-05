@@ -8,12 +8,10 @@ from shapely.geometry import LineString, Point, Polygon, mapping
 from highway_topo_poc.modules.t06_patch_preprocess import geom, pipeline
 
 
-def _write_fc(path: Path, *, crs: str, features: list[dict]) -> None:
-    payload = {
-        "type": "FeatureCollection",
-        "crs": {"type": "name", "properties": {"name": crs}},
-        "features": features,
-    }
+def _write_fc(path: Path, *, crs: str | None, features: list[dict]) -> None:
+    payload = {"type": "FeatureCollection", "features": features}
+    if crs is not None:
+        payload["crs"] = {"type": "name", "properties": {"name": crs}}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -149,3 +147,31 @@ def test_case4_both_endpoints_missing_drops_road(tmp_path: Path) -> None:
     assert summary["missing_endpoint_refs_out"] == 0
     assert drop_reasons.get("no_existing_endpoint_connected") == 1
     assert road_fc["features"] == []
+
+
+def test_case5_missing_drivezone_crs_uses_node_road_crs(tmp_path: Path) -> None:
+    patch = tmp_path / "p_case5"
+    vec = patch / "Vector"
+    _write_fc(
+        vec / "RCSDNode.geojson",
+        crs="EPSG:3857",
+        features=[_node_feature(1, 0.0, 0.0), _node_feature(2, 10.0, 0.0)],
+    )
+    _write_fc(
+        vec / "RCSDRoad.geojson",
+        crs="EPSG:3857",
+        features=[_road_feature(1, 2, [(0.0, 0.0), (10.0, 0.0)])],
+    )
+    _write_fc(
+        vec / "DriveZone.geojson",
+        crs=None,
+        features=[_poly_feature(Polygon([(-1.0, -1.0), (11.0, -1.0), (11.0, 1.0), (-1.0, 1.0)]))],
+    )
+
+    result = pipeline.run_patch(data_root=patch, patch="auto", run_id="ut_case5", out_root=tmp_path / "out", overwrite=True)
+    summary = _read_json(result.summary_path)
+    road_fc = _read_json(result.output_dir / "Vector" / "RCSDRoad.geojson")
+
+    assert summary["roads_in"] == 1
+    assert summary["roads_out"] == 1
+    assert road_fc["crs"]["properties"]["name"] == "EPSG:3857"
