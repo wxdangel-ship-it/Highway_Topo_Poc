@@ -34,6 +34,15 @@
 
 优先级：`CLI > config_json`
 
+### 2.4 Patch-only 输入入口（脚本补充）
+- 脚本：`scripts/run_t04_patch_auto_nodes.sh`
+- 输入：`PATCH_DIR`（可选 `KIND_MASK`，默认 `24=8|16`）
+- 行为：
+  - 从 `PATCH_DIR/Vector/RCSDNode.geojson`（fallback `Node.geojson`）自动发现节点。
+  - 发现结果写入 `focus_node_ids_resolved.txt/json` 后，调用既有 `mode=global_focus`。
+  - 节点为空时 fail-closed（非 0 退出），并写 `node_discovery_report.json` 解释原因。
+- 说明：该脚本仅改变“入口与节点来源”，不改变模块核心算法链路。
+
 ## 3. 字段归一化契约
 - 所有 properties 访问必须走 `field_norm.normalize_props`。
 - `kind` 读取：`get_first_int(..., ["kind"])`。
@@ -167,6 +176,12 @@
 - `breakpoints.json`
 - `summary.txt`
 - `chosen_config.json`
+
+Patch-only 脚本附加审计文件（可选）：
+- `focus_node_ids_resolved.txt`
+- `focus_node_ids_resolved.json`
+- `node_discovery_report.json`
+- `auto_nodes.meta.json`
 
 `intersection_l_opt*.geojson`：
 - 默认每个有效 node 输出一条连续 LineString。

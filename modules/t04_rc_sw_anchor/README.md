@@ -49,7 +49,27 @@ python -m highway_topo_poc.modules.t04_rc_sw_anchor \
   --disable_geometric_stop_fallback true
 ```
 
-## 5. 输出目录
+## 5. Patch-only 入口（WSL）
+仅传 `PATCH_DIR`，自动从 `Patch/Vector/RCSDNode.geojson` 发现节点并调用现有 `global_focus` 链路：
+```bash
+bash scripts/run_t04_patch_auto_nodes.sh /mnt/d/TestData/highway_topo_poc_data/normal/<PATCH_ID>
+```
+
+可选 `KIND_MASK`（默认 `24=8|16`，支持十进制/十六进制）：
+```bash
+bash scripts/run_t04_patch_auto_nodes.sh /mnt/d/TestData/highway_topo_poc_data/normal/<PATCH_ID> 24
+KIND_MASK=0x18 bash scripts/run_t04_patch_auto_nodes.sh /mnt/d/TestData/highway_topo_poc_data/normal/<PATCH_ID>
+```
+
+脚本审计产物（`outputs/_work/t04_rc_sw_anchor/<run_id>/`）：
+- `focus_node_ids_resolved.txt`
+- `focus_node_ids_resolved.json`
+- `node_discovery_report.json`
+- `auto_nodes.meta.json`（包含 `auto_nodes=true/auto_nodes_count/kind_mask` 等）
+
+若过滤后节点为空，脚本会 fail-closed 退出（非 0），并保留 `node_discovery_report.json` 解释原因。
+
+## 6. 输出目录
 `outputs/_work/t04_rc_sw_anchor/<run_id>/`
 
 - `anchors_3857.geojson`
@@ -74,10 +94,10 @@ python -m highway_topo_poc.modules.t04_rc_sw_anchor \
 - 每条 feature 对应一个 split-event，包含 `event_idx/event_s_m/event_dir/pieces_count_at_event/expected_events`。
 - `intersection_l_opt` 仍只输出主结果（单条）。
 
-## 6. 已知边界
+## 7. 已知边界
 - `N<=2` 稳定保持基线行为不变。
 - `N>2` 已支持 split-events 提取与主结果选择，但方向基准仍复用“最大夹角对”。
 - `min_piece_len_m` 仅用于数值噪声抑制，不用于业务口径 auto-tune。
 
-## 7. 配置模板
+## 8. 配置模板
 `modules/t04_rc_sw_anchor/t04_config_template_global_focus.json`
