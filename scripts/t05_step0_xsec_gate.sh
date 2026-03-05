@@ -11,6 +11,7 @@ RUN_ID="auto"
 OUT_ROOT="$(t05_default_out_root "$REPO_ROOT")"
 DEBUG=0
 FORCE=0
+STEP0_MODE="${STEP0_MODE:-lite}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -18,6 +19,7 @@ while [ $# -gt 0 ]; do
     --patch_id) PATCH_ID="$2"; shift 2 ;;
     --run_id) RUN_ID="$2"; shift 2 ;;
     --out_root) OUT_ROOT="$2"; shift 2 ;;
+    --step0_mode) STEP0_MODE="$2"; shift 2 ;;
     --debug) DEBUG=1; shift ;;
     --force) FORCE=1; shift ;;
     *)
@@ -64,7 +66,8 @@ else
     --patch_id "$PATCH_ID" \
     --run_id "$RUN_ID" \
     --out_root "$OUT_ROOT" \
-    --debug_dump "$DEBUG"; then
+    --debug_dump "$DEBUG" \
+    --step0_mode "$STEP0_MODE"; then
     t05_write_state "$PY" "$STATE" "step0" "0" "RUN_FAILED" "$RUN_ID" "$PATCH_ID" "$DATA_ROOT" "$OUT_ROOT"
     echo "ERROR: step0 run failed" >&2
     exit 1
@@ -82,11 +85,12 @@ for f in metrics.json gate.json summary.txt; do
   fi
 done
 
-STATE_EXTRA="$("$PY" - "$PATCH_OUT/metrics.json" "$DEBUG" <<'PY'
+STATE_EXTRA="$("$PY" - "$PATCH_OUT/metrics.json" "$DEBUG" "$STEP0_MODE" <<'PY'
 import json
 import sys
-metrics_path, debug_flag = sys.argv[1], sys.argv[2]
+metrics_path, debug_flag, step0_mode = sys.argv[1], sys.argv[2], sys.argv[3]
 payload = {"debug_dump": bool(int(debug_flag))}
+payload["step0_mode"] = str(step0_mode)
 try:
     with open(metrics_path, "r", encoding="utf-8") as f:
         metrics = json.load(f)

@@ -105,7 +105,7 @@ def test_xsec_gate_fallback_accepts_3d_seed_coords() -> None:
         trajectories=[],
         drivezone_zone_metric=drivezone_far,
         gore_zone_metric=None,
-        params=dict(),
+        params={"STEP0_MODE": "full"},
     )
 
     got = out_map[99].geometry_metric

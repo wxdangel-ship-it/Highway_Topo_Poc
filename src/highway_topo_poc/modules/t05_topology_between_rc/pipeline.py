@@ -205,6 +205,12 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "XSEC_GATE_TRAJ_EVIDENCE_MAX_POINTS": 300000,
     "XSEC_GATE_TRAJ_EVIDENCE_SAMPLE_STEP": 4,
     "XSEC_GATE_TRAJ_EVIDENCE_MAX_TRAJ": 300,
+    "STEP0_MODE": "lite",
+    "STEP0_LITE_MIN_IN_DRIVEZONE_RATIO": 0.90,
+    "STEP0_LITE_MAX_IN_DIVSTRIP_RATIO": 0.01,
+    "STEP0_LITE_MIN_LEN_M": 5.0,
+    "STEP0_LITE_ALLOW_PASSTHROUGH_WHEN_DIVSTRIP_MISSING": 1,
+    "STEP0_STATS_ENABLE": 1,
     "CACHE_ENABLED": 1,
 }
 
@@ -510,11 +516,11 @@ def _run_patch_core(
         or "EPSG:3857"
     )
     lane_boundary_skipped_reason = patch_inputs.input_summary.get("lane_boundary_skipped_reason")
-    lane_boundary_debug_payloads: dict[str, dict[str, Any]] = {}
+    debug_json_payloads: dict[str, dict[str, Any]] = {}
     if bool(int(params.get("DEBUG_DUMP", 0))):
         lane_crs_fix_raw = patch_inputs.input_summary.get("lane_boundary_crs_fix")
         if isinstance(lane_crs_fix_raw, dict) and lane_crs_fix_raw:
-            lane_boundary_debug_payloads["debug/lane_boundary_crs_fix.json"] = dict(lane_crs_fix_raw)
+            debug_json_payloads["debug/lane_boundary_crs_fix.json"] = dict(lane_crs_fix_raw)
     if patch_inputs.drivezone_zone_metric is not None and (not patch_inputs.drivezone_zone_metric.is_empty):
         drivezone_geom_type = str(getattr(patch_inputs.drivezone_zone_metric, "geom_type", ""))
         try:
@@ -577,6 +583,31 @@ def _run_patch_core(
             xsec_cross_count=int(len(xsec_cross_map)),
             xsec_gate_enabled=bool(xsec_cross_stats.get("xsec_gate_enabled", False)),
         )
+    xsec_cross_selected_debug_items: list[dict[str, Any]] = []
+    if bool(int(params.get("DEBUG_DUMP", 0))):
+        debug_json_payloads["debug/xsec_gate_meta_map.json"] = {
+            str(int(k)): dict(v) for k, v in sorted(xsec_gate_meta_map.items(), key=lambda it: int(it[0]))
+        }
+        for nodeid, xsec in sorted(xsec_cross_map.items(), key=lambda it: int(it[0])):
+            if xsec is None:
+                continue
+            geom = getattr(xsec, "geometry_metric", None)
+            if not isinstance(geom, LineString) or geom.is_empty:
+                continue
+            meta = dict(xsec_gate_meta_map.get(int(nodeid), {}))
+            xsec_cross_selected_debug_items.append(
+                {
+                    "geometry": geom,
+                    "properties": {
+                        "nodeid": int(nodeid),
+                        "mode": str(meta.get("mode") or ""),
+                        "selected_by": str(meta.get("selected_by") or ""),
+                        "fallback": bool(meta.get("fallback", False)),
+                        "in_drivezone_ratio": meta.get("in_drivezone_ratio"),
+                        "in_divstrip_ratio": meta.get("in_divstrip_ratio"),
+                    },
+                }
+            )
     pair_cluster_norm_stats: dict[str, Any] = {
         "step1_pair_cluster_disabled": False,
         "step1_pair_cluster_disabled_pair_count": 0,
@@ -653,7 +684,7 @@ def _run_patch_core(
             params=params,
             overall_pass=False,
             extra_metrics=_timing_extra_metrics(),
-            debug_json_payloads=lane_boundary_debug_payloads,
+            debug_json_payloads=debug_json_payloads,
         )
 
     # 先用 Node.Kind 建初值，再用图度数二次推断。
@@ -911,7 +942,7 @@ def _run_patch_core(
                 "drivezone_union_hash": _geometry_hash(patch_inputs.drivezone_zone_metric),
                 **_timing_extra_metrics(),
             },
-            debug_json_payloads=lane_boundary_debug_payloads,
+            debug_json_payloads=debug_json_payloads,
         )
 
     pointcloud_enabled = bool(int(params.get("POINTCLOUD_ENABLE", 0)))
@@ -973,6 +1004,7 @@ def _run_patch_core(
         "step3_endpoint_src_dst": _mk_debug_layer(),
         "xsec_anchor_points": _mk_debug_layer(seed=list(xsec_anchor_debug_items)),
         "xsec_truncated": _mk_debug_layer(seed=list(xsec_trunc_debug_items)),
+        "xsec_cross_selected": _mk_debug_layer(seed=list(xsec_cross_selected_debug_items)),
         "drivezone_union": _mk_debug_layer(),
         "xsec_valid_src": _mk_debug_layer(),
         "xsec_valid_dst": _mk_debug_layer(),
@@ -2372,7 +2404,7 @@ def _run_patch_core(
             "neighbor_search_pass2_used": bool(int(neighbor_search_pass) == 2),
             **_timing_extra_metrics(),
         },
-        debug_json_payloads=lane_boundary_debug_payloads,
+        debug_json_payloads=debug_json_payloads,
     )
 
 
@@ -6124,7 +6156,13 @@ def _truncate_cross_sections_for_crossing(
     gate_fallback_count = 0
     gate_empty_count = 0
     gate_selected_count = 0
+    passthrough_count = 0
+    repaired_count = 0
+    failed_count = 0
+    drivezone_ratio_values: list[float] = []
+    divstrip_ratio_values: list[float] = []
     use_drivezone_gate = bool(drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty))
+    divstrip_available = bool(gore_zone_metric is not None and (not gore_zone_metric.is_empty))
     lmax = float(max(10.0, params.get("XSEC_TRUNC_LMAX_M", 80.0)))
     step = float(max(0.5, params.get("XSEC_TRUNC_STEP_M", 1.0)))
     nonpass_k = int(max(2, params.get("XSEC_TRUNC_NONPASS_K", 6)))
@@ -6139,6 +6177,30 @@ def _truncate_cross_sections_for_crossing(
     gate_traj_evidence_zone: BaseGeometry | None = None
     traj_union_ready = False
     traj_evidence_disabled_reason: str | None = None
+    mode_raw = str(params.get("STEP0_MODE", "lite")).strip().lower()
+    step0_mode = mode_raw if mode_raw in {"lite", "full", "off"} else "lite"
+    step0_lite_min_in_drivezone_ratio = float(max(0.0, min(1.0, float(params.get("STEP0_LITE_MIN_IN_DRIVEZONE_RATIO", 0.90)))))
+    step0_lite_max_in_divstrip_ratio = float(max(0.0, min(1.0, float(params.get("STEP0_LITE_MAX_IN_DIVSTRIP_RATIO", 0.01)))))
+    step0_lite_min_len_m = float(max(0.0, float(params.get("STEP0_LITE_MIN_LEN_M", 5.0))))
+
+    def _as_bool_param(value: Any, default: bool) -> bool:
+        if isinstance(value, bool):
+            return bool(value)
+        if isinstance(value, (int, float)):
+            return bool(int(value))
+        if isinstance(value, str):
+            token = value.strip().lower()
+            if token in {"1", "true", "yes", "on"}:
+                return True
+            if token in {"0", "false", "no", "off"}:
+                return False
+        return bool(default)
+
+    step0_lite_allow_passthrough_when_divstrip_missing = _as_bool_param(
+        params.get("STEP0_LITE_ALLOW_PASSTHROUGH_WHEN_DIVSTRIP_MISSING", 1),
+        True,
+    )
+    step0_stats_enable = _as_bool_param(params.get("STEP0_STATS_ENABLE", 1), True)
 
     def _ensure_traj_evidence() -> None:
         nonlocal traj_union_ready, traj_union, gate_traj_evidence_zone, traj_evidence_disabled_reason
@@ -6164,32 +6226,181 @@ def _truncate_cross_sections_for_crossing(
         if gate_traj_evidence_zone is None:
             traj_evidence_disabled_reason = "zone_build_failed"
 
+    def _to_line_2d(line: LineString) -> LineString:
+        return LineString(
+            [
+                (float(coord[0]), float(coord[1]))
+                for coord in line.coords
+                if len(coord) >= 2
+            ]
+        )
+
+    def _line_len(geom: BaseGeometry | None) -> float:
+        if geom is None or geom.is_empty:
+            return 0.0
+        try:
+            v = float(geom.length)
+        except Exception:
+            return 0.0
+        return v if np.isfinite(v) and v > 0.0 else 0.0
+
+    def _ratio(line: BaseGeometry | None, mask: BaseGeometry | None) -> float | None:
+        total = _line_len(line)
+        if total <= 1e-6:
+            return None
+        if mask is None or mask.is_empty:
+            return None
+        try:
+            inside = float(line.intersection(mask).length)  # type: ignore[union-attr]
+        except Exception:
+            return None
+        if not np.isfinite(inside):
+            return None
+        return float(max(0.0, min(1.0, inside / max(total, 1e-6))))
+
+    def _line_ratios(line: BaseGeometry | None) -> tuple[float | None, float | None]:
+        return (
+            _ratio(line, drivezone_zone_metric if use_drivezone_gate else None),
+            _ratio(line, gore_zone_metric if divstrip_available else None),
+        )
+
+    def _append_ratio_stats(*, drivezone_ratio: float | None, divstrip_ratio: float | None) -> None:
+        if drivezone_ratio is not None and np.isfinite(float(drivezone_ratio)):
+            drivezone_ratio_values.append(float(drivezone_ratio))
+        if divstrip_ratio is not None and np.isfinite(float(divstrip_ratio)):
+            divstrip_ratio_values.append(float(divstrip_ratio))
+
+    def _safe_percentile(values: Sequence[float], q: float) -> float | None:
+        if not values:
+            return None
+        arr = np.asarray([float(v) for v in values if np.isfinite(float(v))], dtype=np.float64)
+        if arr.size == 0:
+            return None
+        return float(np.percentile(arr, float(q)))
+
     n_steps = int(max(1, round(lmax / step)))
 
     for nodeid, cs in xsec_map.items():
         geom = cs.geometry_metric
         if geom is None or geom.is_empty or geom.length <= 1e-6:
-            out[int(nodeid)] = cs
+            gate_empty_count += 1
+            failed_count += 1
+            gate_all_map[int(nodeid)] = geom
+            gate_meta_map[int(nodeid)] = {
+                "len_m": 0.0,
+                "geom_type": str(getattr(geom, "geom_type", "")) if geom is not None else "",
+                "fallback": True,
+                "mode": "failed",
+                "selected_by": "seed_empty",
+                "selection_source": "seed_empty",
+                "in_drivezone_ratio": None,
+                "in_divstrip_ratio": None,
+                "failed_reason": "seed_empty",
+            }
             fallback_orig += 1
             continue
         center = geom.interpolate(0.5, normalized=True)
         c_xy = point_xy_safe(center, context="xsec_trunc_anchor")
         if c_xy is None:
-            out[int(nodeid)] = cs
+            gate_empty_count += 1
+            failed_count += 1
+            gate_all_map[int(nodeid)] = geom
+            gate_meta_map[int(nodeid)] = {
+                "len_m": float(_line_len(geom)),
+                "geom_type": str(getattr(geom, "geom_type", "")),
+                "fallback": True,
+                "mode": "failed",
+                "selected_by": "anchor_missing",
+                "selection_source": "anchor_missing",
+                "in_drivezone_ratio": None,
+                "in_divstrip_ratio": None,
+                "failed_reason": "anchor_missing",
+            }
             fallback_orig += 1
             continue
         ax = float(c_xy[0])
         ay = float(c_xy[1])
+        geom_2d = _to_line_2d(geom)
+        seed_len_m = float(_line_len(geom_2d))
+        seed_drive_ratio, seed_div_ratio = _line_ratios(geom_2d)
 
+        lite_failed_reasons: list[str] = []
+        if step0_mode == "lite":
+            if seed_len_m < step0_lite_min_len_m:
+                lite_failed_reasons.append("seed_too_short")
+            if seed_drive_ratio is None or seed_drive_ratio < step0_lite_min_in_drivezone_ratio:
+                lite_failed_reasons.append("drivezone_ratio_below_threshold")
+            if divstrip_available:
+                if seed_div_ratio is None:
+                    lite_failed_reasons.append("divstrip_ratio_missing")
+                elif seed_div_ratio > step0_lite_max_in_divstrip_ratio:
+                    lite_failed_reasons.append("divstrip_ratio_above_threshold")
+            elif not step0_lite_allow_passthrough_when_divstrip_missing:
+                lite_failed_reasons.append("divstrip_missing_blocked_passthrough")
+
+        if step0_mode == "off" or (step0_mode == "lite" and not lite_failed_reasons):
+            gate_selected_count += 1
+            passthrough_count += 1
+            out[int(nodeid)] = CrossSection(
+                nodeid=int(cs.nodeid),
+                geometry_metric=geom_2d,
+                properties=dict(cs.properties),
+            )
+            gate_all_map[int(nodeid)] = geom_2d
+            gate_meta_map[int(nodeid)] = {
+                "len_m": float(seed_len_m),
+                "geom_type": str(getattr(geom_2d, "geom_type", "")),
+                "fallback": False,
+                "mode": "passthrough",
+                "selected_by": "passthrough",
+                "selection_source": "passthrough",
+                "candidate_segment_count": 1,
+                "selected_mid_dist_m": 0.0,
+                "selected_evidence_len_m": 0.0,
+                "in_drivezone_ratio": seed_drive_ratio,
+                "in_divstrip_ratio": seed_div_ratio,
+                "lite_failed_reasons": [],
+                "failed_reason": None,
+            }
+            _append_ratio_stats(drivezone_ratio=seed_drive_ratio, divstrip_ratio=seed_div_ratio)
+            anchor_feats.append(
+                {
+                    "geometry": Point(ax, ay),
+                    "properties": {
+                        "nodeid": int(nodeid),
+                    },
+                }
+            )
+            trunc_feats.append(
+                {
+                    "geometry": geom_2d,
+                    "properties": {
+                        "nodeid": int(nodeid),
+                        "left_extent_m": None,
+                        "right_extent_m": None,
+                        "cut_by_divstrip_left": None,
+                        "cut_by_divstrip_right": None,
+                        "used_trunc": False,
+                        "xsec_gate_selected_by": "passthrough",
+                        "xsec_gate_fallback": False,
+                        "xsec_gate_mode": "passthrough",
+                        "xsec_gate_in_drivezone_ratio": seed_drive_ratio,
+                        "xsec_gate_in_divstrip_ratio": seed_div_ratio,
+                    },
+                }
+            )
+            continue
+
+        node_gate_empty = False
         if use_drivezone_gate:
-            gate_all: BaseGeometry = geom
+            gate_all: BaseGeometry = geom_2d
             gate_selected_by = "drivezone_intersection"
             gate_fallback = False
             if drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty):
                 try:
-                    inter = geom.intersection(drivezone_zone_metric)
+                    inter = geom_2d.intersection(drivezone_zone_metric)
                 except Exception:
-                    inter = geom
+                    inter = geom_2d
                 if inter is not None and (not inter.is_empty):
                     gate_all = inter
                 else:
@@ -6203,26 +6414,27 @@ def _truncate_cross_sections_for_crossing(
                     gate_all = diff
             if gate_all is None or gate_all.is_empty:
                 gate_empty_count += 1
+                node_gate_empty = True
                 gate_fallback = True
                 if gore_zone_metric is not None and (not gore_zone_metric.is_empty):
                     try:
-                        fallback_geom = geom.difference(gore_zone_metric)
+                        fallback_geom = geom_2d.difference(gore_zone_metric)
                     except Exception:
-                        fallback_geom = geom
+                        fallback_geom = geom_2d
                     if fallback_geom is not None and (not fallback_geom.is_empty):
                         gate_all = fallback_geom
                         gate_selected_by = "fallback_seed_minus_divstrip"
                     else:
-                        gate_all = geom
+                        gate_all = geom_2d
                         gate_selected_by = "fallback_raw_seed"
                 else:
-                    gate_all = geom
+                    gate_all = geom_2d
                     gate_selected_by = "fallback_raw_seed"
             line_parts = [ls for ls in _iter_line_parts(gate_all) if isinstance(ls, LineString) and not ls.is_empty and ls.length > 1e-6]
             if not line_parts:
                 gate_fallback = True
-                gate_all = geom
-                line_parts = [geom]
+                gate_all = geom_2d
+                line_parts = [geom_2d]
                 gate_selected_by = "fallback_raw_seed"
             mid = Point(ax, ay)
             if len(line_parts) == 1:
@@ -6285,11 +6497,76 @@ def _truncate_cross_sections_for_crossing(
                     if len(coord) >= 2
                 ]
             )
-            if gate_selected_line.length < geom.length - 1e-6:
+            selected_len_m = float(_line_len(gate_selected_line))
+            selected_drive_ratio, selected_div_ratio = _line_ratios(gate_selected_line)
+            if step0_mode == "lite":
+                repaired_failed_reasons: list[str] = []
+                if selected_len_m < step0_lite_min_len_m:
+                    repaired_failed_reasons.append("full_too_short")
+                if use_drivezone_gate and (selected_drive_ratio is None or selected_drive_ratio < step0_lite_min_in_drivezone_ratio):
+                    repaired_failed_reasons.append("full_drivezone_ratio_below_threshold")
+                if divstrip_available:
+                    if selected_div_ratio is None:
+                        repaired_failed_reasons.append("full_divstrip_ratio_missing")
+                    elif selected_div_ratio > step0_lite_max_in_divstrip_ratio:
+                        repaired_failed_reasons.append("full_divstrip_ratio_above_threshold")
+                elif not step0_lite_allow_passthrough_when_divstrip_missing:
+                    repaired_failed_reasons.append("divstrip_missing_blocked_repair")
+                if repaired_failed_reasons:
+                    failed_count += 1
+                    if not node_gate_empty:
+                        gate_empty_count += 1
+                    fallback_orig += 1
+                    gate_all_map[int(nodeid)] = gate_all
+                    gate_meta_map[int(nodeid)] = {
+                        "len_m": float(selected_len_m),
+                        "geom_type": str(getattr(gate_all, "geom_type", "")),
+                        "fallback": bool(gate_fallback),
+                        "mode": "failed",
+                        "selected_by": str(segment_selected_by if not gate_fallback else gate_selected_by),
+                        "selection_source": str(gate_selected_by),
+                        "candidate_segment_count": int(len(line_parts)),
+                        "selected_mid_dist_m": float(selected_mid_dist_m),
+                        "selected_evidence_len_m": float(selected_evidence_len_m),
+                        "in_drivezone_ratio": selected_drive_ratio,
+                        "in_divstrip_ratio": selected_div_ratio,
+                        "lite_failed_reasons": list(lite_failed_reasons),
+                        "failed_reason": ";".join(repaired_failed_reasons),
+                    }
+                    anchor_feats.append(
+                        {
+                            "geometry": Point(ax, ay),
+                            "properties": {
+                                "nodeid": int(nodeid),
+                            },
+                        }
+                    )
+                    trunc_feats.append(
+                        {
+                            "geometry": gate_selected_line,
+                            "properties": {
+                                "nodeid": int(nodeid),
+                                "left_extent_m": None,
+                                "right_extent_m": None,
+                                "cut_by_divstrip_left": None,
+                                "cut_by_divstrip_right": None,
+                                "used_trunc": bool(selected_len_m < seed_len_m - 1e-6),
+                                "xsec_gate_selected_by": str(segment_selected_by if not gate_fallback else gate_selected_by),
+                                "xsec_gate_fallback": bool(gate_fallback),
+                                "xsec_gate_mode": "failed",
+                                "xsec_gate_in_drivezone_ratio": selected_drive_ratio,
+                                "xsec_gate_in_divstrip_ratio": selected_div_ratio,
+                                "xsec_gate_failed_reason": ";".join(repaired_failed_reasons),
+                            },
+                        }
+                    )
+                    continue
+            if selected_len_m < seed_len_m - 1e-6:
                 used_trunc += 1
             if gate_fallback:
                 gate_fallback_count += 1
                 fallback_orig += 1
+            repaired_count += 1
             gate_selected_count += 1
             out[int(nodeid)] = CrossSection(
                 nodeid=int(cs.nodeid),
@@ -6298,15 +6575,21 @@ def _truncate_cross_sections_for_crossing(
             )
             gate_all_map[int(nodeid)] = gate_all
             gate_meta_map[int(nodeid)] = {
-                "len_m": float(gate_selected_line.length),
+                "len_m": float(selected_len_m),
                 "geom_type": str(getattr(gate_all, "geom_type", "")),
                 "fallback": bool(gate_fallback),
+                "mode": "repaired",
                 "selected_by": str(segment_selected_by if not gate_fallback else gate_selected_by),
                 "selection_source": str(gate_selected_by),
                 "candidate_segment_count": int(len(line_parts)),
                 "selected_mid_dist_m": float(selected_mid_dist_m),
                 "selected_evidence_len_m": float(selected_evidence_len_m),
+                "in_drivezone_ratio": selected_drive_ratio,
+                "in_divstrip_ratio": selected_div_ratio,
+                "lite_failed_reasons": list(lite_failed_reasons),
+                "failed_reason": None,
             }
+            _append_ratio_stats(drivezone_ratio=selected_drive_ratio, divstrip_ratio=selected_div_ratio)
             anchor_feats.append(
                 {
                     "geometry": Point(ax, ay),
@@ -6324,9 +6607,12 @@ def _truncate_cross_sections_for_crossing(
                         "right_extent_m": None,
                         "cut_by_divstrip_left": None,
                         "cut_by_divstrip_right": None,
-                        "used_trunc": bool(gate_selected_line.length < geom.length - 1e-6),
+                        "used_trunc": bool(selected_len_m < seed_len_m - 1e-6),
                         "xsec_gate_selected_by": str(segment_selected_by if not gate_fallback else gate_selected_by),
                         "xsec_gate_fallback": bool(gate_fallback),
+                        "xsec_gate_mode": "repaired",
+                        "xsec_gate_in_drivezone_ratio": selected_drive_ratio,
+                        "xsec_gate_in_divstrip_ratio": selected_div_ratio,
                     },
                 }
             )
@@ -6389,10 +6675,67 @@ def _truncate_cross_sections_for_crossing(
         p1 = (ax + nx * right_extent, ay + ny * right_extent)
         trunc_line = LineString([p0, p1])
         if trunc_line.is_empty or trunc_line.length <= 1.0:
-            trunc_line = geom
+            trunc_line = geom_2d
             fallback_orig += 1
         else:
             used_trunc += 1
+        trunc_len_m = float(_line_len(trunc_line))
+        trunc_drive_ratio, trunc_div_ratio = _line_ratios(trunc_line)
+        if step0_mode == "lite" and use_drivezone_gate:
+            repaired_failed_reasons = []
+            if trunc_len_m < step0_lite_min_len_m:
+                repaired_failed_reasons.append("full_too_short")
+            if trunc_drive_ratio is None or trunc_drive_ratio < step0_lite_min_in_drivezone_ratio:
+                repaired_failed_reasons.append("full_drivezone_ratio_below_threshold")
+            if divstrip_available:
+                if trunc_div_ratio is None:
+                    repaired_failed_reasons.append("full_divstrip_ratio_missing")
+                elif trunc_div_ratio > step0_lite_max_in_divstrip_ratio:
+                    repaired_failed_reasons.append("full_divstrip_ratio_above_threshold")
+            elif not step0_lite_allow_passthrough_when_divstrip_missing:
+                repaired_failed_reasons.append("divstrip_missing_blocked_repair")
+            if repaired_failed_reasons:
+                failed_count += 1
+                gate_empty_count += 1
+                gate_all_map[int(nodeid)] = trunc_line
+                gate_meta_map[int(nodeid)] = {
+                    "len_m": float(trunc_len_m),
+                    "geom_type": str(getattr(trunc_line, "geom_type", "")),
+                    "fallback": True,
+                    "mode": "failed",
+                    "selected_by": "legacy_trunc",
+                    "selection_source": "legacy_trunc",
+                    "in_drivezone_ratio": trunc_drive_ratio,
+                    "in_divstrip_ratio": trunc_div_ratio,
+                    "lite_failed_reasons": list(lite_failed_reasons),
+                    "failed_reason": ";".join(repaired_failed_reasons),
+                }
+                anchor_feats.append(
+                    {
+                        "geometry": Point(ax, ay),
+                        "properties": {
+                            "nodeid": int(nodeid),
+                        },
+                    }
+                )
+                trunc_feats.append(
+                    {
+                        "geometry": trunc_line,
+                        "properties": {
+                            "nodeid": int(nodeid),
+                            "left_extent_m": float(left_extent),
+                            "right_extent_m": float(right_extent),
+                            "cut_by_divstrip_left": bool(blocked_left),
+                            "cut_by_divstrip_right": bool(blocked_right),
+                            "used_trunc": bool(trunc_line is not geom_2d),
+                            "xsec_gate_mode": "failed",
+                            "xsec_gate_in_drivezone_ratio": trunc_drive_ratio,
+                            "xsec_gate_in_divstrip_ratio": trunc_div_ratio,
+                            "xsec_gate_failed_reason": ";".join(repaired_failed_reasons),
+                        },
+                    }
+                )
+                continue
         out[int(nodeid)] = CrossSection(
             nodeid=int(cs.nodeid),
             geometry_metric=trunc_line,
@@ -6400,13 +6743,20 @@ def _truncate_cross_sections_for_crossing(
         )
         gate_all_map[int(nodeid)] = trunc_line
         gate_meta_map[int(nodeid)] = {
-            "len_m": float(trunc_line.length),
+            "len_m": float(trunc_len_m),
             "geom_type": str(getattr(trunc_line, "geom_type", "")),
-            "fallback": bool(trunc_line.length >= geom.length - 1e-6),
+            "fallback": bool(trunc_len_m >= seed_len_m - 1e-6),
+            "mode": "repaired",
             "selected_by": "legacy_trunc",
             "selection_source": "legacy_trunc",
+            "in_drivezone_ratio": trunc_drive_ratio,
+            "in_divstrip_ratio": trunc_div_ratio,
+            "lite_failed_reasons": list(lite_failed_reasons),
+            "failed_reason": None,
         }
+        repaired_count += 1
         gate_selected_count += 1
+        _append_ratio_stats(drivezone_ratio=trunc_drive_ratio, divstrip_ratio=trunc_div_ratio)
         anchor_feats.append(
             {
                 "geometry": Point(ax, ay),
@@ -6424,17 +6774,36 @@ def _truncate_cross_sections_for_crossing(
                     "right_extent_m": float(right_extent),
                     "cut_by_divstrip_left": bool(blocked_left),
                     "cut_by_divstrip_right": bool(blocked_right),
-                    "used_trunc": bool(trunc_line is not geom),
+                    "used_trunc": bool(trunc_line is not geom_2d),
+                    "xsec_gate_mode": "repaired",
+                    "xsec_gate_in_drivezone_ratio": trunc_drive_ratio,
+                    "xsec_gate_in_divstrip_ratio": trunc_div_ratio,
                 },
             }
         )
+    xsec_drivezone_ratio_p10 = _safe_percentile(drivezone_ratio_values, 10.0) if step0_stats_enable else None
+    xsec_drivezone_ratio_p50 = _safe_percentile(drivezone_ratio_values, 50.0) if step0_stats_enable else None
+    xsec_drivezone_ratio_p90 = _safe_percentile(drivezone_ratio_values, 90.0) if step0_stats_enable else None
+    xsec_divstrip_ratio_p10 = _safe_percentile(divstrip_ratio_values, 10.0) if step0_stats_enable and divstrip_available else None
+    xsec_divstrip_ratio_p50 = _safe_percentile(divstrip_ratio_values, 50.0) if step0_stats_enable and divstrip_available else None
+    xsec_divstrip_ratio_p90 = _safe_percentile(divstrip_ratio_values, 90.0) if step0_stats_enable and divstrip_available else None
     stats = {
+        "step0_mode_used": str(step0_mode),
         "xsec_truncated_count": int(used_trunc),
         "xsec_truncated_fallback_count": int(fallback_orig),
         "xsec_gate_enabled": bool(use_drivezone_gate),
         "xsec_gate_selected_count": int(gate_selected_count),
         "xsec_gate_empty_count": int(gate_empty_count),
         "xsec_gate_fallback_count": int(gate_fallback_count),
+        "xsec_passthrough_count": int(passthrough_count),
+        "xsec_repaired_count": int(repaired_count),
+        "xsec_failed_count": int(failed_count),
+        "xsec_drivezone_ratio_p10": xsec_drivezone_ratio_p10,
+        "xsec_drivezone_ratio_p50": xsec_drivezone_ratio_p50,
+        "xsec_drivezone_ratio_p90": xsec_drivezone_ratio_p90,
+        "xsec_divstrip_ratio_p10": xsec_divstrip_ratio_p10,
+        "xsec_divstrip_ratio_p50": xsec_divstrip_ratio_p50,
+        "xsec_divstrip_ratio_p90": xsec_divstrip_ratio_p90,
         "xsec_gate_traj_evidence_enabled": bool(gate_traj_evidence_zone is not None),
         "xsec_gate_traj_evidence_disabled_reason": traj_evidence_disabled_reason,
         "xsec_gate_traj_point_count": int(traj_point_count),
@@ -6477,6 +6846,20 @@ def _apply_xsec_gate_meta_to_road(
         road[f"xsec_gate_fallback_{tag}"] = None if fb is None else bool(fb)
         sel = str(md.get("selected_by") or "").strip()
         road[f"xsec_gate_selected_by_{tag}"] = sel if sel else None
+        mode = str(md.get("mode") or "").strip()
+        road[f"xsec_gate_mode_{tag}"] = mode if mode else None
+        dz_ratio_v = md.get("in_drivezone_ratio")
+        try:
+            dz_ratio_f = float(dz_ratio_v)
+        except Exception:
+            dz_ratio_f = float("nan")
+        road[f"xsec_gate_in_drivezone_ratio_{tag}"] = float(dz_ratio_f) if np.isfinite(dz_ratio_f) else None
+        ds_ratio_v = md.get("in_divstrip_ratio")
+        try:
+            ds_ratio_f = float(ds_ratio_v)
+        except Exception:
+            ds_ratio_f = float("nan")
+        road[f"xsec_gate_in_divstrip_ratio_{tag}"] = float(ds_ratio_f) if np.isfinite(ds_ratio_f) else None
 
 
 def _make_base_road_record(
@@ -6574,6 +6957,12 @@ def _make_base_road_record(
         "xsec_gate_fallback_dst": None,
         "xsec_gate_selected_by_src": None,
         "xsec_gate_selected_by_dst": None,
+        "xsec_gate_mode_src": None,
+        "xsec_gate_mode_dst": None,
+        "xsec_gate_in_drivezone_ratio_src": None,
+        "xsec_gate_in_drivezone_ratio_dst": None,
+        "xsec_gate_in_divstrip_ratio_src": None,
+        "xsec_gate_in_divstrip_ratio_dst": None,
         "xsec_selected_by_src": None,
         "xsec_selected_by_dst": None,
         "xsec_shift_used_m_src": None,
@@ -6802,6 +7191,7 @@ def _finalize_payloads(
                 or sk.startswith("intersection_")
                 or sk.startswith("step1_corridor_")
                 or sk.startswith("step1_main_corridor_")
+                or sk.startswith("step0_")
                 or sk.startswith("traj_surface_cache_")
                 or sk.startswith("neighbor_search_")
                 or sk.startswith("width_near_minus_base_")
@@ -6829,6 +7219,13 @@ def _finalize_payloads(
             "method": metrics_payload.get("lane_boundary_crs_method"),
             "final_crs": metrics_payload.get("lane_boundary_crs_name_final"),
         },
+        step0_status={
+            "mode": metrics_payload.get("step0_mode_used"),
+            "passthrough": metrics_payload.get("xsec_passthrough_count"),
+            "repaired": metrics_payload.get("xsec_repaired_count"),
+            "failed": metrics_payload.get("xsec_failed_count"),
+            "gate_empty": metrics_payload.get("xsec_gate_empty_count"),
+        },
     )
 
     debug_feature_collections: dict[str, dict[str, Any]] = {}
@@ -6855,6 +7252,7 @@ def _finalize_payloads(
             "step2_xsec_barrier_samples_dst",
             "xsec_passable_samples_src",
             "xsec_passable_samples_dst",
+            "xsec_cross_selected",
             "step3_endpoint_src_dst",
             "drivezone_union",
             "xsec_support_src",

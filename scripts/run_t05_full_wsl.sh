@@ -12,6 +12,7 @@ RUN_ID="auto"
 OUT_ROOT="$(t05_default_out_root "$REPO_ROOT")"
 DEBUG=0
 DEBUG_LAYER_MAX_ITEMS=2000
+STEP0_MODE="${STEP0_MODE:-lite}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -61,6 +62,7 @@ echo "OUT_ROOT=$OUT_ROOT"
 echo "RUN_ID=$RUN_ID"
 echo "DEBUG=$DEBUG"
 echo "DEBUG_LAYER_MAX_ITEMS=$DEBUG_LAYER_MAX_ITEMS"
+echo "STEP0_MODE=$STEP0_MODE"
 
 for PID in "${PATCH_ARR[@]}"; do
   PID="$(echo "$PID" | xargs)"
@@ -89,6 +91,7 @@ TXT
       --run_id "$RUN_ID" \
       --out_root "$OUT_ROOT" \
       --debug_dump "$DEBUG" \
+      --step0_mode "$STEP0_MODE" \
       --debug_layer_max_items "$DEBUG_LAYER_MAX_ITEMS"; then
       echo "ERROR: patch failed: $PID" >&2
       if [ -f "$PROGRESS_LOG" ]; then
