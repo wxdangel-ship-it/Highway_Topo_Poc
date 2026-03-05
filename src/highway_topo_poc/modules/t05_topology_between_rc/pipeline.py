@@ -437,7 +437,8 @@ def run_patch(
     write_json(patch_out / "intervals.json", artifacts["intervals_payload"])
     write_json(patch_out / "gate.json", artifacts["gate_payload"])
     for rel_path, payload in dict(artifacts.get("debug_json_payloads", {})).items():
-        write_json(patch_out / str(rel_path), payload)
+        write_payload = _normalize_debug_geojson_payload(payload)
+        write_json(patch_out / str(rel_path), write_payload)
     for rel_path, payload in dict(artifacts.get("debug_feature_collections", {})).items():
         write_json(patch_out / str(rel_path), payload)
     (patch_out / "summary.txt").write_text(str(artifacts["summary_text"]), encoding="utf-8")
@@ -643,6 +644,7 @@ def _run_patch_core(
     step1_topology_enabled = False
     step1_topology_fallback_reason: str | None = None
     step1_topology_allowed_dst_map: dict[int, set[int]] = {}
+    step1_topology_allowed_pairs: set[tuple[int, int]] = set()
     step1_topology_decisions: dict[int, dict[str, Any]] = {}
     step1_topology_stats: dict[str, Any] = {
         "src_count": int(len(node_ids)),
@@ -680,9 +682,15 @@ def _run_patch_core(
                 require_unique_chain=bool(int(params.get("STEP1_TOPO_REQUIRE_UNIQUE_CHAIN", 1))),
                 max_expansions=int(max(100, int(params.get("STEP1_TOPO_MAX_EXPANSIONS", 50000)))),
             )
+            for src_i, dst_set in step1_topology_allowed_dst_map.items():
+                if len(dst_set) != 1:
+                    continue
+                dst_i = next(iter(dst_set))
+                step1_topology_allowed_pairs.add((int(src_i), int(dst_i)))
             step1_topology_enabled = True
             step1_topology_stats.update({str(k): v for k, v in topo_comp_stats.items()})
             step1_topology_stats.update({str(k): v for k, v in topo_stats.items()})
+            step1_topology_stats["accepted_pair_count"] = int(len(step1_topology_allowed_pairs))
         else:
             step1_topology_fallback_reason = "road_prior_graph_empty_or_missing"
 
@@ -695,6 +703,9 @@ def _run_patch_core(
         step1_topology_allowed_dst_map
         if bool(step1_topology_enabled)
         else (road_prior_next_map if bool(step1_road_prior_filter_enabled) else None)
+    )
+    step1_allowed_pair_filter_set: set[tuple[int, int]] | None = (
+        set(step1_topology_allowed_pairs) if bool(step1_topology_enabled) else None
     )
     step1_road_prior_reject_crossing_count = 0
     step1_road_prior_reject_candidate_total = 0
@@ -903,6 +914,7 @@ def _run_patch_core(
             unique_dst_early_stop=bool(int(params.get("STEP1_UNIQUE_DST_EARLY_STOP", 1))),
             unique_dst_dist_eps_m=float(params.get("STEP1_UNIQUE_DST_DIST_EPS_M", 5.0)),
             allowed_dst_by_src=step1_allowed_dst_filter_map,
+            allowed_pairs=step1_allowed_pair_filter_set,
         )
         nt_map, indeg_map, outdeg_map = infer_node_types(
             node_ids=node_ids,
@@ -928,6 +940,7 @@ def _run_patch_core(
             unique_dst_early_stop=bool(int(params.get("STEP1_UNIQUE_DST_EARLY_STOP", 1))),
             unique_dst_dist_eps_m=float(params.get("STEP1_UNIQUE_DST_DIST_EPS_M", 5.0)),
             allowed_dst_by_src=step1_allowed_dst_filter_map,
+            allowed_pairs=step1_allowed_pair_filter_set,
         )
         return cross_obj, supports_obj, nt_map, indeg_map, outdeg_map
 
@@ -8439,6 +8452,20 @@ def _finalize_payloads(
         "debug_json_payloads": dict(debug_json_payloads or {}),
         "debug_feature_collections": debug_feature_collections,
     }
+
+
+def _normalize_debug_geojson_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Ensure debug FeatureCollection payloads are explicitly tagged as metric CRS."""
+    if not isinstance(payload, dict):
+        return payload
+    if str(payload.get("type")) != "FeatureCollection":
+        return payload
+    crs = payload.get("crs")
+    if isinstance(crs, dict):
+        return payload
+    out = dict(payload)
+    out["crs"] = {"type": "name", "properties": {"name": "EPSG:3857"}}
+    return out
 
 
 def get_default_params() -> dict[str, Any]:
