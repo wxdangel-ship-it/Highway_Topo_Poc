@@ -29,6 +29,12 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--overwrite", type=_parse_bool, default=True)
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--drivezone", default=None, help="Optional DriveZone path override")
+    p.add_argument(
+        "--drivezone_clip_buffer_m",
+        type=float,
+        default=float(DEFAULT_PARAMS["DRIVEZONE_CLIP_BUFFER_M"]),
+        help="Buffer distance (meters) applied to DriveZone union before clipping.",
+    )
     return p.parse_args(list(argv) if argv is not None else None)
 
 
@@ -43,6 +49,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             overwrite=bool(args.overwrite),
             verbose=bool(args.verbose),
             drivezone=args.drivezone,
+            drivezone_clip_buffer_m=float(args.drivezone_clip_buffer_m),
         )
     except InputDataError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)

@@ -37,8 +37,8 @@ class SegmentChoice:
 
 @dataclass(frozen=True)
 class DrivezoneUnionResult:
-    union_geom: BaseGeometry
-    invalid_repair_count: int
+    raw_geom: BaseGeometry
+    clip_geom: BaseGeometry
 
 
 def _stable_hash64(text: str) -> int:
@@ -191,53 +191,72 @@ def choose_segment(
     if not segments:
         return SegmentChoice(segment=None, reason="clipped_empty", connect_src=False, connect_dst=False)
 
-    ranked: list[tuple[int, float, str, int, LineString, bool, bool]] = []
+    ranked: list[tuple[int, float, float, str, int, LineString, bool, bool, int]] = []
     for idx, seg in enumerate(segments):
         connect_src = src_exists and segment_connects_node(seg, src_node, tol_m=tol_m)
         connect_dst = dst_exists and segment_connects_node(seg, dst_node, tol_m=tol_m)
+        connected_count = int(bool(connect_src)) + int(bool(connect_dst))
 
-        if src_exists or dst_exists:
-            if not (connect_src or connect_dst):
-                continue
-
-        if src_exists and dst_exists and connect_src and connect_dst:
-            prio = 0
-        elif connect_src:
-            prio = 1
-        elif connect_dst:
-            prio = 2
+        q0, q1 = line_endpoints(seg)
+        if src_node is not None and dst_node is not None:
+            assigned = assign_by_references(q0, q1, src_ref=src_node, dst_ref=dst_node)
+            dist_score = float(assigned.src_distance_m + assigned.dst_distance_m)
+        elif src_node is not None:
+            dist_score = float(min(src_node.distance(q0), src_node.distance(q1)))
+        elif dst_node is not None:
+            dist_score = float(min(dst_node.distance(q0), dst_node.distance(q1)))
         else:
-            prio = 3
-        ranked.append((prio, -float(seg.length), seg.wkt, idx, seg, connect_src, connect_dst))
+            dist_score = 0.0
+
+        ranked.append(
+            (
+                -connected_count,
+                -float(seg.length),
+                dist_score,
+                seg.wkt,
+                idx,
+                seg,
+                connect_src,
+                connect_dst,
+                connected_count,
+            )
+        )
 
     if not ranked:
-        return SegmentChoice(segment=None, reason="no_existing_endpoint_connected", connect_src=False, connect_dst=False)
+        return SegmentChoice(segment=None, reason="segment_select_failed", connect_src=False, connect_dst=False)
 
-    ranked.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
-    _, _, _, _, chosen, cs, cd = ranked[0]
-    return SegmentChoice(segment=chosen, reason=None, connect_src=bool(cs), connect_dst=bool(cd))
+    ranked.sort(key=lambda t: (t[0], t[1], t[2], t[3], t[4]))
+    _, _, _, _, _, chosen, cs, cd, best_connected_count = ranked[0]
+
+    if src_exists or dst_exists:
+        if best_connected_count == 0:
+            reason = "fallback_longest_no_endpoint_match"
+        else:
+            reason = None
+    else:
+        reason = "fallback_longest_no_existing_endpoint"
+
+    return SegmentChoice(segment=chosen, reason=reason, connect_src=bool(cs), connect_dst=bool(cd))
 
 
 def endpoint_changed(original_side: Point, new_side: Point, *, tol_m: float) -> bool:
     return bool(original_side.distance(new_side) > tol_m)
 
 
-def build_drivezone_union(polygons: list[BaseGeometry]) -> DrivezoneUnionResult:
-    repaired = 0
+def build_drivezone_union(polygons: list[BaseGeometry], *, clip_buffer_m: float) -> DrivezoneUnionResult:
     cleaned: list[BaseGeometry] = []
-    for geom in polygons:
+    for idx, geom in enumerate(polygons):
         if geom.is_empty:
             continue
         g = geom
         if not g.is_valid:
-            g = g.buffer(0)
-            repaired += 1
-        if g.is_empty:
-            continue
+            raise ValueError(f"drivezone_invalid_geometry:index={idx}")
         cleaned.append(g)
     if not cleaned:
-        return DrivezoneUnionResult(union_geom=GeometryCollection(), invalid_repair_count=repaired)
-    return DrivezoneUnionResult(union_geom=unary_union(cleaned), invalid_repair_count=repaired)
+        return DrivezoneUnionResult(raw_geom=GeometryCollection(), clip_geom=GeometryCollection())
+    raw = unary_union(cleaned)
+    clip = raw.buffer(float(clip_buffer_m))
+    return DrivezoneUnionResult(raw_geom=raw, clip_geom=clip)
 
 
 def relation_to_zone(line_geom: BaseGeometry, zone_union: BaseGeometry) -> str:

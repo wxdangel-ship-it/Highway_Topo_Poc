@@ -19,6 +19,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "MISSING_ENDPOINT_DETECT_MODE": "by_id_membership",
     "CLIP_MODE": "intersection_keep_inside",
     "KEEP_SEGMENT_MODE": "connect_existing_endpoint",
+    "DRIVEZONE_CLIP_BUFFER_M": 5.0,
 }
 
 _ID_FIELD_CANDIDATES = ["id", "nodeid", "mainid"]
@@ -141,6 +142,7 @@ def run_patch(
     overwrite: bool = True,
     verbose: bool = False,
     drivezone: str | None = None,
+    drivezone_clip_buffer_m: float = 5.0,
 ) -> RunResult:
     del verbose
     repo_root = resolve_repo_root(Path.cwd())
@@ -205,11 +207,14 @@ def run_patch(
         schema_keys=node_schema_keys,
     )
 
-    drivezone = geom.build_drivezone_union(zones)
-    if drivezone.union_geom.is_empty:
+    try:
+        drivezone = geom.build_drivezone_union(zones, clip_buffer_m=float(drivezone_clip_buffer_m))
+    except ValueError as exc:
+        raise InputDataError(str(exc)) from exc
+    if drivezone.raw_geom.is_empty:
         raise InputDataError("drivezone_union_empty")
-    if drivezone.invalid_repair_count > 0:
-        report.add_warning(f"drivezone_invalid_repaired={drivezone.invalid_repair_count}")
+    if drivezone.clip_geom.is_empty:
+        raise InputDataError("drivezone_clip_empty")
 
     existing_node_ids = set(node_by_id.keys())
 
@@ -223,6 +228,8 @@ def run_patch(
 
     road_out_candidates: list[_ProjectedRoad] = []
     created_nodes: list[_ProjectedNode] = []
+    outside_len_m_total = 0.0
+    fixed_len_m_total = 0.0
 
     for road in roads:
         s_id = road.properties.get(road_s_field)
@@ -230,7 +237,7 @@ def run_patch(
         src_exists = s_id in existing_node_ids
         dst_exists = e_id in existing_node_ids
 
-        relation_in = geom.relation_to_zone(road.geometry, drivezone.union_geom)
+        relation_in = geom.relation_to_zone(road.geometry, drivezone.clip_geom)
         if relation_in == "boundary_intersection":
             report.boundary_intersections_in += 1
 
@@ -239,9 +246,6 @@ def run_patch(
             continue
 
         report.clipped_road_count += 1
-        if (not src_exists) and (not dst_exists):
-            report.add_drop("no_existing_endpoint_connected")
-            continue
 
         orig_line = geom.choose_reference_line(road.geometry)
         if orig_line is None:
@@ -257,7 +261,7 @@ def run_patch(
         src_ref = src_node_pt if src_node_pt is not None else orig_assign.src_point
         dst_ref = dst_node_pt if dst_node_pt is not None else orig_assign.dst_point
 
-        clipped = road.geometry.intersection(drivezone.union_geom)
+        clipped = road.geometry.intersection(drivezone.clip_geom)
         segments = geom.extract_linear_segments(clipped)
         choice = geom.choose_segment(
             segments=segments,
@@ -272,6 +276,12 @@ def run_patch(
             continue
 
         selected_line = choice.segment
+        selected_len_m = float(selected_line.length)
+        outside_geom = selected_line.difference(drivezone.raw_geom)
+        outside_len_m = float(outside_geom.length) if (outside_geom is not None and not outside_geom.is_empty) else 0.0
+        outside_ratio = float(outside_len_m / selected_len_m) if selected_len_m > 0 else 0.0
+        outside_len_m_total += outside_len_m
+        fixed_len_m_total += selected_len_m
         q0, q1 = geom.line_endpoints(selected_line)
         new_assign = geom.assign_by_references(q0, q1, src_ref=src_ref, dst_ref=dst_ref)
 
@@ -343,7 +353,11 @@ def run_patch(
                 "segment_connect_dst": bool(choice.connect_dst),
                 "updated_src": bool(updated_src),
                 "updated_dst": bool(updated_dst),
-                "selected_length_m": float(selected_line.length),
+                "updated_end": ("both" if (updated_src and updated_dst) else ("src" if updated_src else ("dst" if updated_dst else "none"))),
+                "fallback_reason": choice.reason,
+                "selected_length_m": selected_len_m,
+                "outside_len_m": outside_len_m,
+                "outside_ratio": outside_ratio,
                 "selected_wkt": selected_line.wkt,
             }
         )
@@ -394,7 +408,7 @@ def run_patch(
     report.missing_endpoint_refs_out = int(miss_out)
 
     for road in roads_out:
-        relation_out = geom.relation_to_zone(road.geometry, drivezone.union_geom)
+        relation_out = geom.relation_to_zone(road.geometry, drivezone.clip_geom)
         if relation_out == "boundary_intersection":
             report.boundary_intersections_out += 1
 
@@ -434,6 +448,7 @@ def run_patch(
             "missing_endpoint_detect_mode": DEFAULT_PARAMS["MISSING_ENDPOINT_DETECT_MODE"],
             "clip_mode": DEFAULT_PARAMS["CLIP_MODE"],
             "keep_segment_mode": DEFAULT_PARAMS["KEEP_SEGMENT_MODE"],
+            "drivezone_clip_buffer_m": float(drivezone_clip_buffer_m),
         },
         source_notes={
             "node_path": str(loaded.node_path),
@@ -457,6 +472,9 @@ def run_patch(
         "updated_enodeid_count": int(report.updated_enodeid_count),
         "output_node_count": int(report.nodes_out),
         "output_road_count": int(report.roads_out),
+        "drivezone_clip_buffer_m": float(drivezone_clip_buffer_m),
+        "outside_len_m_total": float(outside_len_m_total),
+        "outside_ratio_weighted": float(outside_len_m_total / fixed_len_m_total) if fixed_len_m_total > 0 else 0.0,
         "target_epsg": int(target_epsg),
         "ok": bool(report.missing_endpoint_refs_out == 0),
     }

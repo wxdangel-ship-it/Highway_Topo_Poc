@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from shapely.geometry import LineString, Point, Polygon, mapping
 
 from highway_topo_poc.modules.t06_patch_preprocess import geom, pipeline
+from highway_topo_poc.modules.t06_patch_preprocess.io import InputDataError
 
 
 def _write_fc(path: Path, *, crs: str | None, features: list[dict]) -> None:
@@ -127,7 +129,7 @@ def test_case3_multisegment_choice_prefers_src_connection() -> None:
     assert choice.connect_src is True
 
 
-def test_case4_both_endpoints_missing_drops_road(tmp_path: Path) -> None:
+def test_case4_both_endpoints_missing_creates_two_virtual_nodes(tmp_path: Path) -> None:
     patch = _mk_patch(
         tmp_path,
         patch_id="p_case4",
@@ -139,14 +141,19 @@ def test_case4_both_endpoints_missing_drops_road(tmp_path: Path) -> None:
     result = pipeline.run_patch(data_root=patch, patch="auto", run_id="ut_case4", out_root=tmp_path / "out", overwrite=True)
 
     summary = _read_json(result.summary_path)
-    drop_reasons = _read_json(result.drop_reasons_path)
+    fixed_roads = _read_json(result.output_dir / "report" / "fixed_roads.json")
+    node_fc = _read_json(result.output_dir / "Vector" / "RCSDNode.geojson")
     road_fc = _read_json(result.output_dir / "Vector" / "RCSDRoad.geojson")
 
     assert summary["roads_in"] == 1
-    assert summary["roads_out"] == 0
+    assert summary["roads_out"] == 1
+    assert summary["nodes_created"] == 2
+    assert summary["updated_snodeid_count"] == 1
+    assert summary["updated_enodeid_count"] == 1
     assert summary["missing_endpoint_refs_out"] == 0
-    assert drop_reasons.get("no_existing_endpoint_connected") == 1
-    assert road_fc["features"] == []
+    assert road_fc["features"] != []
+    assert len(node_fc["features"]) == 4
+    assert fixed_roads["items"][0]["fallback_reason"] == "fallback_longest_no_existing_endpoint"
 
 
 def test_case5_missing_drivezone_crs_uses_node_road_crs(tmp_path: Path) -> None:
@@ -235,3 +242,55 @@ def test_case7_stringified_json_drivezone_crs_is_unwrapped(tmp_path: Path) -> No
     assert summary["roads_in"] == 1
     assert summary["roads_out"] == 1
     assert road_fc["crs"]["properties"]["name"] == "EPSG:3857"
+
+
+def test_case8_s2_clip_buffer_keeps_segment_and_reports_outside_len(tmp_path: Path) -> None:
+    patch = _mk_patch(
+        tmp_path,
+        patch_id="p_case8",
+        node_features=[_node_feature(1, 0.0, 0.0)],
+        road_features=[_road_feature(1, 999, [(0.0, 0.0), (14.0, 0.0)])],
+        drivezone_features=[_poly_feature(Polygon([(-1.0, -1.0), (10.0, -1.0), (10.0, 1.0), (-1.0, 1.0)]))],
+    )
+
+    result = pipeline.run_patch(
+        data_root=patch,
+        patch="auto",
+        run_id="ut_case8",
+        out_root=tmp_path / "out",
+        overwrite=True,
+        drivezone_clip_buffer_m=5.0,
+    )
+    metrics = _read_json(result.output_dir / "report" / "metrics.json")
+    fixed_roads = _read_json(result.output_dir / "report" / "fixed_roads.json")
+
+    assert metrics["drivezone_clip_buffer_m"] == 5.0
+    assert metrics["outside_len_m_total"] > 3.5
+    assert metrics["outside_ratio_weighted"] > 0.2
+    assert fixed_roads["items"][0]["outside_len_m"] > 3.5
+    assert fixed_roads["items"][0]["outside_ratio"] > 0.2
+
+
+def test_case9_invalid_drivezone_fails_fast(tmp_path: Path) -> None:
+    patch = _mk_patch(
+        tmp_path,
+        patch_id="p_case9",
+        node_features=[_node_feature(1, 0.0, 0.0), _node_feature(2, 10.0, 0.0)],
+        road_features=[_road_feature(1, 2, [(0.0, 0.0), (10.0, 0.0)])],
+        drivezone_features=[
+            _poly_feature(
+                Polygon(
+                    [
+                        (0.0, 0.0),
+                        (2.0, 2.0),
+                        (2.0, 0.0),
+                        (0.0, 2.0),
+                        (0.0, 0.0),
+                    ]
+                )
+            )
+        ],
+    )
+
+    with pytest.raises(InputDataError, match="drivezone_invalid_geometry"):
+        pipeline.run_patch(data_root=patch, patch="auto", run_id="ut_case9", out_root=tmp_path / "out", overwrite=True)
