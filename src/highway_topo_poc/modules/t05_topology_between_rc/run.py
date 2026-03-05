@@ -219,6 +219,11 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--drivezone_sample_step_m", type=float, default=float(DEFAULT_PARAMS["DRIVEZONE_SAMPLE_STEP_M"]))
     p.add_argument("--cache_enabled", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["CACHE_ENABLED"]))
     p.add_argument("--debug_dump", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["DEBUG_DUMP"]))
+    p.add_argument(
+        "--debug_layer_max_items",
+        type=int,
+        default=int(DEFAULT_PARAMS.get("DEBUG_LAYER_MAX_ITEMS", 2000)),
+    )
 
     return p.parse_args(list(argv) if argv is not None else None)
 
@@ -330,6 +335,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "DRIVEZONE_SAMPLE_STEP_M": float(args.drivezone_sample_step_m),
         "CACHE_ENABLED": int(args.cache_enabled),
         "DEBUG_DUMP": int(args.debug_dump),
+        "DEBUG_LAYER_MAX_ITEMS": int(args.debug_layer_max_items),
     }
     levels = list(DEFAULT_PARAMS.get("STITCH_MAX_DIST_LEVELS_M", [float(args.stitch_max_dist_m)]))
     if levels:

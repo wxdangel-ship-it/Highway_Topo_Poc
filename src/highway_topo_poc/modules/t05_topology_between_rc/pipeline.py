@@ -198,6 +198,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "POINT_CLASS_FALLBACK_ANY": 0,
     "DRIVEZONE_SAMPLE_STEP_M": 2.0,
     "DEBUG_DUMP": 0,
+    "DEBUG_LAYER_MAX_ITEMS": 2000,
     "CACHE_ENABLED": 1,
 }
 
@@ -238,6 +239,29 @@ class _StageTimerScope:
     def __exit__(self, exc_type, exc, tb) -> None:
         dt_ms = (perf_counter() - self._t0) * 1000.0
         self._timer.add(self._key, dt_ms)
+
+
+class _DebugLayerBuffer(list[dict[str, Any]]):
+    def __init__(self, *, max_items: int, seed: Sequence[dict[str, Any]] | None = None) -> None:
+        super().__init__()
+        self.max_items = int(max(0, int(max_items)))
+        self.dropped_count = 0
+        if seed:
+            for item in seed:
+                self.append(item)
+
+    def append(self, item: dict[str, Any]) -> None:  # type: ignore[override]
+        if self.max_items <= 0:
+            self.dropped_count += 1
+            return
+        if len(self) >= self.max_items:
+            self.dropped_count += 1
+            return
+        super().append(item)
+
+    def extend(self, items: Sequence[dict[str, Any]]) -> None:  # type: ignore[override]
+        for item in items:
+            self.append(item)
 
 
 def _normalize_support_clusters_for_xsec_gate(
@@ -803,56 +827,63 @@ def _run_patch_core(
     road_feature_props: list[dict[str, Any]] = []
     road_records: list[dict[str, Any]] = []
     debug_enabled = bool(int(params.get("DEBUG_DUMP", 0)))
+    debug_layer_max_items = int(max(0, int(params.get("DEBUG_LAYER_MAX_ITEMS", 2000))))
+
+    def _mk_debug_layer(seed: Sequence[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        if not debug_enabled:
+            return []
+        return _DebugLayerBuffer(max_items=debug_layer_max_items, seed=seed)
+
     debug_layers: dict[str, list[dict[str, Any]]] = {
-        "traj_surface_best_polygon": [],
-        "traj_surface_best_boundary": [],
-        "lb_path_best": [],
-        "ref_axis_best": [],
-        "step1_corridor_centerline": [],
-        "step1_corridor_candidates": [],
-        "step1_support_trajs": [],
-        "step1_support_trajs_all": [],
-        "step1_seed_selected": [],
-        "xsec_gate_all_src": [],
-        "xsec_gate_all_dst": [],
-        "xsec_gate_selected_src": [],
-        "xsec_gate_selected_dst": [],
-        "step2_xsec_ref_src": [],
-        "step2_xsec_ref_dst": [],
-        "step2_xsec_ref_shifted_candidates_src": [],
-        "step2_xsec_ref_shifted_candidates_dst": [],
-        "step2_xsec_road_all_src": [],
-        "step2_xsec_road_all_dst": [],
-        "step2_xsec_road_selected_src": [],
-        "step2_xsec_road_selected_dst": [],
-        "step2_xsec_barrier_samples_src": [],
-        "step2_xsec_barrier_samples_dst": [],
-        "xsec_passable_samples_src": [],
-        "xsec_passable_samples_dst": [],
-        "step3_endpoint_src_dst": [],
-        "xsec_anchor_points": list(xsec_anchor_debug_items) if debug_enabled else [],
-        "xsec_truncated": list(xsec_trunc_debug_items) if debug_enabled else [],
-        "drivezone_union": [],
-        "xsec_valid_src": [],
-        "xsec_valid_dst": [],
-        "xsec_support_src": [],
-        "xsec_support_dst": [],
-        "xsec_ref_src": [],
-        "xsec_ref_dst": [],
-        "xsec_road_all_src": [],
-        "xsec_road_all_dst": [],
-        "xsec_road_selected_src": [],
-        "xsec_road_selected_dst": [],
-        "xsec_anchor_mid_src": [],
-        "xsec_anchor_mid_dst": [],
-        "xsec_target_selected_src": [],
-        "xsec_target_selected_dst": [],
-        "xsec_target_used_src": [],
-        "xsec_target_used_dst": [],
-        "endpoint_before_after": [],
-        "road_outside_segments": [],
-        "road_bridge_segments": [],
-        "road_divstrip_intersections": [],
+        "traj_surface_best_polygon": _mk_debug_layer(),
+        "traj_surface_best_boundary": _mk_debug_layer(),
+        "lb_path_best": _mk_debug_layer(),
+        "ref_axis_best": _mk_debug_layer(),
+        "step1_corridor_centerline": _mk_debug_layer(),
+        "step1_corridor_candidates": _mk_debug_layer(),
+        "step1_support_trajs": _mk_debug_layer(),
+        "step1_support_trajs_all": _mk_debug_layer(),
+        "step1_seed_selected": _mk_debug_layer(),
+        "xsec_gate_all_src": _mk_debug_layer(),
+        "xsec_gate_all_dst": _mk_debug_layer(),
+        "xsec_gate_selected_src": _mk_debug_layer(),
+        "xsec_gate_selected_dst": _mk_debug_layer(),
+        "step2_xsec_ref_src": _mk_debug_layer(),
+        "step2_xsec_ref_dst": _mk_debug_layer(),
+        "step2_xsec_ref_shifted_candidates_src": _mk_debug_layer(),
+        "step2_xsec_ref_shifted_candidates_dst": _mk_debug_layer(),
+        "step2_xsec_road_all_src": _mk_debug_layer(),
+        "step2_xsec_road_all_dst": _mk_debug_layer(),
+        "step2_xsec_road_selected_src": _mk_debug_layer(),
+        "step2_xsec_road_selected_dst": _mk_debug_layer(),
+        "step2_xsec_barrier_samples_src": _mk_debug_layer(),
+        "step2_xsec_barrier_samples_dst": _mk_debug_layer(),
+        "xsec_passable_samples_src": _mk_debug_layer(),
+        "xsec_passable_samples_dst": _mk_debug_layer(),
+        "step3_endpoint_src_dst": _mk_debug_layer(),
+        "xsec_anchor_points": _mk_debug_layer(seed=list(xsec_anchor_debug_items)),
+        "xsec_truncated": _mk_debug_layer(seed=list(xsec_trunc_debug_items)),
+        "drivezone_union": _mk_debug_layer(),
+        "xsec_valid_src": _mk_debug_layer(),
+        "xsec_valid_dst": _mk_debug_layer(),
+        "xsec_support_src": _mk_debug_layer(),
+        "xsec_support_dst": _mk_debug_layer(),
+        "xsec_ref_src": _mk_debug_layer(),
+        "xsec_ref_dst": _mk_debug_layer(),
+        "xsec_road_all_src": _mk_debug_layer(),
+        "xsec_road_all_dst": _mk_debug_layer(),
+        "xsec_road_selected_src": _mk_debug_layer(),
+        "xsec_road_selected_dst": _mk_debug_layer(),
+        "xsec_anchor_mid_src": _mk_debug_layer(),
+        "xsec_anchor_mid_dst": _mk_debug_layer(),
+        "xsec_target_selected_src": _mk_debug_layer(),
+        "xsec_target_selected_dst": _mk_debug_layer(),
+        "xsec_target_used_src": _mk_debug_layer(),
+        "xsec_target_used_dst": _mk_debug_layer(),
+        "endpoint_before_after": _mk_debug_layer(),
+        "road_outside_segments": _mk_debug_layer(),
+        "road_bridge_segments": _mk_debug_layer(),
+        "road_divstrip_intersections": _mk_debug_layer(),
     }
     if debug_enabled and patch_inputs.drivezone_zone_metric is not None and (not patch_inputs.drivezone_zone_metric.is_empty):
         for poly in _iter_polygon_parts(patch_inputs.drivezone_zone_metric):
