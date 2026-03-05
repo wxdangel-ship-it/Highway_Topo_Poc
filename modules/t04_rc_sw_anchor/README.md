@@ -27,7 +27,7 @@
    - 仅接受唯一关联 road，且 `direction in {2,3}`。
    - 根据有效方向判定 `forward/reverse`（起点正向、终点反向）。
    - 固定搜索范围 `10m`，步长 `k16_step_m`（默认 `0.5m`），命中条件为 `CROSS(s) ∩ DriveZone != empty`。
-   - 命中后复用当前路面 piece 选择与贴边扩展口径，输出单条连续 LineString。
+   - 命中后继续沿搜索方向前探 `k16_refine_ahead_m`（默认 `5.0m`），选择更稳定宽度候选（优先线长更大），再复用当前路面 piece 选择与贴边扩展口径输出单条连续 LineString。
    - 10m 内未命中则硬失败 `K16_DRIVEZONE_NOT_REACHED`。
 
 ## 3. 运行入口

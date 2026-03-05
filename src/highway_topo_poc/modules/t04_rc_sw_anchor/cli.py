@@ -47,6 +47,9 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--multibranch_span_extra_m", default=None)
     p.add_argument("--multibranch_reverse_max_m", default=None)
     p.add_argument("--k16_step_m", default=None)
+    p.add_argument("--k16_refine_enable", default=None)
+    p.add_argument("--k16_refine_ahead_m", default=None)
+    p.add_argument("--k16_refine_step_m", default=None)
     p.add_argument("--output_cross_half_len_m", default=None)
     p.add_argument("--continuous_enable", default=None)
     p.add_argument("--continuous_dist_max_m", default=None)
@@ -99,6 +102,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             "multibranch_span_extra_m": args.multibranch_span_extra_m,
             "multibranch_reverse_max_m": args.multibranch_reverse_max_m,
             "k16_step_m": args.k16_step_m,
+            "k16_refine_enable": args.k16_refine_enable,
+            "k16_refine_ahead_m": args.k16_refine_ahead_m,
+            "k16_refine_step_m": args.k16_refine_step_m,
             "output_cross_half_len_m": args.output_cross_half_len_m,
             "continuous_enable": args.continuous_enable,
             "continuous_dist_max_m": args.continuous_dist_max_m,

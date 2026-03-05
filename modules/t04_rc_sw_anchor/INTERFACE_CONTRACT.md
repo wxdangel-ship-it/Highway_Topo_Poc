@@ -158,6 +158,8 @@
   - 固定搜索范围 `10m`，步长 `k16_step_m`（默认 `0.5m`）
   - 命中条件：`CROSS(s) ∩ DriveZone_union != empty`
 - 命中后输出：
+  - first-hit 后沿搜索方向继续前探 `k16_refine_ahead_m`（默认 `5.0m`），步长 `k16_refine_step_m`
+  - 候选优先级：线长更大 > `pieces_count` 更少 > 更接近 first-hit
   - 在与 `CROSS(s_found)` 交集的片段中优先选包含 center 的 piece，否则选离 center 最近 piece
   - 复用连续线贴边扩展口径，输出单条连续 LineString
 - 失败：
@@ -182,6 +184,9 @@
 - `multibranch_span_extra_m`：默认 `10.0`（多分支 span 两端外扩）
 - `multibranch_reverse_max_m`：默认 `10.0`（多分支反向扫描范围）
 - `k16_step_m`：默认 `0.5`（K16 10m 扫描步长）
+- `k16_refine_enable`：默认 `true`（K16 first-hit 后前探稳定化）
+- `k16_refine_ahead_m`：默认 `5.0`（K16 前探距离）
+- `k16_refine_step_m`：默认 `0.5`（K16 前探步长）
 - patch/focus 门禁阈值分开：
   - `min_anchor_found_ratio_focus/min_anchor_found_ratio_patch`
   - `no_trigger_count_max_focus/no_trigger_count_max_patch`
@@ -249,6 +254,9 @@ Patch-only 脚本附加审计文件（可选）：
   - `k16_search_max_m/k16_step_m/k16_cross_half_len_m`
   - `k16_s_found_m/k16_s_best_m/k16_found`
   - `k16_min_dist_cross_to_drivezone_m/k16_break_reason`
+  - `k16_refine_enable/k16_refine_ahead_m/k16_refine_step_m`
+  - `k16_first_hit_s_m/k16_refined_used/k16_s_refined_m`
+  - `k16_first_hit_len_m/k16_refined_len_m/k16_refine_candidate_count`
 
 `intersection_l_multi.geojson`：
 - 每个 split-event 1 条 feature，properties 至少包含：

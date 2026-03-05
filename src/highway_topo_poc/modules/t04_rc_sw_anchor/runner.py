@@ -995,6 +995,15 @@ def _attach_k16_diag(
     k16_found: bool | None = None,
     k16_min_dist_cross_to_drivezone_m: float | None = None,
     k16_break_reason: str | None = None,
+    k16_refine_enable: bool | None = None,
+    k16_refine_ahead_m: float | None = None,
+    k16_refine_step_m: float | None = None,
+    k16_first_hit_s_m: float | None = None,
+    k16_refined_used: bool | None = None,
+    k16_s_refined_m: float | None = None,
+    k16_first_hit_len_m: float | None = None,
+    k16_refined_len_m: float | None = None,
+    k16_refine_candidate_count: int | None = None,
 ) -> dict[str, Any]:
     out = dict(item)
     out.update(
@@ -1014,6 +1023,15 @@ def _attach_k16_diag(
                 None if k16_min_dist_cross_to_drivezone_m is None else float(k16_min_dist_cross_to_drivezone_m)
             ),
             "k16_break_reason": None if k16_break_reason is None else str(k16_break_reason),
+            "k16_refine_enable": None if k16_refine_enable is None else bool(k16_refine_enable),
+            "k16_refine_ahead_m": None if k16_refine_ahead_m is None else float(k16_refine_ahead_m),
+            "k16_refine_step_m": None if k16_refine_step_m is None else float(k16_refine_step_m),
+            "k16_first_hit_s_m": None if k16_first_hit_s_m is None else float(k16_first_hit_s_m),
+            "k16_refined_used": None if k16_refined_used is None else bool(k16_refined_used),
+            "k16_s_refined_m": None if k16_s_refined_m is None else float(k16_s_refined_m),
+            "k16_first_hit_len_m": None if k16_first_hit_len_m is None else float(k16_first_hit_len_m),
+            "k16_refined_len_m": None if k16_refined_len_m is None else float(k16_refined_len_m),
+            "k16_refine_candidate_count": None if k16_refine_candidate_count is None else int(k16_refine_candidate_count),
         }
     )
     return out
@@ -1040,6 +1058,9 @@ def _evaluate_node_k16(
     k16_search_max_m = 10.0
     k16_cross_half_len_m = 10.0
     k16_step_m = max(0.05, float(params.get("k16_step_m", 0.5)))
+    k16_refine_enable = bool(params.get("k16_refine_enable", True))
+    k16_refine_ahead_m = max(0.0, float(params.get("k16_refine_ahead_m", 5.0)))
+    k16_refine_step_m = max(0.05, float(params.get("k16_refine_step_m", k16_step_m)))
     edge_pad_m = float(params.get("current_road_edge_pad_m", 4.0))
     dummy_line = build_k16_crossline(
         center=(float(node.point.x), float(node.point.y)),
@@ -1079,6 +1100,9 @@ def _evaluate_node_k16(
             k16_cross_half_len_m=k16_cross_half_len_m,
             k16_found=False,
             k16_break_reason="drivezone_missing",
+            k16_refine_enable=k16_refine_enable,
+            k16_refine_ahead_m=k16_refine_ahead_m,
+            k16_refine_step_m=k16_refine_step_m,
         )
 
     sel, sel_diag = find_unique_k16_road(nodeid=nodeid, roads=road_graph.roads)
@@ -1118,6 +1142,9 @@ def _evaluate_node_k16(
             k16_cross_half_len_m=k16_cross_half_len_m,
             k16_found=False,
             k16_break_reason=str(sel_diag.get("reason", "k16_road_selection_failed")),
+            k16_refine_enable=k16_refine_enable,
+            k16_refine_ahead_m=k16_refine_ahead_m,
+            k16_refine_step_m=k16_refine_step_m,
         )
 
     k16_road_id = f"{int(sel.road.snodeid)}->{int(sel.road.enodeid)}#{int(sel.road_index)}"
@@ -1163,6 +1190,9 @@ def _evaluate_node_k16(
             k16_cross_half_len_m=k16_cross_half_len_m,
             k16_found=False,
             k16_break_reason="tangent_invalid",
+            k16_refine_enable=k16_refine_enable,
+            k16_refine_ahead_m=k16_refine_ahead_m,
+            k16_refine_step_m=k16_refine_step_m,
         )
 
     perp = (-float(tangent[1]), float(tangent[0]))
@@ -1222,6 +1252,9 @@ def _evaluate_node_k16(
             k16_found=False,
             k16_min_dist_cross_to_drivezone_m=search_diag.get("min_dist_cross_to_drivezone_m"),
             k16_break_reason="drivezone_not_reached",
+            k16_refine_enable=k16_refine_enable,
+            k16_refine_ahead_m=k16_refine_ahead_m,
+            k16_refine_step_m=k16_refine_step_m,
         )
 
     crossline_hit = search_diag.get("crossline_found")
@@ -1265,28 +1298,63 @@ def _evaluate_node_k16(
             k16_found=False,
             k16_min_dist_cross_to_drivezone_m=search_diag.get("min_dist_cross_to_drivezone_m"),
             k16_break_reason="hit_geometry_invalid",
+            k16_refine_enable=k16_refine_enable,
+            k16_refine_ahead_m=k16_refine_ahead_m,
+            k16_refine_step_m=k16_refine_step_m,
         )
 
-    pieces_raw = segment_drivezone_pieces(
-        segment=crossline_hit,
-        drivezone_union=drivezone_union,
-        min_piece_len_m=0.0,
-    )
-    final_line, line_diag = _build_continuous_line_from_crossline(
-        crossline=crossline_hit,
-        pieces_raw=pieces_raw,
-        center_xy=(float(center_found[0]), float(center_found[1])),
-        found_seg=crossline_hit,
-        drivezone_union=drivezone_union,
-        edge_pad_m=edge_pad_m,
-    )
-    if not isinstance(final_line, LineString):
+    def _build_k16_candidate(s_signed: float) -> dict[str, Any] | None:
+        center_xy = (
+            float(node.point.x + float(tangent[0]) * float(s_signed)),
+            float(node.point.y + float(tangent[1]) * float(s_signed)),
+        )
+        crossline = build_k16_crossline(
+            center=center_xy,
+            perp=perp,
+            half_len=float(k16_cross_half_len_m),
+        )
+        inter = crossline.intersection(drivezone_union)
+        if inter.is_empty:
+            return None
+        pieces_raw_local = segment_drivezone_pieces(
+            segment=crossline,
+            drivezone_union=drivezone_union,
+            min_piece_len_m=0.0,
+        )
+        final_line_local, line_diag_local = _build_continuous_line_from_crossline(
+            crossline=crossline,
+            pieces_raw=pieces_raw_local,
+            center_xy=center_xy,
+            found_seg=crossline,
+            drivezone_union=drivezone_union,
+            edge_pad_m=edge_pad_m,
+        )
+        if not isinstance(final_line_local, LineString):
+            return None
+        clip_piece_type_local = (
+            "continuous_center_piece"
+            if bool(line_diag_local.get("center_piece_hit", False))
+            else "continuous_nearest_piece_fallback"
+        )
+        return {
+            "s_signed": float(s_signed),
+            "center_xy": center_xy,
+            "crossline": crossline,
+            "pieces_raw": pieces_raw_local,
+            "final_line": final_line_local,
+            "line_diag": line_diag_local,
+            "clip_piece_type": clip_piece_type_local,
+        }
+
+    signed_first_hit = None if search_diag.get("s_found_m") is None else float(search_diag.get("s_found_m"))
+    first_candidate = None if signed_first_hit is None else _build_k16_candidate(float(signed_first_hit))
+    if first_candidate is None:
         breakpoints.append(
             make_breakpoint(
                 code=BP_K16_DRIVEZONE_NOT_REACHED,
                 severity="hard",
                 nodeid=nodeid,
-                message=f"k16_piece_select_failed:{line_diag.get('reason')}",
+                message="k16_piece_select_failed:first_hit_invalid",
             )
         )
         return _attach_k16_diag(
@@ -1318,8 +1386,55 @@ def _evaluate_node_k16(
             k16_s_best_m=search_diag.get("s_best_m"),
             k16_found=False,
             k16_min_dist_cross_to_drivezone_m=search_diag.get("min_dist_cross_to_drivezone_m"),
-            k16_break_reason=f"piece_select_failed:{line_diag.get('reason')}",
+            k16_break_reason="piece_select_failed:first_hit_invalid",
+            k16_refine_enable=k16_refine_enable,
+            k16_refine_ahead_m=k16_refine_ahead_m,
+            k16_refine_step_m=k16_refine_step_m,
         )
+
+    candidates: list[dict[str, Any]] = [first_candidate]
+    if k16_refine_enable and k16_refine_ahead_m > 1e-9 and signed_first_hit is not None:
+        dir_sign = 1.0 if float(sel.dir_sign) >= 0.0 else -1.0
+        start_s = float(signed_first_hit)
+        end_s = float(signed_first_hit + dir_sign * float(k16_refine_ahead_m))
+        step_signed = float(dir_sign * float(k16_refine_step_m))
+        cur = float(start_s + step_signed)
+        scan_vals: list[float] = []
+        if step_signed > 0.0:
+            while cur <= end_s + 1e-9:
+                scan_vals.append(float(cur))
+                cur += step_signed
+        else:
+            while cur >= end_s - 1e-9:
+                scan_vals.append(float(cur))
+                cur += step_signed
+        if (not scan_vals) or abs(float(scan_vals[-1]) - float(end_s)) > 1e-9:
+            scan_vals.append(float(end_s))
+
+        for s_val in scan_vals:
+            cand = _build_k16_candidate(float(s_val))
+            if cand is None:
+                continue
+            candidates.append(cand)
+
+    best_candidate = min(
+        candidates,
+        key=lambda c: (
+            -float(c["final_line"].length),
+            int(len(c["pieces_raw"])),
+            abs(float(c["s_signed"]) - float(signed_first_hit)),
+            abs(float(c["s_signed"])),
+        ),
+    )
+    refined_used = bool(abs(float(best_candidate["s_signed"]) - float(signed_first_hit)) > 1e-9)
+    final_line = best_candidate["final_line"]
+    line_diag = best_candidate["line_diag"]
+    pieces_raw = list(best_candidate["pieces_raw"])
+    signed_found = float(best_candidate["s_signed"])
+    clip_piece_type = str(best_candidate["clip_piece_type"])
+    first_hit_len = float(first_candidate["final_line"].length)
+    refined_len = float(final_line.length)
+    refine_candidate_count = int(len(candidates))
 
     id_map = {str(k): int(v) for k, v in node.id_fields}
     boundary = drivezone_union.boundary if drivezone_union is not None else None
@@ -1334,11 +1449,9 @@ def _evaluate_node_k16(
         right_end_to_dz_edge = None
         dist_line_to_dz_edge = None
 
-    signed_found = None if search_diag.get("s_found_m") is None else float(search_diag.get("s_found_m"))
-    scan_dist_abs = None if signed_found is None else float(abs(float(signed_found)))
+    scan_dist_abs = float(abs(float(signed_found)))
     anchor_pt = final_line.interpolate(0.5, normalized=True)
     conf = compute_confidence(trigger="drivezone_split", scan_dist_m=0.0 if scan_dist_abs is None else scan_dist_abs)
-    clip_piece_type = "continuous_center_piece" if bool(line_diag.get("center_piece_hit", False)) else "continuous_nearest_piece_fallback"
     piece_lens = [float(ln.length) for ln in pieces_raw]
 
     result = {
@@ -1386,9 +1499,9 @@ def _evaluate_node_k16(
         "gap_len_m": None,
         "seg_len_m": float(final_line.length),
         "s_divstrip_m": None,
-        "s_drivezone_split_m": None if signed_found is None else float(signed_found),
-        "s_chosen_m": None if signed_found is None else float(signed_found),
-        "split_pick_source": "k16_first_intersection",
+        "s_drivezone_split_m": float(signed_found),
+        "s_chosen_m": float(signed_found),
+        "split_pick_source": "k16_first_intersection_refined" if refined_used else "k16_first_intersection",
         "divstrip_ref_source": "none",
         "divstrip_ref_offset_m": None,
         "output_cross_half_len_m": float(k16_cross_half_len_m),
@@ -1415,7 +1528,7 @@ def _evaluate_node_k16(
         "position_source_forward": None,
         "ref_s_reverse_m": None,
         "position_source_reverse": None,
-        "ref_s_final_m": None if signed_found is None else float(signed_found),
+        "ref_s_final_m": float(signed_found),
         "position_source_final": "k16_ref_s",
         "untrusted_divstrip_at_node": False,
         "node_to_divstrip_m_at_s0": None,
@@ -1470,11 +1583,20 @@ def _evaluate_node_k16(
         k16_search_max_m=k16_search_max_m,
         k16_step_m=k16_step_m,
         k16_cross_half_len_m=k16_cross_half_len_m,
-        k16_s_found_m=signed_found,
+        k16_s_found_m=float(signed_found),
         k16_s_best_m=search_diag.get("s_best_m"),
         k16_found=True,
         k16_min_dist_cross_to_drivezone_m=search_diag.get("min_dist_cross_to_drivezone_m"),
-        k16_break_reason="ok",
+        k16_break_reason="ok_refined" if refined_used else "ok",
+        k16_refine_enable=k16_refine_enable,
+        k16_refine_ahead_m=k16_refine_ahead_m,
+        k16_refine_step_m=k16_refine_step_m,
+        k16_first_hit_s_m=signed_first_hit,
+        k16_refined_used=refined_used,
+        k16_s_refined_m=float(signed_found),
+        k16_first_hit_len_m=first_hit_len,
+        k16_refined_len_m=refined_len,
+        k16_refine_candidate_count=refine_candidate_count,
     )
 
 

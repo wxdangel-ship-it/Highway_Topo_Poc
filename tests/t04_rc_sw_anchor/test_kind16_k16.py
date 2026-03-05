@@ -43,6 +43,7 @@ def _build_case(
     road_direction: int,
     add_second_supported_road: bool,
     drivezone_y_range: tuple[float, float],
+    drivezone_features_override: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     patch_dir = tmp_path / case_name / "patch"
     global_dir = tmp_path / case_name / "global"
@@ -115,7 +116,7 @@ def _build_case(
     _write_json(global_dir / "RCSDRoad.geojson", _fc(road_features))
 
     min_y, max_y = drivezone_y_range
-    drivezone_features = [
+    drivezone_features = drivezone_features_override or [
         {
             "type": "Feature",
             "properties": {"name": "k16_drivezone"},
@@ -188,6 +189,36 @@ def test_k16_reverse_search_hits_drivezone(tmp_path: Path) -> None:
     assert bool(item.get("k16_enabled", False)) is True
     assert str(item.get("k16_search_dir")) == "reverse"
     assert -10.0 <= float(item.get("k16_s_found_m", 1.0)) <= 0.0
+
+
+def test_k16_refine_ahead_prefers_stable_wider_crossline(tmp_path: Path) -> None:
+    drivezone_features = [
+        {
+            "type": "Feature",
+            "properties": {"name": "near_narrow"},
+            "geometry": {"type": "Polygon", "coordinates": [_poly_box(-0.3, 0.5, 0.3, 0.8)]},
+        },
+        {
+            "type": "Feature",
+            "properties": {"name": "ahead_wide"},
+            "geometry": {"type": "Polygon", "coordinates": [_poly_box(-5.0, 2.0, 5.0, 2.8)]},
+        },
+    ]
+    item, _bp = _run_case(
+        tmp_path,
+        case_name="k16_refine_ahead",
+        node_is_effective_end=False,
+        road_direction=2,
+        add_second_supported_road=False,
+        drivezone_y_range=(0.5, 2.8),
+        drivezone_features_override=drivezone_features,
+    )
+    assert str(item.get("status")) == "ok"
+    assert bool(item.get("k16_refined_used", False)) is True
+    assert abs(float(item.get("k16_first_hit_s_m")) - 0.5) <= 1e-6
+    assert float(item.get("k16_s_found_m")) >= 2.0
+    assert float(item.get("k16_refined_len_m")) > float(item.get("k16_first_hit_len_m"))
+    assert str(item.get("split_pick_source")) == "k16_first_intersection_refined"
 
 
 def test_k16_fail_when_multiple_roads(tmp_path: Path) -> None:

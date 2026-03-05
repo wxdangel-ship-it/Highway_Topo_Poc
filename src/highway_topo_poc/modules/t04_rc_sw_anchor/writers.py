@@ -135,6 +135,15 @@ def _props_min(item: dict[str, Any]) -> dict[str, Any]:
         "k16_found": item.get("k16_found"),
         "k16_min_dist_cross_to_drivezone_m": item.get("k16_min_dist_cross_to_drivezone_m"),
         "k16_break_reason": item.get("k16_break_reason"),
+        "k16_refine_enable": item.get("k16_refine_enable"),
+        "k16_refine_ahead_m": item.get("k16_refine_ahead_m"),
+        "k16_refine_step_m": item.get("k16_refine_step_m"),
+        "k16_first_hit_s_m": item.get("k16_first_hit_s_m"),
+        "k16_refined_used": item.get("k16_refined_used"),
+        "k16_s_refined_m": item.get("k16_s_refined_m"),
+        "k16_first_hit_len_m": item.get("k16_first_hit_len_m"),
+        "k16_refined_len_m": item.get("k16_refined_len_m"),
+        "k16_refine_candidate_count": item.get("k16_refine_candidate_count"),
     }
 
 
