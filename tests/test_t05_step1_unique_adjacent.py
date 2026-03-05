@@ -86,6 +86,63 @@ def test_load_road_prior_adjacency_defaults_to_undirected(tmp_path: Path) -> Non
     assert bool(stats.get("respect_direction")) is False
 
 
+def test_topology_unique_decision_marks_multi_chain_when_same_dst_has_two_paths() -> None:
+    raw_graph = {
+        1: [
+            {"to": 10, "edge_id": "e_1_10"},
+            {"to": 11, "edge_id": "e_1_11"},
+        ],
+        10: [{"to": 2, "edge_id": "e_10_2"}],
+        11: [{"to": 2, "edge_id": "e_11_2"}],
+    }
+    compressed, comp_stats = pipeline._compress_topology_graph(
+        raw_graph,
+        cross_nodes={1, 2},
+        enable=True,
+    )
+    xsec_map = {1: _mk_xsec(1, 0.0), 2: _mk_xsec(2, 10.0)}
+    allowed, decisions, topo_stats, straight_features, chain_features = pipeline._build_topology_unique_decisions(
+        compressed,
+        cross_nodes={1, 2},
+        xsec_map=xsec_map,
+        require_unique_chain=True,
+        max_expansions=1000,
+    )
+
+    assert int(comp_stats.get("compressible_node_count", 0)) == 2
+    assert 1 not in allowed
+    assert str(decisions[1]["status"]) == "multi_chain"
+    assert str(decisions[1]["reason"]) == pipeline._HARD_MULTI_CHAIN_SAME_DST
+    assert int(topo_stats.get("multi_chain_src_count", 0)) == 1
+    assert len(straight_features) >= 1
+    assert len(chain_features) >= 1
+
+
+def test_topology_unique_decision_respects_direction_and_reports_unresolved() -> None:
+    # Only reverse direction path 2->1 exists; src=1 should be unresolved.
+    raw_graph = {
+        2: [{"to": 10, "edge_id": "e_2_10"}],
+        10: [{"to": 1, "edge_id": "e_10_1"}],
+    }
+    compressed, _ = pipeline._compress_topology_graph(
+        raw_graph,
+        cross_nodes={1, 2},
+        enable=True,
+    )
+    xsec_map = {1: _mk_xsec(1, 0.0), 2: _mk_xsec(2, 10.0)}
+    allowed, decisions, topo_stats, _straight_features, _chain_features = pipeline._build_topology_unique_decisions(
+        compressed,
+        cross_nodes={1, 2},
+        xsec_map=xsec_map,
+        require_unique_chain=True,
+        max_expansions=1000,
+    )
+
+    assert 1 not in allowed
+    assert str(decisions[1]["status"]) == "unresolved"
+    assert int(topo_stats.get("unresolved_src_count", 0)) >= 1
+
+
 def test_crossing_absorbing_state_prevents_third_party_crossing_expansion() -> None:
     src_key = "t:cross:1"
     mid_key = "t:cross:2"
@@ -557,3 +614,91 @@ def test_unique_neighbor_enters_corridor_stage(tmp_path: Path, monkeypatch) -> N
 
     assert calls["n"] == 1
     assert int(out["metrics_payload"].get("step1_unique_pair_count", 0)) == 1
+
+
+def test_topology_unique_mode_hard_fails_multi_chain_same_dst(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    road_path = tmp_path / "RCSDRoad.geojson"
+    road_payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "geometry": None, "properties": {"snodeid": 1, "enodeid": 10, "direction": 2}},
+            {"type": "Feature", "geometry": None, "properties": {"snodeid": 10, "enodeid": 2, "direction": 2}},
+            {"type": "Feature", "geometry": None, "properties": {"snodeid": 1, "enodeid": 11, "direction": 2}},
+            {"type": "Feature", "geometry": None, "properties": {"snodeid": 11, "enodeid": 2, "direction": 2}},
+        ],
+    }
+    road_path.write_text(json.dumps(road_payload, ensure_ascii=False), encoding="utf-8")
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 10.0)],
+    )
+    patch_inputs = PatchInputs(
+        patch_id=patch_inputs.patch_id,
+        patch_dir=patch_inputs.patch_dir,
+        projection=patch_inputs.projection,
+        projection_to_metric=patch_inputs.projection_to_metric,
+        projection_to_input=patch_inputs.projection_to_input,
+        intersection_lines=patch_inputs.intersection_lines,
+        lane_boundaries_metric=patch_inputs.lane_boundaries_metric,
+        node_kind_map=patch_inputs.node_kind_map,
+        trajectories=patch_inputs.trajectories,
+        drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
+        drivezone_source_path=patch_inputs.drivezone_source_path,
+        divstrip_zone_metric=patch_inputs.divstrip_zone_metric,
+        divstrip_source_path=patch_inputs.divstrip_source_path,
+        point_cloud_path=patch_inputs.point_cloud_path,
+        road_prior_path=road_path,
+        tiles_dir=patch_inputs.tiles_dir,
+        input_summary=patch_inputs.input_summary,
+    )
+    support_12 = PairSupport(src_nodeid=1, dst_nodeid=2, support_traj_ids={"t1"}, support_event_count=1, repr_traj_ids=["t1"])
+    build_result = PairSupportBuildResult(
+        supports={(1, 2): support_12},
+        unresolved_events=[],
+        graph_node_count=0,
+        graph_edge_count=0,
+        stitch_candidate_count=0,
+        stitch_edge_count=0,
+        stitch_query_count=0,
+        stitch_candidates_total=0,
+        stitch_reject_dist_count=0,
+        stitch_reject_angle_count=0,
+        stitch_reject_forward_count=0,
+        stitch_accept_count=0,
+        stitch_levels_used_hist={},
+        ambiguous_events=[],
+        next_crossing_candidates=[],
+        node_dst_votes={1: {2: 1}},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "extract_crossing_events",
+        lambda *args, **kwargs: CrossingExtractResult(
+            events_by_traj={},
+            raw_hit_count=0,
+            dedup_drop_count=0,
+            n_cross_empty_skipped=0,
+            n_cross_geom_unexpected=0,
+            n_cross_distance_gate_reject=0,
+        ),
+    )
+    monkeypatch.setattr(pipeline, "build_pair_supports", lambda *args, **kwargs: build_result)
+    monkeypatch.setattr(
+        pipeline,
+        "infer_node_types",
+        lambda **kwargs: ({1: "unknown", 2: "unknown"}, {1: 0, 2: 0}, {1: 0, 2: 0}),
+    )
+
+    params = dict(pipeline.DEFAULT_PARAMS)
+    params["STEP1_ADJ_MODE"] = "topology_unique"
+    params["STEP1_TOPO_REQUIRE_UNIQUE_CHAIN"] = 1
+    out = pipeline._run_patch_core(
+        patch_inputs,
+        params=params,
+        run_id="unit_run",
+        repo_root=tmp_path,
+    )
+
+    reasons = {str(bp.get("reason")) for bp in out["hard_breakpoints"]}
+    assert pipeline._HARD_MULTI_CHAIN_SAME_DST in reasons
+    assert int(out["metrics_payload"].get("step1_unique_pair_count", -1)) == 0

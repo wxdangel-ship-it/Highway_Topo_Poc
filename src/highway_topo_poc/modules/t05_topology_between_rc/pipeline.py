@@ -80,6 +80,7 @@ _SOFT_CROSS_GEOM_UNEXPECTED = "CROSS_GEOM_UNEXPECTED"
 _SOFT_CROSS_DISTANCE_GATE_REJECT = "CROSS_DISTANCE_GATE_REJECT"
 _SOFT_ENDCAP_WIDTH_CLAMPED = "ENDCAP_WIDTH_CLAMPED"
 _HARD_NO_ADJACENT_PAIR_AFTER_PASS2 = "NO_ADJACENT_PAIR_AFTER_PASS2"
+_HARD_MULTI_CHAIN_SAME_DST = "MULTI_CHAIN_SAME_DST"
 
 
 DEFAULT_PARAMS: dict[str, Any] = {
@@ -102,8 +103,13 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_UNIQUE_DST_EARLY_STOP": 1,
     "STEP1_UNIQUE_DST_DIST_EPS_M": 5.0,
     "STEP1_NODE_VOTE_MIN_RATIO": 1.0,
+    "STEP1_ADJ_MODE": "topology_unique",
+    "STEP1_TOPO_RESPECT_DIRECTION": 1,
+    "STEP1_TOPO_COMPRESS_DEG2": 1,
+    "STEP1_TOPO_REQUIRE_UNIQUE_CHAIN": 1,
+    "STEP1_TOPO_MAX_EXPANSIONS": 50000,
     "STEP1_USE_ROAD_PRIOR_ADJ_FILTER": 1,
-    "STEP1_ROAD_PRIOR_RESPECT_DIRECTION": 0,
+    "STEP1_ROAD_PRIOR_RESPECT_DIRECTION": 1,
     "PASS2_NEIGHBOR_MAX_DIST_M": 8000.0,
     "PASS2_UNRESOLVED_MIN_COUNT": 20,
     "PASS2_UNRESOLVED_PER_SUPPORT": 10.0,
@@ -622,13 +628,73 @@ def _run_patch_core(
         "step1_pair_cluster_disabled_event_count": 0,
         "step1_pair_cluster_disabled_hard_multi_removed_count": 0,
     }
-    step1_road_prior_respect_direction = bool(int(params.get("STEP1_ROAD_PRIOR_RESPECT_DIRECTION", 0)))
+    step1_adj_mode = str(params.get("STEP1_ADJ_MODE", "topology_unique")).strip().lower()
+    step1_road_prior_respect_direction = bool(int(params.get("STEP1_ROAD_PRIOR_RESPECT_DIRECTION", 1)))
     road_prior_next_map, road_prior_stats = _load_road_prior_adjacency(
         patch_inputs.road_prior_path,
         respect_direction=bool(step1_road_prior_respect_direction),
     )
-    step1_road_prior_filter_enabled = bool(int(params.get("STEP1_USE_ROAD_PRIOR_ADJ_FILTER", 1))) and bool(
-        road_prior_next_map
+    step1_topo_respect_direction = bool(int(params.get("STEP1_TOPO_RESPECT_DIRECTION", 1)))
+    road_prior_edge_graph, road_prior_edge_stats = _load_road_prior_graph(
+        patch_inputs.road_prior_path,
+        respect_direction=bool(step1_topo_respect_direction),
+        unknown_direction_as_bidirectional=False,
+    )
+    step1_topology_enabled = False
+    step1_topology_fallback_reason: str | None = None
+    step1_topology_allowed_dst_map: dict[int, set[int]] = {}
+    step1_topology_decisions: dict[int, dict[str, Any]] = {}
+    step1_topology_stats: dict[str, Any] = {
+        "src_count": int(len(node_ids)),
+        "accepted_src_count": 0,
+        "unresolved_src_count": 0,
+        "multi_dst_src_count": 0,
+        "multi_chain_src_count": 0,
+        "search_overflow_src_count": 0,
+        "compress_enabled": bool(int(params.get("STEP1_TOPO_COMPRESS_DEG2", 1))),
+        "compressible_node_count": 0,
+        "keep_node_count": 0,
+        "raw_node_count": 0,
+        "raw_edge_count": 0,
+        "compressed_edge_count": 0,
+    }
+    step1_pair_straight_features: list[dict[str, Any]] = []
+    step1_topo_chain_features: list[dict[str, Any]] = []
+    if step1_adj_mode == "topology_unique":
+        if road_prior_edge_graph:
+            topo_comp_graph, topo_comp_stats = _compress_topology_graph(
+                road_prior_edge_graph,
+                cross_nodes={int(v) for v in node_ids},
+                enable=bool(int(params.get("STEP1_TOPO_COMPRESS_DEG2", 1))),
+            )
+            (
+                step1_topology_allowed_dst_map,
+                step1_topology_decisions,
+                topo_stats,
+                step1_pair_straight_features,
+                step1_topo_chain_features,
+            ) = _build_topology_unique_decisions(
+                topo_comp_graph,
+                cross_nodes={int(v) for v in node_ids},
+                xsec_map=xsec_map,
+                require_unique_chain=bool(int(params.get("STEP1_TOPO_REQUIRE_UNIQUE_CHAIN", 1))),
+                max_expansions=int(max(100, int(params.get("STEP1_TOPO_MAX_EXPANSIONS", 50000)))),
+            )
+            step1_topology_enabled = True
+            step1_topology_stats.update({str(k): v for k, v in topo_comp_stats.items()})
+            step1_topology_stats.update({str(k): v for k, v in topo_stats.items()})
+        else:
+            step1_topology_fallback_reason = "road_prior_graph_empty_or_missing"
+
+    step1_road_prior_filter_enabled = (
+        (not bool(step1_topology_enabled))
+        and bool(int(params.get("STEP1_USE_ROAD_PRIOR_ADJ_FILTER", 1)))
+        and bool(road_prior_next_map)
+    )
+    step1_allowed_dst_filter_map: dict[int, set[int]] | None = (
+        step1_topology_allowed_dst_map
+        if bool(step1_topology_enabled)
+        else (road_prior_next_map if bool(step1_road_prior_filter_enabled) else None)
     )
     step1_road_prior_reject_crossing_count = 0
     step1_road_prior_reject_candidate_total = 0
@@ -637,7 +703,24 @@ def _run_patch_core(
         debug_json_payloads["debug/step1_road_prior_adjacency.json"] = {
             "enabled": bool(step1_road_prior_filter_enabled),
             "stats": dict(road_prior_stats),
+            "edge_stats": dict(road_prior_edge_stats),
             "src_node_count": int(len(road_prior_next_map)),
+        }
+        debug_json_payloads["debug/step1_topology_unique_map.json"] = {
+            "mode": str(step1_adj_mode),
+            "enabled": bool(step1_topology_enabled),
+            "fallback_reason": step1_topology_fallback_reason,
+            "stats": dict(step1_topology_stats),
+            "road_prior_edge_stats": dict(road_prior_edge_stats),
+            "nodes": {str(int(k)): dict(v) for k, v in sorted(step1_topology_decisions.items(), key=lambda it: int(it[0]))},
+        }
+        debug_json_payloads["debug/step1_pair_straight_segments.geojson"] = {
+            "type": "FeatureCollection",
+            "features": list(step1_pair_straight_features),
+        }
+        debug_json_payloads["debug/step1_topo_chain_segments.geojson"] = {
+            "type": "FeatureCollection",
+            "features": list(step1_topo_chain_features),
         }
 
     def _timing_extra_metrics() -> dict[str, Any]:
@@ -685,6 +768,20 @@ def _run_patch_core(
         payload["step1_road_prior_reject_crossing_count"] = int(step1_road_prior_reject_crossing_count)
         payload["step1_road_prior_reject_candidate_total"] = int(step1_road_prior_reject_candidate_total)
         payload["step1_resolved_by_dist_margin_count"] = int(step1_resolved_by_dist_margin_count)
+        payload["step1_adj_mode"] = str(step1_adj_mode)
+        payload["step1_topology_enabled"] = bool(step1_topology_enabled)
+        payload["step1_topology_fallback_reason"] = step1_topology_fallback_reason
+        payload["step1_topology_respect_direction"] = bool(step1_topo_respect_direction)
+        payload["step1_topology_edge_count"] = int(road_prior_edge_stats.get("edge_count", 0))
+        payload["step1_topology_src_count"] = int(step1_topology_stats.get("src_count", 0))
+        payload["step1_topology_accepted_src_count"] = int(step1_topology_stats.get("accepted_src_count", 0))
+        payload["step1_topology_unresolved_src_count"] = int(step1_topology_stats.get("unresolved_src_count", 0))
+        payload["step1_topology_multi_dst_src_count"] = int(step1_topology_stats.get("multi_dst_src_count", 0))
+        payload["step1_topology_multi_chain_src_count"] = int(step1_topology_stats.get("multi_chain_src_count", 0))
+        payload["step1_topology_search_overflow_src_count"] = int(step1_topology_stats.get("search_overflow_src_count", 0))
+        payload["step1_topology_compressible_node_count"] = int(step1_topology_stats.get("compressible_node_count", 0))
+        payload["step1_topology_keep_node_count"] = int(step1_topology_stats.get("keep_node_count", 0))
+        payload["step1_topology_compressed_edge_count"] = int(step1_topology_stats.get("compressed_edge_count", 0))
         payload.update(xsec_cross_stats)
         payload.update(pair_cluster_norm_stats)
         return payload
@@ -805,7 +902,7 @@ def _run_patch_core(
             multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
             unique_dst_early_stop=bool(int(params.get("STEP1_UNIQUE_DST_EARLY_STOP", 1))),
             unique_dst_dist_eps_m=float(params.get("STEP1_UNIQUE_DST_DIST_EPS_M", 5.0)),
-            allowed_dst_by_src=(road_prior_next_map if step1_road_prior_filter_enabled else None),
+            allowed_dst_by_src=step1_allowed_dst_filter_map,
         )
         nt_map, indeg_map, outdeg_map = infer_node_types(
             node_ids=node_ids,
@@ -830,7 +927,7 @@ def _run_patch_core(
             multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
             unique_dst_early_stop=bool(int(params.get("STEP1_UNIQUE_DST_EARLY_STOP", 1))),
             unique_dst_dist_eps_m=float(params.get("STEP1_UNIQUE_DST_DIST_EPS_M", 5.0)),
-            allowed_dst_by_src=(road_prior_next_map if step1_road_prior_filter_enabled else None),
+            allowed_dst_by_src=step1_allowed_dst_filter_map,
         )
         return cross_obj, supports_obj, nt_map, indeg_map, outdeg_map
 
@@ -1003,36 +1100,40 @@ def _run_patch_core(
     node_vote_min_ratio = float(min(1.0, max(0.0, node_vote_min_ratio)))
     strict_unique_required = bool(node_vote_min_ratio >= 1.0 - 1e-9)
     preferred_dst_by_src: dict[int, int] = {}
-    for src_nodeid, vote_raw in sorted(dict(supports_result.node_dst_votes).items(), key=lambda it: int(it[0])):
-        src_i = int(src_nodeid)
-        votes = {
-            int(dst): int(cnt)
-            for dst, cnt in dict(vote_raw).items()
-            if int(cnt) > 0
-        }
-        ordered_votes = sorted(votes.items(), key=lambda it: (-int(it[1]), int(it[0])))
-        total_votes = int(sum(int(v) for _, v in ordered_votes))
-        main_dst = int(ordered_votes[0][0]) if ordered_votes else None
-        main_votes = int(ordered_votes[0][1]) if ordered_votes else 0
-        main_ratio = (float(main_votes) / float(total_votes)) if total_votes > 0 else 0.0
-        top2_gap = (
-            float(main_votes - int(ordered_votes[1][1])) / float(total_votes)
-            if total_votes > 0 and len(ordered_votes) > 1
-            else 1.0
-        )
-        if np.isfinite(main_ratio):
-            step1_vote_main_ratio_vals.append(float(main_ratio))
-        dst_count = int(len(ordered_votes))
-        decision = "OK" if dst_count <= 1 else "OK_BY_VOTE"
-        if dst_count > 1:
-            if strict_unique_required or main_ratio < node_vote_min_ratio:
-                decision = HARD_MULTI_NEIGHBOR_FOR_NODE
+    if step1_topology_enabled:
+        accepted_pairs: set[tuple[int, int]] = set()
+        for src_i, decision in sorted(step1_topology_decisions.items(), key=lambda it: int(it[0])):
+            status = str(decision.get("status") or "unresolved")
+            dst_nodeids = [int(v) for v in decision.get("dst_nodeids", []) if v is not None]
+            dst_vote_items = sorted(
+                ((int(dst), int(len(decision.get("dst_paths", {}).get(str(int(dst)), [])))) for dst in dst_nodeids),
+                key=lambda it: (-int(it[1]), int(it[0])),
+            )
+            total_votes = int(sum(int(v) for _, v in dst_vote_items))
+            main_dst = int(dst_vote_items[0][0]) if dst_vote_items else None
+            main_votes = int(dst_vote_items[0][1]) if dst_vote_items else 0
+            main_ratio = (float(main_votes) / float(total_votes)) if total_votes > 0 else 0.0
+            top2_gap = (
+                float(main_votes - int(dst_vote_items[1][1])) / float(total_votes)
+                if total_votes > 0 and len(dst_vote_items) > 1
+                else 1.0
+            )
+            if np.isfinite(main_ratio):
+                step1_vote_main_ratio_vals.append(float(main_ratio))
+
+            if status == "accepted":
+                chosen = decision.get("chosen_dst_nodeid")
+                if chosen is not None:
+                    accepted_pairs.add((int(src_i), int(chosen)))
+            elif status == "multi_dst":
                 step1_ambiguous_src_nodes.add(int(src_i))
-                step1_ambiguous_nodes_hint[int(src_i)] = (
-                    f"dst_votes={','.join(f'{dst}:{cnt}' for dst, cnt in ordered_votes)};"
-                    f"main_dst={main_dst};main_ratio={main_ratio:.3f};"
-                    f"threshold={node_vote_min_ratio:.3f}"
+                hint = (
+                    f"dst_candidates={','.join(str(v) for v in dst_nodeids)};"
+                    f"dst_count={int(len(dst_nodeids))};"
+                    f"search_overflow={bool(decision.get('search_overflow', False))};"
+                    f"expansions={int(decision.get('expansions', 0))}"
                 )
+                step1_ambiguous_nodes_hint[int(src_i)] = hint
                 hard_breakpoints.append(
                     {
                         "road_id": f"na_{int(src_i)}",
@@ -1040,39 +1141,147 @@ def _run_patch_core(
                         "dst_nodeid": None,
                         "reason": HARD_MULTI_NEIGHBOR_FOR_NODE,
                         "severity": "hard",
-                        "hint": step1_ambiguous_nodes_hint[int(src_i)],
+                        "hint": hint,
                     }
                 )
                 step1_ambiguous_node_count += 1
+            elif status == "multi_chain":
+                step1_ambiguous_src_nodes.add(int(src_i))
+                hint = (
+                    f"dst={decision.get('chosen_dst_nodeid')};"
+                    f"chain_count={int(decision.get('chain_count', 0))};"
+                    f"search_overflow={bool(decision.get('search_overflow', False))};"
+                    f"expansions={int(decision.get('expansions', 0))}"
+                )
+                step1_ambiguous_nodes_hint[int(src_i)] = hint
+                hard_breakpoints.append(
+                    {
+                        "road_id": f"na_{int(src_i)}",
+                        "src_nodeid": int(src_i),
+                        "dst_nodeid": int(decision.get("chosen_dst_nodeid"))
+                        if decision.get("chosen_dst_nodeid") is not None
+                        else None,
+                        "reason": _HARD_MULTI_CHAIN_SAME_DST,
+                        "severity": "hard",
+                        "hint": hint,
+                    }
+                )
+                step1_ambiguous_node_count += 1
+            else:
+                soft_breakpoints.append(
+                    {
+                        "road_id": f"na_{int(src_i)}",
+                        "src_nodeid": int(src_i),
+                        "dst_nodeid": None,
+                        "traj_id": None,
+                        "seq_range": None,
+                        "station_range_m": None,
+                        "reason": SOFT_UNRESOLVED_NEIGHBOR,
+                        "severity": "soft",
+                        "hint": (
+                            f"topology_unique_unresolved;"
+                            f"search_overflow={bool(decision.get('search_overflow', False))};"
+                            f"expansions={int(decision.get('expansions', 0))}"
+                        ),
+                    }
+                )
+
+            step1_node_dst_votes_debug[str(int(src_i))] = {
+                "dst_vote_map": {str(int(dst)): int(cnt) for dst, cnt in dst_vote_items},
+                "dst_count": int(len(dst_vote_items)),
+                "total_votes": int(total_votes),
+                "main_dst": int(main_dst) if main_dst is not None else None,
+                "main_ratio": float(main_ratio),
+                "top2_gap": float(top2_gap),
+                "threshold": float(node_vote_min_ratio),
+                "decision": str(status),
+                "topology_unique_mode": True,
+                "chosen_dst_nodeid": (
+                    int(decision.get("chosen_dst_nodeid")) if decision.get("chosen_dst_nodeid") is not None else None
+                ),
+                "chain_count": int(decision.get("chain_count", 0)),
+                "search_overflow": bool(decision.get("search_overflow", False)),
+                "expansions": int(decision.get("expansions", 0)),
+            }
+
+        supports = {
+            (int(src), int(dst)): support
+            for (src, dst), support in supports.items()
+            if (int(src), int(dst)) in accepted_pairs
+        }
+    else:
+        for src_nodeid, vote_raw in sorted(dict(supports_result.node_dst_votes).items(), key=lambda it: int(it[0])):
+            src_i = int(src_nodeid)
+            votes = {
+                int(dst): int(cnt)
+                for dst, cnt in dict(vote_raw).items()
+                if int(cnt) > 0
+            }
+            ordered_votes = sorted(votes.items(), key=lambda it: (-int(it[1]), int(it[0])))
+            total_votes = int(sum(int(v) for _, v in ordered_votes))
+            main_dst = int(ordered_votes[0][0]) if ordered_votes else None
+            main_votes = int(ordered_votes[0][1]) if ordered_votes else 0
+            main_ratio = (float(main_votes) / float(total_votes)) if total_votes > 0 else 0.0
+            top2_gap = (
+                float(main_votes - int(ordered_votes[1][1])) / float(total_votes)
+                if total_votes > 0 and len(ordered_votes) > 1
+                else 1.0
+            )
+            if np.isfinite(main_ratio):
+                step1_vote_main_ratio_vals.append(float(main_ratio))
+            dst_count = int(len(ordered_votes))
+            decision = "OK" if dst_count <= 1 else "OK_BY_VOTE"
+            if dst_count > 1:
+                if strict_unique_required or main_ratio < node_vote_min_ratio:
+                    decision = HARD_MULTI_NEIGHBOR_FOR_NODE
+                    step1_ambiguous_src_nodes.add(int(src_i))
+                    step1_ambiguous_nodes_hint[int(src_i)] = (
+                        f"dst_votes={','.join(f'{dst}:{cnt}' for dst, cnt in ordered_votes)};"
+                        f"main_dst={main_dst};main_ratio={main_ratio:.3f};"
+                        f"threshold={node_vote_min_ratio:.3f}"
+                    )
+                    hard_breakpoints.append(
+                        {
+                            "road_id": f"na_{int(src_i)}",
+                            "src_nodeid": int(src_i),
+                            "dst_nodeid": None,
+                            "reason": HARD_MULTI_NEIGHBOR_FOR_NODE,
+                            "severity": "hard",
+                            "hint": step1_ambiguous_nodes_hint[int(src_i)],
+                        }
+                    )
+                    step1_ambiguous_node_count += 1
+                elif main_dst is not None:
+                    preferred_dst_by_src[int(src_i)] = int(main_dst)
             elif main_dst is not None:
                 preferred_dst_by_src[int(src_i)] = int(main_dst)
-        elif main_dst is not None:
-            preferred_dst_by_src[int(src_i)] = int(main_dst)
-        step1_node_dst_votes_debug[str(int(src_i))] = {
-            "dst_vote_map": {str(int(dst)): int(cnt) for dst, cnt in ordered_votes},
-            "dst_count": int(dst_count),
-            "total_votes": int(total_votes),
-            "main_dst": int(main_dst) if main_dst is not None else None,
-            "main_ratio": float(main_ratio),
-            "top2_gap": float(top2_gap),
-            "threshold": float(node_vote_min_ratio),
-            "decision": str(decision),
-        }
+            step1_node_dst_votes_debug[str(int(src_i))] = {
+                "dst_vote_map": {str(int(dst)): int(cnt) for dst, cnt in ordered_votes},
+                "dst_count": int(dst_count),
+                "total_votes": int(total_votes),
+                "main_dst": int(main_dst) if main_dst is not None else None,
+                "main_ratio": float(main_ratio),
+                "top2_gap": float(top2_gap),
+                "threshold": float(node_vote_min_ratio),
+                "decision": str(decision),
+                "topology_unique_mode": False,
+            }
 
-    if step1_ambiguous_src_nodes or preferred_dst_by_src:
-        filtered_supports: dict[tuple[int, int], PairSupport] = {}
-        for (src, dst), support in supports.items():
-            src_i = int(src)
-            dst_i = int(dst)
-            if src_i in step1_ambiguous_src_nodes:
-                continue
-            preferred_dst = preferred_dst_by_src.get(src_i)
-            if preferred_dst is not None and int(dst_i) != int(preferred_dst) and int(
-                len(dict(supports_result.node_dst_votes.get(src_i, {})))
-            ) > 1:
-                continue
-            filtered_supports[(int(src_i), int(dst_i))] = support
-        supports = filtered_supports
+        if step1_ambiguous_src_nodes or preferred_dst_by_src:
+            filtered_supports: dict[tuple[int, int], PairSupport] = {}
+            for (src, dst), support in supports.items():
+                src_i = int(src)
+                dst_i = int(dst)
+                if src_i in step1_ambiguous_src_nodes:
+                    continue
+                preferred_dst = preferred_dst_by_src.get(src_i)
+                if preferred_dst is not None and int(dst_i) != int(preferred_dst) and int(
+                    len(dict(supports_result.node_dst_votes.get(src_i, {})))
+                ) > 1:
+                    continue
+                filtered_supports[(int(src_i), int(dst_i))] = support
+            supports = filtered_supports
+
     step1_unique_pair_count = int(len(supports))
 
     if bool(int(params.get("DEBUG_DUMP", 0))):
@@ -1101,7 +1310,13 @@ def _run_patch_core(
                 if src_i not in step1_ambiguous_src_nodes:
                     continue
                 props_out = dict(props)
-                props_out["decision"] = HARD_MULTI_NEIGHBOR_FOR_NODE
+                vote_node = dict(step1_node_dst_votes_debug.get(str(int(src_i))) or {})
+                decision_val = str(vote_node.get("decision") or HARD_MULTI_NEIGHBOR_FOR_NODE)
+                if decision_val == "multi_chain":
+                    decision_val = _HARD_MULTI_CHAIN_SAME_DST
+                elif decision_val == "multi_dst":
+                    decision_val = HARD_MULTI_NEIGHBOR_FOR_NODE
+                props_out["decision"] = decision_val
                 props_out["hint"] = step1_ambiguous_nodes_hint.get(src_i)
                 amb_features.append(
                     {
@@ -1123,7 +1338,10 @@ def _run_patch_core(
         enabled=disable_pair_cluster,
     )
     if not supports:
-        has_multi_neighbor_hard = any(str(bp.get("reason")) == HARD_MULTI_NEIGHBOR_FOR_NODE for bp in hard_breakpoints)
+        has_multi_neighbor_hard = any(
+            str(bp.get("reason")) in {HARD_MULTI_NEIGHBOR_FOR_NODE, _HARD_MULTI_CHAIN_SAME_DST}
+            for bp in hard_breakpoints
+        )
         if not has_multi_neighbor_hard:
             hard_breakpoints.append(
                 {
@@ -6358,6 +6576,7 @@ _ROAD_PRIOR_DST_FIELD_CANDIDATES = (
     "enode",
 )
 _ROAD_PRIOR_DIRECTION_FIELD_CANDIDATES = ("direction", "dir", "flowdir")
+_ROAD_PRIOR_EDGE_ID_FIELD_CANDIDATES = ("road_id", "id", "link_id", "uuid", "name")
 _ROAD_PRIOR_PAIR_RE = re.compile(r"^\s*(-?\d+)\D+(-?\d+)\s*$")
 
 
@@ -6402,6 +6621,23 @@ def _pick_int_field(props: dict[str, Any], candidates: Sequence[str]) -> int | N
     return None
 
 
+def _pick_str_field(props: dict[str, Any], candidates: Sequence[str]) -> str | None:
+    if not props:
+        return None
+    by_key = {str(k).strip().lower(): v for k, v in props.items()}
+    for cand in candidates:
+        key = str(cand).strip().lower()
+        if key not in by_key:
+            continue
+        raw = by_key.get(key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text:
+            return text
+    return None
+
+
 def _pair_from_road_id(props: dict[str, Any]) -> tuple[int, int] | None:
     by_key = {str(k).strip().lower(): v for k, v in props.items()}
     for key in ("road_id", "id", "link_id", "name"):
@@ -6423,11 +6659,12 @@ def _pair_from_road_id(props: dict[str, Any]) -> tuple[int, int] | None:
     return None
 
 
-def _load_road_prior_adjacency(
+def _load_road_prior_graph(
     road_prior_path: Path | None,
     *,
     respect_direction: bool = False,
-) -> tuple[dict[int, set[int]], dict[str, Any]]:
+    unknown_direction_as_bidirectional: bool = True,
+) -> tuple[dict[int, list[dict[str, Any]]], dict[str, Any]]:
     stats: dict[str, Any] = {
         "path": str(road_prior_path) if isinstance(road_prior_path, Path) else None,
         "file_exists": bool(isinstance(road_prior_path, Path) and road_prior_path.is_file()),
@@ -6435,6 +6672,7 @@ def _load_road_prior_adjacency(
         "features_with_pair": 0,
         "features_missing_pair": 0,
         "direction_unknown_count": 0,
+        "direction_unknown_dropped_count": 0,
         "respect_direction": bool(respect_direction),
         "edge_count": 0,
         "src_node_count": 0,
@@ -6455,8 +6693,22 @@ def _load_road_prior_adjacency(
         return {}, stats
     stats["features_total"] = int(len(features))
 
-    edges: set[tuple[int, int]] = set()
-    for feat in features:
+    adjacency: dict[int, list[dict[str, Any]]] = {}
+    seen: set[tuple[int, int, str]] = set()
+
+    def _add_edge(src_n: int, dst_n: int, edge_uid: str) -> None:
+        sig = (int(src_n), int(dst_n), str(edge_uid))
+        if sig in seen:
+            return
+        seen.add(sig)
+        adjacency.setdefault(int(src_n), []).append(
+            {
+                "to": int(dst_n),
+                "edge_id": str(edge_uid),
+            }
+        )
+
+    for idx, feat in enumerate(features):
         if not isinstance(feat, dict):
             continue
         props = feat.get("properties")
@@ -6474,30 +6726,376 @@ def _load_road_prior_adjacency(
             continue
         if int(src) == int(dst):
             continue
+
         stats["features_with_pair"] = int(stats["features_with_pair"]) + 1
         direction = _pick_int_field(props, _ROAD_PRIOR_DIRECTION_FIELD_CANDIDATES)
+        edge_name = _pick_str_field(props, _ROAD_PRIOR_EDGE_ID_FIELD_CANDIDATES) or f"feature_{idx}"
+        edge_base = f"{edge_name}@{idx}"
+        src_i = int(src)
+        dst_i = int(dst)
+
         if not bool(respect_direction):
-            edges.add((int(src), int(dst)))
-            edges.add((int(dst), int(src)))
+            _add_edge(src_i, dst_i, f"{edge_base}:fwd")
+            _add_edge(dst_i, src_i, f"{edge_base}:rev")
             if direction not in {2, 3}:
                 stats["direction_unknown_count"] = int(stats["direction_unknown_count"]) + 1
-        elif direction == 2:
-            edges.add((int(src), int(dst)))
-        elif direction == 3:
-            edges.add((int(dst), int(src)))
+            continue
+
+        if direction == 2:
+            _add_edge(src_i, dst_i, f"{edge_base}:fwd")
+            continue
+        if direction == 3:
+            _add_edge(dst_i, src_i, f"{edge_base}:rev")
+            continue
+
+        stats["direction_unknown_count"] = int(stats["direction_unknown_count"]) + 1
+        if bool(unknown_direction_as_bidirectional):
+            _add_edge(src_i, dst_i, f"{edge_base}:fwd_unk")
+            _add_edge(dst_i, src_i, f"{edge_base}:rev_unk")
         else:
-            # Unknown/absent direction: keep both orientations to avoid false negative filtering.
-            stats["direction_unknown_count"] = int(stats["direction_unknown_count"]) + 1
-            edges.add((int(src), int(dst)))
-            edges.add((int(dst), int(src)))
+            stats["direction_unknown_dropped_count"] = int(stats["direction_unknown_dropped_count"]) + 1
 
-    adjacency: dict[int, set[int]] = {}
-    for src, dst in edges:
-        adjacency.setdefault(int(src), set()).add(int(dst))
-
-    stats["edge_count"] = int(len(edges))
+    for src_i, vals in adjacency.items():
+        vals.sort(key=lambda it: (int(it.get("to", -1)), str(it.get("edge_id", ""))))
+        adjacency[src_i] = vals
+    stats["edge_count"] = int(sum(len(v) for v in adjacency.values()))
     stats["src_node_count"] = int(len(adjacency))
     return adjacency, stats
+
+
+def _load_road_prior_adjacency(
+    road_prior_path: Path | None,
+    *,
+    respect_direction: bool = False,
+) -> tuple[dict[int, set[int]], dict[str, Any]]:
+    edge_graph, stats = _load_road_prior_graph(
+        road_prior_path,
+        respect_direction=bool(respect_direction),
+        unknown_direction_as_bidirectional=True,
+    )
+    adjacency: dict[int, set[int]] = {}
+    for src, edges in edge_graph.items():
+        dsts = {int(item.get("to")) for item in edges if item.get("to") is not None}
+        if dsts:
+            adjacency[int(src)] = set(int(v) for v in dsts)
+    stats["edge_count"] = int(sum(len(v) for v in adjacency.values()))
+    stats["src_node_count"] = int(len(adjacency))
+    return adjacency, stats
+
+
+def _compress_topology_graph(
+    adjacency_edges: dict[int, list[dict[str, Any]]],
+    *,
+    cross_nodes: set[int],
+    enable: bool,
+) -> tuple[dict[int, list[dict[str, Any]]], dict[str, Any]]:
+    all_nodes: set[int] = set(int(v) for v in cross_nodes)
+    out_neighbors: dict[int, set[int]] = {}
+    in_neighbors: dict[int, set[int]] = {}
+    for src, edges in adjacency_edges.items():
+        src_i = int(src)
+        all_nodes.add(src_i)
+        out_neighbors.setdefault(src_i, set())
+        for edge in edges:
+            dst_i = int(edge.get("to"))
+            all_nodes.add(dst_i)
+            out_neighbors.setdefault(src_i, set()).add(dst_i)
+            in_neighbors.setdefault(dst_i, set()).add(src_i)
+    for node in all_nodes:
+        out_neighbors.setdefault(int(node), set())
+        in_neighbors.setdefault(int(node), set())
+
+    removable_nodes = {
+        int(node)
+        for node in all_nodes
+        if int(node) not in cross_nodes
+        and int(len(in_neighbors.get(int(node), set()))) == 1
+        and int(len(out_neighbors.get(int(node), set()))) == 1
+    }
+    if not bool(enable):
+        removable_nodes = set()
+
+    keep_nodes = {int(node) for node in all_nodes if int(node) not in removable_nodes}
+    compressed: dict[int, list[dict[str, Any]]] = {}
+    seen: set[tuple[int, int, tuple[str, ...]]] = set()
+    cycle_truncate_count = 0
+
+    for src in sorted(keep_nodes):
+        src_edges = list(adjacency_edges.get(int(src), []))
+        for first_edge in src_edges:
+            chain_edge_ids: list[str] = []
+            path_nodes: list[int] = [int(src)]
+            visited: set[int] = set()
+            edge_cur = dict(first_edge)
+            for _ in range(100000):
+                dst = int(edge_cur.get("to"))
+                edge_id = str(edge_cur.get("edge_id") or "")
+                chain_edge_ids.append(edge_id)
+                path_nodes.append(int(dst))
+                if int(dst) in keep_nodes:
+                    break
+                if int(dst) in visited:
+                    cycle_truncate_count += 1
+                    break
+                visited.add(int(dst))
+                next_edges = list(adjacency_edges.get(int(dst), []))
+                if len(next_edges) != 1:
+                    break
+                edge_cur = dict(next_edges[0])
+            if len(path_nodes) < 2:
+                continue
+            dst_keep = int(path_nodes[-1])
+            sig = (int(src), int(dst_keep), tuple(chain_edge_ids))
+            if sig in seen:
+                continue
+            seen.add(sig)
+            compressed.setdefault(int(src), []).append(
+                {
+                    "to": int(dst_keep),
+                    "edge_ids": [str(v) for v in chain_edge_ids],
+                    "path_nodes": [int(v) for v in path_nodes],
+                }
+            )
+
+    for src, vals in compressed.items():
+        vals.sort(
+            key=lambda it: (
+                int(it.get("to", -1)),
+                int(len(it.get("edge_ids", []))),
+                ",".join(str(v) for v in it.get("edge_ids", [])),
+            )
+        )
+        compressed[src] = vals
+
+    stats = {
+        "raw_node_count": int(len(all_nodes)),
+        "raw_edge_count": int(sum(len(v) for v in adjacency_edges.values())),
+        "compress_enabled": bool(enable),
+        "compressible_node_count": int(len(removable_nodes)),
+        "keep_node_count": int(len(keep_nodes)),
+        "compressed_edge_count": int(sum(len(v) for v in compressed.values())),
+        "cycle_truncate_count": int(cycle_truncate_count),
+    }
+    return compressed, stats
+
+
+def _search_topology_next_xsecs(
+    compressed_adj: dict[int, list[dict[str, Any]]],
+    *,
+    src_nodeid: int,
+    cross_nodes: set[int],
+    max_expansions: int,
+) -> dict[str, Any]:
+    src = int(src_nodeid)
+    stack: list[tuple[int, list[int], list[str]]] = [(int(src), [int(src)], [])]
+    expansions = 0
+    overflow = False
+    dst_paths_raw: dict[int, list[dict[str, Any]]] = {}
+
+    while stack:
+        node, node_path, edge_path = stack.pop()
+        if int(node) != int(src) and int(node) in cross_nodes:
+            dst_paths_raw.setdefault(int(node), []).append(
+                {
+                    "node_path": [int(v) for v in node_path],
+                    "edge_ids": [str(v) for v in edge_path],
+                }
+            )
+            continue
+        for edge in compressed_adj.get(int(node), []):
+            if expansions >= int(max_expansions):
+                overflow = True
+                stack = []
+                break
+            nxt = int(edge.get("to"))
+            if int(nxt) in node_path:
+                continue
+            edge_ids = [str(v) for v in edge.get("edge_ids", [])]
+            stack.append(
+                (
+                    int(nxt),
+                    [int(v) for v in node_path] + [int(nxt)],
+                    [str(v) for v in edge_path] + edge_ids,
+                )
+            )
+            expansions += 1
+
+    dst_paths: dict[int, list[dict[str, Any]]] = {}
+    for dst, records in dst_paths_raw.items():
+        uniq: dict[tuple[str, ...], dict[str, Any]] = {}
+        for rec in records:
+            edge_ids = [str(v) for v in rec.get("edge_ids", [])]
+            node_path = [int(v) for v in rec.get("node_path", [])]
+            sig = tuple(edge_ids) if edge_ids else tuple(str(v) for v in node_path)
+            if sig in uniq:
+                continue
+            uniq[sig] = {
+                "node_path": node_path,
+                "edge_ids": edge_ids,
+                "signature": [str(v) for v in sig],
+                "chain_len": int(len(edge_ids)),
+            }
+        dst_paths[int(dst)] = list(uniq.values())
+
+    return {
+        "src_nodeid": int(src),
+        "dst_paths": dst_paths,
+        "dst_nodeids": sorted(int(k) for k in dst_paths.keys()),
+        "expansions": int(expansions),
+        "overflow": bool(overflow),
+    }
+
+
+def _cross_section_midpoint(xsec: CrossSection | None) -> Point | None:
+    if xsec is None:
+        return None
+    geom = getattr(xsec, "geometry_metric", None)
+    if not isinstance(geom, LineString) or geom.is_empty or geom.length <= 0:
+        return None
+    pt = geom.interpolate(0.5, normalized=True)
+    if not isinstance(pt, Point) or pt.is_empty:
+        return None
+    return pt
+
+
+def _build_topology_unique_decisions(
+    compressed_adj: dict[int, list[dict[str, Any]]],
+    *,
+    cross_nodes: set[int],
+    xsec_map: dict[int, Any],
+    require_unique_chain: bool,
+    max_expansions: int,
+) -> tuple[dict[int, set[int]], dict[int, dict[str, Any]], dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    allowed_dst_by_src: dict[int, set[int]] = {}
+    decisions: dict[int, dict[str, Any]] = {}
+    straight_features: list[dict[str, Any]] = []
+    chain_features: list[dict[str, Any]] = []
+
+    accepted_count = 0
+    unresolved_count = 0
+    multi_dst_count = 0
+    multi_chain_count = 0
+    overflow_count = 0
+
+    for src in sorted(int(v) for v in cross_nodes):
+        search = _search_topology_next_xsecs(
+            compressed_adj,
+            src_nodeid=int(src),
+            cross_nodes=cross_nodes,
+            max_expansions=int(max(100, max_expansions)),
+        )
+        dst_nodeids = [int(v) for v in search.get("dst_nodeids", [])]
+        dst_paths = {
+            int(k): list(v)
+            for k, v in dict(search.get("dst_paths", {})).items()
+        }
+        if bool(search.get("overflow", False)):
+            overflow_count += 1
+
+        status = "unresolved"
+        reason = SOFT_UNRESOLVED_NEIGHBOR
+        chosen_dst: int | None = None
+        chain_count = 0
+        if len(dst_nodeids) == 0:
+            unresolved_count += 1
+        elif len(dst_nodeids) >= 2:
+            status = "multi_dst"
+            reason = HARD_MULTI_NEIGHBOR_FOR_NODE
+            multi_dst_count += 1
+        else:
+            chosen_dst = int(dst_nodeids[0])
+            chain_count = int(len(dst_paths.get(int(chosen_dst), [])))
+            if bool(require_unique_chain) and chain_count >= 2:
+                status = "multi_chain"
+                reason = _HARD_MULTI_CHAIN_SAME_DST
+                multi_chain_count += 1
+            else:
+                status = "accepted"
+                reason = "accepted"
+                accepted_count += 1
+                allowed_dst_by_src[int(src)] = {int(chosen_dst)}
+
+        src_mid = _cross_section_midpoint(xsec_map.get(int(src)))
+        line_targets: list[int] = []
+        if status == "accepted" and chosen_dst is not None:
+            line_targets = [int(chosen_dst)]
+        elif status == "multi_chain" and chosen_dst is not None:
+            line_targets = [int(chosen_dst)]
+        elif status == "multi_dst":
+            line_targets = [int(v) for v in dst_nodeids]
+
+        for dst in line_targets:
+            dst_mid = _cross_section_midpoint(xsec_map.get(int(dst)))
+            if src_mid is None or dst_mid is None:
+                continue
+            line = LineString([(float(src_mid.x), float(src_mid.y)), (float(dst_mid.x), float(dst_mid.y))])
+            if line.is_empty or line.length <= 0:
+                continue
+            straight_features.append(
+                {
+                    "type": "Feature",
+                    "geometry": mapping(line),
+                    "properties": {
+                        "src_nodeid": int(src),
+                        "dst_nodeid": int(dst),
+                        "status": str(status),
+                        "reason": str(reason),
+                        "dst_count": int(len(dst_nodeids)),
+                        "chain_count": int(chain_count if dst == chosen_dst else len(dst_paths.get(int(dst), []))),
+                        "search_overflow": bool(search.get("overflow", False)),
+                        "expansions": int(search.get("expansions", 0)),
+                    },
+                }
+            )
+            for path_idx, rec in enumerate(dst_paths.get(int(dst), [])[:5], start=1):
+                chain_features.append(
+                    {
+                        "type": "Feature",
+                        "geometry": mapping(line),
+                        "properties": {
+                            "src_nodeid": int(src),
+                            "dst_nodeid": int(dst),
+                            "status": str(status),
+                            "reason": str(reason),
+                            "path_idx": int(path_idx),
+                            "path_node_count": int(len(rec.get("node_path", []))),
+                            "chain_len": int(rec.get("chain_len", 0)),
+                            "edge_ids": [str(v) for v in rec.get("edge_ids", [])[:20]],
+                        },
+                    }
+                )
+
+        decisions[int(src)] = {
+            "src_nodeid": int(src),
+            "status": str(status),
+            "reason": str(reason),
+            "dst_nodeids": [int(v) for v in dst_nodeids],
+            "chosen_dst_nodeid": int(chosen_dst) if chosen_dst is not None else None,
+            "chain_count": int(chain_count),
+            "expansions": int(search.get("expansions", 0)),
+            "search_overflow": bool(search.get("overflow", False)),
+            "dst_paths": {
+                str(int(dst)): [
+                    {
+                        "node_path": [int(v) for v in rec.get("node_path", [])],
+                        "edge_ids": [str(v) for v in rec.get("edge_ids", [])[:50]],
+                        "chain_len": int(rec.get("chain_len", 0)),
+                    }
+                    for rec in recs[:10]
+                ]
+                for dst, recs in sorted(dst_paths.items(), key=lambda it: int(it[0]))
+            },
+        }
+
+    stats = {
+        "src_count": int(len(cross_nodes)),
+        "accepted_src_count": int(accepted_count),
+        "unresolved_src_count": int(unresolved_count),
+        "multi_dst_src_count": int(multi_dst_count),
+        "multi_chain_src_count": int(multi_chain_count),
+        "search_overflow_src_count": int(overflow_count),
+    }
+    return allowed_dst_by_src, decisions, stats, straight_features, chain_features
 
 
 def _build_cross_section_map(patch_inputs: PatchInputs) -> dict[int, Any]:
@@ -7580,6 +8178,7 @@ def _reason_hint(reason: str) -> str:
     hints = {
         HARD_MULTI_CORRIDOR: "multiple_step1_corridors_detected",
         HARD_MULTI_NEIGHBOR_FOR_NODE: "multiple_dst_node_candidates_for_src_node",
+        _HARD_MULTI_CHAIN_SAME_DST: "multiple_topology_chains_for_same_dst",
         HARD_NO_STRATEGY_MERGE_TO_DIVERGE: "merge_to_diverge_not_supported",
         HARD_MULTI_ROAD: "pair_has_multiple_channel_clusters",
         HARD_NON_RC: "non_rc_node_used_in_pair",

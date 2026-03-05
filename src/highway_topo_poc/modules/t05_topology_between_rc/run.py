@@ -46,6 +46,34 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
         default=float(DEFAULT_PARAMS.get("STEP1_NODE_VOTE_MIN_RATIO", 1.0)),
     )
     p.add_argument(
+        "--step1_adj_mode",
+        choices=["topology_unique", "legacy_event_graph"],
+        default=str(DEFAULT_PARAMS.get("STEP1_ADJ_MODE", "topology_unique")),
+    )
+    p.add_argument(
+        "--step1_topo_respect_direction",
+        type=int,
+        choices=[0, 1],
+        default=int(DEFAULT_PARAMS.get("STEP1_TOPO_RESPECT_DIRECTION", 1)),
+    )
+    p.add_argument(
+        "--step1_topo_compress_deg2",
+        type=int,
+        choices=[0, 1],
+        default=int(DEFAULT_PARAMS.get("STEP1_TOPO_COMPRESS_DEG2", 1)),
+    )
+    p.add_argument(
+        "--step1_topo_require_unique_chain",
+        type=int,
+        choices=[0, 1],
+        default=int(DEFAULT_PARAMS.get("STEP1_TOPO_REQUIRE_UNIQUE_CHAIN", 1)),
+    )
+    p.add_argument(
+        "--step1_topo_max_expansions",
+        type=int,
+        default=int(DEFAULT_PARAMS.get("STEP1_TOPO_MAX_EXPANSIONS", 50000)),
+    )
+    p.add_argument(
         "--step1_use_road_prior_adj_filter",
         type=int,
         choices=[0, 1],
@@ -329,6 +357,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         "STEP1_UNIQUE_DST_EARLY_STOP": int(args.step1_unique_dst_early_stop),
         "STEP1_UNIQUE_DST_DIST_EPS_M": float(args.step1_unique_dst_dist_eps_m),
         "STEP1_NODE_VOTE_MIN_RATIO": float(args.step1_node_vote_min_ratio),
+        "STEP1_ADJ_MODE": str(args.step1_adj_mode),
+        "STEP1_TOPO_RESPECT_DIRECTION": int(args.step1_topo_respect_direction),
+        "STEP1_TOPO_COMPRESS_DEG2": int(args.step1_topo_compress_deg2),
+        "STEP1_TOPO_REQUIRE_UNIQUE_CHAIN": int(args.step1_topo_require_unique_chain),
+        "STEP1_TOPO_MAX_EXPANSIONS": int(args.step1_topo_max_expansions),
         "STEP1_USE_ROAD_PRIOR_ADJ_FILTER": int(args.step1_use_road_prior_adj_filter),
         "STEP1_ROAD_PRIOR_RESPECT_DIRECTION": int(args.step1_road_prior_respect_direction),
         "PASS2_TRAJ_XSEC_HIT_BUFFER_M": float(args.pass2_traj_xsec_hit_buffer_m),
