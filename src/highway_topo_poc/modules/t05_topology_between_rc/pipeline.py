@@ -24,10 +24,12 @@ from .geometry import (
     HARD_ENDPOINT_OFF_ANCHOR,
     HARD_ENDPOINT_LOCAL,
     HARD_MULTI_CORRIDOR,
+    HARD_MULTI_NEIGHBOR_FOR_NODE,
     HARD_MULTI_ROAD,
     HARD_NO_STRATEGY_MERGE_TO_DIVERGE,
     HARD_NON_RC,
     HARD_ROAD_OUTSIDE_DRIVEZONE,
+    SOFT_AMBIGUOUS_NEXT_XSEC,
     SOFT_LOW_SUPPORT,
     SOFT_NO_STABLE_SECTION,
     SOFT_DIVSTRIP_MISSING,
@@ -96,6 +98,9 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STITCH_PENALTY": 2.0,
     "STITCH_TOPK": 3,
     "NEIGHBOR_MAX_DIST_M": 2000.0,
+    "STEP1_UNIQUE_DST_EARLY_STOP": 1,
+    "STEP1_UNIQUE_DST_DIST_EPS_M": 5.0,
+    "STEP1_NODE_VOTE_MIN_RATIO": 1.0,
     "PASS2_NEIGHBOR_MAX_DIST_M": 8000.0,
     "PASS2_UNRESOLVED_MIN_COUNT": 20,
     "PASS2_UNRESOLVED_PER_SUPPORT": 10.0,
@@ -771,6 +776,8 @@ def _run_patch_core(
             neighbor_max_dist_m=float(neighbor_max_dist_m),
             multi_road_sep_m=float(params["MULTI_ROAD_SEP_M"]),
             multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
+            unique_dst_early_stop=bool(int(params.get("STEP1_UNIQUE_DST_EARLY_STOP", 1))),
+            unique_dst_dist_eps_m=float(params.get("STEP1_UNIQUE_DST_DIST_EPS_M", 5.0)),
         )
         nt_map, indeg_map, outdeg_map = infer_node_types(
             node_ids=node_ids,
@@ -793,6 +800,8 @@ def _run_patch_core(
             neighbor_max_dist_m=float(neighbor_max_dist_m),
             multi_road_sep_m=float(params["MULTI_ROAD_SEP_M"]),
             multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
+            unique_dst_early_stop=bool(int(params.get("STEP1_UNIQUE_DST_EARLY_STOP", 1))),
+            unique_dst_dist_eps_m=float(params.get("STEP1_UNIQUE_DST_DIST_EPS_M", 5.0)),
         )
         return cross_obj, supports_obj, nt_map, indeg_map, outdeg_map
 
@@ -871,7 +880,188 @@ def _run_patch_core(
             out_degree = pass2_out_degree
 
     _append_cross_breakpoints(cross_result)
-    supports = supports_result.supports
+    supports = dict(supports_result.supports)
+    step1_ambiguous_crossing_count = int(len(supports_result.ambiguous_events))
+    step1_ambiguous_node_count = 0
+    step1_unique_pair_count = 0
+    step1_vote_main_ratio_vals: list[float] = []
+    step1_node_dst_votes_debug: dict[str, dict[str, Any]] = {}
+    step1_ambiguous_src_nodes: set[int] = set()
+    step1_ambiguous_nodes_hint: dict[int, str] = {}
+    step1_next_crossing_candidate_features: list[dict[str, Any]] = []
+    for item in supports_result.ambiguous_events:
+        soft_breakpoints.append(dict(item))
+    for cand in supports_result.next_crossing_candidates:
+        if not isinstance(cand, dict):
+            continue
+        src_point = cand.get("src_point")
+        if not isinstance(src_point, Point) or src_point.is_empty:
+            continue
+        dst_candidates: list[dict[str, Any]] = []
+        for dc in cand.get("dst_candidates", []):
+            if not isinstance(dc, dict):
+                continue
+            try:
+                dst_nodeid = int(dc.get("dst_nodeid"))
+            except Exception:
+                continue
+            try:
+                dist_m = float(dc.get("dist_m"))
+            except Exception:
+                dist_m = None
+            try:
+                stitch_hops = int(dc.get("stitch_hops"))
+            except Exception:
+                stitch_hops = None
+            dst_candidates.append(
+                {
+                    "dst_nodeid": int(dst_nodeid),
+                    "dist_m": float(dist_m) if dist_m is not None and np.isfinite(dist_m) else None,
+                    "stitch_hops": int(stitch_hops) if stitch_hops is not None else None,
+                    "target_key": str(dc.get("target_key") or ""),
+                }
+            )
+        step1_next_crossing_candidate_features.append(
+            {
+                "type": "Feature",
+                "geometry": mapping(src_point),
+                "properties": {
+                    "src_nodeid": int(cand.get("src_nodeid")) if cand.get("src_nodeid") is not None else None,
+                    "src_cross_id": str(cand.get("src_cross_id") or ""),
+                    "traj_id": str(cand.get("traj_id") or ""),
+                    "seq_idx": int(cand.get("seq_idx")) if cand.get("seq_idx") is not None else None,
+                    "station_m": float(cand.get("station_m")) if cand.get("station_m") is not None else None,
+                    "dst_nodeids_found": [int(v) for v in (cand.get("dst_nodeids_found") or [])],
+                    "dst_nodeids_found_count": int(cand.get("dst_nodeids_found_count") or 0),
+                    "dst_candidates": dst_candidates,
+                    "chosen_dst_nodeid": (
+                        int(cand.get("chosen_dst_nodeid")) if cand.get("chosen_dst_nodeid") is not None else None
+                    ),
+                    "chosen_dist_m": float(cand.get("chosen_dist_m")) if cand.get("chosen_dist_m") is not None else None,
+                    "ambiguous": bool(cand.get("ambiguous", False)),
+                    "unresolved": bool(cand.get("unresolved", False)),
+                },
+            }
+        )
+    for unresolved in supports_result.unresolved_events:
+        soft_breakpoints.append(dict(unresolved))
+
+    node_vote_min_ratio = float(params.get("STEP1_NODE_VOTE_MIN_RATIO", 1.0))
+    node_vote_min_ratio = float(min(1.0, max(0.0, node_vote_min_ratio)))
+    strict_unique_required = bool(node_vote_min_ratio >= 1.0 - 1e-9)
+    preferred_dst_by_src: dict[int, int] = {}
+    for src_nodeid, vote_raw in sorted(dict(supports_result.node_dst_votes).items(), key=lambda it: int(it[0])):
+        src_i = int(src_nodeid)
+        votes = {
+            int(dst): int(cnt)
+            for dst, cnt in dict(vote_raw).items()
+            if int(cnt) > 0
+        }
+        ordered_votes = sorted(votes.items(), key=lambda it: (-int(it[1]), int(it[0])))
+        total_votes = int(sum(int(v) for _, v in ordered_votes))
+        main_dst = int(ordered_votes[0][0]) if ordered_votes else None
+        main_votes = int(ordered_votes[0][1]) if ordered_votes else 0
+        main_ratio = (float(main_votes) / float(total_votes)) if total_votes > 0 else 0.0
+        top2_gap = (
+            float(main_votes - int(ordered_votes[1][1])) / float(total_votes)
+            if total_votes > 0 and len(ordered_votes) > 1
+            else 1.0
+        )
+        if np.isfinite(main_ratio):
+            step1_vote_main_ratio_vals.append(float(main_ratio))
+        dst_count = int(len(ordered_votes))
+        decision = "OK" if dst_count <= 1 else "OK_BY_VOTE"
+        if dst_count > 1:
+            if strict_unique_required or main_ratio < node_vote_min_ratio:
+                decision = HARD_MULTI_NEIGHBOR_FOR_NODE
+                step1_ambiguous_src_nodes.add(int(src_i))
+                step1_ambiguous_nodes_hint[int(src_i)] = (
+                    f"dst_votes={','.join(f'{dst}:{cnt}' for dst, cnt in ordered_votes)};"
+                    f"main_dst={main_dst};main_ratio={main_ratio:.3f};"
+                    f"threshold={node_vote_min_ratio:.3f}"
+                )
+                hard_breakpoints.append(
+                    {
+                        "road_id": f"na_{int(src_i)}",
+                        "src_nodeid": int(src_i),
+                        "dst_nodeid": None,
+                        "reason": HARD_MULTI_NEIGHBOR_FOR_NODE,
+                        "severity": "hard",
+                        "hint": step1_ambiguous_nodes_hint[int(src_i)],
+                    }
+                )
+                step1_ambiguous_node_count += 1
+            elif main_dst is not None:
+                preferred_dst_by_src[int(src_i)] = int(main_dst)
+        elif main_dst is not None:
+            preferred_dst_by_src[int(src_i)] = int(main_dst)
+        step1_node_dst_votes_debug[str(int(src_i))] = {
+            "dst_vote_map": {str(int(dst)): int(cnt) for dst, cnt in ordered_votes},
+            "dst_count": int(dst_count),
+            "total_votes": int(total_votes),
+            "main_dst": int(main_dst) if main_dst is not None else None,
+            "main_ratio": float(main_ratio),
+            "top2_gap": float(top2_gap),
+            "threshold": float(node_vote_min_ratio),
+            "decision": str(decision),
+        }
+
+    if step1_ambiguous_src_nodes or preferred_dst_by_src:
+        filtered_supports: dict[tuple[int, int], PairSupport] = {}
+        for (src, dst), support in supports.items():
+            src_i = int(src)
+            dst_i = int(dst)
+            if src_i in step1_ambiguous_src_nodes:
+                continue
+            preferred_dst = preferred_dst_by_src.get(src_i)
+            if preferred_dst is not None and int(dst_i) != int(preferred_dst) and int(
+                len(dict(supports_result.node_dst_votes.get(src_i, {})))
+            ) > 1:
+                continue
+            filtered_supports[(int(src_i), int(dst_i))] = support
+        supports = filtered_supports
+    step1_unique_pair_count = int(len(supports))
+
+    if bool(int(params.get("DEBUG_DUMP", 0))):
+        debug_json_payloads["debug/step1_next_crossing_candidates.geojson"] = {
+            "type": "FeatureCollection",
+            "features": list(step1_next_crossing_candidate_features),
+        }
+        debug_json_payloads["debug/step1_node_dst_votes.json"] = {
+            "threshold": float(node_vote_min_ratio),
+            "strict_unique_required": bool(strict_unique_required),
+            "nodes": dict(step1_node_dst_votes_debug),
+        }
+        if step1_ambiguous_src_nodes:
+            amb_features: list[dict[str, Any]] = []
+            for feat in step1_next_crossing_candidate_features:
+                if not isinstance(feat, dict):
+                    continue
+                props = feat.get("properties")
+                if not isinstance(props, dict):
+                    continue
+                src_nodeid = props.get("src_nodeid")
+                try:
+                    src_i = int(src_nodeid)
+                except Exception:
+                    continue
+                if src_i not in step1_ambiguous_src_nodes:
+                    continue
+                props_out = dict(props)
+                props_out["decision"] = HARD_MULTI_NEIGHBOR_FOR_NODE
+                props_out["hint"] = step1_ambiguous_nodes_hint.get(src_i)
+                amb_features.append(
+                    {
+                        "type": "Feature",
+                        "geometry": feat.get("geometry"),
+                        "properties": props_out,
+                    }
+                )
+            debug_json_payloads["debug/step1_node_ambiguous_examples.geojson"] = {
+                "type": "FeatureCollection",
+                "features": amb_features,
+            }
+
     disable_pair_cluster = bool(int(params.get("STEP1_DISABLE_PAIR_CLUSTER_WHEN_GATE", 1))) and bool(
         xsec_cross_stats.get("xsec_gate_enabled", False)
     )
@@ -879,24 +1069,23 @@ def _run_patch_core(
         supports=supports,
         enabled=disable_pair_cluster,
     )
-    for unresolved in supports_result.unresolved_events:
-        soft_breakpoints.append(dict(unresolved))
-
     if not supports:
-        hard_breakpoints.append(
-            {
-                "road_id": "na",
-                "src_nodeid": None,
-                "dst_nodeid": None,
-                "reason": _HARD_NO_ADJACENT_PAIR_AFTER_PASS2 if int(neighbor_search_pass) == 2 else HARD_CENTER_EMPTY,
-                "severity": "hard",
-                "hint": (
-                    "no_adjacent_pair_after_pass2"
-                    if int(neighbor_search_pass) == 2
-                    else "no_adjacent_pair_from_crossings"
-                ),
-            }
-        )
+        has_multi_neighbor_hard = any(str(bp.get("reason")) == HARD_MULTI_NEIGHBOR_FOR_NODE for bp in hard_breakpoints)
+        if not has_multi_neighbor_hard:
+            hard_breakpoints.append(
+                {
+                    "road_id": "na",
+                    "src_nodeid": None,
+                    "dst_nodeid": None,
+                    "reason": _HARD_NO_ADJACENT_PAIR_AFTER_PASS2 if int(neighbor_search_pass) == 2 else HARD_CENTER_EMPTY,
+                    "severity": "hard",
+                    "hint": (
+                        "no_adjacent_pair_after_pass2"
+                        if int(neighbor_search_pass) == 2
+                        else "no_adjacent_pair_from_crossings"
+                    ),
+                }
+            )
         if progress is not None:
             progress.mark("early_exit_no_supports", neighbor_search_pass=int(neighbor_search_pass))
         return _finalize_payloads(
@@ -927,6 +1116,19 @@ def _run_patch_core(
                 "stitch_reject_forward_count": int(supports_result.stitch_reject_forward_count),
                 "stitch_accept_count": int(supports_result.stitch_accept_count),
                 "stitch_levels_used_hist": dict(supports_result.stitch_levels_used_hist),
+                "step1_ambiguous_crossing_count": int(step1_ambiguous_crossing_count),
+                "step1_ambiguous_node_count": int(step1_ambiguous_node_count),
+                "step1_unique_pair_count": int(step1_unique_pair_count),
+                "step1_vote_main_ratio_p50": (
+                    float(np.percentile(np.asarray(step1_vote_main_ratio_vals, dtype=np.float64), 50.0))
+                    if step1_vote_main_ratio_vals
+                    else None
+                ),
+                "step1_vote_main_ratio_p90": (
+                    float(np.percentile(np.asarray(step1_vote_main_ratio_vals, dtype=np.float64), 90.0))
+                    if step1_vote_main_ratio_vals
+                    else None
+                ),
                 "neighbor_search_pass": int(neighbor_search_pass),
                 "neighbor_search_pass2_attempted": bool(pass2_attempted),
                 "neighbor_search_pass2_used": bool(int(neighbor_search_pass) == 2),
@@ -1303,6 +1505,42 @@ def _run_patch_core(
                 )
             )
             continue
+        if int(getattr(support, "cluster_count", 1)) > 1 or HARD_MULTI_ROAD in set(support.hard_anomalies):
+            road = _make_base_road_record(
+                src=src,
+                dst=dst,
+                support=support,
+                src_type=src_type,
+                dst_type=dst_type,
+                neighbor_search_pass=int(neighbor_search_pass),
+            )
+            _apply_xsec_gate_meta_to_road(road=road, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
+            road["step1_strategy"] = step1_corridor.get("strategy")
+            road["step1_reason"] = step1_corridor.get("hard_reason")
+            road["step1_corridor_count"] = step1_corridor.get("corridor_count")
+            road["step1_main_corridor_ratio"] = step1_corridor.get("main_corridor_ratio")
+            road["gore_fallback_used_src"] = bool(step1_corridor.get("gore_fallback_used_src", False))
+            road["gore_fallback_used_dst"] = bool(step1_corridor.get("gore_fallback_used_dst", False))
+            road["traj_drop_count_by_drivezone"] = int(step1_corridor.get("traj_drop_count_by_drivezone", 0))
+            road["drivezone_fallback_used"] = bool(step1_corridor.get("drivezone_fallback_used", False))
+            road["hard_anomaly"] = True
+            road["hard_reasons"] = [HARD_MULTI_ROAD]
+            road["soft_issue_flags"] = []
+            road["no_geometry_candidate"] = True
+            road["_geometry_metric"] = None
+            road_records.append(road)
+            hard_breakpoints.append(
+                build_breakpoint(
+                    road=road,
+                    reason=HARD_MULTI_ROAD,
+                    severity="hard",
+                    hint=(
+                        f"cluster_count={int(getattr(support, 'cluster_count', 1))};"
+                        f"main_cluster_ratio={float(getattr(support, 'main_cluster_ratio', 1.0)):.3f}"
+                    ),
+                )
+            )
+            continue
         cluster_ids = _select_cluster_candidates(support, max_clusters=3)
         candidate_roads: list[dict[str, Any]] = []
         cluster_inputs: list[tuple[int, PairSupport, dict[str, Any]]] = []
@@ -1438,6 +1676,56 @@ def _run_patch_core(
             continue
 
         ranked_candidates = sorted(candidate_roads, key=_candidate_sort_key, reverse=True)
+        viable_candidates = [
+            c
+            for c in ranked_candidates
+            if bool(c.get("_candidate_feasible", False))
+            and bool(c.get("_candidate_has_geometry", False))
+            and isinstance(c.get("_geometry_metric"), LineString)
+            and (not c.get("_geometry_metric").is_empty)
+        ]
+        if len(viable_candidates) > 1:
+            road = _make_base_road_record(
+                src=src,
+                dst=dst,
+                support=support,
+                src_type=src_type,
+                dst_type=dst_type,
+                neighbor_search_pass=int(neighbor_search_pass),
+            )
+            _apply_xsec_gate_meta_to_road(road=road, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
+            road["step1_strategy"] = step1_corridor.get("strategy")
+            road["step1_reason"] = step1_corridor.get("hard_reason")
+            road["step1_corridor_count"] = step1_corridor.get("corridor_count")
+            road["step1_main_corridor_ratio"] = step1_corridor.get("main_corridor_ratio")
+            road["gore_fallback_used_src"] = bool(step1_corridor.get("gore_fallback_used_src", False))
+            road["gore_fallback_used_dst"] = bool(step1_corridor.get("gore_fallback_used_dst", False))
+            road["traj_drop_count_by_drivezone"] = int(step1_corridor.get("traj_drop_count_by_drivezone", 0))
+            road["drivezone_fallback_used"] = bool(step1_corridor.get("drivezone_fallback_used", False))
+            road["hard_anomaly"] = True
+            road["hard_reasons"] = [HARD_MULTI_ROAD]
+            road["soft_issue_flags"] = []
+            road["no_geometry_candidate"] = True
+            road["cluster_score_top2"] = [
+                {
+                    "cluster_id": int(c.get("candidate_cluster_id", -1)),
+                    "score": float(c.get("_candidate_score", -1e9)),
+                    "feasible": bool(c.get("_candidate_feasible", False)),
+                    "has_geometry": bool(c.get("_candidate_has_geometry", False)),
+                }
+                for c in viable_candidates[:2]
+            ]
+            road["_geometry_metric"] = None
+            road_records.append(road)
+            hard_breakpoints.append(
+                build_breakpoint(
+                    road=road,
+                    reason=HARD_MULTI_ROAD,
+                    severity="hard",
+                    hint=f"viable_candidate_count={int(len(viable_candidates))}",
+                )
+            )
+            continue
         selected = ranked_candidates[0]
         selected["chosen_cluster_id"] = int(selected.get("candidate_cluster_id", 0))
         selected["no_geometry_candidate"] = False
@@ -2107,6 +2395,11 @@ def _run_patch_core(
         if step1_main_corridor_ratio_vals
         else np.empty((0,), dtype=np.float64)
     )
+    step1_vote_main_ratio_arr = (
+        np.asarray(step1_vote_main_ratio_vals, dtype=np.float64)
+        if step1_vote_main_ratio_vals
+        else np.empty((0,), dtype=np.float64)
+    )
     xsec_samples_passable_ratio_src_arr = (
         np.asarray(xsec_samples_passable_ratio_src_vals, dtype=np.float64)
         if xsec_samples_passable_ratio_src_vals
@@ -2149,6 +2442,15 @@ def _run_patch_core(
             "stitch_reject_forward_count": int(supports_result.stitch_reject_forward_count),
             "stitch_accept_count": int(supports_result.stitch_accept_count),
             "stitch_levels_used_hist": dict(supports_result.stitch_levels_used_hist),
+            "step1_ambiguous_crossing_count": int(step1_ambiguous_crossing_count),
+            "step1_ambiguous_node_count": int(step1_ambiguous_node_count),
+            "step1_unique_pair_count": int(step1_unique_pair_count),
+            "step1_vote_main_ratio_p50": (
+                float(np.percentile(step1_vote_main_ratio_arr, 50.0)) if step1_vote_main_ratio_arr.size > 0 else None
+            ),
+            "step1_vote_main_ratio_p90": (
+                float(np.percentile(step1_vote_main_ratio_arr, 90.0)) if step1_vote_main_ratio_arr.size > 0 else None
+            ),
             "neighbor_search_pass2_attempted": bool(pass2_attempted),
             "expanded_end_count": int(expanded_end_count),
             "gore_tip_end_count": int(gore_tip_end_count),
@@ -7057,6 +7359,7 @@ def _stitch_stats(values: Sequence[int]) -> tuple[int, int, int]:
 def _reason_hint(reason: str) -> str:
     hints = {
         HARD_MULTI_CORRIDOR: "multiple_step1_corridors_detected",
+        HARD_MULTI_NEIGHBOR_FOR_NODE: "multiple_dst_node_candidates_for_src_node",
         HARD_NO_STRATEGY_MERGE_TO_DIVERGE: "merge_to_diverge_not_supported",
         HARD_MULTI_ROAD: "pair_has_multiple_channel_clusters",
         HARD_NON_RC: "non_rc_node_used_in_pair",
@@ -7074,6 +7377,7 @@ def _reason_hint(reason: str) -> str:
         SOFT_NO_LB_PATH: "lane_boundary_graph_path_not_found",
         SOFT_WIGGLY: "turn_rate_exceeds_limit",
         SOFT_OPEN_END: "patch_boundary_open_end",
+        SOFT_AMBIGUOUS_NEXT_XSEC: "multiple_next_crossings_found",
         SOFT_UNRESOLVED_NEIGHBOR: "stitch_graph_neighbor_unresolved",
         SOFT_NO_STABLE_SECTION: "stable_section_not_found_use_fallback",
         SOFT_DIVSTRIP_MISSING: "divstripzone_missing_gore_disabled",
@@ -7191,6 +7495,9 @@ def _finalize_payloads(
                 or sk.startswith("intersection_")
                 or sk.startswith("step1_corridor_")
                 or sk.startswith("step1_main_corridor_")
+                or sk.startswith("step1_ambiguous_")
+                or sk.startswith("step1_unique_")
+                or sk.startswith("step1_vote_")
                 or sk.startswith("step0_")
                 or sk.startswith("traj_surface_cache_")
                 or sk.startswith("neighbor_search_")
