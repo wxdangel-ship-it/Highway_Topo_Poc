@@ -16,6 +16,7 @@ from .io import CrossSection, TrajectoryData
 
 
 HARD_MULTI_ROAD = "MULTI_ROAD_SAME_PAIR"
+HARD_MULTI_NEIGHBOR_FOR_NODE = "MULTI_NEIGHBOR_FOR_NODE"
 HARD_NON_RC = "NON_RC_IN_BETWEEN"
 HARD_CENTER_EMPTY = "CENTER_ESTIMATE_EMPTY"
 HARD_ENDPOINT = "ENDPOINT_NOT_ON_XSEC"
@@ -34,6 +35,7 @@ SOFT_NO_LB_PATH = "NO_LB_CONTINUOUS_PATH"
 SOFT_WIGGLY = "WIGGLY_CENTERLINE"
 SOFT_OPEN_END = "OPEN_END"
 SOFT_UNRESOLVED_NEIGHBOR = "UNRESOLVED_NEIGHBOR"
+SOFT_AMBIGUOUS_NEXT_XSEC = "AMBIGUOUS_NEXT_XSEC"
 SOFT_NO_STABLE_SECTION = "NO_STABLE_SECTION"
 SOFT_DIVSTRIP_MISSING = "DIVSTRIP_MISSING"
 SOFT_ROAD_OUTSIDE_TRAJ_SURFACE = "ROAD_OUTSIDE_TRAJ_SURFACE"
@@ -105,6 +107,9 @@ class PairSupportBuildResult:
     stitch_reject_forward_count: int
     stitch_accept_count: int
     stitch_levels_used_hist: dict[str, int]
+    ambiguous_events: list[dict[str, Any]] = field(default_factory=list)
+    next_crossing_candidates: list[dict[str, Any]] = field(default_factory=list)
+    node_dst_votes: dict[int, dict[int, int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -277,6 +282,8 @@ def build_pair_supports(
     neighbor_max_dist_m: float = 2000.0,
     multi_road_sep_m: float = 8.0,
     multi_road_topn: int = 10,
+    unique_dst_early_stop: bool = True,
+    unique_dst_dist_eps_m: float = 5.0,
 ) -> PairSupportBuildResult:
     levels = _normalize_stitch_levels(
         stitch_max_dist_levels_m=stitch_max_dist_levels_m,
@@ -297,6 +304,10 @@ def build_pair_supports(
 
     supports: dict[tuple[int, int], PairSupport] = {}
     unresolved_events: list[dict[str, Any]] = []
+    ambiguous_events: list[dict[str, Any]] = []
+    next_crossing_candidates: list[dict[str, Any]] = []
+    node_dst_votes: dict[int, dict[int, int]] = {}
+    dst_dist_eps_m = float(max(0.0, unique_dst_dist_eps_m))
 
     for traj_id, items in graph.event_keys_by_traj.items():
         for ev, source_key in items:
@@ -306,7 +317,63 @@ def build_pair_supports(
                 nodes=graph.nodes,
                 edges=graph.edges,
                 max_dist_m=float(neighbor_max_dist_m),
+                unique_dst_early_stop=bool(unique_dst_early_stop),
             )
+            hit_targets = list(search.hit_targets)
+            dst_nodeids_found = sorted({int(item[1]) for item in hit_targets})
+            dst_candidates = [
+                {
+                    "dst_nodeid": int(item[1]),
+                    "dist_m": float(item[2]),
+                    "stitch_hops": int(item[3]),
+                    "target_key": str(item[0]),
+                }
+                for item in hit_targets
+            ]
+            next_crossing_candidates.append(
+                {
+                    "src_nodeid": int(ev.nodeid),
+                    "src_cross_id": str(source_key),
+                    "traj_id": str(traj_id),
+                    "seq_idx": int(ev.seq_idx),
+                    "station_m": float(ev.station_m),
+                    "src_point": ev.cross_point,
+                    "dst_nodeids_found": list(dst_nodeids_found),
+                    "dst_nodeids_found_count": int(len(dst_nodeids_found)),
+                    "dst_candidates": list(dst_candidates),
+                    "chosen_dst_nodeid": int(dst_candidates[0]["dst_nodeid"]) if len(dst_candidates) == 1 else None,
+                    "chosen_dist_m": float(dst_candidates[0]["dist_m"]) if len(dst_candidates) == 1 else None,
+                    "ambiguous": bool(len(dst_nodeids_found) >= 2),
+                    "unresolved": bool(search.target_key is None and len(dst_nodeids_found) == 0),
+                    "unique_dst_dist_eps_m": float(dst_dist_eps_m),
+                }
+            )
+
+            if len(dst_nodeids_found) >= 2:
+                top = sorted(dst_candidates, key=lambda it: (float(it["dist_m"]), int(it["dst_nodeid"])))
+                hint_parts = [
+                    f"dst_nodeids={','.join(str(v) for v in dst_nodeids_found)}",
+                    f"candidate_count={int(len(dst_nodeids_found))}",
+                ]
+                if top:
+                    top_desc = ",".join(f"{int(it['dst_nodeid'])}:{float(it['dist_m']):.1f}" for it in top[:3])
+                    hint_parts.append(f"top_dist={top_desc}")
+                ambiguous_events.append(
+                    {
+                        "road_id": f"na_{ev.nodeid}_{traj_id}_{ev.seq_idx}",
+                        "src_nodeid": int(ev.nodeid),
+                        "dst_nodeid": None,
+                        "traj_id": str(traj_id),
+                        "seq_range": [int(ev.seq_idx), int(ev.seq_idx)],
+                        "station_range_m": [float(ev.station_m), float(ev.station_m)],
+                        "reason": SOFT_AMBIGUOUS_NEXT_XSEC,
+                        "severity": "soft",
+                        "hint": ";".join(hint_parts),
+                        "src_cross_id": str(source_key),
+                        "dst_nodeids_found": list(dst_nodeids_found),
+                    }
+                )
+                continue
 
             target_key = search.target_key
             if target_key is None:
@@ -329,7 +396,8 @@ def build_pair_supports(
                             f"stitch_candidates={stitch_candidate_count};"
                             f"stitch_candidates_last={last_stitch_candidates};"
                             f"stitch_candidates_explored={explored_stitch_candidates};"
-                            f"explored_nodes={int(search.explored_node_count)}"
+                            f"explored_nodes={int(search.explored_node_count)};"
+                            f"dst_found={int(len(dst_nodeids_found))}"
                         ),
                         "max_explored_dist_m": float(search.max_explored_dist_m),
                         "last_node_ref": str(search.last_key),
@@ -402,6 +470,8 @@ def build_pair_supports(
             support.evidence_traj_ids.append(str(traj_id))
             support.evidence_cluster_ids.append(0)
             support.evidence_lengths_m.append(float(search.distance_m))
+            src_vote = node_dst_votes.setdefault(int(ev.nodeid), {})
+            src_vote[int(dst_nodeid)] = int(src_vote.get(int(dst_nodeid), 0) + 1)
 
             is_open_end = ("start" in edge_kinds) or ("end" in edge_kinds)
             support.open_end_flags.append(bool(is_open_end))
@@ -467,6 +537,9 @@ def build_pair_supports(
         stitch_reject_forward_count=int(graph.stitch_reject_forward_count),
         stitch_accept_count=int(graph.stitch_accept_count),
         stitch_levels_used_hist=dict(graph.stitch_levels_used_hist),
+        ambiguous_events=list(ambiguous_events),
+        next_crossing_candidates=list(next_crossing_candidates),
+        node_dst_votes={int(k): {int(kk): int(vv) for kk, vv in dict(v).items()} for k, v in node_dst_votes.items()},
     )
 
 
@@ -555,6 +628,7 @@ class _SearchResult:
     last_key: str
     explored_node_count: int
     explored_stitch_candidates: int
+    hit_targets: list[tuple[str, int, float, int]]
 
 
 @dataclass(frozen=True)
@@ -867,6 +941,7 @@ def _search_next_crossing(
     nodes: dict[str, _GraphNode],
     edges: dict[str, list[_GraphEdge]],
     max_dist_m: float,
+    unique_dst_early_stop: bool = True,
 ) -> _SearchResult:
     best: dict[str, tuple[float, int]] = {source_key: (0.0, 0)}
     prev: dict[str, str] = {}
@@ -877,6 +952,7 @@ def _search_next_crossing(
     last_key = source_key
     explored_keys: set[str] = set()
     explored_stitch_candidates = 0
+    hit_by_dst: dict[int, tuple[str, float, int]] = {}
 
     while heap:
         dist, hops, key = heapq.heappop(heap)
@@ -901,17 +977,20 @@ def _search_next_crossing(
             explored_keys.add(key)
             explored_stitch_candidates += int(_count_outgoing_stitch_edges(edges.get(key, [])))
         if node.kind == "cross" and node.cross_nodeid is not None and int(node.cross_nodeid) != int(source_nodeid):
-            return _SearchResult(
-                target_key=key,
-                distance_m=float(dist),
-                stitch_hops=int(hops),
-                prev=prev,
-                prev_edge=prev_edge,
-                max_explored_dist_m=float(max_explored),
-                last_key=str(last_key),
-                explored_node_count=int(len(explored_keys)),
-                explored_stitch_candidates=int(explored_stitch_candidates),
-            )
+            dst_nodeid = int(node.cross_nodeid)
+            prev_hit = hit_by_dst.get(dst_nodeid)
+            if prev_hit is None:
+                hit_by_dst[dst_nodeid] = (str(key), float(dist), int(hops))
+            else:
+                old_key, old_dist, old_hops = prev_hit
+                if float(dist) < float(old_dist) - 1e-9 or (
+                    abs(float(dist) - float(old_dist)) <= 1e-9 and int(hops) < int(old_hops)
+                ):
+                    hit_by_dst[dst_nodeid] = (str(key), float(dist), int(hops))
+            if bool(unique_dst_early_stop) and len(hit_by_dst) >= 2:
+                break
+            # crossing node is an absorbing state for adjacent-by-crossing search.
+            continue
 
         for edge in edges.get(key, []):
             nd = float(dist + edge.weight)
@@ -929,6 +1008,28 @@ def _search_next_crossing(
             prev_edge[edge.to_key] = edge
             heapq.heappush(heap, (nd, nh, edge.to_key))
 
+    if hit_by_dst:
+        ordered_hits = sorted(
+            (
+                (hit_key, int(dst_nodeid), float(hit_dist), int(hit_hops))
+                for dst_nodeid, (hit_key, hit_dist, hit_hops) in hit_by_dst.items()
+            ),
+            key=lambda it: (float(it[2]), int(it[3]), int(it[1]), str(it[0])),
+        )
+        chosen = ordered_hits[0]
+        return _SearchResult(
+            target_key=str(chosen[0]),
+            distance_m=float(chosen[2]),
+            stitch_hops=int(chosen[3]),
+            prev=prev,
+            prev_edge=prev_edge,
+            max_explored_dist_m=float(max_explored),
+            last_key=str(last_key),
+            explored_node_count=int(len(explored_keys)),
+            explored_stitch_candidates=int(explored_stitch_candidates),
+            hit_targets=list(ordered_hits),
+        )
+
     return _SearchResult(
         target_key=None,
         distance_m=float(max_explored),
@@ -939,6 +1040,7 @@ def _search_next_crossing(
         last_key=str(last_key),
         explored_node_count=int(len(explored_keys)),
         explored_stitch_candidates=int(explored_stitch_candidates),
+        hit_targets=[],
     )
 
 
@@ -5423,6 +5525,7 @@ __all__ = [
     "HARD_ENDPOINT_OFF_ANCHOR",
     "HARD_BRIDGE_SEGMENT",
     "HARD_DIVSTRIP_INTERSECT",
+    "HARD_MULTI_NEIGHBOR_FOR_NODE",
     "HARD_MULTI_ROAD",
     "HARD_NON_RC",
     "PairSupport",
@@ -5437,6 +5540,7 @@ __all__ = [
     "SOFT_SPARSE_POINTS",
     "SOFT_TRAJ_SURFACE_GAP",
     "SOFT_TRAJ_SURFACE_INSUFFICIENT",
+    "SOFT_AMBIGUOUS_NEXT_XSEC",
     "SOFT_UNRESOLVED_NEIGHBOR",
     "SOFT_WIGGLY",
     "build_pair_supports",
