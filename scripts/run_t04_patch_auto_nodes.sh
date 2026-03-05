@@ -8,11 +8,11 @@ Usage:
 
 Positional:
   PATCH_DIR    Required. Patch directory.
-  KIND_MASK    Optional. Node kind mask for auto discovery (default: 24).
+  KIND_MASK    Optional. Node kind mask for auto discovery (default: 65560 = 8|16|65536).
   OUT_ROOT     Optional. Output root (default: outputs/_work/t04_rc_sw_anchor).
 
 Options:
-  --kind_mask <int>   Override kind mask (supports decimal/hex like 24 or 0x18).
+  --kind_mask <int>   Override kind mask (supports decimal/hex like 65560 or 0x10018).
   --out_root <path>   Override output root.
   --python <path>     Python binary (default: ./.venv/bin/python, fallback: python3).
   -h, --help          Show help.
@@ -23,7 +23,7 @@ USAGE
 }
 
 PATCH_DIR=""
-KIND_MASK="${KIND_MASK:-24}"
+KIND_MASK="${KIND_MASK:-65560}"
 OUT_ROOT="${OUT_ROOT:-outputs/_work/t04_rc_sw_anchor}"
 PY="${PYTHON_BIN:-}"
 POSITIONAL=()
@@ -169,4 +169,3 @@ echo "OK run_dir=${RUN_DIR}"
 echo "focus_node_ids=${RESOLVED_TXT}"
 echo "focus_report=${RESOLVED_JSON}"
 echo "auto_meta=${AUTO_META_JSON}"
-

@@ -28,6 +28,9 @@ BP_DRIVEZONE_CRS_UNKNOWN = "DRIVEZONE_CRS_UNKNOWN"
 BP_DRIVEZONE_CLIP_EMPTY = "DRIVEZONE_CLIP_EMPTY"
 BP_DRIVEZONE_CLIP_MULTIPIECE = "DRIVEZONE_CLIP_MULTIPIECE"
 BP_DRIVEZONE_SPLIT_NOT_FOUND = "DRIVEZONE_SPLIT_NOT_FOUND"
+BP_K16_ROAD_NOT_UNIQUE = "K16_ROAD_NOT_UNIQUE"
+BP_K16_ROAD_DIR_UNSUPPORTED = "K16_ROAD_DIR_UNSUPPORTED"
+BP_K16_DRIVEZONE_NOT_REACHED = "K16_DRIVEZONE_NOT_REACHED"
 BP_SEQUENTIAL_ORDER_VIOLATION = "SEQUENTIAL_ORDER_VIOLATION"
 BP_NEXT_INTERSECTION_NOT_FOUND_CONNECTED = "NEXT_INTERSECTION_NOT_FOUND_CONNECTED"
 BP_NEXT_INTERSECTION_NOT_FOUND_DEG3 = "NEXT_INTERSECTION_NOT_FOUND_DEG3"
@@ -250,11 +253,12 @@ def build_summary_text(
         else:
             focus_text = "na"
         lines.append(
-            "- nodeid={nodeid} kind={kind} kind_bits(merge={is_merge},diverge={is_diverge}) anchor_type={anchor_type} status={status} found_split={found_split} scan_dist_m={scan_dist} trigger={trigger} evidence_source={evidence_source} stop_dist_m={stop} stop_reason={stop_reason} pieces_count={pieces_count} piece_lens_m={piece_lens} gap_len_m={gap_len} seg_len_m={seg_len} s_divstrip_m={s_divstrip} s_drivezone_split_m={s_dz} s_chosen_m={s_chosen} split_pick_source={pick_src} dist_line_to_divstrip_m={dist_line_to_divstrip} dist_line_to_drivezone_edge_m={dist_line_to_drivezone_edge} branchA={branch_a} branchB={branch_b} focus_resolve={focus_resolve}".format(
+            "- nodeid={nodeid} kind={kind} kind_bits(merge={is_merge},diverge={is_diverge},k16={is_k16}) anchor_type={anchor_type} status={status} found_split={found_split} scan_dist_m={scan_dist} trigger={trigger} evidence_source={evidence_source} stop_dist_m={stop} stop_reason={stop_reason} pieces_count={pieces_count} piece_lens_m={piece_lens} gap_len_m={gap_len} seg_len_m={seg_len} s_divstrip_m={s_divstrip} s_drivezone_split_m={s_dz} s_chosen_m={s_chosen} split_pick_source={pick_src} dist_line_to_divstrip_m={dist_line_to_divstrip} dist_line_to_drivezone_edge_m={dist_line_to_drivezone_edge} branchA={branch_a} branchB={branch_b} k16_found={k16_found} k16_s_found_m={k16_s} focus_resolve={focus_resolve}".format(
                 nodeid=item.get("nodeid"),
                 kind=item.get("kind"),
                 is_merge=item.get("is_merge_kind"),
                 is_diverge=item.get("is_diverge_kind"),
+                is_k16=bool(item.get("k16_enabled", False)),
                 anchor_type=item.get("anchor_type"),
                 status=item.get("status"),
                 found_split=item.get("found_split"),
@@ -275,6 +279,8 @@ def build_summary_text(
                 dist_line_to_drivezone_edge=item.get("dist_line_to_drivezone_edge_m"),
                 branch_a=item.get("branch_a_id"),
                 branch_b=item.get("branch_b_id"),
+                k16_found=item.get("k16_found"),
+                k16_s=item.get("k16_s_found_m"),
                 focus_resolve=focus_text,
             )
         )
@@ -308,6 +314,9 @@ __all__ = [
     "BP_DRIVEZONE_CRS_UNKNOWN",
     "BP_DRIVEZONE_MISSING",
     "BP_DRIVEZONE_SPLIT_NOT_FOUND",
+    "BP_K16_ROAD_NOT_UNIQUE",
+    "BP_K16_ROAD_DIR_UNSUPPORTED",
+    "BP_K16_DRIVEZONE_NOT_REACHED",
     "BP_SEQUENTIAL_ORDER_VIOLATION",
     "BP_DRIVEZONE_UNION_EMPTY",
     "BP_DIVSTRIPZONE_MISSING",

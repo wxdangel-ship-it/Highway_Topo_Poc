@@ -1,7 +1,7 @@
 # t04_rc_sw_anchor
 
 ## 1. 业务目标（vNext）
-- 面向 `merge/diverge` 节点，输出锚点与最终横截线 `intersection_l_opt`。
+- 面向 `merge/diverge` 与 `K16(kind&65536!=0)` 节点，输出锚点与最终横截线 `intersection_l_opt`。
 - 采用 `DriveZone-first`：主触发证据来自 `SEG(s) ∩ DriveZone` 的连通片段数变化。
 - 采用 `Between-Branches(B)`：每一步只在两分支之间构造 `SEG(s)=PA->PB`，避免扫到无关道路。
 - stop 仅 `hard-stop`：沿 RCSDRoad 拓扑联通可达，且 `degree>=3`。
@@ -23,6 +23,12 @@
 10. 连续链合并：相邻 `diverge->merge` 以横截线几何关系为主（相交或近邻）触发合并；`abs_s` 差值仅保留诊断，不作为阻断门槛。
 11. 异常分支（reverse tip/ref_s）：在默认方向缺参考、`s≈0` 命中不可信 divstrip、或 `divstrip_first_hit` 且无 drivezone split 时触发，反向最多 10m 查找；窗口按场景区分：常规（非 reverse）取“靠近节点 1m”（且不跨过 node），异常 reverse 取“远离节点 1m”。若反向无 split 且仍与 divstrip 相交，则继续向远离节点方向搜索到 `reverse_tip_max_m`；仍无非相交候选则硬失败。连续后继节点若出现 `tip_projection + no_split` 且 near-zero，会启用扩展搜索，避免复用上一处物理分割。
 12. 多分支异常双向选择（N>2）：默认主结果为正向最早事件；若正反两侧均有事件，则按方案X选择反向最远事件（`s` 最负）；若仅反向有事件则反向兜底。
+13. K16 节点（`kind&65536!=0`）独立流程：
+   - 仅接受唯一关联 road，且 `direction in {2,3}`。
+   - 根据有效方向判定 `forward/reverse`（起点正向、终点反向）。
+   - 固定搜索范围 `10m`，步长 `k16_step_m`（默认 `0.5m`），命中条件为 `CROSS(s) ∩ DriveZone != empty`。
+   - 命中后复用当前路面 piece 选择与贴边扩展口径，输出单条连续 LineString。
+   - 10m 内未命中则硬失败 `K16_DRIVEZONE_NOT_REACHED`。
 
 ## 3. 运行入口
 ```bash
@@ -55,10 +61,10 @@ python -m highway_topo_poc.modules.t04_rc_sw_anchor \
 bash scripts/run_t04_patch_auto_nodes.sh /mnt/d/TestData/highway_topo_poc_data/normal/<PATCH_ID>
 ```
 
-可选 `KIND_MASK`（默认 `24=8|16`，支持十进制/十六进制）：
+可选 `KIND_MASK`（默认 `65560=8|16|65536`，支持十进制/十六进制）：
 ```bash
-bash scripts/run_t04_patch_auto_nodes.sh /mnt/d/TestData/highway_topo_poc_data/normal/<PATCH_ID> 24
-KIND_MASK=0x18 bash scripts/run_t04_patch_auto_nodes.sh /mnt/d/TestData/highway_topo_poc_data/normal/<PATCH_ID>
+bash scripts/run_t04_patch_auto_nodes.sh /mnt/d/TestData/highway_topo_poc_data/normal/<PATCH_ID> 65560
+KIND_MASK=0x10018 bash scripts/run_t04_patch_auto_nodes.sh /mnt/d/TestData/highway_topo_poc_data/normal/<PATCH_ID>
 ```
 
 脚本审计产物（`outputs/_work/t04_rc_sw_anchor/<run_id>/`）：
@@ -87,7 +93,7 @@ KIND_MASK=0x18 bash scripts/run_t04_patch_auto_nodes.sh /mnt/d/TestData/highway_
 `intersection_l_opt*.geojson` 约定：
 - 默认每个 `nodeid` 输出 1 条连续 LineString（当前位置所在路面 piece 内扩边后结果）。
 - 若触发连续链 `diverge->merge` 合并，输出 1 条合并 feature，properties 含 `nodeids[]/kinds[]/roles[]`。
-- properties 必含 `nodeid/kind/kind_bits/anchor_type/scan_dist_m/stop_reason/evidence_source` 与关键诊断字段。
+- properties 必含 `nodeid/kind/kind_bits/anchor_type/scan_dist_m/stop_reason/evidence_source` 与关键诊断字段（K16 时含 `k16_*` 字段）。
 
 `intersection_l_multi.geojson` 约定：
 - 仅在 `N>2` 多分支节点输出事件线（可同时包含 `forward/reverse`）。

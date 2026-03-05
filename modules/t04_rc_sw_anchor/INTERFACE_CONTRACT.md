@@ -3,7 +3,10 @@
 ## 1. 目标与范围
 - 模块 ID：`t04_rc_sw_anchor`
 - 目标：识别 `merge/diverge` 锚点并输出 `intersection_l_opt`。
-- 范围：仅对 `kind bit3/bit4`（merge/diverge）生效；其他类型失败并打断点。
+- 范围：
+  - `kind bit3/bit4`（merge/diverge）走既有主流程
+  - `kind bit16(65536)` 走 K16 专用横截线流程
+  - 其他类型失败并打断点
 
 ## 2. 模式与输入
 支持模式：
@@ -36,7 +39,7 @@
 
 ### 2.4 Patch-only 输入入口（脚本补充）
 - 脚本：`scripts/run_t04_patch_auto_nodes.sh`
-- 输入：`PATCH_DIR`（可选 `KIND_MASK`，默认 `24=8|16`）
+- 输入：`PATCH_DIR`（可选 `KIND_MASK`，默认 `65560=8|16|65536`）
 - 行为：
   - 从 `PATCH_DIR/Vector/RCSDNode.geojson`（fallback `Node.geojson`）自动发现节点。
   - 发现结果写入 `focus_node_ids_resolved.txt/json` 后，调用既有 `mode=global_focus`。
@@ -138,6 +141,29 @@
   - `intersection_l_opt`：仅主结果一条线
   - `intersection_l_multi`：输出所有事件线（含 `forward/reverse`）
 
+### 5.9 K16（kind bit16=65536）专用流程
+- K16 road 约束：
+  - 节点关联 road（`snodeid==nodeid or enodeid==nodeid`）必须恰好 1 条
+  - 且 `road.direction in {2,3}`
+  - 不满足时硬失败：
+    - `K16_ROAD_NOT_UNIQUE`
+    - `K16_ROAD_DIR_UNSUPPORTED`
+- 搜索方向：
+  - `direction=2` 有效方向 `snodeid->enodeid`
+  - `direction=3` 有效方向 `enodeid->snodeid`
+  - node 在有效起点：`forward`
+  - node 在有效终点：`reverse`
+- 扫描：
+  - 初始横截线半长 `10m`（总长 `20m`）
+  - 固定搜索范围 `10m`，步长 `k16_step_m`（默认 `0.5m`）
+  - 命中条件：`CROSS(s) ∩ DriveZone_union != empty`
+- 命中后输出：
+  - 在与 `CROSS(s_found)` 交集的片段中优先选包含 center 的 piece，否则选离 center 最近 piece
+  - 复用连续线贴边扩展口径，输出单条连续 LineString
+- 失败：
+  - `10m` 内无交集：`K16_DRIVEZONE_NOT_REACHED`（hard）
+  - 记录 `k16_min_dist_cross_to_drivezone_m` 与 `k16_s_best_m`
+
 ## 6. 参数契约（关键）
 - `min_piece_len_m`：DriveZone 交段最小长度过滤（数值噪声抑制）
 - `next_intersection_degree_min`：默认 `3`
@@ -155,6 +181,7 @@
 - `multibranch_enable`：默认 `true`（仅 `N>2` 生效）
 - `multibranch_span_extra_m`：默认 `10.0`（多分支 span 两端外扩）
 - `multibranch_reverse_max_m`：默认 `10.0`（多分支反向扫描范围）
+- `k16_step_m`：默认 `0.5`（K16 10m 扫描步长）
 - patch/focus 门禁阈值分开：
   - `min_anchor_found_ratio_focus/min_anchor_found_ratio_patch`
   - `no_trigger_count_max_focus/no_trigger_count_max_patch`
@@ -218,6 +245,10 @@ Patch-only 脚本附加审计文件（可选）：
   - `s_main_m/main_pick_source/abnormal_two_sided`
   - `span_extra_m/direction_filter_applied/branches_used_count/branches_ignored_due_to_direction`
   - `s_drivezone_split_first_m`
+  - `k16_enabled/k16_road_id/k16_road_dir/k16_endpoint_role/k16_search_dir`
+  - `k16_search_max_m/k16_step_m/k16_cross_half_len_m`
+  - `k16_s_found_m/k16_s_best_m/k16_found`
+  - `k16_min_dist_cross_to_drivezone_m/k16_break_reason`
 
 `intersection_l_multi.geojson`：
 - 每个 split-event 1 条 feature，properties 至少包含：
@@ -241,6 +272,9 @@ Patch-only 脚本附加审计文件（可选）：
 - `UNTRUSTED_DIVSTRIP_AT_NODE`
 - `POINTCLOUD_CRS_UNKNOWN_UNUSABLE`
 - `POINTCLOUD_MISSING_OR_UNUSABLE`
+- `K16_ROAD_NOT_UNIQUE`
+- `K16_ROAD_DIR_UNSUPPORTED`
+- `K16_DRIVEZONE_NOT_REACHED`
 
 ## 9. 门禁
 Hard：

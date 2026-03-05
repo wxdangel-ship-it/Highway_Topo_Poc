@@ -18,6 +18,12 @@ from .crs_norm import guess_crs_from_bbox, normalize_epsg_name, transform_xy_arr
 from .divstrip_ops import anchor_point_from_crossline, tip_point_from_divstrip
 from .drivezone_ops import segment_drivezone_pieces
 from .io_geojson import NodeRecord, RoadRecord, load_divstrip_union, load_drivezone_union, load_nodes, load_roads
+from .k16_ops import (
+    build_crossline as build_k16_crossline,
+    compute_tangent_at_node as compute_k16_tangent_at_node,
+    find_unique_k16_road,
+    search_crossline_hit_drivezone,
+)
 from .local_frame import LocalFrame
 from .metrics_breakpoints import (
     BP_AMBIGUOUS_KIND,
@@ -28,6 +34,9 @@ from .metrics_breakpoints import (
     BP_DRIVEZONE_CLIP_MULTIPIECE,
     BP_DRIVEZONE_CRS_UNKNOWN,
     BP_DRIVEZONE_MISSING,
+    BP_K16_DRIVEZONE_NOT_REACHED,
+    BP_K16_ROAD_DIR_UNSUPPORTED,
+    BP_K16_ROAD_NOT_UNIQUE,
     BP_SEQUENTIAL_ORDER_VIOLATION,
     BP_MULTI_BRANCH_TODO,
     BP_NEXT_INTERSECTION_NOT_FOUND_DEG3,
@@ -970,6 +979,505 @@ def _extract_multibranch_events(
     }
 
 
+def _attach_k16_diag(
+    item: dict[str, Any],
+    *,
+    k16_enabled: bool,
+    k16_road_id: str | None = None,
+    k16_road_dir: int | None = None,
+    k16_endpoint_role: str | None = None,
+    k16_search_dir: str | None = None,
+    k16_search_max_m: float | None = None,
+    k16_step_m: float | None = None,
+    k16_cross_half_len_m: float | None = None,
+    k16_s_found_m: float | None = None,
+    k16_s_best_m: float | None = None,
+    k16_found: bool | None = None,
+    k16_min_dist_cross_to_drivezone_m: float | None = None,
+    k16_break_reason: str | None = None,
+) -> dict[str, Any]:
+    out = dict(item)
+    out.update(
+        {
+            "k16_enabled": bool(k16_enabled),
+            "k16_road_id": None if k16_road_id is None else str(k16_road_id),
+            "k16_road_dir": None if k16_road_dir is None else int(k16_road_dir),
+            "k16_endpoint_role": None if k16_endpoint_role is None else str(k16_endpoint_role),
+            "k16_search_dir": None if k16_search_dir is None else str(k16_search_dir),
+            "k16_search_max_m": None if k16_search_max_m is None else float(k16_search_max_m),
+            "k16_step_m": None if k16_step_m is None else float(k16_step_m),
+            "k16_cross_half_len_m": None if k16_cross_half_len_m is None else float(k16_cross_half_len_m),
+            "k16_s_found_m": None if k16_s_found_m is None else float(k16_s_found_m),
+            "k16_s_best_m": None if k16_s_best_m is None else float(k16_s_best_m),
+            "k16_found": None if k16_found is None else bool(k16_found),
+            "k16_min_dist_cross_to_drivezone_m": (
+                None if k16_min_dist_cross_to_drivezone_m is None else float(k16_min_dist_cross_to_drivezone_m)
+            ),
+            "k16_break_reason": None if k16_break_reason is None else str(k16_break_reason),
+        }
+    )
+    return out
+
+
+def _evaluate_node_k16(
+    *,
+    node: NodeRecord,
+    road_graph: RoadGraph,
+    drivezone_union: BaseGeometry | None,
+    drivezone_usable: bool,
+    params: dict[str, Any],
+    breakpoints: list[dict[str, Any]],
+    resolved_from: dict[str, Any] | None = None,
+    is_in_continuous_chain: bool = False,
+    chain_component_id: str | None = None,
+    chain_node_offset_m: float | None = None,
+    required_prev_abs_s: float | None = None,
+) -> dict[str, Any]:
+    nodeid = int(node.nodeid)
+    kind = None if node.kind is None else int(node.kind)
+    chain_offset = None if chain_node_offset_m is None else float(chain_node_offset_m)
+    required_prev_abs = None if required_prev_abs_s is None else float(required_prev_abs_s)
+    k16_search_max_m = 10.0
+    k16_cross_half_len_m = 10.0
+    k16_step_m = max(0.05, float(params.get("k16_step_m", 0.5)))
+    edge_pad_m = float(params.get("current_road_edge_pad_m", 4.0))
+    dummy_line = build_k16_crossline(
+        center=(float(node.point.x), float(node.point.y)),
+        perp=(1.0, 0.0),
+        half_len=float(k16_cross_half_len_m),
+    )
+
+    if (not drivezone_usable) or drivezone_union is None or drivezone_union.is_empty:
+        breakpoints.append(
+            make_breakpoint(
+                code=BP_DRIVEZONE_MISSING,
+                severity="hard",
+                nodeid=nodeid,
+                message="k16_drivezone_missing",
+            )
+        )
+        return _attach_k16_diag(
+            _empty_fail_result(
+                nodeid=nodeid,
+                kind=kind,
+                anchor_type="k16",
+                scan_dir="na",
+                line=dummy_line,
+                divstrip_union=None,
+                drivezone_union=drivezone_union,
+                stop_reason="k16_drivezone_missing",
+                id_fields=node.id_fields,
+                resolved_from=resolved_from,
+                is_in_continuous_chain=bool(is_in_continuous_chain),
+                chain_component_id=chain_component_id,
+                chain_node_offset_m=chain_offset,
+                abs_s_prev_required_m=required_prev_abs,
+            ),
+            k16_enabled=True,
+            k16_search_max_m=k16_search_max_m,
+            k16_step_m=k16_step_m,
+            k16_cross_half_len_m=k16_cross_half_len_m,
+            k16_found=False,
+            k16_break_reason="drivezone_missing",
+        )
+
+    sel, sel_diag = find_unique_k16_road(nodeid=nodeid, roads=road_graph.roads)
+    if sel is None:
+        bp_code = BP_K16_ROAD_NOT_UNIQUE
+        if str(sel_diag.get("code")) == "K16_ROAD_DIR_UNSUPPORTED":
+            bp_code = BP_K16_ROAD_DIR_UNSUPPORTED
+        breakpoints.append(
+            make_breakpoint(
+                code=bp_code,
+                severity="hard",
+                nodeid=nodeid,
+                message=str(sel_diag.get("reason", "k16_road_selection_failed")),
+                extra={k: v for k, v in sel_diag.items() if k != "ok"},
+            )
+        )
+        return _attach_k16_diag(
+            _empty_fail_result(
+                nodeid=nodeid,
+                kind=kind,
+                anchor_type="k16",
+                scan_dir="na",
+                line=dummy_line,
+                divstrip_union=None,
+                drivezone_union=drivezone_union,
+                stop_reason=str(sel_diag.get("reason", "k16_road_selection_failed")),
+                id_fields=node.id_fields,
+                resolved_from=resolved_from,
+                is_in_continuous_chain=bool(is_in_continuous_chain),
+                chain_component_id=chain_component_id,
+                chain_node_offset_m=chain_offset,
+                abs_s_prev_required_m=required_prev_abs,
+            ),
+            k16_enabled=True,
+            k16_search_max_m=k16_search_max_m,
+            k16_step_m=k16_step_m,
+            k16_cross_half_len_m=k16_cross_half_len_m,
+            k16_found=False,
+            k16_break_reason=str(sel_diag.get("reason", "k16_road_selection_failed")),
+        )
+
+    k16_road_id = f"{int(sel.road.snodeid)}->{int(sel.road.enodeid)}#{int(sel.road_index)}"
+    try:
+        tangent = compute_k16_tangent_at_node(
+            road_geom=sel.road.line,
+            node_pt=node.point,
+            endpoint_role=sel.tangent_endpoint_role,
+        )
+    except Exception as exc:  # noqa: BLE001
+        breakpoints.append(
+            make_breakpoint(
+                code=BP_K16_ROAD_NOT_UNIQUE,
+                severity="hard",
+                nodeid=nodeid,
+                message=f"k16_tangent_invalid:{type(exc).__name__}",
+            )
+        )
+        return _attach_k16_diag(
+            _empty_fail_result(
+                nodeid=nodeid,
+                kind=kind,
+                anchor_type="k16",
+                scan_dir=str(sel.search_dir),
+                line=dummy_line,
+                divstrip_union=None,
+                drivezone_union=drivezone_union,
+                stop_reason="k16_tangent_invalid",
+                id_fields=node.id_fields,
+                resolved_from=resolved_from,
+                is_in_continuous_chain=bool(is_in_continuous_chain),
+                chain_component_id=chain_component_id,
+                chain_node_offset_m=chain_offset,
+                abs_s_prev_required_m=required_prev_abs,
+            ),
+            k16_enabled=True,
+            k16_road_id=k16_road_id,
+            k16_road_dir=int(sel.road_dir),
+            k16_endpoint_role=str(sel.endpoint_role),
+            k16_search_dir=str(sel.search_dir),
+            k16_search_max_m=k16_search_max_m,
+            k16_step_m=k16_step_m,
+            k16_cross_half_len_m=k16_cross_half_len_m,
+            k16_found=False,
+            k16_break_reason="tangent_invalid",
+        )
+
+    perp = (-float(tangent[1]), float(tangent[0]))
+    search_diag = search_crossline_hit_drivezone(
+        node_pt=node.point,
+        t=tangent,
+        perp=perp,
+        drivezone_union=drivezone_union,
+        dir_sign=float(sel.dir_sign),
+        max_m=float(k16_search_max_m),
+        step=float(k16_step_m),
+        cross_half_len_m=float(k16_cross_half_len_m),
+    )
+    line_probe = search_diag.get("crossline_best")
+    if not isinstance(line_probe, LineString):
+        line_probe = dummy_line
+
+    if not bool(search_diag.get("hit", False)):
+        breakpoints.append(
+            make_breakpoint(
+                code=BP_K16_DRIVEZONE_NOT_REACHED,
+                severity="hard",
+                nodeid=nodeid,
+                message="k16_drivezone_not_reached_within_10m",
+                extra={
+                    "k16_min_dist_cross_to_drivezone_m": search_diag.get("min_dist_cross_to_drivezone_m"),
+                    "k16_s_best_m": search_diag.get("s_best_m"),
+                },
+            )
+        )
+        return _attach_k16_diag(
+            _empty_fail_result(
+                nodeid=nodeid,
+                kind=kind,
+                anchor_type="k16",
+                scan_dir=str(sel.search_dir),
+                line=line_probe,
+                divstrip_union=None,
+                drivezone_union=drivezone_union,
+                stop_reason="k16_drivezone_not_reached",
+                id_fields=node.id_fields,
+                resolved_from=resolved_from,
+                is_in_continuous_chain=bool(is_in_continuous_chain),
+                chain_component_id=chain_component_id,
+                chain_node_offset_m=chain_offset,
+                abs_s_prev_required_m=required_prev_abs,
+            ),
+            k16_enabled=True,
+            k16_road_id=k16_road_id,
+            k16_road_dir=int(sel.road_dir),
+            k16_endpoint_role=str(sel.endpoint_role),
+            k16_search_dir=str(sel.search_dir),
+            k16_search_max_m=k16_search_max_m,
+            k16_step_m=k16_step_m,
+            k16_cross_half_len_m=k16_cross_half_len_m,
+            k16_s_best_m=search_diag.get("s_best_m"),
+            k16_found=False,
+            k16_min_dist_cross_to_drivezone_m=search_diag.get("min_dist_cross_to_drivezone_m"),
+            k16_break_reason="drivezone_not_reached",
+        )
+
+    crossline_hit = search_diag.get("crossline_found")
+    center_found = search_diag.get("center_found_xy")
+    if not isinstance(crossline_hit, LineString) or not (isinstance(center_found, tuple) and len(center_found) == 2):
+        breakpoints.append(
+            make_breakpoint(
+                code=BP_K16_DRIVEZONE_NOT_REACHED,
+                severity="hard",
+                nodeid=nodeid,
+                message="k16_hit_geometry_invalid",
+            )
+        )
+        return _attach_k16_diag(
+            _empty_fail_result(
+                nodeid=nodeid,
+                kind=kind,
+                anchor_type="k16",
+                scan_dir=str(sel.search_dir),
+                line=line_probe,
+                divstrip_union=None,
+                drivezone_union=drivezone_union,
+                stop_reason="k16_hit_geometry_invalid",
+                id_fields=node.id_fields,
+                resolved_from=resolved_from,
+                is_in_continuous_chain=bool(is_in_continuous_chain),
+                chain_component_id=chain_component_id,
+                chain_node_offset_m=chain_offset,
+                abs_s_prev_required_m=required_prev_abs,
+            ),
+            k16_enabled=True,
+            k16_road_id=k16_road_id,
+            k16_road_dir=int(sel.road_dir),
+            k16_endpoint_role=str(sel.endpoint_role),
+            k16_search_dir=str(sel.search_dir),
+            k16_search_max_m=k16_search_max_m,
+            k16_step_m=k16_step_m,
+            k16_cross_half_len_m=k16_cross_half_len_m,
+            k16_s_found_m=search_diag.get("s_found_m"),
+            k16_s_best_m=search_diag.get("s_best_m"),
+            k16_found=False,
+            k16_min_dist_cross_to_drivezone_m=search_diag.get("min_dist_cross_to_drivezone_m"),
+            k16_break_reason="hit_geometry_invalid",
+        )
+
+    pieces_raw = segment_drivezone_pieces(
+        segment=crossline_hit,
+        drivezone_union=drivezone_union,
+        min_piece_len_m=0.0,
+    )
+    final_line, line_diag = _build_continuous_line_from_crossline(
+        crossline=crossline_hit,
+        pieces_raw=pieces_raw,
+        center_xy=(float(center_found[0]), float(center_found[1])),
+        found_seg=crossline_hit,
+        drivezone_union=drivezone_union,
+        edge_pad_m=edge_pad_m,
+    )
+    if not isinstance(final_line, LineString):
+        breakpoints.append(
+            make_breakpoint(
+                code=BP_K16_DRIVEZONE_NOT_REACHED,
+                severity="hard",
+                nodeid=nodeid,
+                message=f"k16_piece_select_failed:{line_diag.get('reason')}",
+            )
+        )
+        return _attach_k16_diag(
+            _empty_fail_result(
+                nodeid=nodeid,
+                kind=kind,
+                anchor_type="k16",
+                scan_dir=str(sel.search_dir),
+                line=crossline_hit,
+                divstrip_union=None,
+                drivezone_union=drivezone_union,
+                stop_reason="k16_piece_select_failed",
+                id_fields=node.id_fields,
+                resolved_from=resolved_from,
+                is_in_continuous_chain=bool(is_in_continuous_chain),
+                chain_component_id=chain_component_id,
+                chain_node_offset_m=chain_offset,
+                abs_s_prev_required_m=required_prev_abs,
+            ),
+            k16_enabled=True,
+            k16_road_id=k16_road_id,
+            k16_road_dir=int(sel.road_dir),
+            k16_endpoint_role=str(sel.endpoint_role),
+            k16_search_dir=str(sel.search_dir),
+            k16_search_max_m=k16_search_max_m,
+            k16_step_m=k16_step_m,
+            k16_cross_half_len_m=k16_cross_half_len_m,
+            k16_s_found_m=search_diag.get("s_found_m"),
+            k16_s_best_m=search_diag.get("s_best_m"),
+            k16_found=False,
+            k16_min_dist_cross_to_drivezone_m=search_diag.get("min_dist_cross_to_drivezone_m"),
+            k16_break_reason=f"piece_select_failed:{line_diag.get('reason')}",
+        )
+
+    id_map = {str(k): int(v) for k, v in node.id_fields}
+    boundary = drivezone_union.boundary if drivezone_union is not None else None
+    if boundary is not None:
+        p0 = Point(float(final_line.coords[0][0]), float(final_line.coords[0][1]))
+        p1 = Point(float(final_line.coords[-1][0]), float(final_line.coords[-1][1]))
+        left_end_to_dz_edge = float(p0.distance(boundary))
+        right_end_to_dz_edge = float(p1.distance(boundary))
+        dist_line_to_dz_edge = float(final_line.distance(boundary))
+    else:
+        left_end_to_dz_edge = None
+        right_end_to_dz_edge = None
+        dist_line_to_dz_edge = None
+
+    signed_found = None if search_diag.get("s_found_m") is None else float(search_diag.get("s_found_m"))
+    scan_dist_abs = None if signed_found is None else float(abs(float(signed_found)))
+    anchor_pt = final_line.interpolate(0.5, normalized=True)
+    conf = compute_confidence(trigger="drivezone_split", scan_dist_m=0.0 if scan_dist_abs is None else scan_dist_abs)
+    clip_piece_type = "continuous_center_piece" if bool(line_diag.get("center_piece_hit", False)) else "continuous_nearest_piece_fallback"
+    piece_lens = [float(ln.length) for ln in pieces_raw]
+
+    result = {
+        "nodeid": int(nodeid),
+        "id": id_map.get("id"),
+        "mainid": id_map.get("mainid"),
+        "mainnodeid": id_map.get("mainnodeid"),
+        "kind": None if kind is None else int(kind),
+        "is_merge_kind": False,
+        "is_diverge_kind": False,
+        "anchor_type": "k16",
+        "status": "ok",
+        "found_split": True,
+        "anchor_found": True,
+        "trigger": "k16_drivezone_intersection",
+        "scan_dir": str(sel.search_dir),
+        "scan_dist_m": None if scan_dist_abs is None else float(scan_dist_abs),
+        "stop_dist_m": float(k16_search_max_m),
+        "stop_reason": "k16_drivezone_hit",
+        "next_intersection_dist_m": None,
+        "dist_to_divstrip_m": None,
+        "dist_line_to_divstrip_m": None,
+        "dist_line_to_drivezone_edge_m": dist_line_to_dz_edge,
+        "confidence": float(conf),
+        "flags": ["k16"],
+        "evidence_source": "drivezone_intersection",
+        "anchor_point": anchor_pt,
+        "crossline_opt": final_line,
+        "crossline_opt_pieces": [],
+        "tip_s_m": None,
+        "first_divstrip_hit_dist_m": None,
+        "best_divstrip_dz_dist_m": None,
+        "best_divstrip_pc_dist_m": None,
+        "first_pc_only_dist_m": None,
+        "fan_area_m2": 0.0,
+        "non_drivezone_area_m2": 0.0,
+        "non_drivezone_frac": 0.0,
+        "clipped_len_m": float(final_line.length),
+        "clip_empty": False,
+        "clip_piece_type": clip_piece_type,
+        "pieces_count": int(len(pieces_raw)),
+        "piece_lens_m": piece_lens,
+        "selected_piece_count": 1,
+        "selected_piece_lens_m": [float(final_line.length)],
+        "gap_len_m": None,
+        "seg_len_m": float(final_line.length),
+        "s_divstrip_m": None,
+        "s_drivezone_split_m": None if signed_found is None else float(signed_found),
+        "s_chosen_m": None if signed_found is None else float(signed_found),
+        "split_pick_source": "k16_first_intersection",
+        "divstrip_ref_source": "none",
+        "divstrip_ref_offset_m": None,
+        "output_cross_half_len_m": float(k16_cross_half_len_m),
+        "branch_a_id": None,
+        "branch_b_id": None,
+        "branch_axis_id": None,
+        "branch_a_crossline_hit": None,
+        "branch_b_crossline_hit": None,
+        "pa_center_dist_m": None,
+        "pb_center_dist_m": None,
+        "left_edge_dist_m": None,
+        "right_edge_dist_m": None,
+        "left_end_to_drivezone_edge_m": left_end_to_dz_edge,
+        "right_end_to_drivezone_edge_m": right_end_to_dz_edge,
+        "left_extended_to_piece_edge": False,
+        "right_extended_to_piece_edge": False,
+        "has_divstrip_nearby": False,
+        "reverse_tip_attempted": False,
+        "reverse_tip_used": False,
+        "reverse_tip_not_improved": False,
+        "reverse_search_max_m": None,
+        "reverse_trigger": None,
+        "ref_s_forward_m": None,
+        "position_source_forward": None,
+        "ref_s_reverse_m": None,
+        "position_source_reverse": None,
+        "ref_s_final_m": None if signed_found is None else float(signed_found),
+        "position_source_final": "k16_ref_s",
+        "untrusted_divstrip_at_node": False,
+        "node_to_divstrip_m_at_s0": None,
+        "seg0_intersects_divstrip": None,
+        "ng_candidates_before_suppress": 0,
+        "ng_candidates_after_suppress": 0,
+        "is_in_continuous_chain": bool(is_in_continuous_chain),
+        "chain_component_id": chain_component_id,
+        "chain_node_offset_m": None if chain_offset is None else float(chain_offset),
+        "abs_s_chosen_m": None,
+        "abs_s_prev_required_m": None if required_prev_abs is None else float(required_prev_abs),
+        "sequential_ok": True,
+        "sequential_violation_reason": None,
+        "merged": False,
+        "merged_group_id": None,
+        "merged_with_nodeids": None,
+        "abs_s_merged_m": None,
+        "merged_crossline_id": None,
+        "merged_output_nodeids": None,
+        "merged_output_kinds": None,
+        "merged_output_roles": None,
+        "merged_output_anchor_types": None,
+        "merge_reason": None,
+        "merge_geom_dist_m": None,
+        "merge_abs_diff_m": None,
+        "merge_abs_gap_cfg_m": None,
+        "merge_abs_gate_skipped": None,
+        "suppress_intersection_feature": False,
+        "multibranch_enabled": False,
+        "multibranch_N": 0,
+        "multibranch_expected_events": 0,
+        "split_events_forward": [],
+        "split_events_reverse": [],
+        "s_main_m": None,
+        "main_pick_source": "none",
+        "abnormal_two_sided": False,
+        "span_extra_m": None,
+        "direction_filter_applied": False,
+        "branches_used_count": 0,
+        "branches_ignored_due_to_direction": 0,
+        "s_drivezone_split_first_m": None,
+        "multibranch_event_lines": [],
+        "resolved_from": resolved_from,
+    }
+    return _attach_k16_diag(
+        result,
+        k16_enabled=True,
+        k16_road_id=k16_road_id,
+        k16_road_dir=int(sel.road_dir),
+        k16_endpoint_role=str(sel.endpoint_role),
+        k16_search_dir=str(sel.search_dir),
+        k16_search_max_m=k16_search_max_m,
+        k16_step_m=k16_step_m,
+        k16_cross_half_len_m=k16_cross_half_len_m,
+        k16_s_found_m=signed_found,
+        k16_s_best_m=search_diag.get("s_best_m"),
+        k16_found=True,
+        k16_min_dist_cross_to_drivezone_m=search_diag.get("min_dist_cross_to_drivezone_m"),
+        k16_break_reason="ok",
+    )
+
+
 def _evaluate_node(
     *,
     node: NodeRecord,
@@ -991,6 +1499,7 @@ def _evaluate_node(
     kind = None if node.kind is None else int(node.kind)
     is_merge = bool(kind is not None and (int(kind) & (1 << 3)) != 0)
     is_diverge = bool(kind is not None and (int(kind) & (1 << 4)) != 0)
+    is_k16 = bool(kind is not None and (int(kind) & (1 << 16)) != 0)
     chain_offset = None if chain_node_offset_m is None else float(chain_node_offset_m)
     required_prev_abs = None if required_prev_abs_s is None else float(required_prev_abs_s)
     hard_failed = False
@@ -1037,6 +1546,53 @@ def _evaluate_node(
             chain_component_id=chain_component_id,
             chain_node_offset_m=chain_offset,
             abs_s_prev_required_m=required_prev_abs,
+        )
+
+    if is_k16 and (is_merge or is_diverge):
+        _add_bp(
+            code=BP_AMBIGUOUS_KIND,
+            severity="hard",
+            message="k16_with_merge_or_diverge_bits_not_supported",
+            extra={"kind": int(kind)},
+        )
+        return _attach_k16_diag(
+            _empty_fail_result(
+                nodeid=nodeid,
+                kind=kind,
+                anchor_type="k16",
+                scan_dir="na",
+                line=dummy_line,
+                divstrip_union=divstrip_union,
+                drivezone_union=drivezone_union,
+                stop_reason="k16_with_merge_or_diverge_bits_not_supported",
+                id_fields=node.id_fields,
+                resolved_from=resolved_from,
+                is_in_continuous_chain=bool(is_in_continuous_chain),
+                chain_component_id=chain_component_id,
+                chain_node_offset_m=chain_offset,
+                abs_s_prev_required_m=required_prev_abs,
+            ),
+            k16_enabled=True,
+            k16_search_max_m=10.0,
+            k16_step_m=float(max(0.05, float(params.get("k16_step_m", 0.5)))),
+            k16_cross_half_len_m=10.0,
+            k16_found=False,
+            k16_break_reason="k16_with_merge_or_diverge_bits_not_supported",
+        )
+
+    if is_k16:
+        return _evaluate_node_k16(
+            node=node,
+            road_graph=road_graph,
+            drivezone_union=drivezone_union,
+            drivezone_usable=drivezone_usable,
+            params=params,
+            breakpoints=breakpoints,
+            resolved_from=resolved_from,
+            is_in_continuous_chain=is_in_continuous_chain,
+            chain_component_id=chain_component_id,
+            chain_node_offset_m=chain_node_offset_m,
+            required_prev_abs_s=required_prev_abs_s,
         )
 
     if is_merge and is_diverge:

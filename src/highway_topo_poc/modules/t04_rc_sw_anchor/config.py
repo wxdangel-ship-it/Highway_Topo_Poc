@@ -35,6 +35,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "multibranch_enable": True,
     "multibranch_span_extra_m": 10.0,
     "multibranch_reverse_max_m": 10.0,
+    "k16_step_m": 0.5,
     "output_cross_half_len_m": 120.0,
     "current_road_edge_pad_m": 4.0,
     "continuous_enable": True,

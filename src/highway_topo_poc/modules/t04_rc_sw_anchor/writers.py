@@ -32,6 +32,7 @@ def _props_min(item: dict[str, Any]) -> dict[str, Any]:
         "kind_bits": {
             "merge": bool(item.get("is_merge_kind", False)),
             "diverge": bool(item.get("is_diverge_kind", False)),
+            "k16": bool(item.get("k16_enabled", False)),
         },
         "anchor_type": item.get("anchor_type"),
         "status": item.get("status"),
@@ -121,6 +122,19 @@ def _props_min(item: dict[str, Any]) -> dict[str, Any]:
         "branches_used_count": item.get("branches_used_count"),
         "branches_ignored_due_to_direction": item.get("branches_ignored_due_to_direction"),
         "s_drivezone_split_first_m": item.get("s_drivezone_split_first_m"),
+        "k16_enabled": item.get("k16_enabled"),
+        "k16_road_id": item.get("k16_road_id"),
+        "k16_road_dir": item.get("k16_road_dir"),
+        "k16_endpoint_role": item.get("k16_endpoint_role"),
+        "k16_search_dir": item.get("k16_search_dir"),
+        "k16_search_max_m": item.get("k16_search_max_m"),
+        "k16_step_m": item.get("k16_step_m"),
+        "k16_cross_half_len_m": item.get("k16_cross_half_len_m"),
+        "k16_s_found_m": item.get("k16_s_found_m"),
+        "k16_s_best_m": item.get("k16_s_best_m"),
+        "k16_found": item.get("k16_found"),
+        "k16_min_dist_cross_to_drivezone_m": item.get("k16_min_dist_cross_to_drivezone_m"),
+        "k16_break_reason": item.get("k16_break_reason"),
     }
 
 
