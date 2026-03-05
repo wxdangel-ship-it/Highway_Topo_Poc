@@ -488,6 +488,7 @@ def _run_patch_core(
     drivezone_area_m2 = None
     drivezone_bounds_metric = None
     drivezone_src_crs = patch_inputs.input_summary.get("drivezone_src_crs")
+    drivezone_crs_alignment_reason = patch_inputs.input_summary.get("drivezone_crs_alignment_reason")
     drivezone_crs_inferred = bool(patch_inputs.input_summary.get("drivezone_crs_inferred", False))
     intersection_src_crs = patch_inputs.input_summary.get("intersection_src_crs")
     intersection_crs_inferred = bool(patch_inputs.input_summary.get("intersection_crs_inferred", False))
@@ -496,6 +497,11 @@ def _run_patch_core(
     )
     lane_boundary_crs_inferred = bool(patch_inputs.input_summary.get("lane_boundary_crs_inferred", False))
     lane_boundary_crs_method = str(patch_inputs.input_summary.get("lane_boundary_crs_method") or "skipped")
+    lane_boundary_src_crs_name = str(
+        patch_inputs.input_summary.get("lane_boundary_src_crs_name")
+        or patch_inputs.input_summary.get("lane_src_crs")
+        or "EPSG:3857"
+    )
     lane_boundary_crs_name_final = str(
         patch_inputs.input_summary.get("lane_boundary_crs_name_final")
         or patch_inputs.input_summary.get("lane_src_crs")
@@ -598,6 +604,7 @@ def _run_patch_core(
         payload.update(pointcloud_stats)
         payload["drivezone_src_crs"] = drivezone_src_crs
         payload["drivezone_crs_inferred"] = bool(drivezone_crs_inferred)
+        payload["drivezone_crs_alignment_reason"] = drivezone_crs_alignment_reason
         payload["drivezone_metric_geom_type"] = drivezone_geom_type
         payload["drivezone_area_m2"] = drivezone_area_m2
         payload["drivezone_metric_bounds"] = drivezone_bounds_metric
@@ -608,6 +615,7 @@ def _run_patch_core(
         payload["lane_boundary_used"] = bool(lane_boundary_used)
         payload["lane_boundary_crs_inferred"] = bool(lane_boundary_crs_inferred)
         payload["lane_boundary_crs_method"] = str(lane_boundary_crs_method)
+        payload["lane_boundary_src_crs_name"] = str(lane_boundary_src_crs_name)
         payload["lane_boundary_crs_name_final"] = str(lane_boundary_crs_name_final)
         payload["lane_boundary_skipped_reason"] = lane_boundary_skipped_reason
         payload.update(xsec_cross_stats)

@@ -143,6 +143,8 @@ def test_optional_laneboundary_missing_crs_lonlat_reproject(tmp_path: Path) -> N
 
     assert loaded.input_summary.get("lane_boundary_crs_method") == "coord_scale_crs84_reproject"
     assert bool(loaded.input_summary.get("lane_boundary_crs_inferred")) is True
+    assert loaded.input_summary.get("lane_boundary_crs_name_final") == "EPSG:3857"
+    assert loaded.input_summary.get("lane_boundary_src_crs_name") == "EPSG:3857"
     x0, y0 = loaded.lane_boundaries_metric[0].coords[0]
     assert abs(float(x0)) > 1000.0
     assert abs(float(y0)) > 1000.0
@@ -197,6 +199,76 @@ def test_required_inputs_missing_crs_projected_are_inferred(tmp_path: Path) -> N
     assert bool(loaded.input_summary.get("intersection_crs_inferred")) is True
     assert loaded.trajectories
     assert all(str(t.source_crs) == "EPSG:3857" for t in loaded.trajectories)
+
+
+def test_drivezone_missing_crs_conflict_aligns_to_intersection_type(tmp_path: Path) -> None:
+    lane_payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": [[0.1, 0.1], [0.2, 0.2]]},
+                "properties": {},
+            }
+        ],
+    }
+    drivezone_lonlat = [
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [
+                    [
+                        [8.43, 49.00],
+                        [8.46, 49.00],
+                        [8.46, 49.03],
+                        [8.43, 49.03],
+                        [8.43, 49.00],
+                    ]
+                ],
+            },
+            "properties": {},
+        }
+    ]
+    patch_dir = _build_patch(
+        tmp_path,
+        patch_id="p_drivezone_align",
+        lane_payload=lane_payload,
+        drivezone_features=drivezone_lonlat,
+    )
+    _drop_crs(patch_dir / "Vector" / "DriveZone.geojson")
+
+    loaded = load_patch_inputs(patch_dir.parent, patch_id=patch_dir.name)
+    assert loaded.input_summary.get("intersection_src_crs") == "EPSG:3857"
+    assert loaded.input_summary.get("drivezone_src_crs") == "EPSG:3857"
+    assert loaded.input_summary.get("drivezone_crs_alignment_reason") == "align_to_intersection_crs_type"
+
+
+def test_optional_divstrip_missing_crs_uninferable_is_skipped(tmp_path: Path) -> None:
+    lane_payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": [[940_000.0, 6_275_010.0], [940_100.0, 6_275_020.0]]},
+                "properties": {},
+            }
+        ],
+    }
+    patch_dir = _build_patch(tmp_path, patch_id="p_divstrip_skip", lane_payload=lane_payload)
+    _write_json(
+        patch_dir / "Vector" / "DivStripZone.geojson",
+        {
+            "type": "FeatureCollection",
+            "features": [{"type": "Feature", "geometry": None, "properties": {}}],
+        },
+    )
+
+    loaded = load_patch_inputs(patch_dir.parent, patch_id=patch_dir.name)
+    assert loaded.divstrip_zone_metric is None
+    assert loaded.input_summary.get("divstrip_crs_method") == "skipped"
+    assert bool(loaded.input_summary.get("divstrip_used")) is False
+    assert str(loaded.input_summary.get("divstrip_skipped_reason") or "") != ""
 
 
 @pytest.mark.parametrize(

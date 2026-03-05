@@ -257,13 +257,13 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
     lane_payload_raw = (
         _load_geojson(laneboundary_path) if laneboundary_path.is_file() else {"type": "FeatureCollection", "features": []}
     )
-    div_payload = _load_geojson(divstrip_path) if divstrip_path.is_file() else {"type": "FeatureCollection", "features": []}
+    div_payload_raw = _load_geojson(divstrip_path) if divstrip_path.is_file() else {"type": "FeatureCollection", "features": []}
     node_payload = _load_geojson(node_path) if node_path.is_file() else {"type": "FeatureCollection", "features": []}
     inter_declared_crs = _normalize_epsg_name(_extract_declared_crs(inter_payload))
     drive_declared_crs = _normalize_epsg_name(_extract_declared_crs(drive_payload))
-    div_declared_crs = _normalize_epsg_name(_extract_declared_crs(div_payload)) if divstrip_path.is_file() else None
+    div_declared_crs = _normalize_epsg_name(_extract_declared_crs(div_payload_raw)) if divstrip_path.is_file() else None
+    div_feature_count_raw = int(len(div_payload_raw.get("features", [])))
 
-    trajectories = _load_trajectories(traj_dir)
     point_cloud_path = _pick_point_cloud_file(pointcloud_dir)
 
     dst_crs = "EPSG:3857"
@@ -279,7 +279,20 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
         allow_empty_if_no_features=False,
         prefer_projected_crs=inter_crs,
     ) or inter_crs
+    drive_crs_alignment_reason: str | None = None
+    if (
+        drive_declared_crs is None
+        and inter_crs is not None
+        and _is_geographic_crs_name(drive_crs) != _is_geographic_crs_name(inter_crs)
+    ):
+        drive_crs = inter_crs
+        drive_crs_alignment_reason = "align_to_intersection_crs_type"
     patch_crs_name = drive_crs
+    trajectories = _load_trajectories(
+        traj_dir,
+        prefer_projected_crs=inter_crs,
+        align_missing_to_crs=inter_crs,
+    )
     lane_fix_info: dict[str, Any]
     if laneboundary_path.is_file():
         lane_payload_fixed, lane_fix_info = fix_optional_geojson_crs(
@@ -312,19 +325,42 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
             "skipped_reason": "file_missing",
             "sample_coord": None,
         }
-    div_crs = (
-        _require_geojson_crs(
-            div_payload,
+    div_fix_info: dict[str, Any]
+    if divstrip_path.is_file():
+        div_payload_fixed, div_fix_info = fix_optional_geojson_crs(
+            div_payload_raw,
             path=divstrip_path,
-            allow_empty_if_no_features=True,
-            prefer_projected_crs=drive_crs,
+            patch_crs_name=patch_crs_name,
         )
-        or inter_crs
-    )
+        if div_payload_fixed is None:
+            div_payload = {"type": "FeatureCollection", "features": []}
+            div_crs = None
+        else:
+            div_payload = div_payload_fixed
+            div_crs = (
+                _require_geojson_crs(
+                    div_payload,
+                    path=divstrip_path,
+                    allow_empty_if_no_features=True,
+                    prefer_projected_crs=patch_crs_name,
+                )
+                or patch_crs_name
+            )
+    else:
+        div_payload = {"type": "FeatureCollection", "features": []}
+        div_crs = None
+        div_fix_info = {
+            "used": False,
+            "inferred": False,
+            "method": "skipped",
+            "final_crs": patch_crs_name,
+            "skipped_reason": "file_missing",
+            "sample_coord": None,
+        }
     inter_to_metric = _make_transformer(inter_crs, dst_crs)
     lane_to_metric = _make_transformer(lane_crs or dst_crs, dst_crs)
     drive_to_metric = _make_transformer(drive_crs, dst_crs)
-    div_to_metric = _make_transformer(div_crs, dst_crs)
+    div_to_metric = _make_transformer(div_crs or dst_crs, dst_crs)
 
     projection = ProjectionInfo(
         input_crs=inter_crs,
@@ -341,7 +377,8 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
     lane_used = bool(lane_boundaries)
     lane_fix_info = dict(lane_fix_info)
     lane_fix_info["used"] = bool(lane_used)
-    lane_fix_info["final_crs"] = str(lane_fix_info.get("final_crs") or lane_crs or dst_crs)
+    lane_fix_info["source_crs"] = str(lane_crs or dst_crs)
+    lane_fix_info["final_crs"] = dst_crs
     if not lane_used:
         lane_fix_info["method"] = "skipped"
         if not str(lane_fix_info.get("skipped_reason") or "").strip():
@@ -350,6 +387,16 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
         lane_fix_info["skipped_reason"] = None
     drivezone_zone = _extract_polygon_union(drive_payload, drive_to_metric)
     divstrip_zone = _extract_polygon_union(div_payload, div_to_metric)
+    div_fix_info = dict(div_fix_info)
+    div_fix_info["used"] = bool(divstrip_zone is not None and (not divstrip_zone.is_empty))
+    div_fix_info["source_crs"] = str(div_crs or dst_crs)
+    div_fix_info["final_crs"] = dst_crs
+    if not bool(div_fix_info["used"]):
+        div_fix_info["method"] = "skipped"
+        if not str(div_fix_info.get("skipped_reason") or "").strip():
+            div_fix_info["skipped_reason"] = "divstrip_empty_or_unusable"
+    else:
+        div_fix_info["skipped_reason"] = None
     if drivezone_zone is None or drivezone_zone.is_empty:
         raise InputDataError(f"drivezone_empty: {drivezone_path}")
     node_kind = _extract_node_kind_map(node_payload)
@@ -380,11 +427,16 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
             "dst_crs": dst_crs,
             "intersection_src_crs": inter_crs,
             "lane_src_crs": lane_crs,
+            "lane_boundary_src_crs_name": lane_fix_info.get("source_crs"),
             "drivezone_src_crs": drive_crs,
-            "divstrip_src_crs": div_crs if divstrip_path.is_file() else None,
+            "drivezone_crs_alignment_reason": drive_crs_alignment_reason,
+            "divstrip_src_crs": div_fix_info.get("source_crs"),
             "intersection_crs_inferred": bool(inter_declared_crs is None and inter_crs is not None),
             "drivezone_crs_inferred": bool(drive_declared_crs is None and drive_crs is not None),
-            "divstrip_crs_inferred": bool(divstrip_path.is_file() and div_declared_crs is None and div_crs is not None),
+            "divstrip_crs_inferred": bool(div_fix_info.get("inferred", False)),
+            "divstrip_crs_method": str(div_fix_info.get("method") or "skipped"),
+            "divstrip_used": bool(div_fix_info.get("used", False)),
+            "divstrip_skipped_reason": div_fix_info.get("skipped_reason"),
             "lane_boundary_used": bool(lane_fix_info.get("used", False)),
             "lane_boundary_crs_inferred": bool(lane_fix_info.get("inferred", False)),
             "lane_boundary_crs_method": str(lane_fix_info.get("method") or "skipped"),
@@ -395,7 +447,7 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
             "has_drivezone_file": drivezone_path.is_file(),
             "drivezone_feature_count": int(len(drive_payload.get("features", []))),
             "has_divstrip_file": divstrip_path.is_file(),
-            "divstrip_feature_count": int(len(div_payload.get("features", []))),
+            "divstrip_feature_count": int(div_feature_count_raw),
         },
     )
 
@@ -592,7 +644,12 @@ def _load_geojson(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _load_trajectories(traj_dir: Path) -> list[TrajectoryData]:
+def _load_trajectories(
+    traj_dir: Path,
+    *,
+    prefer_projected_crs: str | None = "EPSG:3857",
+    align_missing_to_crs: str | None = None,
+) -> list[TrajectoryData]:
     files = sorted(traj_dir.rglob(_TRAJ_FILE_NAME)) if traj_dir.is_dir() else []
     out: list[TrajectoryData] = []
 
@@ -601,12 +658,22 @@ def _load_trajectories(traj_dir: Path) -> list[TrajectoryData]:
             payload = _load_geojson(fp)
         except Exception:
             continue
+        declared_crs = _normalize_epsg_name(_extract_declared_crs(payload))
         src_crs = _require_geojson_crs(
             payload,
             path=fp,
             allow_empty_if_no_features=True,
-            prefer_projected_crs="EPSG:3857",
+            prefer_projected_crs=prefer_projected_crs,
         )
+        if (
+            declared_crs is None
+            and src_crs is not None
+            and align_missing_to_crs is not None
+            and _is_geographic_crs_name(src_crs) != _is_geographic_crs_name(align_missing_to_crs)
+        ):
+            aligned = _normalize_epsg_name(align_missing_to_crs)
+            if aligned is not None:
+                src_crs = aligned
 
         feats = payload.get("features", [])
         xs: list[float] = []
