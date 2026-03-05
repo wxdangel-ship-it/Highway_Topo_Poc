@@ -285,6 +285,7 @@ def build_pair_supports(
     unique_dst_early_stop: bool = True,
     unique_dst_dist_eps_m: float = 5.0,
     allowed_dst_by_src: dict[int, set[int]] | None = None,
+    allowed_pairs: set[tuple[int, int]] | None = None,
 ) -> PairSupportBuildResult:
     levels = _normalize_stitch_levels(
         stitch_max_dist_levels_m=stitch_max_dist_levels_m,
@@ -309,9 +310,24 @@ def build_pair_supports(
     next_crossing_candidates: list[dict[str, Any]] = []
     node_dst_votes: dict[int, dict[int, int]] = {}
     dst_dist_eps_m = float(max(0.0, unique_dst_dist_eps_m))
+    allowed_pairs_dst_by_src: dict[int, set[int]] | None = None
+    if allowed_pairs is not None:
+        allowed_pairs_dst_by_src = {}
+        for pair in allowed_pairs:
+            if not isinstance(pair, tuple) or len(pair) != 2:
+                continue
+            src_i = int(pair[0])
+            dst_i = int(pair[1])
+            allowed_pairs_dst_by_src.setdefault(src_i, set()).add(dst_i)
 
     for traj_id, items in graph.event_keys_by_traj.items():
         for ev, source_key in items:
+            allowed_pair_dsts_for_src: set[int] | None = None
+            if allowed_pairs_dst_by_src is not None:
+                allowed_pair_dsts_for_src = set(allowed_pairs_dst_by_src.get(int(ev.nodeid), set()))
+                # Topology-first mode: only process events from accepted src nodes.
+                if not allowed_pair_dsts_for_src:
+                    continue
             search = _search_next_crossing(
                 source_key=source_key,
                 source_nodeid=int(ev.nodeid),
@@ -326,6 +342,13 @@ def build_pair_supports(
                 raw = allowed_dst_by_src.get(int(ev.nodeid))
                 if raw is not None:
                     allowed_dsts_for_src = {int(v) for v in raw}
+            if allowed_pair_dsts_for_src is not None:
+                if allowed_dsts_for_src is None:
+                    allowed_dsts_for_src = set(allowed_pair_dsts_for_src)
+                else:
+                    allowed_dsts_for_src = {
+                        int(v) for v in allowed_dsts_for_src if int(v) in allowed_pair_dsts_for_src
+                    }
             hit_targets = list(hit_targets_raw)
             if allowed_dsts_for_src is not None:
                 hit_targets = [it for it in hit_targets if int(it[1]) in allowed_dsts_for_src]
@@ -378,6 +401,12 @@ def build_pair_supports(
                         sorted(int(v) for v in allowed_dsts_for_src) if allowed_dsts_for_src is not None else None
                     ),
                     "road_prior_reject_count": int(max(0, len(hit_targets_raw) - len(hit_targets))),
+                    "topology_pair_filter_applied": bool(allowed_pair_dsts_for_src is not None),
+                    "topology_pair_allowed_dst": (
+                        sorted(int(v) for v in allowed_pair_dsts_for_src)
+                        if allowed_pair_dsts_for_src is not None
+                        else None
+                    ),
                 }
             )
 
