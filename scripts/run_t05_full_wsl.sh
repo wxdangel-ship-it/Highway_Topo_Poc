@@ -67,9 +67,11 @@ for PID in "${PATCH_ARR[@]}"; do
   if [ -z "$PID" ]; then
     continue
   fi
+  PATCH_OUT="$(t05_patch_out_dir "$OUT_ROOT" "$RUN_ID" "$PID")"
+  PROGRESS_LOG="$PATCH_OUT/progress.ndjson"
+  mkdir -p "$PATCH_OUT"
   echo "===== patch $PID ====="
   if [ "${T05_TEST_MODE:-0}" = "1" ]; then
-    PATCH_OUT="$(t05_patch_out_dir "$OUT_ROOT" "$RUN_ID" "$PID")"
     mkdir -p "$PATCH_OUT/debug"
     cat >"$PATCH_OUT/gate.json" <<'JSON'
 {"overall_pass": true, "hard_breakpoints": [], "soft_breakpoints": [], "version": "t05_gate_v1"}
@@ -89,11 +91,14 @@ TXT
       --debug_dump "$DEBUG" \
       --debug_layer_max_items "$DEBUG_LAYER_MAX_ITEMS"; then
       echo "ERROR: patch failed: $PID" >&2
+      if [ -f "$PROGRESS_LOG" ]; then
+        echo "---- progress tail: $PROGRESS_LOG ----" >&2
+        tail -n 20 "$PROGRESS_LOG" >&2 || true
+      fi
       FAIL_COUNT=$((FAIL_COUNT + 1))
       continue
     fi
   fi
-  PATCH_OUT="$(t05_patch_out_dir "$OUT_ROOT" "$RUN_ID" "$PID")"
   echo "out_dir=$PATCH_OUT"
 done
 

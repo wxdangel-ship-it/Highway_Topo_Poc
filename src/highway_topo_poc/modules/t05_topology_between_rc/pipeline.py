@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import resource
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Sequence
@@ -241,6 +243,41 @@ class _StageTimerScope:
         self._timer.add(self._key, dt_ms)
 
 
+def _max_rss_mb() -> float | None:
+    try:
+        rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except Exception:
+        return None
+    if not math.isfinite(rss) or rss <= 0:
+        return None
+    return float(rss / 1024.0)
+
+
+class _ProgressLogger:
+    def __init__(self, path: Path | None) -> None:
+        self.path = path
+
+    def mark(self, stage: str, **extra: Any) -> None:
+        p = self.path
+        if p is None:
+            return
+        record: dict[str, Any] = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "stage": str(stage),
+        }
+        rss_mb = _max_rss_mb()
+        if rss_mb is not None:
+            record["rss_mb_max"] = float(round(rss_mb, 1))
+        for k, v in extra.items():
+            record[str(k)] = v
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=True, default=str) + "\n")
+        except Exception:
+            pass
+
+
 class _DebugLayerBuffer(list[dict[str, Any]]):
     def __init__(self, *, max_items: int, seed: Sequence[dict[str, Any]] | None = None) -> None:
         super().__init__()
@@ -333,10 +370,18 @@ def run_patch(
     if not out_dir.is_absolute():
         out_dir = (repo_root / out_dir).resolve()
     patch_out = out_dir / run_id_val / "patches" / patch_inputs.patch_id
+    progress = _ProgressLogger(patch_out / "progress.ndjson")
 
     params = dict(DEFAULT_PARAMS)
     if params_override:
         params.update(params_override)
+    progress.mark(
+        "run_patch_start",
+        run_id=run_id_val,
+        patch_id=str(patch_inputs.patch_id),
+        debug_dump=bool(int(params.get("DEBUG_DUMP", 0))),
+        pointcloud_enable=bool(int(params.get("POINTCLOUD_ENABLE", 0))),
+    )
 
     artifacts = _run_patch_core(
         patch_inputs,
@@ -346,8 +391,11 @@ def run_patch(
         prefill_metrics={
             "t_load_traj": float(max(0.0, t_load_inputs_ms)),
         },
+        progress=progress,
     )
+    progress.mark("run_patch_core_done", road_count=int(artifacts.get("road_count", 0)))
 
+    progress.mark("write_outputs_start")
     write_geojson_lines(
         patch_out / _ROAD_OUT_NAME,
         lines_input_crs=artifacts["road_lines_metric"],
@@ -369,6 +417,11 @@ def run_patch(
     for rel_path, payload in dict(artifacts.get("debug_feature_collections", {})).items():
         write_json(patch_out / str(rel_path), payload)
     (patch_out / "summary.txt").write_text(str(artifacts["summary_text"]), encoding="utf-8")
+    progress.mark(
+        "run_patch_done",
+        overall_pass=bool(artifacts.get("overall_pass", False)),
+        hard_breakpoints=int(len(artifacts.get("hard_breakpoints", []))),
+    )
 
     return RunResult(
         run_id=run_id_val,
@@ -388,7 +441,10 @@ def _run_patch_core(
     run_id: str,
     repo_root: Path,
     prefill_metrics: dict[str, Any] | None = None,
+    progress: _ProgressLogger | None = None,
 ) -> dict[str, Any]:
+    if progress is not None:
+        progress.mark("core_start", patch_id=str(patch_inputs.patch_id))
     stage_timer = _StageTimer()
     if prefill_metrics:
         for k, v in dict(prefill_metrics).items():
@@ -408,6 +464,8 @@ def _run_patch_core(
 
     xsec_map = _build_cross_section_map(patch_inputs)
     node_ids = sorted(xsec_map.keys())
+    if progress is not None:
+        progress.mark("xsec_map_ready", node_count=int(len(node_ids)))
 
     hard_breakpoints: list[dict[str, Any]] = []
     soft_breakpoints: list[dict[str, Any]] = []
@@ -499,6 +557,12 @@ def _run_patch_core(
         gore_zone_metric=gore_zone_metric_raw,
         params=params,
     )
+    if progress is not None:
+        progress.mark(
+            "xsec_truncate_done",
+            xsec_cross_count=int(len(xsec_cross_map)),
+            xsec_gate_enabled=bool(xsec_cross_stats.get("xsec_gate_enabled", False)),
+        )
     pair_cluster_norm_stats: dict[str, Any] = {
         "step1_pair_cluster_disabled": False,
         "step1_pair_cluster_disabled_pair_count": 0,
@@ -557,6 +621,8 @@ def _run_patch_core(
                 "hint": "no_intersection_features",
             }
         )
+        if progress is not None:
+            progress.mark("early_exit_no_nodes")
         return _finalize_payloads(
             run_id=run_id,
             repo_root=repo_root,
@@ -687,6 +753,13 @@ def _run_patch_core(
         stitch_forward_dot_min=float(params["STITCH_FORWARD_DOT_MIN"]),
         neighbor_max_dist_m=float(params["NEIGHBOR_MAX_DIST_M"]),
     )
+    if progress is not None:
+        progress.mark(
+            "neighbor_pass1_done",
+            pass1_pairs=int(len(pass1_supports.supports)),
+            pass1_unresolved=int(len(pass1_supports.unresolved_events)),
+            pass1_stitch_accept=int(pass1_supports.stitch_accept_count),
+        )
     neighbor_search_pass = 1
     cross_result = pass1_cross
     supports_result = pass1_supports
@@ -717,12 +790,21 @@ def _run_patch_core(
 
     if should_try_pass2:
         pass2_attempted = True
+        if progress is not None:
+            progress.mark("neighbor_pass2_start")
         pass2_cross, pass2_supports, pass2_node_type_map, pass2_in_degree, pass2_out_degree = _run_neighbor_pass(
             hit_buffer_m=float(params["PASS2_TRAJ_XSEC_HIT_BUFFER_M"]),
             stitch_max_dist_m=float(params["PASS2_STITCH_MAX_DIST_M"]),
             stitch_forward_dot_min=float(params["PASS2_STITCH_FORWARD_DOT_MIN"]),
             neighbor_max_dist_m=float(params["PASS2_NEIGHBOR_MAX_DIST_M"]),
         )
+        if progress is not None:
+            progress.mark(
+                "neighbor_pass2_done",
+                pass2_pairs=int(len(pass2_supports.supports)),
+                pass2_unresolved=int(len(pass2_supports.unresolved_events)),
+                pass2_stitch_accept=int(pass2_supports.stitch_accept_count),
+            )
 
         def _supports_quality_key(res: PairSupportBuildResult) -> tuple[int, int, int, int]:
             pair_count = int(len(res.supports))
@@ -766,6 +848,8 @@ def _run_patch_core(
                 ),
             }
         )
+        if progress is not None:
+            progress.mark("early_exit_no_supports", neighbor_search_pass=int(neighbor_search_pass))
         return _finalize_payloads(
             run_id=run_id,
             repo_root=repo_root,
@@ -813,6 +897,8 @@ def _run_patch_core(
         )
 
     pointcloud_enabled = bool(int(params.get("POINTCLOUD_ENABLE", 0)))
+    if progress is not None:
+        progress.mark("surface_points_start", pointcloud_enabled=bool(pointcloud_enabled))
     with stage_timer.scope("t_load_pointcloud"):
         points_xyz, non_ground_xy, pointcloud_stats = _load_surface_points(
             patch_inputs,
@@ -820,6 +906,12 @@ def _run_patch_core(
             params,
             use_pointcloud=pointcloud_enabled,
             with_non_ground=True,
+        )
+    if progress is not None:
+        progress.mark(
+            "surface_points_done",
+            ground_points=int(points_xyz.shape[0]) if isinstance(points_xyz, np.ndarray) else None,
+            non_ground_points=int(non_ground_xy.shape[0]) if isinstance(non_ground_xy, np.ndarray) else None,
         )
     gore_zone_metric = gore_zone_metric_raw
 
@@ -897,7 +989,12 @@ def _run_patch_core(
                 }
             )
 
-    for pair, support in sorted(supports.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+    total_pairs = int(len(supports))
+    if progress is not None:
+        progress.mark("road_eval_start", total_pairs=total_pairs)
+    for idx, (pair, support) in enumerate(sorted(supports.items(), key=lambda kv: (kv[0][0], kv[0][1])), start=1):
+        if progress is not None and (idx == 1 or idx % 20 == 0 or idx == total_pairs):
+            progress.mark("road_eval_progress", pair_index=int(idx), total_pairs=total_pairs)
         src, dst = pair
         src_xsec = xsec_map.get(src)
         dst_xsec = xsec_map.get(dst)
@@ -1971,6 +2068,8 @@ def _run_patch_core(
         else np.empty((0,), dtype=np.float64)
     )
 
+    if progress is not None:
+        progress.mark("core_finalize_start", road_candidates=int(len(road_records)))
     return _finalize_payloads(
         run_id=run_id,
         repo_root=repo_root,
