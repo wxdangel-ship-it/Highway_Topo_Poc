@@ -201,6 +201,10 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "DRIVEZONE_SAMPLE_STEP_M": 2.0,
     "DEBUG_DUMP": 0,
     "DEBUG_LAYER_MAX_ITEMS": 2000,
+    "XSEC_GATE_TRAJ_EVIDENCE_ENABLE": 1,
+    "XSEC_GATE_TRAJ_EVIDENCE_MAX_POINTS": 300000,
+    "XSEC_GATE_TRAJ_EVIDENCE_SAMPLE_STEP": 4,
+    "XSEC_GATE_TRAJ_EVIDENCE_MAX_TRAJ": 300,
     "CACHE_ENABLED": 1,
 }
 
@@ -542,6 +546,8 @@ def _run_patch_core(
     # and drift to adjacent roads.
     gore_zone_metric_raw = patch_inputs.divstrip_zone_metric
 
+    if progress is not None:
+        progress.mark("xsec_truncate_start")
     (
         xsec_cross_map,
         xsec_anchor_debug_items,
@@ -5939,17 +5945,58 @@ def _build_cross_section_map(patch_inputs: PatchInputs) -> dict[int, Any]:
     return out
 
 
-def _build_traj_union_for_crossing(trajectories: Sequence[Any]) -> BaseGeometry | None:
-    lines: list[LineString] = []
+def _estimate_trajectory_point_count(trajectories: Sequence[Any]) -> int:
+    total = 0
     for traj in trajectories:
+        xyz = np.asarray(getattr(traj, "xyz_metric", np.empty((0, 3), dtype=np.float64)), dtype=np.float64)
+        if xyz.ndim != 2:
+            continue
+        total += int(max(0, xyz.shape[0]))
+    return int(total)
+
+
+def _build_traj_union_for_crossing(
+    trajectories: Sequence[Any],
+    *,
+    sample_step: int = 1,
+    max_traj: int = 0,
+    max_points_per_traj: int = 5000,
+) -> BaseGeometry | None:
+    def _subsample_keep_endpoints(xy_arr: np.ndarray, k: int) -> np.ndarray:
+        n = int(xy_arr.shape[0])
+        if n <= 2 or k <= 1:
+            return xy_arr
+        idx = np.arange(0, n, int(k), dtype=np.int64)
+        if idx.size == 0 or int(idx[-1]) != n - 1:
+            idx = np.append(idx, n - 1)
+        idx = np.unique(idx)
+        if idx.size < 2:
+            return xy_arr
+        return xy_arr[idx, :]
+
+    lines: list[LineString] = []
+    step = int(max(1, int(sample_step)))
+    traj_limit = int(max(0, int(max_traj)))
+    max_pts = int(max(100, int(max_points_per_traj)))
+    used_traj = 0
+    for traj in trajectories:
+        if traj_limit > 0 and used_traj >= traj_limit:
+            break
         xyz = np.asarray(getattr(traj, "xyz_metric", np.empty((0, 3), dtype=np.float64)), dtype=np.float64)
         if xyz.ndim != 2 or xyz.shape[0] < 2:
             continue
         xy = np.asarray(xyz[:, :2], dtype=np.float64)
+        if step > 1:
+            xy = _subsample_keep_endpoints(xy, step)
         finite = np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])
         if np.count_nonzero(finite) < 2:
             continue
         xy = xy[finite, :]
+        if xy.shape[0] > max_pts:
+            s2 = int(max(1, math.ceil(float(xy.shape[0]) / float(max_pts))))
+            xy = _subsample_keep_endpoints(xy, s2)
+        if xy.shape[0] < 2:
+            continue
         try:
             ls = LineString([(float(x), float(y)) for x, y in xy])
         except Exception:
@@ -5957,12 +6004,19 @@ def _build_traj_union_for_crossing(trajectories: Sequence[Any]) -> BaseGeometry 
         if ls.is_empty or ls.length <= 1e-6:
             continue
         lines.append(ls)
+        used_traj += 1
     if not lines:
         return None
-    try:
-        merged = unary_union(lines)
-    except Exception:
-        merged = lines[0]
+    if len(lines) == 1:
+        merged: BaseGeometry = lines[0]
+    else:
+        try:
+            merged = MultiLineString(lines)
+        except Exception:
+            try:
+                merged = unary_union(lines[: min(len(lines), 64)])
+            except Exception:
+                merged = lines[0]
     if merged is None or merged.is_empty:
         return None
     return merged
@@ -6047,7 +6101,7 @@ def _truncate_cross_sections_for_crossing(
     dict[int, dict[str, Any]],
     dict[str, Any],
 ]:
-    traj_union = _build_traj_union_for_crossing(trajectories)
+    traj_union: BaseGeometry | None = None
     out: dict[int, Any] = {}
     anchor_feats: list[dict[str, Any]] = []
     trunc_feats: list[dict[str, Any]] = []
@@ -6065,10 +6119,39 @@ def _truncate_cross_sections_for_crossing(
     evidence_radius = float(max(0.5, params.get("XSEC_TRUNC_EVIDENCE_RADIUS_M", 1.0)))
     gate_evidence_mid_margin_m = float(max(0.0, params.get("XSEC_GATE_EVIDENCE_MID_MARGIN_M", 8.0)))
     gate_evidence_min_len_m = float(max(0.0, params.get("XSEC_GATE_EVIDENCE_MIN_LEN_M", 1.0)))
-    gate_traj_evidence_zone = _build_traj_evidence_zone_for_gate(
-        traj_union=traj_union,
-        evidence_radius_m=float(max(1.0, evidence_radius * 2.0)),
-    )
+    traj_evidence_enabled = bool(int(params.get("XSEC_GATE_TRAJ_EVIDENCE_ENABLE", 1)))
+    traj_point_budget = int(max(10_000, int(params.get("XSEC_GATE_TRAJ_EVIDENCE_MAX_POINTS", 300_000))))
+    traj_sample_step = int(max(1, int(params.get("XSEC_GATE_TRAJ_EVIDENCE_SAMPLE_STEP", 4))))
+    traj_evidence_max_traj = int(max(1, int(params.get("XSEC_GATE_TRAJ_EVIDENCE_MAX_TRAJ", 300))))
+    traj_point_count = _estimate_trajectory_point_count(trajectories)
+    gate_traj_evidence_zone: BaseGeometry | None = None
+    traj_union_ready = False
+    traj_evidence_disabled_reason: str | None = None
+
+    def _ensure_traj_evidence() -> None:
+        nonlocal traj_union_ready, traj_union, gate_traj_evidence_zone, traj_evidence_disabled_reason
+        if traj_union_ready:
+            return
+        traj_union_ready = True
+        if not traj_evidence_enabled:
+            traj_evidence_disabled_reason = "disabled_by_param"
+            return
+        if traj_point_count > traj_point_budget:
+            traj_evidence_disabled_reason = "point_budget_exceeded"
+            return
+        traj_union = _build_traj_union_for_crossing(
+            trajectories,
+            sample_step=traj_sample_step,
+            max_traj=traj_evidence_max_traj,
+            max_points_per_traj=4000,
+        )
+        gate_traj_evidence_zone = _build_traj_evidence_zone_for_gate(
+            traj_union=traj_union,
+            evidence_radius_m=float(max(1.0, evidence_radius * 2.0)),
+        )
+        if gate_traj_evidence_zone is None:
+            traj_evidence_disabled_reason = "zone_build_failed"
+
     n_steps = int(max(1, round(lmax / step)))
 
     for nodeid, cs in xsec_map.items():
@@ -6136,6 +6219,7 @@ def _truncate_cross_sections_for_crossing(
                 selected_evidence_len_m = 0.0
                 selected_mid_dist_m = float(selected_line.distance(mid))
             else:
+                _ensure_traj_evidence()
                 scored_parts: list[dict[str, Any]] = []
                 for i_part, ls in enumerate(line_parts):
                     mid_dist_m = float(ls.distance(mid))
@@ -6236,6 +6320,7 @@ def _truncate_cross_sections_for_crossing(
             )
             continue
 
+        _ensure_traj_evidence()
         nx, ny = _estimate_cross_normal_from_lb(
             anchor_xy=(ax, ay),
             source_xsec=geom,
@@ -6338,6 +6423,12 @@ def _truncate_cross_sections_for_crossing(
         "xsec_gate_selected_count": int(gate_selected_count),
         "xsec_gate_empty_count": int(gate_empty_count),
         "xsec_gate_fallback_count": int(gate_fallback_count),
+        "xsec_gate_traj_evidence_enabled": bool(gate_traj_evidence_zone is not None),
+        "xsec_gate_traj_evidence_disabled_reason": traj_evidence_disabled_reason,
+        "xsec_gate_traj_point_count": int(traj_point_count),
+        "xsec_gate_traj_point_budget": int(traj_point_budget),
+        "xsec_gate_traj_sample_step": int(traj_sample_step),
+        "xsec_gate_traj_max_traj": int(traj_evidence_max_traj),
     }
     return out, anchor_feats, trunc_feats, gate_all_map, gate_meta_map, stats
 
