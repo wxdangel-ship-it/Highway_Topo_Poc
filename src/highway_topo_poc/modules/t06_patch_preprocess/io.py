@@ -101,30 +101,42 @@ def _extract_crs_name(payload: dict[str, Any], *, path: Path, allow_missing: boo
             return None
         raise InputDataError(f"crs_missing: {path}")
     if isinstance(crs_obj, str):
-        name = crs_obj.strip()
-        if name:
-            return name
-        if allow_missing:
-            return None
-        raise InputDataError(f"crs_name_missing: {path}")
-    if not isinstance(crs_obj, dict):
-        if allow_missing:
-            return None
-        raise InputDataError(f"crs_missing: {path}")
+        text = crs_obj.strip()
+        if not text:
+            if allow_missing:
+                return None
+            raise InputDataError(f"crs_name_missing: {path}")
+        # Some datasets store CRS object as a JSON string; decode it before extraction.
+        if text.startswith("{"):
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                crs_obj = parsed
+            else:
+                return text
+        else:
+            return text
 
-    props = crs_obj.get("properties")
-    if isinstance(props, dict):
-        name = props.get("name")
-        if isinstance(name, str) and name.strip():
-            return name.strip()
-    alt_name = crs_obj.get("name")
-    if isinstance(alt_name, str) and alt_name.strip():
-        return alt_name.strip()
+    if isinstance(crs_obj, dict):
+        props = crs_obj.get("properties")
+        if isinstance(props, dict):
+            name = props.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+        alt_name = crs_obj.get("name")
+        if isinstance(alt_name, str) and alt_name.strip():
+            return alt_name.strip()
+        if allow_missing:
+            return None
+        if not isinstance(props, dict):
+            raise InputDataError(f"crs_missing_properties: {path}")
+        raise InputDataError(f"crs_name_missing: {path}")
+
     if allow_missing:
         return None
-    if not isinstance(props, dict):
-        raise InputDataError(f"crs_missing_properties: {path}")
-    raise InputDataError(f"crs_name_missing: {path}")
+    raise InputDataError(f"crs_missing: {path}")
 
 
 def _resolve_patch_dir(data_root: Path, patch: str | None) -> Path:
