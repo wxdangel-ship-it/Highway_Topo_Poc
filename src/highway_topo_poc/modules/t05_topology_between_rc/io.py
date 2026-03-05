@@ -253,14 +253,14 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
         raise InputDataError(f"drivezone_missing: {drivezone_path}")
 
     inter_payload = _load_geojson(intersection_path)
-    drive_payload = _load_geojson(drivezone_path)
+    drive_payload_raw = _load_geojson(drivezone_path)
     lane_payload_raw = (
         _load_geojson(laneboundary_path) if laneboundary_path.is_file() else {"type": "FeatureCollection", "features": []}
     )
     div_payload_raw = _load_geojson(divstrip_path) if divstrip_path.is_file() else {"type": "FeatureCollection", "features": []}
     node_payload = _load_geojson(node_path) if node_path.is_file() else {"type": "FeatureCollection", "features": []}
     inter_declared_crs = _normalize_epsg_name(_extract_declared_crs(inter_payload))
-    drive_declared_crs = _normalize_epsg_name(_extract_declared_crs(drive_payload))
+    drive_declared_crs = _normalize_epsg_name(_extract_declared_crs(drive_payload_raw))
     div_declared_crs = _normalize_epsg_name(_extract_declared_crs(div_payload_raw)) if divstrip_path.is_file() else None
     div_feature_count_raw = int(len(div_payload_raw.get("features", [])))
 
@@ -274,19 +274,24 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
         prefer_projected_crs="EPSG:3857",
     )
     drive_crs = _require_geojson_crs(
-        drive_payload,
+        drive_payload_raw,
         path=drivezone_path,
         allow_empty_if_no_features=False,
         prefer_projected_crs=inter_crs,
     ) or inter_crs
+    drive_payload = drive_payload_raw
+    drive_crs_before_alignment = drive_crs
     drive_crs_alignment_reason: str | None = None
+    drivezone_crs_reprojected = False
     if (
         drive_declared_crs is None
         and inter_crs is not None
         and _is_geographic_crs_name(drive_crs) != _is_geographic_crs_name(inter_crs)
     ):
+        drive_payload = reproject_fc(drive_payload_raw, drive_crs, inter_crs)
         drive_crs = inter_crs
-        drive_crs_alignment_reason = "align_to_intersection_crs_type"
+        drive_crs_alignment_reason = "align_to_intersection_crs_type_reproject"
+        drivezone_crs_reprojected = True
     patch_crs_name = drive_crs
     trajectories = _load_trajectories(
         traj_dir,
@@ -429,7 +434,9 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
             "lane_src_crs": lane_crs,
             "lane_boundary_src_crs_name": lane_fix_info.get("source_crs"),
             "drivezone_src_crs": drive_crs,
+            "drivezone_src_crs_before_alignment": drive_crs_before_alignment,
             "drivezone_crs_alignment_reason": drive_crs_alignment_reason,
+            "drivezone_crs_reprojected": bool(drivezone_crs_reprojected),
             "divstrip_src_crs": div_fix_info.get("source_crs"),
             "intersection_crs_inferred": bool(inter_declared_crs is None and inter_crs is not None),
             "drivezone_crs_inferred": bool(drive_declared_crs is None and drive_crs is not None),

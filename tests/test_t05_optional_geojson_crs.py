@@ -240,8 +240,12 @@ def test_drivezone_missing_crs_conflict_aligns_to_intersection_type(tmp_path: Pa
 
     loaded = load_patch_inputs(patch_dir.parent, patch_id=patch_dir.name)
     assert loaded.input_summary.get("intersection_src_crs") == "EPSG:3857"
+    assert loaded.input_summary.get("drivezone_src_crs_before_alignment") == "EPSG:4326"
     assert loaded.input_summary.get("drivezone_src_crs") == "EPSG:3857"
-    assert loaded.input_summary.get("drivezone_crs_alignment_reason") == "align_to_intersection_crs_type"
+    assert loaded.input_summary.get("drivezone_crs_alignment_reason") == "align_to_intersection_crs_type_reproject"
+    assert bool(loaded.input_summary.get("drivezone_crs_reprojected")) is True
+    assert loaded.drivezone_zone_metric is not None
+    assert float(loaded.drivezone_zone_metric.area) > 1_000_000.0
 
 
 def test_optional_divstrip_missing_crs_uninferable_is_skipped(tmp_path: Path) -> None:

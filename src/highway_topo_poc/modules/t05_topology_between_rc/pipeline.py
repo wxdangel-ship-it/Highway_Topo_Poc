@@ -488,7 +488,9 @@ def _run_patch_core(
     drivezone_area_m2 = None
     drivezone_bounds_metric = None
     drivezone_src_crs = patch_inputs.input_summary.get("drivezone_src_crs")
+    drivezone_src_crs_before_alignment = patch_inputs.input_summary.get("drivezone_src_crs_before_alignment")
     drivezone_crs_alignment_reason = patch_inputs.input_summary.get("drivezone_crs_alignment_reason")
+    drivezone_crs_reprojected = bool(patch_inputs.input_summary.get("drivezone_crs_reprojected", False))
     drivezone_crs_inferred = bool(patch_inputs.input_summary.get("drivezone_crs_inferred", False))
     intersection_src_crs = patch_inputs.input_summary.get("intersection_src_crs")
     intersection_crs_inferred = bool(patch_inputs.input_summary.get("intersection_crs_inferred", False))
@@ -603,8 +605,10 @@ def _run_patch_core(
         payload["traj_surface_cache_miss_count"] = int(surface_cache_miss_count)
         payload.update(pointcloud_stats)
         payload["drivezone_src_crs"] = drivezone_src_crs
+        payload["drivezone_src_crs_before_alignment"] = drivezone_src_crs_before_alignment
         payload["drivezone_crs_inferred"] = bool(drivezone_crs_inferred)
         payload["drivezone_crs_alignment_reason"] = drivezone_crs_alignment_reason
+        payload["drivezone_crs_reprojected"] = bool(drivezone_crs_reprojected)
         payload["drivezone_metric_geom_type"] = drivezone_geom_type
         payload["drivezone_area_m2"] = drivezone_area_m2
         payload["drivezone_metric_bounds"] = drivezone_bounds_metric
