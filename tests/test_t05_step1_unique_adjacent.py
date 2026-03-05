@@ -60,13 +60,30 @@ def test_load_road_prior_adjacency_parses_direction_and_fields(tmp_path: Path) -
     }
     road_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    adj, stats = pipeline._load_road_prior_adjacency(road_path)
+    adj, stats = pipeline._load_road_prior_adjacency(road_path, respect_direction=True)
 
     assert 2 in adj.get(1, set())
     assert 3 in adj.get(4, set())
     assert 6 in adj.get(5, set())
     assert 5 in adj.get(6, set())
     assert int(stats.get("edge_count", 0)) >= 4
+
+
+def test_load_road_prior_adjacency_defaults_to_undirected(tmp_path: Path) -> None:
+    road_path = tmp_path / "RCSDRoad.geojson"
+    payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "geometry": None, "properties": {"snodeid": 10, "enodeid": 20, "direction": 2}},
+        ],
+    }
+    road_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    adj, stats = pipeline._load_road_prior_adjacency(road_path)
+
+    assert 20 in adj.get(10, set())
+    assert 10 in adj.get(20, set())
+    assert bool(stats.get("respect_direction")) is False
 
 
 def test_crossing_absorbing_state_prevents_third_party_crossing_expansion() -> None:

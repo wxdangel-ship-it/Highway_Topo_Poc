@@ -103,6 +103,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_UNIQUE_DST_DIST_EPS_M": 5.0,
     "STEP1_NODE_VOTE_MIN_RATIO": 1.0,
     "STEP1_USE_ROAD_PRIOR_ADJ_FILTER": 1,
+    "STEP1_ROAD_PRIOR_RESPECT_DIRECTION": 0,
     "PASS2_NEIGHBOR_MAX_DIST_M": 8000.0,
     "PASS2_UNRESOLVED_MIN_COUNT": 20,
     "PASS2_UNRESOLVED_PER_SUPPORT": 10.0,
@@ -621,7 +622,11 @@ def _run_patch_core(
         "step1_pair_cluster_disabled_event_count": 0,
         "step1_pair_cluster_disabled_hard_multi_removed_count": 0,
     }
-    road_prior_next_map, road_prior_stats = _load_road_prior_adjacency(patch_inputs.road_prior_path)
+    step1_road_prior_respect_direction = bool(int(params.get("STEP1_ROAD_PRIOR_RESPECT_DIRECTION", 0)))
+    road_prior_next_map, road_prior_stats = _load_road_prior_adjacency(
+        patch_inputs.road_prior_path,
+        respect_direction=bool(step1_road_prior_respect_direction),
+    )
     step1_road_prior_filter_enabled = bool(int(params.get("STEP1_USE_ROAD_PRIOR_ADJ_FILTER", 1))) and bool(
         road_prior_next_map
     )
@@ -673,6 +678,7 @@ def _run_patch_core(
         payload["lane_boundary_crs_name_final"] = str(lane_boundary_crs_name_final)
         payload["lane_boundary_skipped_reason"] = lane_boundary_skipped_reason
         payload["step1_road_prior_filter_enabled"] = bool(step1_road_prior_filter_enabled)
+        payload["step1_road_prior_respect_direction"] = bool(step1_road_prior_respect_direction)
         payload["step1_road_prior_edge_count"] = int(road_prior_stats.get("edge_count", 0))
         payload["step1_road_prior_src_count"] = int(road_prior_stats.get("src_node_count", 0))
         payload["step1_road_prior_reject_crossing_count"] = int(step1_road_prior_reject_crossing_count)
@@ -6406,7 +6412,11 @@ def _pair_from_road_id(props: dict[str, Any]) -> tuple[int, int] | None:
     return None
 
 
-def _load_road_prior_adjacency(road_prior_path: Path | None) -> tuple[dict[int, set[int]], dict[str, Any]]:
+def _load_road_prior_adjacency(
+    road_prior_path: Path | None,
+    *,
+    respect_direction: bool = False,
+) -> tuple[dict[int, set[int]], dict[str, Any]]:
     stats: dict[str, Any] = {
         "path": str(road_prior_path) if isinstance(road_prior_path, Path) else None,
         "file_exists": bool(isinstance(road_prior_path, Path) and road_prior_path.is_file()),
@@ -6414,6 +6424,7 @@ def _load_road_prior_adjacency(road_prior_path: Path | None) -> tuple[dict[int, 
         "features_with_pair": 0,
         "features_missing_pair": 0,
         "direction_unknown_count": 0,
+        "respect_direction": bool(respect_direction),
         "edge_count": 0,
         "src_node_count": 0,
         "load_error": None,
@@ -6454,7 +6465,12 @@ def _load_road_prior_adjacency(road_prior_path: Path | None) -> tuple[dict[int, 
             continue
         stats["features_with_pair"] = int(stats["features_with_pair"]) + 1
         direction = _pick_int_field(props, _ROAD_PRIOR_DIRECTION_FIELD_CANDIDATES)
-        if direction == 2:
+        if not bool(respect_direction):
+            edges.add((int(src), int(dst)))
+            edges.add((int(dst), int(src)))
+            if direction not in {2, 3}:
+                stats["direction_unknown_count"] = int(stats["direction_unknown_count"]) + 1
+        elif direction == 2:
             edges.add((int(src), int(dst)))
         elif direction == 3:
             edges.add((int(dst), int(src)))
