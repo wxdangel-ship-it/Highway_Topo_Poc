@@ -284,6 +284,7 @@ def build_pair_supports(
     multi_road_topn: int = 10,
     unique_dst_early_stop: bool = True,
     unique_dst_dist_eps_m: float = 5.0,
+    allowed_dst_by_src: dict[int, set[int]] | None = None,
 ) -> PairSupportBuildResult:
     levels = _normalize_stitch_levels(
         stitch_max_dist_levels_m=stitch_max_dist_levels_m,
@@ -319,7 +320,15 @@ def build_pair_supports(
                 max_dist_m=float(neighbor_max_dist_m),
                 unique_dst_early_stop=bool(unique_dst_early_stop),
             )
-            hit_targets = list(search.hit_targets)
+            hit_targets_raw = list(search.hit_targets)
+            allowed_dsts_for_src: set[int] | None = None
+            if allowed_dst_by_src is not None:
+                raw = allowed_dst_by_src.get(int(ev.nodeid))
+                if raw is not None:
+                    allowed_dsts_for_src = {int(v) for v in raw}
+            hit_targets = list(hit_targets_raw)
+            if allowed_dsts_for_src is not None:
+                hit_targets = [it for it in hit_targets if int(it[1]) in allowed_dsts_for_src]
             dst_nodeids_found = sorted({int(item[1]) for item in hit_targets})
             dst_candidates = [
                 {
@@ -344,8 +353,13 @@ def build_pair_supports(
                     "chosen_dst_nodeid": int(dst_candidates[0]["dst_nodeid"]) if len(dst_candidates) == 1 else None,
                     "chosen_dist_m": float(dst_candidates[0]["dist_m"]) if len(dst_candidates) == 1 else None,
                     "ambiguous": bool(len(dst_nodeids_found) >= 2),
-                    "unresolved": bool(search.target_key is None and len(dst_nodeids_found) == 0),
+                    "unresolved": bool(len(dst_nodeids_found) == 0),
                     "unique_dst_dist_eps_m": float(dst_dist_eps_m),
+                    "road_prior_filter_applied": bool(allowed_dsts_for_src is not None),
+                    "road_prior_allowed_dst": (
+                        sorted(int(v) for v in allowed_dsts_for_src) if allowed_dsts_for_src is not None else None
+                    ),
+                    "road_prior_reject_count": int(max(0, len(hit_targets_raw) - len(hit_targets))),
                 }
             )
 
@@ -375,7 +389,13 @@ def build_pair_supports(
                 )
                 continue
 
-            target_key = search.target_key
+            target_key: str | None = None
+            target_dist_m = float(search.max_explored_dist_m)
+            target_stitch_hops = 0
+            if len(dst_candidates) == 1:
+                target_key = str(dst_candidates[0].get("target_key") or "")
+                target_dist_m = float(dst_candidates[0].get("dist_m"))
+                target_stitch_hops = int(dst_candidates[0].get("stitch_hops"))
             if target_key is None:
                 last_stitch_candidates = _count_outgoing_stitch_edges(graph.edges.get(search.last_key, []))
                 explored_stitch_candidates = int(max(0, search.explored_stitch_candidates))
@@ -466,10 +486,10 @@ def build_pair_supports(
             support.src_cross_points.append(ev.cross_point)
             support.dst_cross_points.append(target_node.point)
             support.traj_segments.append(path_line)
-            support.stitch_hops.append(int(search.stitch_hops))
+            support.stitch_hops.append(int(target_stitch_hops))
             support.evidence_traj_ids.append(str(traj_id))
             support.evidence_cluster_ids.append(0)
-            support.evidence_lengths_m.append(float(search.distance_m))
+            support.evidence_lengths_m.append(float(target_dist_m))
             src_vote = node_dst_votes.setdefault(int(ev.nodeid), {})
             src_vote[int(dst_nodeid)] = int(src_vote.get(int(dst_nodeid), 0) + 1)
 

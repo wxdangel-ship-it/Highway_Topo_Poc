@@ -46,6 +46,12 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
         default=float(DEFAULT_PARAMS.get("STEP1_NODE_VOTE_MIN_RATIO", 1.0)),
     )
     p.add_argument(
+        "--step1_use_road_prior_adj_filter",
+        type=int,
+        choices=[0, 1],
+        default=int(DEFAULT_PARAMS.get("STEP1_USE_ROAD_PRIOR_ADJ_FILTER", 1)),
+    )
+    p.add_argument(
         "--pass2_traj_xsec_hit_buffer_m",
         type=float,
         default=float(DEFAULT_PARAMS["PASS2_TRAJ_XSEC_HIT_BUFFER_M"]),
@@ -317,6 +323,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "STEP1_UNIQUE_DST_EARLY_STOP": int(args.step1_unique_dst_early_stop),
         "STEP1_UNIQUE_DST_DIST_EPS_M": float(args.step1_unique_dst_dist_eps_m),
         "STEP1_NODE_VOTE_MIN_RATIO": float(args.step1_node_vote_min_ratio),
+        "STEP1_USE_ROAD_PRIOR_ADJ_FILTER": int(args.step1_use_road_prior_adj_filter),
         "PASS2_TRAJ_XSEC_HIT_BUFFER_M": float(args.pass2_traj_xsec_hit_buffer_m),
         "PASS2_STITCH_MAX_DIST_M": float(args.pass2_stitch_max_dist_m),
         "PASS2_STITCH_FORWARD_DOT_MIN": float(args.pass2_stitch_forward_dot_min),

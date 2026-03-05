@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import resource
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -101,6 +102,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_UNIQUE_DST_EARLY_STOP": 1,
     "STEP1_UNIQUE_DST_DIST_EPS_M": 5.0,
     "STEP1_NODE_VOTE_MIN_RATIO": 1.0,
+    "STEP1_USE_ROAD_PRIOR_ADJ_FILTER": 1,
     "PASS2_NEIGHBOR_MAX_DIST_M": 8000.0,
     "PASS2_UNRESOLVED_MIN_COUNT": 20,
     "PASS2_UNRESOLVED_PER_SUPPORT": 10.0,
@@ -619,6 +621,18 @@ def _run_patch_core(
         "step1_pair_cluster_disabled_event_count": 0,
         "step1_pair_cluster_disabled_hard_multi_removed_count": 0,
     }
+    road_prior_next_map, road_prior_stats = _load_road_prior_adjacency(patch_inputs.road_prior_path)
+    step1_road_prior_filter_enabled = bool(int(params.get("STEP1_USE_ROAD_PRIOR_ADJ_FILTER", 1))) and bool(
+        road_prior_next_map
+    )
+    step1_road_prior_reject_crossing_count = 0
+    step1_road_prior_reject_candidate_total = 0
+    if bool(int(params.get("DEBUG_DUMP", 0))):
+        debug_json_payloads["debug/step1_road_prior_adjacency.json"] = {
+            "enabled": bool(step1_road_prior_filter_enabled),
+            "stats": dict(road_prior_stats),
+            "src_node_count": int(len(road_prior_next_map)),
+        }
 
     def _timing_extra_metrics() -> dict[str, Any]:
         required = (
@@ -658,6 +672,11 @@ def _run_patch_core(
         payload["lane_boundary_src_crs_name"] = str(lane_boundary_src_crs_name)
         payload["lane_boundary_crs_name_final"] = str(lane_boundary_crs_name_final)
         payload["lane_boundary_skipped_reason"] = lane_boundary_skipped_reason
+        payload["step1_road_prior_filter_enabled"] = bool(step1_road_prior_filter_enabled)
+        payload["step1_road_prior_edge_count"] = int(road_prior_stats.get("edge_count", 0))
+        payload["step1_road_prior_src_count"] = int(road_prior_stats.get("src_node_count", 0))
+        payload["step1_road_prior_reject_crossing_count"] = int(step1_road_prior_reject_crossing_count)
+        payload["step1_road_prior_reject_candidate_total"] = int(step1_road_prior_reject_candidate_total)
         payload.update(xsec_cross_stats)
         payload.update(pair_cluster_norm_stats)
         return payload
@@ -778,6 +797,7 @@ def _run_patch_core(
             multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
             unique_dst_early_stop=bool(int(params.get("STEP1_UNIQUE_DST_EARLY_STOP", 1))),
             unique_dst_dist_eps_m=float(params.get("STEP1_UNIQUE_DST_DIST_EPS_M", 5.0)),
+            allowed_dst_by_src=(road_prior_next_map if step1_road_prior_filter_enabled else None),
         )
         nt_map, indeg_map, outdeg_map = infer_node_types(
             node_ids=node_ids,
@@ -802,6 +822,7 @@ def _run_patch_core(
             multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
             unique_dst_early_stop=bool(int(params.get("STEP1_UNIQUE_DST_EARLY_STOP", 1))),
             unique_dst_dist_eps_m=float(params.get("STEP1_UNIQUE_DST_DIST_EPS_M", 5.0)),
+            allowed_dst_by_src=(road_prior_next_map if step1_road_prior_filter_enabled else None),
         )
         return cross_obj, supports_obj, nt_map, indeg_map, outdeg_map
 
@@ -878,6 +899,21 @@ def _run_patch_core(
             node_type_map = pass2_node_type_map
             in_degree = pass2_in_degree
             out_degree = pass2_out_degree
+
+    if step1_road_prior_filter_enabled:
+        for cand in supports_result.next_crossing_candidates:
+            if not isinstance(cand, dict):
+                continue
+            if not bool(cand.get("road_prior_filter_applied", False)):
+                continue
+            rej = cand.get("road_prior_reject_count", 0)
+            try:
+                rej_i = int(rej)
+            except Exception:
+                rej_i = 0
+            if rej_i > 0:
+                step1_road_prior_reject_crossing_count += 1
+                step1_road_prior_reject_candidate_total += int(rej_i)
 
     _append_cross_breakpoints(cross_result)
     supports = dict(supports_result.supports)
@@ -6280,6 +6316,163 @@ def _as_float_list(value: Any, *, fallback: Sequence[float]) -> list[float]:
     return [float(v) for v in fallback if np.isfinite(float(v)) and float(v) > 0]
 
 
+_ROAD_PRIOR_SRC_FIELD_CANDIDATES = (
+    "snodeid",
+    "src_nodeid",
+    "src",
+    "from",
+    "from_nodeid",
+    "start_id",
+    "startnodeid",
+    "start_node_id",
+    "fnodeid",
+    "snode",
+)
+_ROAD_PRIOR_DST_FIELD_CANDIDATES = (
+    "enodeid",
+    "dst_nodeid",
+    "dst",
+    "to",
+    "to_nodeid",
+    "end_id",
+    "endnodeid",
+    "end_node_id",
+    "tnodeid",
+    "enode",
+)
+_ROAD_PRIOR_DIRECTION_FIELD_CANDIDATES = ("direction", "dir", "flowdir")
+_ROAD_PRIOR_PAIR_RE = re.compile(r"^\s*(-?\d+)\D+(-?\d+)\s*$")
+
+
+def _to_int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, float):
+        if np.isfinite(value):
+            return int(round(float(value)))
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except Exception:
+            try:
+                fv = float(text)
+            except Exception:
+                return None
+            if np.isfinite(fv):
+                return int(round(float(fv)))
+            return None
+    return None
+
+
+def _pick_int_field(props: dict[str, Any], candidates: Sequence[str]) -> int | None:
+    if not props:
+        return None
+    by_key = {str(k).strip().lower(): v for k, v in props.items()}
+    for cand in candidates:
+        if str(cand).lower() not in by_key:
+            continue
+        out = _to_int_or_none(by_key[str(cand).lower()])
+        if out is not None:
+            return int(out)
+    return None
+
+
+def _pair_from_road_id(props: dict[str, Any]) -> tuple[int, int] | None:
+    by_key = {str(k).strip().lower(): v for k, v in props.items()}
+    for key in ("road_id", "id", "link_id", "name"):
+        raw = by_key.get(str(key).lower())
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        m = _ROAD_PRIOR_PAIR_RE.match(text)
+        if not m:
+            continue
+        try:
+            src = int(m.group(1))
+            dst = int(m.group(2))
+        except Exception:
+            continue
+        return (int(src), int(dst))
+    return None
+
+
+def _load_road_prior_adjacency(road_prior_path: Path | None) -> tuple[dict[int, set[int]], dict[str, Any]]:
+    stats: dict[str, Any] = {
+        "path": str(road_prior_path) if isinstance(road_prior_path, Path) else None,
+        "file_exists": bool(isinstance(road_prior_path, Path) and road_prior_path.is_file()),
+        "features_total": 0,
+        "features_with_pair": 0,
+        "features_missing_pair": 0,
+        "direction_unknown_count": 0,
+        "edge_count": 0,
+        "src_node_count": 0,
+        "load_error": None,
+    }
+    if road_prior_path is None or (not road_prior_path.is_file()):
+        return {}, stats
+
+    try:
+        payload = json.loads(road_prior_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        stats["load_error"] = f"{type(exc).__name__}: {exc}"
+        return {}, stats
+
+    features = payload.get("features", [])
+    if not isinstance(features, list):
+        stats["load_error"] = "features_not_list"
+        return {}, stats
+    stats["features_total"] = int(len(features))
+
+    edges: set[tuple[int, int]] = set()
+    for feat in features:
+        if not isinstance(feat, dict):
+            continue
+        props = feat.get("properties")
+        if not isinstance(props, dict):
+            props = {}
+
+        src = _pick_int_field(props, _ROAD_PRIOR_SRC_FIELD_CANDIDATES)
+        dst = _pick_int_field(props, _ROAD_PRIOR_DST_FIELD_CANDIDATES)
+        if src is None or dst is None:
+            pair = _pair_from_road_id(props)
+            if pair is not None:
+                src, dst = pair
+        if src is None or dst is None:
+            stats["features_missing_pair"] = int(stats["features_missing_pair"]) + 1
+            continue
+        if int(src) == int(dst):
+            continue
+        stats["features_with_pair"] = int(stats["features_with_pair"]) + 1
+        direction = _pick_int_field(props, _ROAD_PRIOR_DIRECTION_FIELD_CANDIDATES)
+        if direction == 2:
+            edges.add((int(src), int(dst)))
+        elif direction == 3:
+            edges.add((int(dst), int(src)))
+        else:
+            # Unknown/absent direction: keep both orientations to avoid false negative filtering.
+            stats["direction_unknown_count"] = int(stats["direction_unknown_count"]) + 1
+            edges.add((int(src), int(dst)))
+            edges.add((int(dst), int(src)))
+
+    adjacency: dict[int, set[int]] = {}
+    for src, dst in edges:
+        adjacency.setdefault(int(src), set()).add(int(dst))
+
+    stats["edge_count"] = int(len(edges))
+    stats["src_node_count"] = int(len(adjacency))
+    return adjacency, stats
+
+
 def _build_cross_section_map(patch_inputs: PatchInputs) -> dict[int, Any]:
     out: dict[int, Any] = {}
     for cs in patch_inputs.intersection_lines:
@@ -7498,6 +7691,7 @@ def _finalize_payloads(
                 or sk.startswith("step1_ambiguous_")
                 or sk.startswith("step1_unique_")
                 or sk.startswith("step1_vote_")
+                or sk.startswith("step1_road_prior_")
                 or sk.startswith("step0_")
                 or sk.startswith("traj_surface_cache_")
                 or sk.startswith("neighbor_search_")
