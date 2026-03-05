@@ -175,3 +175,33 @@ def test_case5_missing_drivezone_crs_uses_node_road_crs(tmp_path: Path) -> None:
     assert summary["roads_in"] == 1
     assert summary["roads_out"] == 1
     assert road_fc["crs"]["properties"]["name"] == "EPSG:3857"
+
+
+def test_case6_invalid_type_drivezone_crs_uses_node_road_crs(tmp_path: Path) -> None:
+    patch = tmp_path / "p_case6"
+    vec = patch / "Vector"
+    _write_fc(
+        vec / "RCSDNode.geojson",
+        crs="EPSG:3857",
+        features=[_node_feature(1, 0.0, 0.0), _node_feature(2, 10.0, 0.0)],
+    )
+    _write_fc(
+        vec / "RCSDRoad.geojson",
+        crs="EPSG:3857",
+        features=[_road_feature(1, 2, [(0.0, 0.0), (10.0, 0.0)])],
+    )
+    dz_payload = {
+        "type": "FeatureCollection",
+        "crs": 3857,
+        "features": [_poly_feature(Polygon([(-1.0, -1.0), (11.0, -1.0), (11.0, 1.0), (-1.0, 1.0)]))],
+    }
+    (vec / "DriveZone.geojson").parent.mkdir(parents=True, exist_ok=True)
+    (vec / "DriveZone.geojson").write_text(json.dumps(dz_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    result = pipeline.run_patch(data_root=patch, patch="auto", run_id="ut_case6", out_root=tmp_path / "out", overwrite=True)
+    summary = _read_json(result.summary_path)
+    road_fc = _read_json(result.output_dir / "Vector" / "RCSDRoad.geojson")
+
+    assert summary["roads_in"] == 1
+    assert summary["roads_out"] == 1
+    assert road_fc["crs"]["properties"]["name"] == "EPSG:3857"

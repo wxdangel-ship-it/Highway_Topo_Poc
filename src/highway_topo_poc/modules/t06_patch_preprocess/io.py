@@ -96,17 +96,35 @@ def _read_geojson(path: Path) -> dict[str, Any]:
 
 def _extract_crs_name(payload: dict[str, Any], *, path: Path, allow_missing: bool = False) -> str | None:
     crs_obj = payload.get("crs")
-    if not isinstance(crs_obj, dict):
-        if allow_missing and crs_obj is None:
+    if crs_obj is None:
+        if allow_missing:
             return None
         raise InputDataError(f"crs_missing: {path}")
+    if isinstance(crs_obj, str):
+        name = crs_obj.strip()
+        if name:
+            return name
+        if allow_missing:
+            return None
+        raise InputDataError(f"crs_name_missing: {path}")
+    if not isinstance(crs_obj, dict):
+        if allow_missing:
+            return None
+        raise InputDataError(f"crs_missing: {path}")
+
     props = crs_obj.get("properties")
+    if isinstance(props, dict):
+        name = props.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    alt_name = crs_obj.get("name")
+    if isinstance(alt_name, str) and alt_name.strip():
+        return alt_name.strip()
+    if allow_missing:
+        return None
     if not isinstance(props, dict):
         raise InputDataError(f"crs_missing_properties: {path}")
-    name = props.get("name")
-    if not isinstance(name, str) or not name.strip():
-        raise InputDataError(f"crs_name_missing: {path}")
-    return name.strip()
+    raise InputDataError(f"crs_name_missing: {path}")
 
 
 def _resolve_patch_dir(data_root: Path, patch: str | None) -> Path:
