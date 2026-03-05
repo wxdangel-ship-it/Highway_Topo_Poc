@@ -632,6 +632,7 @@ def _run_patch_core(
     )
     step1_road_prior_reject_crossing_count = 0
     step1_road_prior_reject_candidate_total = 0
+    step1_resolved_by_dist_margin_count = 0
     if bool(int(params.get("DEBUG_DUMP", 0))):
         debug_json_payloads["debug/step1_road_prior_adjacency.json"] = {
             "enabled": bool(step1_road_prior_filter_enabled),
@@ -683,6 +684,7 @@ def _run_patch_core(
         payload["step1_road_prior_src_count"] = int(road_prior_stats.get("src_node_count", 0))
         payload["step1_road_prior_reject_crossing_count"] = int(step1_road_prior_reject_crossing_count)
         payload["step1_road_prior_reject_candidate_total"] = int(step1_road_prior_reject_candidate_total)
+        payload["step1_resolved_by_dist_margin_count"] = int(step1_resolved_by_dist_margin_count)
         payload.update(xsec_cross_stats)
         payload.update(pair_cluster_norm_stats)
         return payload
@@ -906,20 +908,23 @@ def _run_patch_core(
             in_degree = pass2_in_degree
             out_degree = pass2_out_degree
 
-    if step1_road_prior_filter_enabled:
-        for cand in supports_result.next_crossing_candidates:
-            if not isinstance(cand, dict):
-                continue
-            if not bool(cand.get("road_prior_filter_applied", False)):
-                continue
-            rej = cand.get("road_prior_reject_count", 0)
-            try:
-                rej_i = int(rej)
-            except Exception:
-                rej_i = 0
-            if rej_i > 0:
-                step1_road_prior_reject_crossing_count += 1
-                step1_road_prior_reject_candidate_total += int(rej_i)
+    for cand in supports_result.next_crossing_candidates:
+        if not isinstance(cand, dict):
+            continue
+        if bool(cand.get("resolved_by_dist_margin", False)):
+            step1_resolved_by_dist_margin_count += 1
+        if not step1_road_prior_filter_enabled:
+            continue
+        if not bool(cand.get("road_prior_filter_applied", False)):
+            continue
+        rej = cand.get("road_prior_reject_count", 0)
+        try:
+            rej_i = int(rej)
+        except Exception:
+            rej_i = 0
+        if rej_i > 0:
+            step1_road_prior_reject_crossing_count += 1
+            step1_road_prior_reject_candidate_total += int(rej_i)
 
     _append_cross_breakpoints(cross_result)
     supports = dict(supports_result.supports)
@@ -982,6 +987,12 @@ def _run_patch_core(
                     "chosen_dist_m": float(cand.get("chosen_dist_m")) if cand.get("chosen_dist_m") is not None else None,
                     "ambiguous": bool(cand.get("ambiguous", False)),
                     "unresolved": bool(cand.get("unresolved", False)),
+                    "resolved_by_dist_margin": bool(cand.get("resolved_by_dist_margin", False)),
+                    "resolved_by_dist_margin_dst_nodeid": (
+                        int(cand.get("resolved_by_dist_margin_dst_nodeid"))
+                        if cand.get("resolved_by_dist_margin_dst_nodeid") is not None
+                        else None
+                    ),
                 },
             }
         )
@@ -7707,6 +7718,7 @@ def _finalize_payloads(
                 or sk.startswith("step1_ambiguous_")
                 or sk.startswith("step1_unique_")
                 or sk.startswith("step1_vote_")
+                or sk.startswith("step1_resolved_")
                 or sk.startswith("step1_road_prior_")
                 or sk.startswith("step0_")
                 or sk.startswith("traj_surface_cache_")

@@ -339,6 +339,20 @@ def build_pair_supports(
                 }
                 for item in hit_targets
             ]
+            resolved_by_dist_margin = False
+            chosen_dst_from_margin: dict[str, Any] | None = None
+            if len(dst_candidates) >= 2:
+                top_sorted = sorted(
+                    dst_candidates,
+                    key=lambda it: (float(it.get("dist_m", float("inf"))), int(it.get("stitch_hops", 0)), int(it["dst_nodeid"])),
+                )
+                d0 = float(top_sorted[0].get("dist_m", float("inf")))
+                d1 = float(top_sorted[1].get("dist_m", float("inf")))
+                if np.isfinite(d0) and np.isfinite(d1) and (d1 - d0) > float(dst_dist_eps_m):
+                    resolved_by_dist_margin = True
+                    chosen_dst_from_margin = dict(top_sorted[0])
+                    dst_nodeids_found = [int(top_sorted[0]["dst_nodeid"])]
+                    dst_candidates = [dict(top_sorted[0])]
             next_crossing_candidates.append(
                 {
                     "src_nodeid": int(ev.nodeid),
@@ -355,6 +369,10 @@ def build_pair_supports(
                     "ambiguous": bool(len(dst_nodeids_found) >= 2),
                     "unresolved": bool(len(dst_nodeids_found) == 0),
                     "unique_dst_dist_eps_m": float(dst_dist_eps_m),
+                    "resolved_by_dist_margin": bool(resolved_by_dist_margin),
+                    "resolved_by_dist_margin_dst_nodeid": (
+                        int(chosen_dst_from_margin["dst_nodeid"]) if chosen_dst_from_margin is not None else None
+                    ),
                     "road_prior_filter_applied": bool(allowed_dsts_for_src is not None),
                     "road_prior_allowed_dst": (
                         sorted(int(v) for v in allowed_dsts_for_src) if allowed_dsts_for_src is not None else None

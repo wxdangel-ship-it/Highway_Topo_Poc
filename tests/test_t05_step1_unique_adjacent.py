@@ -333,6 +333,102 @@ def test_road_prior_adjacency_filter_converts_ambiguous_to_unique(monkeypatch) -
     assert not res.ambiguous_events
 
 
+def test_distance_margin_resolves_ambiguous_next_crossing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    src_key = "t:cross:1"
+    dst_a_key = "t:cross:2"
+    dst_b_key = "t:cross:3"
+    ev = CrossingEvent(
+        traj_id="t",
+        nodeid=1,
+        seq=10,
+        seg_idx=0,
+        seq_idx=0,
+        station_m=0.0,
+        cross_point=Point(0.0, 0.0),
+        heading_xy=(1.0, 0.0),
+        cross_dist_m=0.0,
+    )
+    fake_graph = geom_mod._GraphBuildResult(
+        nodes={
+            src_key: geom_mod._GraphNode(
+                key=src_key,
+                traj_id="t",
+                kind="cross",
+                station_m=0.0,
+                point=Point(0.0, 0.0),
+                heading_xy=(1.0, 0.0),
+                cross_nodeid=1,
+                seq_idx=0,
+            ),
+            dst_a_key: geom_mod._GraphNode(
+                key=dst_a_key,
+                traj_id="t",
+                kind="cross",
+                station_m=10.0,
+                point=Point(10.0, 0.0),
+                heading_xy=(1.0, 0.0),
+                cross_nodeid=2,
+                seq_idx=1,
+            ),
+            dst_b_key: geom_mod._GraphNode(
+                key=dst_b_key,
+                traj_id="t",
+                kind="cross",
+                station_m=120.0,
+                point=Point(120.0, 0.0),
+                heading_xy=(1.0, 0.0),
+                cross_nodeid=3,
+                seq_idx=2,
+            ),
+        },
+        edges={
+            src_key: [
+                geom_mod._GraphEdge(
+                    to_key=dst_a_key,
+                    weight=10.0,
+                    kind="traj",
+                    traj_id="t",
+                    station_from=0.0,
+                    station_to=10.0,
+                ),
+                geom_mod._GraphEdge(
+                    to_key=dst_b_key,
+                    weight=120.0,
+                    kind="traj",
+                    traj_id="t",
+                    station_from=0.0,
+                    station_to=120.0,
+                ),
+            ],
+            dst_a_key: [],
+            dst_b_key: [],
+        },
+        event_keys_by_traj={"t": [(ev, src_key)]},
+        traj_line_map={"t": LineString([(0.0, 0.0), (120.0, 0.0)])},
+        stitch_candidate_count=0,
+        stitch_edge_count=0,
+        stitch_query_count=0,
+        stitch_candidates_total=0,
+        stitch_reject_dist_count=0,
+        stitch_reject_angle_count=0,
+        stitch_reject_forward_count=0,
+        stitch_accept_count=0,
+        stitch_levels_used_hist={},
+    )
+    monkeypatch.setattr(geom_mod, "_build_forward_graph", lambda **kwargs: fake_graph)
+
+    res = geom_mod.build_pair_supports(
+        trajectories=[],
+        events_by_traj={"t": [ev]},
+        node_type_map={1: "unknown", 2: "unknown", 3: "unknown"},
+        neighbor_max_dist_m=500.0,
+        unique_dst_dist_eps_m=5.0,
+    )
+
+    assert (1, 2) in res.supports
+    assert not res.ambiguous_events
+
+
 def test_node_level_multi_neighbor_hard_fail(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     patch_inputs = _mk_patch_inputs(
         tmp_path=tmp_path,
