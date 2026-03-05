@@ -160,6 +160,7 @@
 - 命中后输出：
   - first-hit 后沿搜索方向继续前探 `k16_refine_ahead_m`（默认 `5.0m`），步长 `k16_refine_step_m`
   - 候选优先级：线长更大 > `pieces_count` 更少 > 更接近 first-hit
+  - 搜索线半长固定 `10m`；输出线使用 `output_cross_half_len_m` 进行几何重建并截到当前 piece 边界（不依赖阈值触发补边）
   - 在与 `CROSS(s_found)` 交集的片段中优先选包含 center 的 piece，否则选离 center 最近 piece
   - 复用连续线贴边扩展口径，输出单条连续 LineString
 - 失败：
@@ -252,6 +253,7 @@ Patch-only 脚本附加审计文件（可选）：
   - `s_drivezone_split_first_m`
   - `k16_enabled/k16_road_id/k16_road_dir/k16_endpoint_role/k16_search_dir`
   - `k16_search_max_m/k16_step_m/k16_cross_half_len_m`
+  - `k16_output_cross_half_len_m`
   - `k16_s_found_m/k16_s_best_m/k16_found`
   - `k16_min_dist_cross_to_drivezone_m/k16_break_reason`
   - `k16_refine_enable/k16_refine_ahead_m/k16_refine_step_m`

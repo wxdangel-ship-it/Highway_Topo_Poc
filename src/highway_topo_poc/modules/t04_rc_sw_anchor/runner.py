@@ -990,6 +990,7 @@ def _attach_k16_diag(
     k16_search_max_m: float | None = None,
     k16_step_m: float | None = None,
     k16_cross_half_len_m: float | None = None,
+    k16_output_cross_half_len_m: float | None = None,
     k16_s_found_m: float | None = None,
     k16_s_best_m: float | None = None,
     k16_found: bool | None = None,
@@ -1016,6 +1017,9 @@ def _attach_k16_diag(
             "k16_search_max_m": None if k16_search_max_m is None else float(k16_search_max_m),
             "k16_step_m": None if k16_step_m is None else float(k16_step_m),
             "k16_cross_half_len_m": None if k16_cross_half_len_m is None else float(k16_cross_half_len_m),
+            "k16_output_cross_half_len_m": (
+                None if k16_output_cross_half_len_m is None else float(k16_output_cross_half_len_m)
+            ),
             "k16_s_found_m": None if k16_s_found_m is None else float(k16_s_found_m),
             "k16_s_best_m": None if k16_s_best_m is None else float(k16_s_best_m),
             "k16_found": None if k16_found is None else bool(k16_found),
@@ -1057,6 +1061,10 @@ def _evaluate_node_k16(
     required_prev_abs = None if required_prev_abs_s is None else float(required_prev_abs_s)
     k16_search_max_m = 10.0
     k16_cross_half_len_m = 10.0
+    k16_output_cross_half_len_m = max(
+        float(k16_cross_half_len_m),
+        float(params.get("output_cross_half_len_m", 120.0)),
+    )
     k16_step_m = max(0.05, float(params.get("k16_step_m", 0.5)))
     k16_refine_enable = bool(params.get("k16_refine_enable", True))
     k16_refine_ahead_m = max(0.0, float(params.get("k16_refine_ahead_m", 5.0)))
@@ -1098,6 +1106,7 @@ def _evaluate_node_k16(
             k16_search_max_m=k16_search_max_m,
             k16_step_m=k16_step_m,
             k16_cross_half_len_m=k16_cross_half_len_m,
+            k16_output_cross_half_len_m=k16_output_cross_half_len_m,
             k16_found=False,
             k16_break_reason="drivezone_missing",
             k16_refine_enable=k16_refine_enable,
@@ -1140,6 +1149,7 @@ def _evaluate_node_k16(
             k16_search_max_m=k16_search_max_m,
             k16_step_m=k16_step_m,
             k16_cross_half_len_m=k16_cross_half_len_m,
+            k16_output_cross_half_len_m=k16_output_cross_half_len_m,
             k16_found=False,
             k16_break_reason=str(sel_diag.get("reason", "k16_road_selection_failed")),
             k16_refine_enable=k16_refine_enable,
@@ -1188,6 +1198,7 @@ def _evaluate_node_k16(
             k16_search_max_m=k16_search_max_m,
             k16_step_m=k16_step_m,
             k16_cross_half_len_m=k16_cross_half_len_m,
+            k16_output_cross_half_len_m=k16_output_cross_half_len_m,
             k16_found=False,
             k16_break_reason="tangent_invalid",
             k16_refine_enable=k16_refine_enable,
@@ -1248,6 +1259,7 @@ def _evaluate_node_k16(
             k16_search_max_m=k16_search_max_m,
             k16_step_m=k16_step_m,
             k16_cross_half_len_m=k16_cross_half_len_m,
+            k16_output_cross_half_len_m=k16_output_cross_half_len_m,
             k16_s_best_m=search_diag.get("s_best_m"),
             k16_found=False,
             k16_min_dist_cross_to_drivezone_m=search_diag.get("min_dist_cross_to_drivezone_m"),
@@ -1293,6 +1305,7 @@ def _evaluate_node_k16(
             k16_search_max_m=k16_search_max_m,
             k16_step_m=k16_step_m,
             k16_cross_half_len_m=k16_cross_half_len_m,
+            k16_output_cross_half_len_m=k16_output_cross_half_len_m,
             k16_s_found_m=search_diag.get("s_found_m"),
             k16_s_best_m=search_diag.get("s_best_m"),
             k16_found=False,
@@ -1311,7 +1324,7 @@ def _evaluate_node_k16(
         crossline = build_k16_crossline(
             center=center_xy,
             perp=perp,
-            half_len=float(k16_cross_half_len_m),
+            half_len=float(k16_output_cross_half_len_m),
         )
         inter = crossline.intersection(drivezone_union)
         if inter.is_empty:
@@ -1382,6 +1395,7 @@ def _evaluate_node_k16(
             k16_search_max_m=k16_search_max_m,
             k16_step_m=k16_step_m,
             k16_cross_half_len_m=k16_cross_half_len_m,
+            k16_output_cross_half_len_m=k16_output_cross_half_len_m,
             k16_s_found_m=search_diag.get("s_found_m"),
             k16_s_best_m=search_diag.get("s_best_m"),
             k16_found=False,
@@ -1504,7 +1518,7 @@ def _evaluate_node_k16(
         "split_pick_source": "k16_first_intersection_refined" if refined_used else "k16_first_intersection",
         "divstrip_ref_source": "none",
         "divstrip_ref_offset_m": None,
-        "output_cross_half_len_m": float(k16_cross_half_len_m),
+        "output_cross_half_len_m": float(k16_output_cross_half_len_m),
         "branch_a_id": None,
         "branch_b_id": None,
         "branch_axis_id": None,
@@ -1583,6 +1597,7 @@ def _evaluate_node_k16(
         k16_search_max_m=k16_search_max_m,
         k16_step_m=k16_step_m,
         k16_cross_half_len_m=k16_cross_half_len_m,
+        k16_output_cross_half_len_m=k16_output_cross_half_len_m,
         k16_s_found_m=float(signed_found),
         k16_s_best_m=search_diag.get("s_best_m"),
         k16_found=True,
@@ -1698,6 +1713,7 @@ def _evaluate_node(
             k16_search_max_m=10.0,
             k16_step_m=float(max(0.05, float(params.get("k16_step_m", 0.5)))),
             k16_cross_half_len_m=10.0,
+            k16_output_cross_half_len_m=max(10.0, float(params.get("output_cross_half_len_m", 120.0))),
             k16_found=False,
             k16_break_reason="k16_with_merge_or_diverge_bits_not_supported",
         )

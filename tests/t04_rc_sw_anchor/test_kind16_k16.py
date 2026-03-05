@@ -221,6 +221,30 @@ def test_k16_refine_ahead_prefers_stable_wider_crossline(tmp_path: Path) -> None
     assert str(item.get("split_pick_source")) == "k16_first_intersection_refined"
 
 
+def test_k16_output_rebuild_reaches_both_piece_edges_without_threshold(tmp_path: Path) -> None:
+    drivezone_features = [
+        {
+            "type": "Feature",
+            "properties": {"name": "asymmetric_wide"},
+            "geometry": {"type": "Polygon", "coordinates": [_poly_box(-2.0, 2.0, 30.0, 2.8)]},
+        }
+    ]
+    item, _bp = _run_case(
+        tmp_path,
+        case_name="k16_edge_rebuild",
+        node_is_effective_end=False,
+        road_direction=2,
+        add_second_supported_road=False,
+        drivezone_y_range=(2.0, 2.8),
+        drivezone_features_override=drivezone_features,
+    )
+    assert str(item.get("status")) == "ok"
+    # If output still used half_len=10, seg_len would be around 12m here.
+    assert float(item.get("seg_len_m", 0.0)) > 20.0
+    assert float(item.get("left_end_to_drivezone_edge_m", 9.9)) <= 1e-6
+    assert float(item.get("right_end_to_drivezone_edge_m", 9.9)) <= 1e-6
+
+
 def test_k16_fail_when_multiple_roads(tmp_path: Path) -> None:
     item, bp_codes = _run_case(
         tmp_path,

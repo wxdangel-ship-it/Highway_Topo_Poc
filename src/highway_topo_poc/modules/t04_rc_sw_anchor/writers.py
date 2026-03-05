@@ -130,6 +130,7 @@ def _props_min(item: dict[str, Any]) -> dict[str, Any]:
         "k16_search_max_m": item.get("k16_search_max_m"),
         "k16_step_m": item.get("k16_step_m"),
         "k16_cross_half_len_m": item.get("k16_cross_half_len_m"),
+        "k16_output_cross_half_len_m": item.get("k16_output_cross_half_len_m"),
         "k16_s_found_m": item.get("k16_s_found_m"),
         "k16_s_best_m": item.get("k16_s_best_m"),
         "k16_found": item.get("k16_found"),
