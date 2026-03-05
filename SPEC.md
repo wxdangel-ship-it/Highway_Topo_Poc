@@ -51,6 +51,11 @@
 - t05 RC 路口间拓扑生产（以横截面为单元；细节接口契约放子 Agent）
 - t00 合成/模拟数据生成（外网回归用；可注入可控异常）
 
+当前阶段模块状态：
+- Frozen（不再演进）：`t00_synth_data`、`t01_fusion_qc`、`t02_ground_seg_qc`、`t03_marking_entity`
+- Core（已通过测试数据验证，已上传基线版本）：`t04_rc_sw_anchor`、`t05_topology_between_rc`
+- New（仅定义契约与目录骨架，暂不实现逻辑）：`t06_patch_preprocess`、`t07_patch_postprocess`
+
 ### 1.2 关键业务背景（全局认知）
 - RC/SW 是两套不同数据：
   - 高精度矢量：精度高但资料缺失
@@ -226,9 +231,12 @@
 ---
 
 ## 10. 模块目录与代码组织要求
-- 每个技术点一个模块目录（t00–t05）
+- 每个技术点/流程阶段一个模块目录（当前 `t00–t07`）
 - 子模块的接口契约（INTERFACE_CONTRACT.md）放在各自模块目录中，由子 Agent 阶段产出
 - 模块实现代码放在 `src/highway_topo_poc/modules/<module_id>/`，`modules/<module_id>/` 仅承载模块文档与接口契约
+- 模块文档最小集合：`AGENTS.md` / `SKILL.md` / `INTERFACE_CONTRACT.md`（README 非必需）
+- `INTERFACE_CONTRACT.md` 章节顺序统一：`Inputs` / `Outputs` / `EntryPoints` / `Params` / `Examples` / `Acceptance`
+- `modules/<module_id>/` 不放 `.py` 实现；实现由 `src/highway_topo_poc/modules/<module_id>/` 承载
 - common/schemas/configs/scripts/tests 保持清晰分层
 - 所有阈值参数必须配置化
 
@@ -241,11 +249,13 @@ modules/
   t03_marking_entity/
   t04_rc_sw_anchor/
   t05_topology_between_rc/
+  t06_patch_preprocess/
+  t07_patch_postprocess/
 ```
 
 ---
 
-## 11. 五个关键技术点（摘要级要求）
+## 11. 关键技术点与流程模块（摘要级要求）
 说明：本章只给全局“要回答的问题与回传要求”，子模块细节接口契约由子 Agent 冻结。
 
 ### 11.1 t01 参差区间识别
@@ -283,6 +293,18 @@ modules/
 ### 11.5 t05 拓扑生产
 - 回传必须包含：Road/Node 数量、smoothness/centered 分位数、断头率/孤立比例/自交计数、短辫折叠摘要
 
+### 11.6 t06_patch_preprocess（新增）
+- 模块定位：Patch 预处理，先筛选当前 Patch 的 `RCSDNode/RCSDRoad`，再对 Patch 边缘 Road 做预处理并构建边缘虚拟 Node。
+- 输入摘要：`RCSDNode`、`RCSDRoad`、`DriveZone`（路径通过参数给定，命名口径与 `t04` 对齐）。
+- 输出摘要：Patch 级 `RCSDNode`（含边缘打断/虚拟 Node）与 Patch 级 `RCSDRoad`。
+- 状态：当前仅冻结契约与目录骨架；实现逻辑后续由子 Agent 推进。
+
+### 11.7 t07_patch_postprocess（新增）
+- 模块定位：Patch 后处理，基于二层路网拓扑要求对上游产物做完整性校验与处理。
+- 输入摘要：Patch 级 `RCSDNode/RCSDRoad` + `Road`（t05 产物）+ `intersection_l`（t04 产物）。
+- 输出摘要：最终交付层 `Node/Road/intersection_l`。
+- 状态：当前仅冻结契约与目录骨架；实现逻辑后续由子 Agent 推进。
+
 ---
 
 ## 12. 配置、运行、可复现与审计要求
@@ -290,6 +312,10 @@ modules/
 - 支持：按模块运行、按 patch 列表批量运行、失败不中断（可配置）
 - 运行环境：WSL + Python
 - 工作区约束：项目必须放在 Windows E: 盘（WSL 下通常 `/mnt/<drive>/...`）；外传文本只要求可粘贴（体积可控）
+
+### 12.1 整 Patch 端到端验证计划（当前冻结）
+- 当前阶段先按单 Patch、分模块顺序执行：`t06_patch_preprocess -> t04_rc_sw_anchor -> t05_topology_between_rc -> t07_patch_postprocess`。
+- 待单 Patch 路径稳定后，再新增批处理编排模块（本任务不创建该模块）。
 
 ---
 
@@ -349,3 +375,13 @@ modules:
 
   t05_topology_between_rc:
     enabled: true
+
+  t06_patch_preprocess:
+    enabled: false
+    params:
+      drivezone_path: "<path or Vector/DriveZone.geojson>"
+
+  t07_patch_postprocess:
+    enabled: false
+    params:
+      topo_ruleset: "L2_default"

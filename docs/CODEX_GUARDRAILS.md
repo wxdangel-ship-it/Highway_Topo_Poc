@@ -2,7 +2,7 @@
 
 ## 0. 总原则：Stop → Ask → Do
 - 任何不清晰的地方，优先提出问题给用户确认
-- 未确认前，不进行大规模落地（最多允许创建空目录与占位 README）
+- 未确认前，不进行大规模落地（最多允许创建空目录与模块文档三件套占位）
 
 ## 1. 必须先问的触发条件（示例）
 - 目录结构、模块命名、运行入口、schema 字段、输出格式
@@ -28,10 +28,13 @@
 
 ## 5. 代码承载硬约束（modules vs src）
 - 明确禁止把可执行 Python 实现代码放进 `modules/<module_id>/`；该目录仅承载模块文档与接口契约。
+- 每个模块目录最小文档集合固定为：`AGENTS.md` / `SKILL.md` / `INTERFACE_CONTRACT.md`（README 非必需）。
+- `INTERFACE_CONTRACT.md` 章节顺序固定：`Inputs` / `Outputs` / `EntryPoints` / `Params` / `Examples` / `Acceptance`。
 - 新增实现代码默认放在 `src/highway_topo_poc/modules/<module_id>/`。
 - 新增测试默认放在 `tests/`，建议命名 `test_<module_id>_*.py`。
 - pytest/CI/import 只能依赖 src-layout 可导入包，不允许依赖手动 `PYTHONPATH` 才能运行。
 - 并行开发时禁止在 `outputs/` 下作为工作目录。
+- 运行产物统一写入 `outputs/_work/<module_id>/<run_id>/`，不得回写 `data/`。
 - 所有 `pytest` 与 `git` 命令必须在 repo root 执行。
 # Workspace Setup (WSL + Python)
 

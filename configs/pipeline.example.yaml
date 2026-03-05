@@ -1,0 +1,27 @@
+run:
+  run_id: "2026-03-05_example"
+  output_dir: "outputs/${run.run_id}"
+
+provider:
+  type: "file_patch"
+  data_root: "${DATA_ROOT}"
+  patch_manifest: "configs/patch_list.json"
+
+modules:
+  t04_rc_sw_anchor:
+    enabled: true
+    params:
+      drivezone_path: "<path or Vector/DriveZone.geojson>"
+
+  t05_topology_between_rc:
+    enabled: true
+
+  t06_patch_preprocess:
+    enabled: false
+    params:
+      drivezone_path: "<path or Vector/DriveZone.geojson>"
+
+  t07_patch_postprocess:
+    enabled: false
+    params:
+      topo_ruleset: "L2_default"

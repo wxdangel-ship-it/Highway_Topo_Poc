@@ -5,13 +5,15 @@
 - 外网：开发与回归（含合成数据）
 - 内网：跑真实数据并以“文本粘贴包”回传质检结果
 
-## 2. POC 范围（t00–t05）
+## 2. POC 范围（t00–t07）
 - t01：点云标量融合质量（参差区间识别）
 - t02：地面点云分割质量（地面点分类 + Traj 纵向(clearance)QC + Traj 横截(cross-track)QC，含 overall_pass 门禁与 auto_tune 自检；优先 POC 自研，后续可 skill 化复用）
 - t03：标线实体化聚合（重点：导流带）
 - t04：RC/SW 路口锚点识别（细节放子 Agent）
 - t05：RC 路口间拓扑生产（细节放子 Agent）
 - t00：合成/模拟测试数据生成（modules/t00_synth_data/；用于外网回归与 CI）
+- t06：Patch 预处理（仅契约与目录骨架，后续子 Agent 实现）
+- t07：Patch 后处理（仅契约与目录骨架，后续子 Agent 实现）
 
 ## 2.1 Patch Vector 标准（摘要）
 - `LaneBoundary.geojson`
@@ -44,6 +46,12 @@
 - 不冻结生产级阈值与参数（但必须配置化记录）
 - 不在全局文档冻结子模块接口契约（INTERFACE_CONTRACT 在子 Agent 阶段完成）
 
+## 5.1 当前阶段推进策略
+- 冻结模块（不再演进）：`t00_synth_data`、`t01_fusion_qc`、`t02_ground_seg_qc`、`t03_marking_entity`
+- 核心模块（已通过测试数据验证并上传基线）：`t04_rc_sw_anchor`、`t05_topology_between_rc`
+- 新模块（仅文档与目录骨架）：`t06_patch_preprocess`、`t07_patch_postprocess`
+- 即将开展：整 Patch E2E 验证先走逐 Patch 模式，执行顺序为 `t06 -> t04 -> t05 -> t07`；批处理编排模块后续再建
+
 
 ## 6. 模块目录（概览）
 ```text
@@ -54,4 +62,6 @@ modules/
   t03_marking_entity/
   t04_rc_sw_anchor/
   t05_topology_between_rc/
+  t06_patch_preprocess/
+  t07_patch_postprocess/
 ```
