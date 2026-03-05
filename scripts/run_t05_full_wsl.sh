@@ -11,6 +11,7 @@ PATCH_IDS=""
 RUN_ID="auto"
 OUT_ROOT="$(t05_default_out_root "$REPO_ROOT")"
 DEBUG=0
+DEBUG_LAYER_MAX_ITEMS=2000
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -20,6 +21,7 @@ while [ $# -gt 0 ]; do
     --run_id) RUN_ID="$2"; shift 2 ;;
     --out_root) OUT_ROOT="$2"; shift 2 ;;
     --debug) DEBUG=1; shift ;;
+    --debug_layer_max_items) DEBUG_LAYER_MAX_ITEMS="$2"; shift 2 ;;
     *)
       echo "ERROR: unknown arg: $1" >&2
       exit 2
@@ -58,6 +60,7 @@ echo "DATA_ROOT=$DATA_ROOT"
 echo "OUT_ROOT=$OUT_ROOT"
 echo "RUN_ID=$RUN_ID"
 echo "DEBUG=$DEBUG"
+echo "DEBUG_LAYER_MAX_ITEMS=$DEBUG_LAYER_MAX_ITEMS"
 
 for PID in "${PATCH_ARR[@]}"; do
   PID="$(echo "$PID" | xargs)"
@@ -83,7 +86,8 @@ TXT
       --patch_id "$PID" \
       --run_id "$RUN_ID" \
       --out_root "$OUT_ROOT" \
-      --debug_dump "$DEBUG"; then
+      --debug_dump "$DEBUG" \
+      --debug_layer_max_items "$DEBUG_LAYER_MAX_ITEMS"; then
       echo "ERROR: patch failed: $PID" >&2
       FAIL_COUNT=$((FAIL_COUNT + 1))
       continue
