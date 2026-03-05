@@ -143,6 +143,50 @@ def test_topology_unique_decision_respects_direction_and_reports_unresolved() ->
     assert int(topo_stats.get("unresolved_src_count", 0)) >= 1
 
 
+def test_topology_unique_anchor_decisions_include_incoming_anchor_paths() -> None:
+    # 1 -> 2 only. node 2 has no outgoing edge; incoming-anchor(reverse-search) should still
+    # contribute an accepted pair 1->2.
+    raw_graph = {
+        1: [{"to": 2, "edge_id": "e_1_2"}],
+    }
+    compressed, _ = pipeline._compress_topology_graph(
+        raw_graph,
+        cross_nodes={1, 2},
+        enable=True,
+    )
+    xsec_map = {1: _mk_xsec(1, 0.0), 2: _mk_xsec(2, 10.0)}
+    (
+        allowed_dst,
+        allowed_pairs,
+        node_decisions,
+        anchor_decisions,
+        topo_stats,
+        _straight,
+        _chain,
+    ) = pipeline._build_topology_unique_anchor_decisions(
+        compressed,
+        cross_nodes={1, 2},
+        xsec_map=xsec_map,
+        require_unique_chain=True,
+        max_expansions=1000,
+    )
+
+    assert (1, 2) in allowed_pairs
+    assert 2 in allowed_dst.get(1, set())
+    assert int(topo_stats.get("src_anchor_in_count", 0)) >= 1
+    assert int(topo_stats.get("src_anchor_out_count", 0)) >= 1
+    # node 2 should have at least one accepted incoming-anchor decision evidence
+    assert str(node_decisions[2]["status"]) == "accepted"
+    assert any(
+        isinstance(v, dict)
+        and str(v.get("anchor_role")) == "in"
+        and str(v.get("status")) == "accepted"
+        and int(v.get("pair_src_nodeid")) == 1
+        and int(v.get("pair_dst_nodeid")) == 2
+        for v in anchor_decisions.values()
+    )
+
+
 def test_crossing_absorbing_state_prevents_third_party_crossing_expansion() -> None:
     src_key = "t:cross:1"
     mid_key = "t:cross:2"

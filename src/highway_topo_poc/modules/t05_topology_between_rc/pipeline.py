@@ -81,6 +81,7 @@ _SOFT_CROSS_DISTANCE_GATE_REJECT = "CROSS_DISTANCE_GATE_REJECT"
 _SOFT_ENDCAP_WIDTH_CLAMPED = "ENDCAP_WIDTH_CLAMPED"
 _HARD_NO_ADJACENT_PAIR_AFTER_PASS2 = "NO_ADJACENT_PAIR_AFTER_PASS2"
 _HARD_MULTI_CHAIN_SAME_DST = "MULTI_CHAIN_SAME_DST"
+_HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR = "ROAD_OUTSIDE_SEGMENT_CORRIDOR"
 
 
 DEFAULT_PARAMS: dict[str, Any] = {
@@ -108,6 +109,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_TOPO_COMPRESS_DEG2": 1,
     "STEP1_TOPO_REQUIRE_UNIQUE_CHAIN": 1,
     "STEP1_TOPO_MAX_EXPANSIONS": 50000,
+    "STEP1_CORRIDOR_ZONE_TOPK": 3,
     "STEP1_USE_ROAD_PRIOR_ADJ_FILTER": 1,
     "STEP1_ROAD_PRIOR_RESPECT_DIRECTION": 1,
     "PASS2_NEIGHBOR_MAX_DIST_M": 8000.0,
@@ -219,6 +221,11 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "XSEC_GATE_TRAJ_EVIDENCE_MAX_POINTS": 300000,
     "XSEC_GATE_TRAJ_EVIDENCE_SAMPLE_STEP": 4,
     "XSEC_GATE_TRAJ_EVIDENCE_MAX_TRAJ": 300,
+    "STEP2_SEGMENT_CORRIDOR_INSIDE_TOL_M": 0.5,
+    "STEP2_SEGMENT_CORRIDOR_MIN_INSIDE_RATIO": 0.999,
+    "STEP3_WIDENING_SUPPRESS_ENABLE": 1,
+    "STEP3_WIDENING_RATIO_TRIGGER": 1.25,
+    "STEP3_WIDENING_REQUIRE_EXPANDED_FLAG": 1,
     "STEP0_MODE": "lite",
     "STEP0_LITE_MIN_IN_DRIVEZONE_RATIO": 0.90,
     "STEP0_LITE_MAX_IN_DIVSTRIP_RATIO": 0.01,
@@ -645,7 +652,8 @@ def _run_patch_core(
     step1_topology_fallback_reason: str | None = None
     step1_topology_allowed_dst_map: dict[int, set[int]] = {}
     step1_topology_allowed_pairs: set[tuple[int, int]] = set()
-    step1_topology_decisions: dict[int, dict[str, Any]] = {}
+    step1_topology_node_decisions: dict[int, dict[str, Any]] = {}
+    step1_topology_anchor_decisions: dict[str, dict[str, Any]] = {}
     step1_topology_stats: dict[str, Any] = {
         "src_count": int(len(node_ids)),
         "accepted_src_count": 0,
@@ -671,22 +679,19 @@ def _run_patch_core(
             )
             (
                 step1_topology_allowed_dst_map,
-                step1_topology_decisions,
+                step1_topology_allowed_pairs,
+                step1_topology_node_decisions,
+                step1_topology_anchor_decisions,
                 topo_stats,
                 step1_pair_straight_features,
                 step1_topo_chain_features,
-            ) = _build_topology_unique_decisions(
+            ) = _build_topology_unique_anchor_decisions(
                 topo_comp_graph,
                 cross_nodes={int(v) for v in node_ids},
                 xsec_map=xsec_map,
                 require_unique_chain=bool(int(params.get("STEP1_TOPO_REQUIRE_UNIQUE_CHAIN", 1))),
                 max_expansions=int(max(100, int(params.get("STEP1_TOPO_MAX_EXPANSIONS", 50000)))),
             )
-            for src_i, dst_set in step1_topology_allowed_dst_map.items():
-                if len(dst_set) != 1:
-                    continue
-                dst_i = next(iter(dst_set))
-                step1_topology_allowed_pairs.add((int(src_i), int(dst_i)))
             step1_topology_enabled = True
             step1_topology_stats.update({str(k): v for k, v in topo_comp_stats.items()})
             step1_topology_stats.update({str(k): v for k, v in topo_stats.items()})
@@ -723,7 +728,14 @@ def _run_patch_core(
             "fallback_reason": step1_topology_fallback_reason,
             "stats": dict(step1_topology_stats),
             "road_prior_edge_stats": dict(road_prior_edge_stats),
-            "nodes": {str(int(k)): dict(v) for k, v in sorted(step1_topology_decisions.items(), key=lambda it: int(it[0]))},
+            "nodes": {
+                str(int(k)): dict(v)
+                for k, v in sorted(step1_topology_node_decisions.items(), key=lambda it: int(it[0]))
+            },
+            "anchors": {
+                str(k): dict(v)
+                for k, v in sorted(step1_topology_anchor_decisions.items(), key=lambda it: str(it[0]))
+            },
         }
         debug_json_payloads["debug/step1_pair_straight_segments.geojson"] = {
             "type": "FeatureCollection",
@@ -1114,12 +1126,26 @@ def _run_patch_core(
     strict_unique_required = bool(node_vote_min_ratio >= 1.0 - 1e-9)
     preferred_dst_by_src: dict[int, int] = {}
     if step1_topology_enabled:
-        accepted_pairs: set[tuple[int, int]] = set()
-        for src_i, decision in sorted(step1_topology_decisions.items(), key=lambda it: int(it[0])):
+        accepted_pairs: set[tuple[int, int]] = set(step1_topology_allowed_pairs)
+        for src_i, decision in sorted(step1_topology_node_decisions.items(), key=lambda it: int(it[0])):
             status = str(decision.get("status") or "unresolved")
-            dst_nodeids = [int(v) for v in decision.get("dst_nodeids", []) if v is not None]
+            dst_nodeids = [int(v) for v in (decision.get("dst_nodeids") or []) if v is not None]
+            dst_vote_raw = decision.get("dst_vote_map")
+            if isinstance(dst_vote_raw, dict):
+                dst_vote_items = sorted(
+                    (
+                        (int(dst), int(cnt))
+                        for dst, cnt in dst_vote_raw.items()
+                        if dst is not None and int(cnt) > 0
+                    ),
+                    key=lambda it: (-int(it[1]), int(it[0])),
+                )
+            else:
+                dst_vote_items = []
+            if not dst_vote_items and dst_nodeids:
+                dst_vote_items = [(int(dst), 1) for dst in dst_nodeids]
             dst_vote_items = sorted(
-                ((int(dst), int(len(decision.get("dst_paths", {}).get(str(int(dst)), [])))) for dst in dst_nodeids),
+                ((int(dst), int(cnt)) for dst, cnt in dst_vote_items),
                 key=lambda it: (-int(it[1]), int(it[0])),
             )
             total_votes = int(sum(int(v) for _, v in dst_vote_items))
@@ -1134,53 +1160,10 @@ def _run_patch_core(
             if np.isfinite(main_ratio):
                 step1_vote_main_ratio_vals.append(float(main_ratio))
 
-            if status == "accepted":
-                chosen = decision.get("chosen_dst_nodeid")
-                if chosen is not None:
-                    accepted_pairs.add((int(src_i), int(chosen)))
-            elif status == "multi_dst":
-                step1_ambiguous_src_nodes.add(int(src_i))
-                hint = (
-                    f"dst_candidates={','.join(str(v) for v in dst_nodeids)};"
-                    f"dst_count={int(len(dst_nodeids))};"
-                    f"search_overflow={bool(decision.get('search_overflow', False))};"
-                    f"expansions={int(decision.get('expansions', 0))}"
-                )
-                step1_ambiguous_nodes_hint[int(src_i)] = hint
-                hard_breakpoints.append(
-                    {
-                        "road_id": f"na_{int(src_i)}",
-                        "src_nodeid": int(src_i),
-                        "dst_nodeid": None,
-                        "reason": HARD_MULTI_NEIGHBOR_FOR_NODE,
-                        "severity": "hard",
-                        "hint": hint,
-                    }
-                )
-                step1_ambiguous_node_count += 1
-            elif status == "multi_chain":
-                step1_ambiguous_src_nodes.add(int(src_i))
-                hint = (
-                    f"dst={decision.get('chosen_dst_nodeid')};"
-                    f"chain_count={int(decision.get('chain_count', 0))};"
-                    f"search_overflow={bool(decision.get('search_overflow', False))};"
-                    f"expansions={int(decision.get('expansions', 0))}"
-                )
-                step1_ambiguous_nodes_hint[int(src_i)] = hint
-                hard_breakpoints.append(
-                    {
-                        "road_id": f"na_{int(src_i)}",
-                        "src_nodeid": int(src_i),
-                        "dst_nodeid": int(decision.get("chosen_dst_nodeid"))
-                        if decision.get("chosen_dst_nodeid") is not None
-                        else None,
-                        "reason": _HARD_MULTI_CHAIN_SAME_DST,
-                        "severity": "hard",
-                        "hint": hint,
-                    }
-                )
-                step1_ambiguous_node_count += 1
-            else:
+            has_multi_dst_anchor = bool(decision.get("has_multi_dst_anchor", False))
+            has_multi_chain_anchor = bool(decision.get("has_multi_chain_anchor", False))
+            search_overflow = bool(decision.get("search_overflow", False))
+            if status != "accepted":
                 soft_breakpoints.append(
                     {
                         "road_id": f"na_{int(src_i)}",
@@ -1193,9 +1176,34 @@ def _run_patch_core(
                         "severity": "soft",
                         "hint": (
                             f"topology_unique_unresolved;"
-                            f"search_overflow={bool(decision.get('search_overflow', False))};"
-                            f"expansions={int(decision.get('expansions', 0))}"
+                            f"search_overflow={bool(search_overflow)};"
+                            f"anchor_count={int(decision.get('anchor_count', 0))}"
                         ),
+                    }
+                )
+            if has_multi_dst_anchor or has_multi_chain_anchor:
+                hint_bits = [
+                    f"has_multi_dst_anchor={bool(has_multi_dst_anchor)}",
+                    f"has_multi_chain_anchor={bool(has_multi_chain_anchor)}",
+                    f"dst_candidates={','.join(str(v) for v in dst_nodeids)}",
+                    f"anchor_count={int(decision.get('anchor_count', 0))}",
+                    f"search_overflow={bool(search_overflow)}",
+                ]
+                hint = ";".join(hint_bits)
+                step1_ambiguous_src_nodes.add(int(src_i))
+                step1_ambiguous_nodes_hint[int(src_i)] = hint
+                step1_ambiguous_node_count += 1
+                soft_breakpoints.append(
+                    {
+                        "road_id": f"na_{int(src_i)}",
+                        "src_nodeid": int(src_i),
+                        "dst_nodeid": int(main_dst) if main_dst is not None else None,
+                        "traj_id": None,
+                        "seq_range": None,
+                        "station_range_m": None,
+                        "reason": SOFT_AMBIGUOUS_NEXT_XSEC,
+                        "severity": "soft",
+                        "hint": f"topology_anchor_ambiguous;{hint}",
                     }
                 )
 
@@ -1212,10 +1220,68 @@ def _run_patch_core(
                 "chosen_dst_nodeid": (
                     int(decision.get("chosen_dst_nodeid")) if decision.get("chosen_dst_nodeid") is not None else None
                 ),
-                "chain_count": int(decision.get("chain_count", 0)),
-                "search_overflow": bool(decision.get("search_overflow", False)),
-                "expansions": int(decision.get("expansions", 0)),
+                "search_overflow": bool(search_overflow),
+                "anchor_count": int(decision.get("anchor_count", 0)),
+                "has_multi_dst_anchor": bool(has_multi_dst_anchor),
+                "has_multi_chain_anchor": bool(has_multi_chain_anchor),
             }
+
+        if bool(int(params.get("STEP1_TOPO_REQUIRE_UNIQUE_CHAIN", 1))):
+            pair_chain_sigs: dict[tuple[int, int], set[tuple[str, ...]]] = {}
+            for anchor in step1_topology_anchor_decisions.values():
+                if not isinstance(anchor, dict):
+                    continue
+                if str(anchor.get("status") or "") != "accepted":
+                    continue
+                if str(anchor.get("search_direction") or "forward") != "forward":
+                    continue
+                pair_src_val = anchor.get("pair_src_nodeid")
+                pair_dst_val = anchor.get("pair_dst_nodeid")
+                raw_dst_val = anchor.get("chosen_dst_nodeid")
+                if pair_src_val is None or pair_dst_val is None:
+                    continue
+                src_i = int(pair_src_val)
+                dst_i = int(pair_dst_val)
+                if (int(src_i), int(dst_i)) not in accepted_pairs:
+                    continue
+                dst_paths_map = anchor.get("dst_paths")
+                dst_paths = []
+                if isinstance(dst_paths_map, dict):
+                    if raw_dst_val is not None:
+                        dst_paths = dst_paths_map.get(str(int(raw_dst_val)), []) or []
+                    if not dst_paths:
+                        for _k, _vals in dst_paths_map.items():
+                            if isinstance(_vals, list) and _vals:
+                                dst_paths = _vals
+                                break
+                if dst_paths and isinstance(dst_paths[0], dict):
+                    edge_ids = [str(v) for v in (dst_paths[0].get("edge_ids") or []) if str(v)]
+                    if edge_ids:
+                        sig = tuple(edge_ids)
+                    else:
+                        sig = tuple(str(v) for v in (dst_paths[0].get("node_path") or []))
+                else:
+                    start_edge = str(anchor.get("start_edge_id") or "")
+                    sig = (start_edge,) if start_edge else (f"{int(src_i)}->{int(dst_i)}",)
+                pair_chain_sigs.setdefault((int(src_i), int(dst_i)), set()).add(tuple(sig))
+            for (src_i, dst_i), sigs in sorted(pair_chain_sigs.items(), key=lambda it: (int(it[0][0]), int(it[0][1]))):
+                if int(len(sigs)) <= 1:
+                    continue
+                accepted_pairs.discard((int(src_i), int(dst_i)))
+                step1_ambiguous_src_nodes.add(int(src_i))
+                hint = f"dst={int(dst_i)};chain_count={int(len(sigs))};chain_unique_required=true"
+                step1_ambiguous_nodes_hint[int(src_i)] = hint
+                step1_ambiguous_node_count += 1
+                hard_breakpoints.append(
+                    {
+                        "road_id": f"na_{int(src_i)}_{int(dst_i)}",
+                        "src_nodeid": int(src_i),
+                        "dst_nodeid": int(dst_i),
+                        "reason": _HARD_MULTI_CHAIN_SAME_DST,
+                        "severity": "hard",
+                        "hint": hint,
+                    }
+                )
 
         supports = {
             (int(src), int(dst)): support
@@ -1468,6 +1534,7 @@ def _run_patch_core(
         "ref_axis_best": _mk_debug_layer(),
         "step1_corridor_centerline": _mk_debug_layer(),
         "step1_corridor_candidates": _mk_debug_layer(),
+        "step1_corridor_zone": _mk_debug_layer(),
         "step1_support_trajs": _mk_debug_layer(),
         "step1_support_trajs_all": _mk_debug_layer(),
         "step1_seed_selected": _mk_debug_layer(),
@@ -1688,6 +1755,21 @@ def _run_patch_core(
                         },
                     }
                 )
+            for poly in _iter_polygon_parts(step1_corridor.get("corridor_zone_metric")):
+                debug_layers["step1_corridor_zone"].append(
+                    {
+                        "geometry": poly,
+                        "properties": {
+                            "road_id": f"{src}_{dst}",
+                            "src_nodeid": int(src),
+                            "dst_nodeid": int(dst),
+                            "area_m2": step1_corridor.get("corridor_zone_area_m2"),
+                            "source_count": step1_corridor.get("corridor_zone_source_count"),
+                            "half_width_m": step1_corridor.get("corridor_zone_half_width_m"),
+                            "shape_ref_inside_ratio": step1_corridor.get("corridor_shape_ref_inside_ratio"),
+                        },
+                    }
+                )
             traj_flag_by_idx: dict[int, dict[str, Any]] = {}
             for item in step1_corridor.get("traj_gore_flags", []):
                 if not isinstance(item, dict):
@@ -1775,6 +1857,10 @@ def _run_patch_core(
             road["gore_fallback_used_dst"] = bool(step1_corridor.get("gore_fallback_used_dst", False))
             road["traj_drop_count_by_drivezone"] = int(step1_corridor.get("traj_drop_count_by_drivezone", 0))
             road["drivezone_fallback_used"] = bool(step1_corridor.get("drivezone_fallback_used", False))
+            road["step1_corridor_zone_area_m2"] = step1_corridor.get("corridor_zone_area_m2")
+            road["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
+            road["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
+            road["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
             road["hard_anomaly"] = True
             road["hard_reasons"] = [str(step1_corridor.get("hard_reason"))]
             road["soft_issue_flags"] = []
@@ -1807,6 +1893,10 @@ def _run_patch_core(
             road["gore_fallback_used_dst"] = bool(step1_corridor.get("gore_fallback_used_dst", False))
             road["traj_drop_count_by_drivezone"] = int(step1_corridor.get("traj_drop_count_by_drivezone", 0))
             road["drivezone_fallback_used"] = bool(step1_corridor.get("drivezone_fallback_used", False))
+            road["step1_corridor_zone_area_m2"] = step1_corridor.get("corridor_zone_area_m2")
+            road["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
+            road["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
+            road["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
             road["hard_anomaly"] = True
             road["hard_reasons"] = [HARD_MULTI_ROAD]
             road["soft_issue_flags"] = []
@@ -1905,6 +1995,7 @@ def _run_patch_core(
                 params=params,
                 traj_surface_hint=surface_hint,
                 shape_ref_hint_metric=step1_corridor.get("shape_ref_line"),
+                segment_corridor_metric=step1_corridor.get("corridor_zone_metric"),
                 src_xsec=src_xsec_gate.geometry_metric,
                 dst_xsec=dst_xsec_gate.geometry_metric,
             )
@@ -1917,6 +2008,10 @@ def _run_patch_core(
             road_k["gore_fallback_used_dst"] = bool(step1_corridor.get("gore_fallback_used_dst", False))
             road_k["traj_drop_count_by_drivezone"] = int(step1_corridor.get("traj_drop_count_by_drivezone", 0))
             road_k["drivezone_fallback_used"] = bool(step1_corridor.get("drivezone_fallback_used", False))
+            road_k["step1_corridor_zone_area_m2"] = step1_corridor.get("corridor_zone_area_m2")
+            road_k["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
+            road_k["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
+            road_k["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
             key_k = f"{src}_{dst}_k{int(cluster_id)}"
             stage_timer.add("t_build_lane_graph", float(road_k.get("_timing_lb_graph_ms", 0.0)))
             sp_ms = float(road_k.get("_timing_shortest_path_ms", 0.0))
@@ -1944,6 +2039,10 @@ def _run_patch_core(
             road["gore_fallback_used_dst"] = bool(step1_corridor.get("gore_fallback_used_dst", False))
             road["traj_drop_count_by_drivezone"] = int(step1_corridor.get("traj_drop_count_by_drivezone", 0))
             road["drivezone_fallback_used"] = bool(step1_corridor.get("drivezone_fallback_used", False))
+            road["step1_corridor_zone_area_m2"] = step1_corridor.get("corridor_zone_area_m2")
+            road["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
+            road["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
+            road["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
             road["hard_anomaly"] = True
             road["hard_reasons"] = [HARD_CENTER_EMPTY]
             road["soft_issue_flags"] = [SOFT_TRAJ_SURFACE_INSUFFICIENT]
@@ -1986,6 +2085,10 @@ def _run_patch_core(
             road["gore_fallback_used_dst"] = bool(step1_corridor.get("gore_fallback_used_dst", False))
             road["traj_drop_count_by_drivezone"] = int(step1_corridor.get("traj_drop_count_by_drivezone", 0))
             road["drivezone_fallback_used"] = bool(step1_corridor.get("drivezone_fallback_used", False))
+            road["step1_corridor_zone_area_m2"] = step1_corridor.get("corridor_zone_area_m2")
+            road["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
+            road["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
+            road["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
             road["hard_anomaly"] = True
             road["hard_reasons"] = [HARD_MULTI_ROAD]
             road["soft_issue_flags"] = []
@@ -2077,6 +2180,14 @@ def _run_patch_core(
                     f"endpoint_src={selected.get('endpoint_in_drivezone_src')};"
                     f"endpoint_dst={selected.get('endpoint_in_drivezone_dst')}"
                 )
+            if reason == _HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR:
+                hint = (
+                    f"outside_len_m={selected.get('segment_corridor_outside_len_m')};"
+                    f"in_ratio={selected.get('segment_corridor_inside_ratio')};"
+                    f"shape_ref_in_ratio={selected.get('segment_corridor_shape_ref_inside_ratio')};"
+                    f"threshold={selected.get('segment_corridor_min_inside_ratio')};"
+                    f"tol_m={selected.get('segment_corridor_inside_tol_m')}"
+                )
             bp = build_breakpoint(
                 road=selected,
                 reason=reason,
@@ -2097,6 +2208,12 @@ def _run_patch_core(
                 bp["road_in_drivezone_ratio"] = selected.get("road_in_drivezone_ratio")
                 bp["endpoint_in_drivezone_src"] = selected.get("endpoint_in_drivezone_src")
                 bp["endpoint_in_drivezone_dst"] = selected.get("endpoint_in_drivezone_dst")
+            if reason == _HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR:
+                bp["segment_corridor_outside_len_m"] = selected.get("segment_corridor_outside_len_m")
+                bp["segment_corridor_inside_ratio"] = selected.get("segment_corridor_inside_ratio")
+                bp["segment_corridor_shape_ref_inside_ratio"] = selected.get("segment_corridor_shape_ref_inside_ratio")
+                bp["segment_corridor_min_inside_ratio"] = selected.get("segment_corridor_min_inside_ratio")
+                bp["segment_corridor_inside_tol_m"] = selected.get("segment_corridor_inside_tol_m")
             hard_breakpoints.append(bp)
 
         existing_soft_reasons = {
@@ -3473,6 +3590,11 @@ def _build_step1_corridor_for_pair(
         "corridor_count": 0,
         "main_corridor_ratio": None,
         "corridor_candidates": [],
+        "corridor_zone_metric": None,
+        "corridor_zone_area_m2": None,
+        "corridor_zone_source_count": 0,
+        "corridor_zone_half_width_m": float(max(1.0, params.get("CORRIDOR_HALF_WIDTH_M", 15.0))),
+        "corridor_shape_ref_inside_ratio": None,
     }
 
     if str(dst_type) == "diverge":
@@ -3747,13 +3869,61 @@ def _build_step1_corridor_for_pair(
                     )
                 out["multi_corridor_detected"] = True
                 out["multi_corridor_hint"] = str(hint)
-                if multi_hard:
-                    out["hard_reason"] = HARD_MULTI_CORRIDOR
-                    out["hard_hint"] = str(hint)
-                    return out
-                out["strategy"] = f"{strategy}|multi_corridor_soft"
+    if multi_hard and bool(out.get("multi_corridor_detected", False)):
+        out["hard_reason"] = HARD_MULTI_CORRIDOR
+        out["hard_hint"] = str(out.get("multi_corridor_hint") or "step1_multi_corridor_detected")
+        return out
+    out["strategy"] = f"{strategy}|multi_corridor_soft"
     picked_seg = picked["seg"]
     out["shape_ref_line"] = _orient_axis_line(picked_seg, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    zone_half_w = float(max(1.0, params.get("CORRIDOR_HALF_WIDTH_M", 15.0)))
+    zone_topk = int(max(1, int(params.get("STEP1_CORRIDOR_ZONE_TOPK", 3))))
+    zone_lines: list[LineString] = []
+    for cand in out.get("corridor_candidates", [])[:zone_topk]:
+        if not isinstance(cand, dict):
+            continue
+        line = cand.get("geometry")
+        if isinstance(line, LineString) and (not line.is_empty) and line.length > 1e-6:
+            zone_lines.append(line)
+    shape_ref_line = out.get("shape_ref_line")
+    if not zone_lines and isinstance(shape_ref_line, LineString) and (not shape_ref_line.is_empty):
+        zone_lines.append(shape_ref_line)
+    if zone_lines:
+        zone_parts: list[BaseGeometry] = []
+        for line in zone_lines:
+            try:
+                zz = line.buffer(zone_half_w, cap_style=2, join_style=2)
+            except Exception:
+                zz = line.buffer(zone_half_w)
+            if zz is None or zz.is_empty:
+                continue
+            zone_parts.append(zz)
+        if zone_parts:
+            try:
+                corridor_zone = unary_union(zone_parts)
+            except Exception:
+                corridor_zone = zone_parts[0]
+            if corridor_zone is not None and (not corridor_zone.is_empty) and passable_zone is not None and (
+                not passable_zone.is_empty
+            ):
+                try:
+                    clipped = corridor_zone.intersection(passable_zone)
+                    if clipped is not None and (not clipped.is_empty):
+                        corridor_zone = clipped
+                except Exception:
+                    pass
+            if corridor_zone is not None and (not corridor_zone.is_empty):
+                out["corridor_zone_metric"] = corridor_zone
+                out["corridor_zone_source_count"] = int(len(zone_lines))
+                try:
+                    out["corridor_zone_area_m2"] = float(corridor_zone.area)
+                except Exception:
+                    out["corridor_zone_area_m2"] = None
+    out["corridor_zone_half_width_m"] = float(zone_half_w)
+    out["corridor_shape_ref_inside_ratio"] = _line_inside_ratio(
+        out.get("shape_ref_line"),
+        out.get("corridor_zone_metric"),
+    )
     for item in out["traj_gore_flags"]:
         if int(item.get("idx", -1)) == int(picked.get("idx", -2)):
             item["selected"] = True
@@ -5441,6 +5611,17 @@ def _to_finite_float(v: Any, default: float = 0.0) -> float:
     return float(f)
 
 
+def _safe_width_ratio(near_v: Any, base_v: Any) -> float | None:
+    try:
+        near_f = float(near_v)
+        base_f = float(base_v)
+    except Exception:
+        return None
+    if (not np.isfinite(near_f)) or (not np.isfinite(base_f)) or float(base_f) <= 1e-6:
+        return None
+    return float(max(0.0, near_f / max(base_f, 1e-6)))
+
+
 def _drivezone_gate_diagnostics(
     *,
     road_line: LineString | None,
@@ -5514,6 +5695,7 @@ def _evaluate_candidate_road(
     params: dict[str, Any],
     traj_surface_hint: dict[str, Any],
     shape_ref_hint_metric: LineString | None = None,
+    segment_corridor_metric: BaseGeometry | None = None,
 ) -> dict[str, Any]:
     t0_center = perf_counter()
     center = estimate_centerline(
@@ -5716,6 +5898,17 @@ def _evaluate_candidate_road(
         traj_surface_hint.get("covered_length_ratio"), 0.0
     )
     road["_traj_surface_geom_metric"] = traj_surface_hint.get("surface_metric")
+    road["_segment_corridor_metric"] = segment_corridor_metric
+    road["segment_corridor_enforced"] = bool(segment_corridor_metric is not None and (not segment_corridor_metric.is_empty))
+    road["segment_corridor_inside_ratio"] = None
+    road["segment_corridor_shape_ref_inside_ratio"] = None
+    road["segment_corridor_outside_len_m"] = None
+    road["segment_corridor_inside_tol_m"] = float(
+        max(0.0, float(params.get("STEP2_SEGMENT_CORRIDOR_INSIDE_TOL_M", 0.5)))
+    )
+    road["segment_corridor_min_inside_ratio"] = float(
+        max(0.0, min(1.0, float(params.get("STEP2_SEGMENT_CORRIDOR_MIN_INSIDE_RATIO", 0.999))))
+    )
 
     center_empty_like = bool(HARD_CENTER_EMPTY in set(center.hard_flags)) or (not _is_valid_linestring(center.centerline_metric))
     if center_empty_like:
@@ -5833,6 +6026,40 @@ def _evaluate_candidate_road(
         if np.isfinite(src_dist) and np.isfinite(dst_dist) and src_dist <= endpoint_tol + 1e-6 and dst_dist <= endpoint_tol + 1e-6:
             hard_flags.discard(HARD_CENTER_EMPTY)
             center_empty_downgraded = True
+
+    src_width_ratio = _safe_width_ratio(road.get("src_width_near_m"), road.get("src_width_base_m"))
+    dst_width_ratio = _safe_width_ratio(road.get("dst_width_near_m"), road.get("dst_width_base_m"))
+    road["step3_width_ratio_src"] = float(src_width_ratio) if src_width_ratio is not None else None
+    road["step3_width_ratio_dst"] = float(dst_width_ratio) if dst_width_ratio is not None else None
+    road["step3_widening_suppressed"] = False
+    road["step3_widening_suppress_src"] = False
+    road["step3_widening_suppress_dst"] = False
+    road["step3_widening_suppress_mode"] = None
+    if bool(int(params.get("STEP3_WIDENING_SUPPRESS_ENABLE", 1))) and _is_valid_linestring(road_line):
+        ratio_trigger = float(max(1.0, float(params.get("STEP3_WIDENING_RATIO_TRIGGER", 1.25))))
+        require_expanded_flag = bool(int(params.get("STEP3_WIDENING_REQUIRE_EXPANDED_FLAG", 1)))
+        src_trigger = bool(src_width_ratio is not None and float(src_width_ratio) >= ratio_trigger)
+        dst_trigger = bool(dst_width_ratio is not None and float(dst_width_ratio) >= ratio_trigger)
+        if bool(require_expanded_flag):
+            src_trigger = bool(src_trigger and bool(road.get("src_is_expanded", False)))
+            dst_trigger = bool(dst_trigger and bool(road.get("dst_is_expanded", False)))
+        if src_trigger or dst_trigger:
+            shape_ref_suppressed = _fallback_geometry_from_shape_ref(
+                shape_ref_line=center.shape_ref_metric,
+                src_xsec=src_xsec,
+                dst_xsec=dst_xsec,
+            )
+            if _is_valid_linestring(shape_ref_suppressed):
+                road_line = shape_ref_suppressed
+                centerline_fallback_used = True
+                road["step3_widening_suppressed"] = True
+                road["step3_widening_suppress_src"] = bool(src_trigger)
+                road["step3_widening_suppress_dst"] = bool(dst_trigger)
+                road["step3_widening_suppress_mode"] = (
+                    f"shape_ref_substring;ratio_src={src_width_ratio};ratio_dst={dst_width_ratio};"
+                    f"trigger={ratio_trigger:.3f}"
+                )
+
     road["centerline_fallback_geometry_used"] = bool(centerline_fallback_used)
     road["center_estimate_empty_downgraded"] = bool(center_empty_downgraded)
     if road_line is not None:
@@ -5911,6 +6138,36 @@ def _evaluate_candidate_road(
             hard_flags.add(HARD_DIVSTRIP_INTERSECT)
     divstrip_inter_len = max(float(divstrip_inter_len), float(divstrip_inter_retry_len))
     road["divstrip_intersect_len_m"] = float(max(0.0, divstrip_inter_len))
+
+    corridor_zone_raw = segment_corridor_metric
+    if corridor_zone_raw is not None and (not corridor_zone_raw.is_empty):
+        corridor_tol = float(max(0.0, road.get("segment_corridor_inside_tol_m") or 0.0))
+        corridor_zone = corridor_zone_raw
+        if corridor_tol > 1e-9:
+            try:
+                buffered = corridor_zone_raw.buffer(float(corridor_tol))
+                if buffered is not None and (not buffered.is_empty):
+                    corridor_zone = buffered
+            except Exception:
+                corridor_zone = corridor_zone_raw
+        shape_ref_for_check = center.shape_ref_metric
+        if not (isinstance(shape_ref_for_check, LineString) and (not shape_ref_for_check.is_empty)):
+            shape_ref_for_check = shape_ref_hint_metric
+        shape_ref_inside_ratio = _line_inside_ratio(shape_ref_for_check, corridor_zone)
+        road["segment_corridor_shape_ref_inside_ratio"] = (
+            float(shape_ref_inside_ratio) if shape_ref_inside_ratio is not None else None
+        )
+        if isinstance(road_line, LineString) and (not road_line.is_empty):
+            inside_ratio = _line_inside_ratio(road_line, corridor_zone)
+            road["segment_corridor_inside_ratio"] = float(inside_ratio) if inside_ratio is not None else None
+            try:
+                outside_len = float(max(0.0, float(road_line.difference(corridor_zone).length)))
+            except Exception:
+                outside_len = float(max(0.0, float(road_line.length)))
+            road["segment_corridor_outside_len_m"] = float(outside_len)
+            min_ratio = float(max(0.0, min(1.0, road.get("segment_corridor_min_inside_ratio") or 0.0)))
+            if (inside_ratio is None) or (float(inside_ratio) + 1e-9 < min_ratio) or (outside_len > 1e-6):
+                hard_flags.add(_HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR)
 
     drivezone_diag = _drivezone_gate_diagnostics(
         road_line=road_line,
@@ -6012,10 +6269,15 @@ def _evaluate_candidate_road(
     bridge_count = 1 if HARD_BRIDGE_SEGMENT in hard_flags else 0
     divstrip_count = 1 if HARD_DIVSTRIP_INTERSECT in hard_flags else 0
     drivezone_count = 1 if HARD_ROAD_OUTSIDE_DRIVEZONE in hard_flags else 0
+    corridor_count = 1 if _HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR in hard_flags else 0
     score = 10.0 * float(in_ratio) - 0.01 * _to_finite_float(road.get("max_segment_m"), 1e6) - 0.1 * float(
         bridge_count
-    ) - 0.1 * float(outside_count) - 0.1 * float(divstrip_count) - 0.1 * float(drivezone_count)
-    feasible = bool(has_geometry) and (bridge_count <= 0) and (outside_count <= 0) and (divstrip_count <= 0) and (drivezone_count <= 0)
+    ) - 0.1 * float(outside_count) - 0.1 * float(divstrip_count) - 0.1 * float(drivezone_count) - 0.1 * float(
+        corridor_count
+    )
+    feasible = bool(has_geometry) and (bridge_count <= 0) and (outside_count <= 0) and (divstrip_count <= 0) and (
+        drivezone_count <= 0
+    ) and (corridor_count <= 0)
     road["_candidate_score"] = float(score)
     road["_candidate_feasible"] = bool(feasible)
     road["_candidate_in_ratio"] = float(in_ratio)
@@ -6892,6 +7154,192 @@ def _compress_topology_graph(
     return compressed, stats
 
 
+def _reverse_compressed_graph(
+    compressed_adj: dict[int, list[dict[str, Any]]],
+) -> dict[int, list[dict[str, Any]]]:
+    reversed_graph: dict[int, list[dict[str, Any]]] = {}
+    for src, edges in compressed_adj.items():
+        src_i = int(src)
+        for idx, edge in enumerate(edges):
+            to_raw = edge.get("to")
+            if to_raw is None:
+                continue
+            dst_i = int(to_raw)
+            edge_ids = [str(v) for v in edge.get("edge_ids", [])]
+            path_nodes = [int(v) for v in edge.get("path_nodes", []) if v is not None]
+            if not path_nodes:
+                path_nodes = [int(src_i), int(dst_i)]
+            if int(path_nodes[0]) != int(src_i):
+                path_nodes = [int(src_i)] + path_nodes
+            if int(path_nodes[-1]) != int(dst_i):
+                path_nodes.append(int(dst_i))
+            rev_edge_ids = [f"rev:{str(v)}" for v in reversed(edge_ids)] if edge_ids else [f"rev_edge_{src_i}_{dst_i}_{idx}"]
+            rev_path_nodes = [int(v) for v in reversed(path_nodes)]
+            reversed_graph.setdefault(int(dst_i), []).append(
+                {
+                    "to": int(src_i),
+                    "edge_ids": [str(v) for v in rev_edge_ids],
+                    "path_nodes": [int(v) for v in rev_path_nodes],
+                }
+            )
+    for src, vals in reversed_graph.items():
+        vals.sort(
+            key=lambda it: (
+                int(it.get("to", -1)),
+                int(len(it.get("edge_ids", []))),
+                ",".join(str(v) for v in it.get("edge_ids", [])),
+            )
+        )
+        reversed_graph[int(src)] = vals
+    return reversed_graph
+
+
+def _collect_topology_anchor_seeds(
+    compressed_adj: dict[int, list[dict[str, Any]]],
+    *,
+    cross_nodes: set[int],
+    seed_role: str = "out",
+) -> list[dict[str, Any]]:
+    role = str(seed_role or "out").strip().lower()
+    role_tag = role if role in {"out", "in"} else "out"
+    seeds: list[dict[str, Any]] = []
+    for src in sorted(int(v) for v in cross_nodes):
+        edges = list(compressed_adj.get(int(src), []))
+        if not edges:
+            seeds.append(
+                {
+                    "anchor_id": f"{int(src)}::{role_tag.upper()}::NO_EDGE",
+                    "src_nodeid": int(src),
+                    "start_to": None,
+                    "start_edge_ids": [],
+                    "start_path_nodes": [int(src)],
+                    "anchor_role": str(role_tag),
+                }
+            )
+            continue
+        used_anchor_ids: set[str] = set()
+        for idx, edge in enumerate(edges):
+            edge_ids = [str(v) for v in edge.get("edge_ids", [])]
+            first_edge_id = edge_ids[0] if edge_ids else f"edge_{int(idx)}"
+            anchor_id = f"{int(src)}::{role_tag.upper()}::{str(first_edge_id)}"
+            if anchor_id in used_anchor_ids:
+                anchor_id = f"{anchor_id}#{int(idx)}"
+            used_anchor_ids.add(anchor_id)
+            to_raw = edge.get("to")
+            try:
+                start_to = int(to_raw) if to_raw is not None else None
+            except Exception:
+                start_to = None
+            path_nodes = [int(v) for v in edge.get("path_nodes", []) if v is not None]
+            if path_nodes and int(path_nodes[0]) != int(src):
+                path_nodes = [int(src)] + path_nodes
+            if not path_nodes:
+                path_nodes = [int(src)]
+                if start_to is not None:
+                    path_nodes.append(int(start_to))
+            seeds.append(
+                {
+                    "anchor_id": str(anchor_id),
+                    "src_nodeid": int(src),
+                    "start_to": int(start_to) if start_to is not None else None,
+                    "start_edge_ids": edge_ids,
+                    "start_path_nodes": [int(v) for v in path_nodes],
+                    "anchor_role": str(role_tag),
+                }
+            )
+    return seeds
+
+
+def _search_topology_next_xsecs_from_anchor(
+    compressed_adj: dict[int, list[dict[str, Any]]],
+    *,
+    src_nodeid: int,
+    start_to: int | None,
+    start_edge_ids: Sequence[str],
+    start_path_nodes: Sequence[int],
+    cross_nodes: set[int],
+    max_expansions: int,
+) -> dict[str, Any]:
+    src = int(src_nodeid)
+    if start_to is None:
+        return {
+            "src_nodeid": int(src),
+            "dst_paths": {},
+            "dst_nodeids": [],
+            "expansions": 0,
+            "overflow": False,
+        }
+
+    init_node_path = [int(v) for v in start_path_nodes if v is not None]
+    if not init_node_path:
+        init_node_path = [int(src), int(start_to)]
+    if int(init_node_path[0]) != int(src):
+        init_node_path = [int(src)] + [int(v) for v in init_node_path]
+    if int(init_node_path[-1]) != int(start_to):
+        init_node_path.append(int(start_to))
+    init_edge_path = [str(v) for v in start_edge_ids]
+
+    stack: list[tuple[int, list[int], list[str]]] = [
+        (int(start_to), [int(v) for v in init_node_path], [str(v) for v in init_edge_path])
+    ]
+    expansions = 1
+    overflow = False
+    dst_paths_raw: dict[int, list[dict[str, Any]]] = {}
+
+    while stack:
+        node, node_path, edge_path = stack.pop()
+        if int(node) != int(src) and int(node) in cross_nodes:
+            dst_paths_raw.setdefault(int(node), []).append(
+                {
+                    "node_path": [int(v) for v in node_path],
+                    "edge_ids": [str(v) for v in edge_path],
+                }
+            )
+            continue
+        for edge in compressed_adj.get(int(node), []):
+            if expansions >= int(max_expansions):
+                overflow = True
+                stack = []
+                break
+            nxt = int(edge.get("to"))
+            if int(nxt) in node_path:
+                continue
+            edge_ids = [str(v) for v in edge.get("edge_ids", [])]
+            stack.append(
+                (
+                    int(nxt),
+                    [int(v) for v in node_path] + [int(nxt)],
+                    [str(v) for v in edge_path] + edge_ids,
+                )
+            )
+            expansions += 1
+
+    dst_paths: dict[int, list[dict[str, Any]]] = {}
+    for dst, records in dst_paths_raw.items():
+        uniq: dict[tuple[str, ...], dict[str, Any]] = {}
+        for rec in records:
+            edge_ids = [str(v) for v in rec.get("edge_ids", [])]
+            node_path = [int(v) for v in rec.get("node_path", [])]
+            sig = tuple(edge_ids) if edge_ids else tuple(str(v) for v in node_path)
+            if sig in uniq:
+                continue
+            uniq[sig] = {
+                "node_path": node_path,
+                "edge_ids": edge_ids,
+                "signature": [str(v) for v in sig],
+                "chain_len": int(len(edge_ids)),
+            }
+        dst_paths[int(dst)] = list(uniq.values())
+
+    return {
+        "src_nodeid": int(src),
+        "dst_paths": dst_paths,
+        "dst_nodeids": sorted(int(k) for k in dst_paths.keys()),
+        "expansions": int(expansions),
+        "overflow": bool(overflow),
+    }
+
+
 def _search_topology_next_xsecs(
     compressed_adj: dict[int, list[dict[str, Any]]],
     *,
@@ -6957,6 +7405,321 @@ def _search_topology_next_xsecs(
         "expansions": int(expansions),
         "overflow": bool(overflow),
     }
+
+
+def _build_topology_unique_anchor_decisions(
+    compressed_adj: dict[int, list[dict[str, Any]]],
+    *,
+    cross_nodes: set[int],
+    xsec_map: dict[int, Any],
+    require_unique_chain: bool,
+    max_expansions: int,
+) -> tuple[
+    dict[int, set[int]],
+    set[tuple[int, int]],
+    dict[int, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, Any],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    allowed_dst_by_src: dict[int, set[int]] = {}
+    allowed_pairs: set[tuple[int, int]] = set()
+    node_decisions: dict[int, dict[str, Any]] = {}
+    anchor_decisions: dict[str, dict[str, Any]] = {}
+    straight_features: list[dict[str, Any]] = []
+    chain_features: list[dict[str, Any]] = []
+
+    reverse_adj = _reverse_compressed_graph(compressed_adj)
+    anchors_out = _collect_topology_anchor_seeds(compressed_adj, cross_nodes=cross_nodes, seed_role="out")
+    anchors_in = _collect_topology_anchor_seeds(reverse_adj, cross_nodes=cross_nodes, seed_role="in")
+    anchor_batches: list[tuple[str, dict[int, list[dict[str, Any]]], list[dict[str, Any]]]] = [
+        ("forward", compressed_adj, anchors_out),
+        ("reverse", reverse_adj, anchors_in),
+    ]
+
+    accepted_anchor_count = 0
+    unresolved_anchor_count = 0
+    multi_dst_anchor_count = 0
+    multi_chain_anchor_count = 0
+    overflow_anchor_count = 0
+
+    node_agg: dict[int, dict[str, Any]] = {
+        int(src): {
+            "src_nodeid": int(src),
+            "anchor_ids": [],
+            "accepted_dst": set(),
+            "dst_vote_map": {},
+            "has_multi_dst": False,
+            "has_multi_chain": False,
+            "has_overflow": False,
+        }
+        for src in sorted(int(v) for v in cross_nodes)
+    }
+
+    for search_direction, graph_used, seeds in anchor_batches:
+        reverse_mode = str(search_direction) == "reverse"
+        for seed in seeds:
+            anchor_id = str(seed.get("anchor_id") or "")
+            anchor_role = str(seed.get("anchor_role") or ("in" if reverse_mode else "out")).strip().lower()
+            src = int(seed.get("src_nodeid"))
+            start_to = seed.get("start_to")
+            if start_to is not None:
+                start_to = int(start_to)
+            start_edge_ids = [str(v) for v in seed.get("start_edge_ids", [])]
+            start_path_nodes = [int(v) for v in seed.get("start_path_nodes", [])]
+
+            search = _search_topology_next_xsecs_from_anchor(
+                graph_used,
+                src_nodeid=int(src),
+                start_to=start_to,
+                start_edge_ids=start_edge_ids,
+                start_path_nodes=start_path_nodes,
+                cross_nodes=cross_nodes,
+                max_expansions=int(max(100, max_expansions)),
+            )
+            dst_nodeids = [int(v) for v in search.get("dst_nodeids", [])]
+            dst_paths = {
+                int(k): list(v)
+                for k, v in dict(search.get("dst_paths", {})).items()
+            }
+            if bool(search.get("overflow", False)):
+                overflow_anchor_count += 1
+
+            status = "unresolved"
+            reason = SOFT_UNRESOLVED_NEIGHBOR
+            chosen_dst: int | None = None
+            chain_count = 0
+            pair_src: int | None = None
+            pair_dst: int | None = None
+            if len(dst_nodeids) == 0:
+                unresolved_anchor_count += 1
+            elif len(dst_nodeids) >= 2:
+                status = "multi_dst"
+                reason = HARD_MULTI_NEIGHBOR_FOR_NODE
+                multi_dst_anchor_count += 1
+            else:
+                chosen_dst = int(dst_nodeids[0])
+                chain_count = int(len(dst_paths.get(int(chosen_dst), [])))
+                if bool(require_unique_chain) and chain_count >= 2:
+                    status = "multi_chain"
+                    reason = _HARD_MULTI_CHAIN_SAME_DST
+                    multi_chain_anchor_count += 1
+                else:
+                    status = "accepted"
+                    reason = "accepted"
+                    accepted_anchor_count += 1
+                    if bool(reverse_mode):
+                        pair_src = int(chosen_dst)
+                        pair_dst = int(src)
+                    else:
+                        pair_src = int(src)
+                        pair_dst = int(chosen_dst)
+                    if pair_src is not None and pair_dst is not None:
+                        allowed_dst_by_src.setdefault(int(pair_src), set()).add(int(pair_dst))
+                        allowed_pairs.add((int(pair_src), int(pair_dst)))
+
+            agg = node_agg.setdefault(
+                int(src),
+                {
+                    "src_nodeid": int(src),
+                    "anchor_ids": [],
+                    "accepted_dst": set(),
+                    "dst_vote_map": {},
+                    "has_multi_dst": False,
+                    "has_multi_chain": False,
+                    "has_overflow": False,
+                },
+            )
+            agg["anchor_ids"].append(str(anchor_id))
+            agg["has_overflow"] = bool(agg.get("has_overflow", False) or bool(search.get("overflow", False)))
+            if status == "accepted" and chosen_dst is not None:
+                cast_set = agg.get("accepted_dst")
+                if isinstance(cast_set, set):
+                    cast_set.add(int(chosen_dst))
+                else:
+                    agg["accepted_dst"] = {int(chosen_dst)}
+            if status == "multi_dst":
+                agg["has_multi_dst"] = True
+            if status == "multi_chain":
+                agg["has_multi_chain"] = True
+            vote_map = agg.get("dst_vote_map")
+            if not isinstance(vote_map, dict):
+                vote_map = {}
+                agg["dst_vote_map"] = vote_map
+            for dst in dst_nodeids:
+                vote_map[int(dst)] = int(vote_map.get(int(dst), 0) + int(len(dst_paths.get(int(dst), [])) or 1))
+
+            line_targets: list[tuple[int, int, int | None]] = []
+            if status in {"accepted", "multi_chain"} and chosen_dst is not None:
+                if bool(reverse_mode):
+                    line_targets = [(int(chosen_dst), int(src), int(chosen_dst))]
+                else:
+                    line_targets = [(int(src), int(chosen_dst), int(chosen_dst))]
+            elif status == "multi_dst":
+                if bool(reverse_mode):
+                    line_targets = [(int(dst), int(src), int(dst)) for dst in dst_nodeids]
+                else:
+                    line_targets = [(int(src), int(dst), int(dst)) for dst in dst_nodeids]
+
+            for pair_src_i, pair_dst_i, raw_dst in line_targets:
+                src_mid = _cross_section_midpoint(xsec_map.get(int(pair_src_i)))
+                dst_mid = _cross_section_midpoint(xsec_map.get(int(pair_dst_i)))
+                if src_mid is None or dst_mid is None:
+                    continue
+                line = LineString([(float(src_mid.x), float(src_mid.y)), (float(dst_mid.x), float(dst_mid.y))])
+                if line.is_empty or line.length <= 0:
+                    continue
+                chain_n = int(chain_count)
+                if raw_dst is not None:
+                    if chosen_dst is not None and int(raw_dst) == int(chosen_dst):
+                        chain_n = int(chain_count)
+                    else:
+                        chain_n = int(len(dst_paths.get(int(raw_dst), [])))
+                straight_features.append(
+                    {
+                        "type": "Feature",
+                        "geometry": mapping(line),
+                        "properties": {
+                            "src_nodeid": int(pair_src_i),
+                            "dst_nodeid": int(pair_dst_i),
+                            "seed_src_nodeid": int(src),
+                            "anchor_id": str(anchor_id),
+                            "anchor_role": str(anchor_role),
+                            "search_direction": str(search_direction),
+                            "start_edge_id": str(start_edge_ids[0]) if start_edge_ids else None,
+                            "status": str(status),
+                            "reason": str(reason),
+                            "dst_count": int(len(dst_nodeids)),
+                            "chain_count": int(chain_n),
+                            "search_overflow": bool(search.get("overflow", False)),
+                            "expansions": int(search.get("expansions", 0)),
+                        },
+                    }
+                )
+                if raw_dst is None:
+                    continue
+                for path_idx, rec in enumerate(dst_paths.get(int(raw_dst), [])[:5], start=1):
+                    chain_features.append(
+                        {
+                            "type": "Feature",
+                            "geometry": mapping(line),
+                            "properties": {
+                                "src_nodeid": int(pair_src_i),
+                                "dst_nodeid": int(pair_dst_i),
+                                "seed_src_nodeid": int(src),
+                                "anchor_id": str(anchor_id),
+                                "anchor_role": str(anchor_role),
+                                "search_direction": str(search_direction),
+                                "start_edge_id": str(start_edge_ids[0]) if start_edge_ids else None,
+                                "status": str(status),
+                                "reason": str(reason),
+                                "path_idx": int(path_idx),
+                                "path_node_count": int(len(rec.get("node_path", []))),
+                                "chain_len": int(rec.get("chain_len", 0)),
+                                "edge_ids": [str(v) for v in rec.get("edge_ids", [])[:20]],
+                            },
+                        }
+                    )
+
+            anchor_decisions[str(anchor_id)] = {
+                "anchor_id": str(anchor_id),
+                "anchor_role": str(anchor_role),
+                "search_direction": str(search_direction),
+                "src_nodeid": int(src),
+                "start_edge_id": str(start_edge_ids[0]) if start_edge_ids else None,
+                "start_to": int(start_to) if start_to is not None else None,
+                "status": str(status),
+                "reason": str(reason),
+                "dst_nodeids": [int(v) for v in dst_nodeids],
+                "chosen_dst_nodeid": int(chosen_dst) if chosen_dst is not None else None,
+                "pair_src_nodeid": int(pair_src) if pair_src is not None else None,
+                "pair_dst_nodeid": int(pair_dst) if pair_dst is not None else None,
+                "chain_count": int(chain_count),
+                "expansions": int(search.get("expansions", 0)),
+                "search_overflow": bool(search.get("overflow", False)),
+                "dst_paths": {
+                    str(int(dst)): [
+                        {
+                            "node_path": [int(v) for v in rec.get("node_path", [])],
+                            "edge_ids": [str(v) for v in rec.get("edge_ids", [])[:50]],
+                            "chain_len": int(rec.get("chain_len", 0)),
+                        }
+                        for rec in recs[:10]
+                    ]
+                    for dst, recs in sorted(dst_paths.items(), key=lambda it: int(it[0]))
+                },
+            }
+
+    accepted_src_nodes = 0
+    unresolved_src_nodes = 0
+    multi_dst_src_nodes = 0
+    multi_chain_src_nodes = 0
+    overflow_src_nodes = 0
+    for src in sorted(int(v) for v in cross_nodes):
+        agg = node_agg.get(int(src), {})
+        accepted_dst = sorted(int(v) for v in set(agg.get("accepted_dst", set())))
+        has_multi_dst = bool(agg.get("has_multi_dst", False))
+        has_multi_chain = bool(agg.get("has_multi_chain", False))
+        has_overflow = bool(agg.get("has_overflow", False))
+        if has_overflow:
+            overflow_src_nodes += 1
+        if has_multi_dst:
+            multi_dst_src_nodes += 1
+        if has_multi_chain:
+            multi_chain_src_nodes += 1
+        if accepted_dst:
+            accepted_src_nodes += 1
+            status = "accepted"
+            reason = "accepted_multi_anchor" if len(accepted_dst) > 1 else "accepted"
+            chosen_dst = int(accepted_dst[0])
+        else:
+            unresolved_src_nodes += 1
+            status = "unresolved"
+            reason = SOFT_UNRESOLVED_NEIGHBOR
+            chosen_dst = None
+        vote_map_raw = agg.get("dst_vote_map", {})
+        vote_map = {str(int(k)): int(v) for k, v in dict(vote_map_raw).items() if int(v) > 0}
+        node_decisions[int(src)] = {
+            "src_nodeid": int(src),
+            "status": str(status),
+            "reason": str(reason),
+            "dst_nodeids": [int(v) for v in accepted_dst],
+            "chosen_dst_nodeid": int(chosen_dst) if chosen_dst is not None else None,
+            "anchor_count": int(len(agg.get("anchor_ids", []))),
+            "anchor_ids": [str(v) for v in agg.get("anchor_ids", [])[:50]],
+            "dst_vote_map": dict(vote_map),
+            "has_multi_dst_anchor": bool(has_multi_dst),
+            "has_multi_chain_anchor": bool(has_multi_chain),
+            "search_overflow": bool(has_overflow),
+        }
+
+    stats = {
+        "src_count": int(len(cross_nodes)),
+        "accepted_src_count": int(accepted_src_nodes),
+        "unresolved_src_count": int(unresolved_src_nodes),
+        "multi_dst_src_count": int(multi_dst_src_nodes),
+        "multi_chain_src_count": int(multi_chain_src_nodes),
+        "search_overflow_src_count": int(overflow_src_nodes),
+        "src_anchor_count": int(len(anchors_out) + len(anchors_in)),
+        "src_anchor_out_count": int(len(anchors_out)),
+        "src_anchor_in_count": int(len(anchors_in)),
+        "accepted_anchor_count": int(accepted_anchor_count),
+        "unresolved_anchor_count": int(unresolved_anchor_count),
+        "multi_dst_anchor_count": int(multi_dst_anchor_count),
+        "multi_chain_anchor_count": int(multi_chain_anchor_count),
+        "search_overflow_anchor_count": int(overflow_anchor_count),
+        "accepted_pair_count": int(len(allowed_pairs)),
+    }
+    return (
+        allowed_dst_by_src,
+        allowed_pairs,
+        node_decisions,
+        anchor_decisions,
+        stats,
+        straight_features,
+        chain_features,
+    )
 
 
 def _cross_section_midpoint(xsec: CrossSection | None) -> Point | None:
@@ -8157,10 +8920,26 @@ def _make_base_road_record(
         "step1_reason": None,
         "step1_corridor_count": None,
         "step1_main_corridor_ratio": None,
+        "step1_corridor_zone_area_m2": None,
+        "step1_corridor_zone_source_count": None,
+        "step1_corridor_zone_half_width_m": None,
+        "step1_corridor_shape_ref_inside_ratio": None,
         "gore_fallback_used_src": False,
         "gore_fallback_used_dst": False,
         "traj_drop_count_by_drivezone": 0,
         "drivezone_fallback_used": False,
+        "segment_corridor_enforced": False,
+        "segment_corridor_inside_ratio": None,
+        "segment_corridor_shape_ref_inside_ratio": None,
+        "segment_corridor_outside_len_m": None,
+        "segment_corridor_inside_tol_m": None,
+        "segment_corridor_min_inside_ratio": None,
+        "step3_width_ratio_src": None,
+        "step3_width_ratio_dst": None,
+        "step3_widening_suppressed": False,
+        "step3_widening_suppress_src": False,
+        "step3_widening_suppress_dst": False,
+        "step3_widening_suppress_mode": None,
         "repr_traj_ids": repr_ids,
         "stitch_hops_p50": stitch_p50,
         "stitch_hops_p90": stitch_p90,
@@ -8202,6 +8981,7 @@ def _reason_hint(reason: str) -> str:
         HARD_BRIDGE_SEGMENT: "bridge_segment_too_long",
         HARD_DIVSTRIP_INTERSECT: "road_intersects_divstrip_forbidden",
         HARD_ROAD_OUTSIDE_DRIVEZONE: "road_outside_drivezone_forbidden",
+        _HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR: "road_outside_segment_corridor",
         _HARD_NO_ADJACENT_PAIR_AFTER_PASS2: "no_adjacent_pair_after_pass2",
         SOFT_LOW_SUPPORT: "support_traj_count_below_threshold",
         SOFT_SPARSE_POINTS: "surface_points_coverage_low",
@@ -8374,6 +9154,7 @@ def _finalize_payloads(
         always_emit_empty = {
             "step1_corridor_centerline",
             "step1_corridor_candidates",
+            "step1_corridor_zone",
             "step1_support_trajs",
             "step1_support_trajs_all",
             "step1_seed_selected",
