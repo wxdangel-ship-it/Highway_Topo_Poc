@@ -164,6 +164,7 @@ def build_summary_text(
     soft_breakpoints: Sequence[dict[str, Any]],
     params: dict[str, Any],
     lane_boundary_status: dict[str, Any] | None = None,
+    step0_status: dict[str, Any] | None = None,
     max_lines: int = 120,
     max_bytes: int = 8 * 1024,
 ) -> str:
@@ -178,6 +179,15 @@ def build_summary_text(
         method = str(lane_boundary_status.get("method") or "skipped")
         final_crs = str(lane_boundary_status.get("final_crs") or "none")
         lines.append(f"lane_boundary: used={used}, method={method}, final_crs={final_crs}")
+    if isinstance(step0_status, dict):
+        mode = str(step0_status.get("mode") or "lite")
+        passthrough = int(step0_status.get("passthrough", 0) or 0)
+        repaired = int(step0_status.get("repaired", 0) or 0)
+        failed = int(step0_status.get("failed", 0) or 0)
+        gate_empty = int(step0_status.get("gate_empty", 0) or 0)
+        lines.append(
+            f"Step0: mode={mode} passthrough={passthrough} repaired={repaired} failed={failed} gate_empty={gate_empty}"
+        )
     lines.append("")
 
     candidate_count = int(road_candidate_count) if road_candidate_count is not None else int(len(roads))

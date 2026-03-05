@@ -220,6 +220,39 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--cache_enabled", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["CACHE_ENABLED"]))
     p.add_argument("--debug_dump", type=int, choices=[0, 1], default=int(DEFAULT_PARAMS["DEBUG_DUMP"]))
     p.add_argument(
+        "--step0_mode",
+        type=str,
+        choices=["lite", "full", "off"],
+        default=str(DEFAULT_PARAMS.get("STEP0_MODE", "lite")),
+    )
+    p.add_argument(
+        "--step0_lite_min_in_drivezone_ratio",
+        type=float,
+        default=float(DEFAULT_PARAMS.get("STEP0_LITE_MIN_IN_DRIVEZONE_RATIO", 0.90)),
+    )
+    p.add_argument(
+        "--step0_lite_max_in_divstrip_ratio",
+        type=float,
+        default=float(DEFAULT_PARAMS.get("STEP0_LITE_MAX_IN_DIVSTRIP_RATIO", 0.01)),
+    )
+    p.add_argument(
+        "--step0_lite_min_len_m",
+        type=float,
+        default=float(DEFAULT_PARAMS.get("STEP0_LITE_MIN_LEN_M", 5.0)),
+    )
+    p.add_argument(
+        "--step0_lite_allow_passthrough_when_divstrip_missing",
+        type=int,
+        choices=[0, 1],
+        default=int(DEFAULT_PARAMS.get("STEP0_LITE_ALLOW_PASSTHROUGH_WHEN_DIVSTRIP_MISSING", 1)),
+    )
+    p.add_argument(
+        "--step0_stats_enable",
+        type=int,
+        choices=[0, 1],
+        default=int(DEFAULT_PARAMS.get("STEP0_STATS_ENABLE", 1)),
+    )
+    p.add_argument(
         "--debug_layer_max_items",
         type=int,
         default=int(DEFAULT_PARAMS.get("DEBUG_LAYER_MAX_ITEMS", 2000)),
@@ -335,6 +368,14 @@ def main(argv: Iterable[str] | None = None) -> int:
         "DRIVEZONE_SAMPLE_STEP_M": float(args.drivezone_sample_step_m),
         "CACHE_ENABLED": int(args.cache_enabled),
         "DEBUG_DUMP": int(args.debug_dump),
+        "STEP0_MODE": str(args.step0_mode),
+        "STEP0_LITE_MIN_IN_DRIVEZONE_RATIO": float(args.step0_lite_min_in_drivezone_ratio),
+        "STEP0_LITE_MAX_IN_DIVSTRIP_RATIO": float(args.step0_lite_max_in_divstrip_ratio),
+        "STEP0_LITE_MIN_LEN_M": float(args.step0_lite_min_len_m),
+        "STEP0_LITE_ALLOW_PASSTHROUGH_WHEN_DIVSTRIP_MISSING": int(
+            args.step0_lite_allow_passthrough_when_divstrip_missing
+        ),
+        "STEP0_STATS_ENABLE": int(args.step0_stats_enable),
         "DEBUG_LAYER_MAX_ITEMS": int(args.debug_layer_max_items),
     }
     levels = list(DEFAULT_PARAMS.get("STITCH_MAX_DIST_LEVELS_M", [float(args.stitch_max_dist_m)]))
