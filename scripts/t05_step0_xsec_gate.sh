@@ -11,7 +11,7 @@ RUN_ID="auto"
 OUT_ROOT="$(t05_default_out_root "$REPO_ROOT")"
 DEBUG=0
 FORCE=0
-STEP0_MODE="${STEP0_MODE:-lite}"
+STEP0_MODE="${STEP0_MODE:-off}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
