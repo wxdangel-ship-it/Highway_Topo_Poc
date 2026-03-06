@@ -15,12 +15,12 @@
    - `N<=2`：按基线路径处理，分支对用“最大夹角对”。
    - `N>2`：启用多分支流程（仅统计 `direction=2/3` 的有效分支，`direction=0/1` 不参与）。
    - 横截方向仍由“最大夹角对”确定，扫描线改为所有有效分支匹配点形成的 span，并两端外扩 `multibranch_span_extra_m`（默认 10m）。
-5. 扫描与 stop：沿 `scan_axis_road` 扫描到 `next_intersection_connected_deg3` 或 `scan_max_limit_m`。
+5. 扫描与 stop：非连续链节点沿 `scan_axis_road` 扫描到 `next_intersection_connected_deg3` 或 `scan_max_limit_m`；连续链节点使用链级 stop 上界（组件内节点默认 stop 距离的最大值，且不超过 `scan_max_limit_m`）。
 6. split 判定：`SEG(s)` 与 DriveZone 的交段数 `>=2` 的最早 `s*` 触发。
 7. 输出构造：检测用 `SEG(s)`，输出用同方向“长横截线”与 DriveZone 截断后两条 LineString（`piece_idx=0/1`）；anchor 用 gap 中点，失败时回退横截线中点并写断点。
 8. divstrip 优先：有导流带参考时优先在其邻域选择 `s*`；无导流带时回退到 DriveZone 最早 split，不允许跨路口漂移。
-9. 连续分合流顺序化（v1）：识别 `<50m` 连续链（仅 `direction=2/3`，跳过 `degree=2` 过路点），链内按 `abs_s` 顺序约束，必要时节点级 fail（`SEQUENTIAL_ORDER_VIOLATION`）。
-10. 连续链合并：相邻 `diverge->merge` 以横截线几何关系为主（相交或近邻）触发合并；`abs_s` 差值仅保留诊断，不作为阻断门槛。
+9. 连续分合流顺序化（v1）：识别 `<50m` 连续链（仅 `direction=2/3`，跳过 `degree=2` 过路点），链内按原始拓扑顺序约束 `abs_s` 相对顺序，必要时节点级 fail（`SEQUENTIAL_ORDER_VIOLATION`）。
+10. 连续链合并：仅相邻 `diverge->merge`（先分后合）允许共用一条横截线；满足几何相交或近邻时触发合并，`abs_s` 差值仅保留诊断，不作为阻断门槛。
 11. 异常分支（reverse tip/ref_s）：在默认方向缺参考、`s≈0` 命中不可信 divstrip、或 `divstrip_first_hit` 且无 drivezone split 时触发，反向最多 10m 查找；窗口按场景区分：常规（非 reverse）取“靠近节点 1m”（且不跨过 node），异常 reverse 取“远离节点 1m”。若反向无 split 且仍与 divstrip 相交，则继续向远离节点方向搜索到 `reverse_tip_max_m`；仍无非相交候选则硬失败。连续后继节点若出现 `tip_projection + no_split` 且 near-zero，会启用扩展搜索，避免复用上一处物理分割。
 12. 多分支异常双向选择（N>2）：默认主结果为正向最早事件；若正反两侧均有事件，则按方案X选择反向最远事件（`s` 最负）；若仅反向有事件则反向兜底。
 13. K16 节点（`kind&65536!=0`）独立流程：

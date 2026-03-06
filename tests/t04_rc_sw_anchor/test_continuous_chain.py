@@ -16,7 +16,12 @@ from highway_topo_poc.modules.t04_rc_sw_anchor.continuous_chain import (
 )
 from highway_topo_poc.modules.t04_rc_sw_anchor.io_geojson import RoadRecord, load_divstrip_union, load_drivezone_union, load_nodes, load_roads
 from highway_topo_poc.modules.t04_rc_sw_anchor.road_graph import RoadGraph
-from highway_topo_poc.modules.t04_rc_sw_anchor.runner import _apply_continuous_merges, _evaluate_node, run_from_runtime
+from highway_topo_poc.modules.t04_rc_sw_anchor.runner import (
+    _apply_continuous_merges,
+    _apply_continuous_relative_order_constraints,
+    _evaluate_node,
+    run_from_runtime,
+)
 from highway_topo_poc.modules.t04_rc_sw_anchor.writers import write_intersection_opt_geojson
 
 from ._synth_patch_factory import create_synth_patch
@@ -348,6 +353,194 @@ def test_chain_merge_not_triggered_when_geometry_far() -> None:
     )
     assert all(bool(x.get("merged")) is False for x in seed_results)
     assert all(bool(x.get("suppress_intersection_feature")) is False for x in seed_results)
+
+
+def test_chain_merge_not_triggered_when_offset_not_diverge_then_merge_order() -> None:
+    comp = ChainComponent(
+        component_id="chain_002",
+        node_ids=(10, 20),
+        edges=(ChainEdge(src=10, dst=20, dist_m=1.0, path_road_indices=(1,), start_road_idx=1),),
+        offsets_m={10: 12.0, 20: 6.0},
+        predecessors={10: tuple(), 20: (10,)},
+        diag={},
+    )
+    seed_results = [
+        {
+            "nodeid": 10,
+            "kind": 16,
+            "is_diverge_kind": True,
+            "is_merge_kind": False,
+            "status": "suspect",
+            "anchor_type": "diverge",
+            "crossline_opt": LineString([(0.0, 0.0), (6.0, 0.0)]),
+            "is_in_continuous_chain": True,
+            "chain_component_id": "chain_002",
+            "chain_node_offset_m": 12.0,
+            "abs_s_chosen_m": 20.0,
+            "merged": False,
+            "suppress_intersection_feature": False,
+        },
+        {
+            "nodeid": 20,
+            "kind": 8,
+            "is_diverge_kind": False,
+            "is_merge_kind": True,
+            "status": "suspect",
+            "anchor_type": "merge",
+            "crossline_opt": LineString([(0.0, 0.0), (6.0, 0.0)]),
+            "is_in_continuous_chain": True,
+            "chain_component_id": "chain_002",
+            "chain_node_offset_m": 6.0,
+            "abs_s_chosen_m": 20.0,
+            "merged": False,
+            "suppress_intersection_feature": False,
+        },
+    ]
+    _apply_continuous_merges(seed_results=seed_results, components=[comp], merge_gap_m=5.0, geom_tol_m=1.0)
+    assert all(bool(x.get("merged")) is False for x in seed_results)
+    assert all(bool(x.get("suppress_intersection_feature")) is False for x in seed_results)
+
+
+def test_continuous_relative_order_violation_marks_downstream_fail() -> None:
+    comp = ChainComponent(
+        component_id="chain_003",
+        node_ids=(100, 200),
+        edges=(ChainEdge(src=100, dst=200, dist_m=2.0, path_road_indices=(1,), start_road_idx=1),),
+        offsets_m={100: 0.0, 200: 5.0},
+        predecessors={100: tuple(), 200: (100,)},
+        diag={},
+    )
+    seed_results = [
+        {
+            "nodeid": 100,
+            "status": "suspect",
+            "anchor_found": True,
+            "abs_s_chosen_m": 10.0,
+            "is_diverge_kind": True,
+            "is_merge_kind": False,
+            "flags": [],
+        },
+        {
+            "nodeid": 200,
+            "status": "suspect",
+            "anchor_found": True,
+            "abs_s_chosen_m": 9.5,
+            "is_diverge_kind": False,
+            "is_merge_kind": True,
+            "flags": [],
+        },
+    ]
+    breakpoints: list[dict] = []
+    _apply_continuous_relative_order_constraints(
+        seed_results=seed_results,
+        components=[comp],
+        breakpoints=breakpoints,
+    )
+    downstream = next(x for x in seed_results if int(x.get("nodeid")) == 200)
+    assert str(downstream.get("status")) == "fail"
+    assert bool(downstream.get("anchor_found")) is False
+    assert str(downstream.get("sequential_violation_reason")) == "relative_order_not_increasing"
+    assert any(str(bp.get("code")) == "SEQUENTIAL_ORDER_VIOLATION" and int(bp.get("nodeid")) == 200 for bp in breakpoints)
+
+
+def test_continuous_relative_order_allows_equal_only_for_diverge_to_merge() -> None:
+    comp = ChainComponent(
+        component_id="chain_004",
+        node_ids=(300, 400),
+        edges=(ChainEdge(src=300, dst=400, dist_m=2.0, path_road_indices=(1,), start_road_idx=1),),
+        offsets_m={300: 0.0, 400: 5.0},
+        predecessors={300: tuple(), 400: (300,)},
+        diag={},
+    )
+    seed_results = [
+        {
+            "nodeid": 300,
+            "status": "suspect",
+            "anchor_found": True,
+            "abs_s_chosen_m": 12.0,
+            "is_diverge_kind": True,
+            "is_merge_kind": False,
+            "flags": [],
+        },
+        {
+            "nodeid": 400,
+            "status": "suspect",
+            "anchor_found": True,
+            "abs_s_chosen_m": 12.0,
+            "is_diverge_kind": False,
+            "is_merge_kind": True,
+            "flags": [],
+        },
+    ]
+    breakpoints: list[dict] = []
+    _apply_continuous_relative_order_constraints(
+        seed_results=seed_results,
+        components=[comp],
+        breakpoints=breakpoints,
+    )
+    downstream = next(x for x in seed_results if int(x.get("nodeid")) == 400)
+    assert str(downstream.get("status")) == "suspect"
+    assert bool(downstream.get("anchor_found")) is True
+    assert not any(str(bp.get("code")) == "SEQUENTIAL_ORDER_VIOLATION" for bp in breakpoints)
+
+
+def test_continuous_chain_stop_uses_component_max_boundary(tmp_path: Path, monkeypatch) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    out_root = tmp_path / "outputs" / "_work" / "t04_rc_sw_anchor"
+    runtime = _build_runtime(data, out_root, "continuous_chain_stop_override", continuous_enable=True)
+
+    node_div = int(data["node_diverge"])
+    node_merge = int(data["node_merge"])
+    comp = ChainComponent(
+        component_id="chain_stop_000",
+        node_ids=(int(node_div), int(node_merge)),
+        edges=(ChainEdge(src=int(node_div), dst=int(node_merge), dist_m=10.0, path_road_indices=(1,), start_road_idx=1),),
+        offsets_m={int(node_div): 0.0, int(node_merge): 10.0},
+        predecessors={int(node_div): tuple(), int(node_merge): (int(node_div),)},
+        diag={},
+    )
+
+    def _fake_build_continuous_graph(*, starts_set, nodes_kind, roads, continuous_dist_max_m=50.0):
+        return list(comp.edges), [comp], {"edge_count": 1, "component_count": 1, "dir_errors": []}
+
+    def _fake_find_next_intersection_connected_deg3(self, *, nodeid, scan_dir, degree_min=3, max_hops=64):
+        dist_map = {
+            int(node_div): 20.0,
+            int(node_merge): 80.0,
+        }
+        dist = dist_map.get(int(nodeid))
+        if dist is None:
+            return None, {
+                "start_edges_count": 0,
+                "degree_min": int(degree_min),
+                "deg_too_low_skipped": 0,
+                "next_intersection_nodeid": None,
+                "used_fallback": False,
+            }
+        return float(dist), {
+            "start_edges_count": 1,
+            "degree_min": int(degree_min),
+            "deg_too_low_skipped": 0,
+            "next_intersection_nodeid": int(nodeid) + 1,
+            "used_fallback": False,
+        }
+
+    monkeypatch.setattr(runner_mod, "build_continuous_graph", _fake_build_continuous_graph)
+    monkeypatch.setattr(RoadGraph, "find_next_intersection_connected_deg3", _fake_find_next_intersection_connected_deg3)
+
+    out_dir = run_from_runtime(runtime).out_dir
+    items = {int(x["nodeid"]): x for x in _read_json(out_dir / "anchors.json").get("items", [])}
+
+    div_item = items[int(node_div)]
+    merge_item = items[int(node_merge)]
+    assert float(div_item.get("stop_dist_node_raw_m")) == 20.0
+    assert float(div_item.get("stop_dist_chain_override_m")) == 80.0
+    assert float(div_item.get("stop_dist_m")) == 80.0
+    assert bool(div_item.get("stop_dist_chain_override_applied")) is True
+
+    assert float(merge_item.get("stop_dist_node_raw_m")) == 80.0
+    assert float(merge_item.get("stop_dist_chain_override_m")) == 80.0
+    assert float(merge_item.get("stop_dist_m")) == 80.0
 
 
 def test_regression_non_chain_unchanged(tmp_path: Path) -> None:
