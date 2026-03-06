@@ -880,37 +880,6 @@ def _scan_first_divstrip_hit(
     return first_hit_s, best_dist_m, seg0_intersects
 
 
-def _pick_piece_pair_around_center(
-    *,
-    piece_info: list[tuple[LineString, float, float, float]],
-    center_s: float,
-) -> tuple[tuple[LineString, float, float, float], tuple[LineString, float, float, float]] | None:
-    if len(piece_info) < 2:
-        return None
-    left = [x for x in piece_info if float(x[3]) <= float(center_s)]
-    right = [x for x in piece_info if float(x[3]) >= float(center_s)]
-
-    chosen: list[tuple[LineString, float, float, float]] = []
-    if left:
-        chosen.append(min(left, key=lambda x: abs(float(center_s) - float(x[3]))))
-    if right:
-        cand = min(right, key=lambda x: abs(float(x[3]) - float(center_s)))
-        if not chosen or cand is not chosen[0]:
-            chosen.append(cand)
-    if len(chosen) < 2:
-        chosen = sorted(
-            piece_info,
-            key=lambda x: (
-                abs(float(x[3]) - float(center_s)),
-                -float(x[0].length),
-            ),
-        )[:2]
-    if len(chosen) < 2:
-        return None
-    chosen = sorted(chosen, key=lambda x: float(x[1]))
-    return chosen[0], chosen[1]
-
-
 def _build_ref_window_away_from_node(*, ref_s: float, window_m: float) -> tuple[float, float, float]:
     w = max(0.0, float(window_m))
     ref = float(ref_s)
@@ -3186,7 +3155,6 @@ def _evaluate_node(
 
     left_extended_to_piece_edge = False
     right_extended_to_piece_edge = False
-    split_gap_used = False
     gap_len = None
     selected_lines = [selected_piece[0]]
     selected_piece_lens = [float(selected_piece[0].length)]
@@ -3202,22 +3170,6 @@ def _evaluate_node(
         if right_probe_dist > edge_touch_tol_m + 1e-9 and span_end < base_s1 - 1e-9:
             span_end = base_s1
             right_extended_to_piece_edge = True
-
-    if _is_drivezone_position_source(position_source_final) and abs(float(scan_dist)) >= max(0.5, 0.5 * float(step)) - 1e-9:
-        split_pair = _pick_piece_pair_around_center(piece_info=piece_info, center_s=float(center_s))
-        if split_pair is not None:
-            left_piece_info, right_piece_info = split_pair
-            gap_start = float(left_piece_info[2])
-            gap_end = float(right_piece_info[1])
-            if gap_end - gap_start > 1e-6:
-                span_start = float(gap_start)
-                span_end = float(gap_end)
-                split_gap_used = True
-                gap_len = float(gap_end - gap_start)
-                selected_lines = [left_piece_info[0], right_piece_info[0]]
-                selected_piece_lens = [float(left_piece_info[0].length), float(right_piece_info[0].length)]
-                left_extended_to_piece_edge = False
-                right_extended_to_piece_edge = False
 
     if (not math.isfinite(span_start)) or (not math.isfinite(span_end)) or (span_end - span_start) <= 1e-6:
         _add_bp(
@@ -3312,10 +3264,7 @@ def _evaluate_node(
 
     piece_lens = [float(ln.length) for ln in output_pieces_raw]
     clipped_len = float(final_geom.length)
-    if split_gap_used:
-        clip_piece_type = "drivezone_split_gap"
-    else:
-        clip_piece_type = "continuous_center_piece" if center_piece_hit else "continuous_nearest_piece_fallback"
+    clip_piece_type = "continuous_center_piece" if center_piece_hit else "continuous_nearest_piece_fallback"
     near_node_extended_split_unstable = bool(
         _is_drivezone_position_source(position_source_final)
         and str(s_drivezone_split_source_out or "") == "extended"
@@ -3353,9 +3302,7 @@ def _evaluate_node(
         flags.append("divstrip_ref_used")
     if divstrip_ref_offset is not None and divstrip_ref_offset > float(divstrip_preferred_window_m):
         flags.append("divstrip_ref_offset_gt_window")
-    if split_gap_used:
-        flags.append("drivezone_split_gap_used")
-    elif not center_piece_hit:
+    if not center_piece_hit:
         flags.append("center_piece_missing_fallback")
     if left_extended_to_piece_edge:
         flags.append("left_extended_to_piece_edge")
