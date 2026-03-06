@@ -184,6 +184,32 @@ def _rewrite_drivezone_split_band(path: Path) -> None:
     _write_json(path, payload)
 
 
+def _rewrite_drivezone_stage2_extension_case(path: Path) -> None:
+    payload = _read_json(path)
+    cx, cy = _layer_center_xy(path)
+    payload["features"] = [
+        {
+            "type": "Feature",
+            "properties": {"name": "left_band"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [_box(cx, cy, -30.0, -120.0, -4.0, 180.0)],
+            },
+        },
+        {
+            "type": "Feature",
+            "properties": {"name": "right_band_shifted"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [_box(cx, cy, 8.5, -120.0, 30.0, 180.0)],
+            },
+        },
+    ]
+    payload.pop("crs", None)
+    payload["crs"] = {"type": "name", "properties": {"name": "EPSG:3857"}}
+    _write_json(path, payload)
+
+
 def _rewrite_divstrip_far_only(path: Path) -> None:
     _rewrite_divstrip_offset(path, dy=150.0)
 
@@ -406,6 +432,36 @@ def test_divstrip_hard_window_requires_split_within_1m(tmp_path: Path) -> None:
     bp = _read_json(out_dir / "breakpoints.json")
     by_code = {str(x.get("code")): int(x.get("count", 0)) for x in bp.get("by_code", [])}
     assert by_code.get("DRIVEZONE_CLIP_EMPTY", 0) >= 1
+
+
+def test_split_stage2_extended_crossline_recovers_split(tmp_path: Path) -> None:
+    base_data = create_synth_patch(tmp_path / "base", kind_key="kind", id_mode="id", crs_mode="3857")
+    _rewrite_drivezone_stage2_extension_case(base_data["drivezone_path"])
+    _data0, out0 = _run_runtime(
+        tmp_path / "base",
+        run_id="split_stage2_base",
+        data=base_data,
+        focus_node_ids=[str(base_data["node_diverge"])],
+        params_override={"scan_max_limit_m": 14.0, "split_stage2_extend_m": 0.0},
+    )
+    base_item = _read_json(out0 / "anchors.json")["items"][0]
+    assert bool(base_item.get("found_split", False)) is False
+    assert str(base_item.get("trigger")) == "divstrip_ref"
+
+    ext_data = create_synth_patch(tmp_path / "ext", kind_key="kind", id_mode="id", crs_mode="3857")
+    _rewrite_drivezone_stage2_extension_case(ext_data["drivezone_path"])
+    _data1, out1 = _run_runtime(
+        tmp_path / "ext",
+        run_id="split_stage2_ext",
+        data=ext_data,
+        focus_node_ids=[str(ext_data["node_diverge"])],
+        params_override={"scan_max_limit_m": 14.0, "split_stage2_extend_m": 5.0},
+    )
+    ext_item = _read_json(out1 / "anchors.json")["items"][0]
+    assert bool(ext_item.get("found_split", False)) is True
+    assert str(ext_item.get("trigger")) == "drivezone_split"
+    assert str(ext_item.get("s_drivezone_split_source")) == "extended"
+    assert bool(ext_item.get("reverse_tip_attempted", False)) is False
 
 
 def test_drivezone_clip_more_than_two_pieces(tmp_path: Path) -> None:

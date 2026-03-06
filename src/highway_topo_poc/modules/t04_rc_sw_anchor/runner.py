@@ -16,7 +16,7 @@ from .between_branches import build_between_branches_segment, select_branch_pair
 from .continuous_chain import ChainComponent, build_continuous_graph
 from .crs_norm import guess_crs_from_bbox, normalize_epsg_name, transform_xy_arrays
 from .divstrip_ops import anchor_point_from_crossline, tip_point_from_divstrip
-from .drivezone_ops import segment_drivezone_pieces
+from .drivezone_ops import extend_line_to_half_len, segment_drivezone_pieces
 from .io_geojson import NodeRecord, RoadRecord, load_divstrip_union, load_drivezone_union, load_nodes, load_roads
 from .k16_ops import (
     build_crossline as build_k16_crossline,
@@ -2054,6 +2054,7 @@ def _evaluate_node(
     divstrip_preferred_window_m = max(0.0, float(params.get("divstrip_preferred_window_m", 8.0)))
     divstrip_ref_hard_window_m = max(0.0, float(params.get("divstrip_ref_hard_window_m", 1.0)))
     divstrip_drivezone_max_offset_m = max(0.0, float(params.get("divstrip_drivezone_max_offset_m", 30.0)))
+    split_stage2_extend_m = max(0.0, float(params.get("split_stage2_extend_m", 5.0)))
     reverse_tip_max_m = max(0.0, float(params.get("reverse_tip_max_m", 10.0)))
     output_cross_half_len_m = max(float(half_len), float(params.get("output_cross_half_len_m", 120.0)))
     event_edge_pad_m = max(0.0, float(params.get("current_road_edge_pad_m", 4.0)))
@@ -2135,6 +2136,27 @@ def _evaluate_node(
     last_seg = dummy_line
     last_diag: dict[str, Any] = {"seg_len_m": float(dummy_line.length), "pa_center_dist_m": None, "pb_center_dist_m": None}
 
+    def _detect_split_pieces(seg_line: LineString) -> tuple[list[LineString], str | None]:
+        pieces_strict = segment_drivezone_pieces(
+            segment=seg_line,
+            drivezone_union=drivezone_union,
+            min_piece_len_m=min_piece_len_m,
+        )
+        if len(pieces_strict) >= 2:
+            return pieces_strict, "strict"
+        if split_stage2_extend_m <= 1e-9:
+            return pieces_strict, None
+        extend_half_len = max(0.1, 0.5 * float(seg_line.length) + float(split_stage2_extend_m))
+        seg_extended = extend_line_to_half_len(line=seg_line, half_len_m=extend_half_len)
+        pieces_extended = segment_drivezone_pieces(
+            segment=seg_extended,
+            drivezone_union=drivezone_union,
+            min_piece_len_m=min_piece_len_m,
+        )
+        if len(pieces_extended) >= 2:
+            return pieces_extended, "extended"
+        return pieces_strict, None
+
     for i in range(n_steps):
         s = float(i) * step
         center_xy = (
@@ -2162,12 +2184,8 @@ def _evaluate_node(
                 seg0_intersects_divstrip = bool(seg.intersects(divstrip_union) or float(dist_div) <= 1e-9)
                 node_to_divstrip_m_at_s0 = float(node.point.distance(divstrip_union))
 
-        pieces = segment_drivezone_pieces(
-            segment=seg,
-            drivezone_union=drivezone_union,
-            min_piece_len_m=min_piece_len_m,
-        )
-        if len(pieces) >= 2:
+        pieces, split_source = _detect_split_pieces(seg)
+        if split_source is not None:
             split_hits.append(
                 {
                     "s": float(s),
@@ -2175,14 +2193,18 @@ def _evaluate_node(
                     "diag": seg_diag,
                     "pieces": pieces,
                     "dist_div": dist_div,
+                    "split_source": str(split_source),
                 }
             )
 
     id_map = {str(k): int(v) for k, v in node.id_fields}
     first_split = split_hits[0] if split_hits else None
     s_drivezone_split = None if first_split is None else float(first_split["s"])
+    s_drivezone_split_source = None if first_split is None else str(first_split.get("split_source", "strict"))
     if multibranch_enabled:
         s_drivezone_split = None if s_main_m is None else float(s_main_m)
+        if s_drivezone_split is not None:
+            s_drivezone_split_source = "multibranch_main"
         if s_drivezone_split_first_m is None and first_split is not None:
             s_drivezone_split_first_m = float(first_split["s"])
 
@@ -2228,6 +2250,7 @@ def _evaluate_node(
     divstrip_ref_s_rev: float | None = None
     divstrip_ref_source_rev = "none"
     s_drivezone_split_rev: float | None = None
+    s_drivezone_split_source_rev: str | None = None
     first_divstrip_hit_s_rev: float | None = None
     best_divstrip_dist_m_rev: float | None = None
 
@@ -2286,13 +2309,10 @@ def _evaluate_node(
                     best_divstrip_dist_m_rev = float(dist_div_rev)
                 if first_divstrip_hit_s_rev is None and dist_div_rev <= float(div_tol):
                     first_divstrip_hit_s_rev = float(s_rev)
-            pieces_rev = segment_drivezone_pieces(
-                segment=seg_rev,
-                drivezone_union=drivezone_union,
-                min_piece_len_m=min_piece_len_m,
-            )
-            if s_drivezone_split_rev is None and len(pieces_rev) >= 2:
+            _pieces_rev, split_source_rev = _detect_split_pieces(seg_rev)
+            if s_drivezone_split_rev is None and split_source_rev is not None:
                 s_drivezone_split_rev = float(s_rev)
+                s_drivezone_split_source_rev = str(split_source_rev)
 
         if first_divstrip_hit_s_rev is not None:
             divstrip_ref_s_rev = float(first_divstrip_hit_s_rev)
@@ -2339,6 +2359,7 @@ def _evaluate_node(
     position_source_final = position_source
     s_divstrip_out = divstrip_ref_s_rev if reverse_tip_used else divstrip_ref_s
     s_drivezone_split_out = s_drivezone_split_rev if reverse_tip_used else s_drivezone_split
+    s_drivezone_split_source_out = s_drivezone_split_source_rev if reverse_tip_used else s_drivezone_split_source
     divstrip_ref_source_out = divstrip_ref_source_rev if reverse_tip_used else divstrip_ref_source
     reverse_diag_payload = {
         "reverse_tip_attempted": bool(reverse_tip_attempted),
@@ -3217,6 +3238,7 @@ def _evaluate_node(
         "seg_len_m": float(found_diag.get("seg_len_m", found_seg.length)),
         "s_divstrip_m": None if s_divstrip_out is None else float(s_divstrip_out),
         "s_drivezone_split_m": None if s_drivezone_split_out is None else float(s_drivezone_split_out),
+        "s_drivezone_split_source": None if s_drivezone_split_source_out is None else str(s_drivezone_split_source_out),
         "s_chosen_m": float(scan_dist),
         "split_pick_source": str(split_pick_source),
         "divstrip_ref_source": str(divstrip_ref_source_out),
