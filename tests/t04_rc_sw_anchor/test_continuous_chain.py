@@ -92,6 +92,59 @@ def test_chain_detection_direction_respected() -> None:
     assert any(int(e.src) == 1 and int(e.dst) == 3 for e in chain_edges)
 
 
+def test_chain_detection_diverge_to_merge_uses_75m_threshold() -> None:
+    roads = [
+        _mk_road(10, 11, direction=2, length_m=30.0),
+        _mk_road(11, 12, direction=2, length_m=30.0),
+        _mk_road(12, 13, direction=2, length_m=1.0),
+        _mk_road(12, 14, direction=2, length_m=1.0),
+    ]
+    chain_edges, _components, _diag = build_continuous_graph(
+        starts_set={10, 12},
+        nodes_kind={10: 16, 12: 8},
+        roads=roads,
+        continuous_dist_max_m=50.0,
+        continuous_diverge_then_merge_dist_max_m=75.0,
+    )
+    edge = next((e for e in chain_edges if int(e.src) == 10 and int(e.dst) == 12), None)
+    assert edge is not None
+    assert float(edge.dist_m) == 60.0
+
+
+def test_chain_detection_diverge_to_merge_over_75m_is_rejected() -> None:
+    roads = [
+        _mk_road(20, 21, direction=2, length_m=40.0),
+        _mk_road(21, 22, direction=2, length_m=40.0),
+        _mk_road(22, 23, direction=2, length_m=1.0),
+        _mk_road(22, 24, direction=2, length_m=1.0),
+    ]
+    chain_edges, _components, _diag = build_continuous_graph(
+        starts_set={20, 22},
+        nodes_kind={20: 16, 22: 8},
+        roads=roads,
+        continuous_dist_max_m=50.0,
+        continuous_diverge_then_merge_dist_max_m=75.0,
+    )
+    assert not any(int(e.src) == 20 and int(e.dst) == 22 for e in chain_edges)
+
+
+def test_chain_detection_non_diverge_to_merge_stays_on_50m_threshold() -> None:
+    roads = [
+        _mk_road(30, 31, direction=2, length_m=30.0),
+        _mk_road(31, 32, direction=2, length_m=30.0),
+        _mk_road(32, 33, direction=2, length_m=1.0),
+        _mk_road(32, 34, direction=2, length_m=1.0),
+    ]
+    chain_edges, _components, _diag = build_continuous_graph(
+        starts_set={30, 32},
+        nodes_kind={30: 8, 32: 16},
+        roads=roads,
+        continuous_dist_max_m=50.0,
+        continuous_diverge_then_merge_dist_max_m=75.0,
+    )
+    assert not any(int(e.src) == 30 and int(e.dst) == 32 for e in chain_edges)
+
+
 def test_chain_order_enforced_prevents_same_location(tmp_path: Path) -> None:
     data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
     nodes, _node_meta, _node_err = load_nodes(
@@ -500,7 +553,14 @@ def test_continuous_chain_stop_uses_component_max_boundary(tmp_path: Path, monke
         diag={},
     )
 
-    def _fake_build_continuous_graph(*, starts_set, nodes_kind, roads, continuous_dist_max_m=50.0):
+    def _fake_build_continuous_graph(
+        *,
+        starts_set,
+        nodes_kind,
+        roads,
+        continuous_dist_max_m=50.0,
+        continuous_diverge_then_merge_dist_max_m=75.0,
+    ):
         return list(comp.edges), [comp], {"edge_count": 1, "component_count": 1, "dir_errors": []}
 
     def _fake_find_next_intersection_connected_deg3(self, *, nodeid, scan_dir, degree_min=3, max_hops=64):

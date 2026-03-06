@@ -23,6 +23,30 @@ def _is_merge_or_diverge(kind: int | None) -> bool:
     return bool((int(kind) & (1 << 3)) != 0 or (int(kind) & (1 << 4)) != 0)
 
 
+def _is_merge_kind(kind: int | None) -> bool:
+    if kind is None:
+        return False
+    return bool((int(kind) & (1 << 3)) != 0)
+
+
+def _is_diverge_kind(kind: int | None) -> bool:
+    if kind is None:
+        return False
+    return bool((int(kind) & (1 << 4)) != 0)
+
+
+def _edge_dist_limit_m(
+    *,
+    src_kind: int | None,
+    dst_kind: int | None,
+    continuous_dist_max_m: float,
+    continuous_diverge_then_merge_dist_max_m: float,
+) -> float:
+    if _is_diverge_kind(src_kind) and _is_merge_kind(dst_kind):
+        return float(continuous_diverge_then_merge_dist_max_m)
+    return float(continuous_dist_max_m)
+
+
 @dataclass(frozen=True)
 class DirectedEdge:
     src: int
@@ -244,9 +268,14 @@ def build_continuous_graph(
     nodes_kind: dict[int, int],
     roads: list[RoadRecord],
     continuous_dist_max_m: float = 50.0,
+    continuous_diverge_then_merge_dist_max_m: float = 75.0,
 ) -> tuple[list[ChainEdge], list[ChainComponent], dict[str, Any]]:
     starts = {int(x) for x in starts_set}
     adjacency_out, incident_map, dir_errors = build_effective_directed_edges(roads)
+
+    base_limit_m = float(continuous_dist_max_m)
+    diverge_merge_limit_m = float(continuous_diverge_then_merge_dist_max_m)
+    search_limit_m = float(max(base_limit_m, diverge_merge_limit_m))
 
     edges_map: dict[tuple[int, int], ChainEdge] = {}
     visit_queue: deque[int] = deque(sorted(starts))
@@ -258,6 +287,7 @@ def build_continuous_graph(
         if src in seen_expand:
             continue
         seen_expand.add(src)
+        src_kind = _safe_int(nodes_kind.get(int(src)))
         out_edges = adjacency_out.get(src, [])
         for first_edge in out_edges:
             out = follow_to_next_deg3(
@@ -265,25 +295,33 @@ def build_continuous_graph(
                 first_edge=first_edge,
                 adjacency_out=adjacency_out,
                 incident_map=incident_map,
-                max_dist_m=float(continuous_dist_max_m),
+                max_dist_m=float(search_limit_m),
                 skip_deg2=True,
             )
             if out is None:
                 continue
             dst, dist_m, path_road_indices, diag = out
+            dst_kind = _safe_int(nodes_kind.get(int(dst)))
+            edge_limit_m = _edge_dist_limit_m(
+                src_kind=src_kind,
+                dst_kind=dst_kind,
+                continuous_dist_max_m=base_limit_m,
+                continuous_diverge_then_merge_dist_max_m=diverge_merge_limit_m,
+            )
             trace_diag[src].append(
                 {
                     "dst": int(dst),
                     "dist_m": float(dist_m),
+                    "dist_limit_m": float(edge_limit_m),
                     "path_road_indices": [int(x) for x in path_road_indices],
                     "diag": dict(diag),
                 }
             )
             if int(dst) not in starts:
                 continue
-            if not _is_merge_or_diverge(_safe_int(nodes_kind.get(int(dst)))):
+            if not _is_merge_or_diverge(dst_kind):
                 continue
-            if float(dist_m) >= float(continuous_dist_max_m):
+            if float(dist_m) >= float(edge_limit_m):
                 continue
             key = (int(src), int(dst))
             prev = edges_map.get(key)

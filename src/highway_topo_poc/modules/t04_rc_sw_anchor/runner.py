@@ -3741,6 +3741,9 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
                 nodes_kind=node_kinds,
                 roads=roads,
                 continuous_dist_max_m=float(params.get("continuous_dist_max_m", 50.0)),
+                continuous_diverge_then_merge_dist_max_m=float(
+                    params.get("continuous_diverge_then_merge_dist_max_m", 75.0)
+                ),
             )
             chain_diag = {"enabled": True, **dict(chain_diag_raw)}
             if chain_diag.get("dir_errors"):

@@ -44,6 +44,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "current_road_edge_pad_m": 4.0,
     "continuous_enable": True,
     "continuous_dist_max_m": 50.0,
+    "continuous_diverge_then_merge_dist_max_m": 75.0,
     "continuous_merge_max_gap_m": 5.0,
     "continuous_merge_geom_tol_m": 1.0,
     "continuous_tip_projection_min_abs_m": 1.0,

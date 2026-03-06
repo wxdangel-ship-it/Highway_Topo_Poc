@@ -53,6 +53,7 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--output_cross_half_len_m", default=None)
     p.add_argument("--continuous_enable", default=None)
     p.add_argument("--continuous_dist_max_m", default=None)
+    p.add_argument("--continuous_diverge_then_merge_dist_max_m", default=None)
     p.add_argument("--continuous_merge_max_gap_m", default=None)
     p.add_argument("--continuous_merge_geom_tol_m", default=None)
     p.add_argument("--next_intersection_degree_min", default=None)
@@ -108,6 +109,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "output_cross_half_len_m": args.output_cross_half_len_m,
             "continuous_enable": args.continuous_enable,
             "continuous_dist_max_m": args.continuous_dist_max_m,
+            "continuous_diverge_then_merge_dist_max_m": args.continuous_diverge_then_merge_dist_max_m,
             "continuous_merge_max_gap_m": args.continuous_merge_max_gap_m,
             "continuous_merge_geom_tol_m": args.continuous_merge_geom_tol_m,
             "next_intersection_degree_min": args.next_intersection_degree_min,
