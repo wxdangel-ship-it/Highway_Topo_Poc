@@ -25,6 +25,30 @@ _NODE_FALLBACK_NAME = "Node.geojson"
 _ROAD_PRIMARY_NAME = "RCSDRoad.geojson"
 _ROAD_FALLBACK_NAME = "Road.geojson"
 _MAX_SAFE_FLOAT_INT = 9007199254740991  # 2^53 - 1
+_ROAD_PRIOR_SRC_FIELD_CANDIDATES = (
+    "snodeid",
+    "src_nodeid",
+    "src",
+    "from",
+    "from_nodeid",
+    "start_id",
+    "startnodeid",
+    "start_node_id",
+    "fnodeid",
+    "snode",
+)
+_ROAD_PRIOR_DST_FIELD_CANDIDATES = (
+    "enodeid",
+    "dst_nodeid",
+    "dst",
+    "to",
+    "to_nodeid",
+    "end_id",
+    "endnodeid",
+    "end_node_id",
+    "tnodeid",
+    "enode",
+)
 
 
 @dataclass(frozen=True)
@@ -260,6 +284,7 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
     )
     div_payload_raw = _load_geojson(divstrip_path) if divstrip_path.is_file() else {"type": "FeatureCollection", "features": []}
     node_payload = _load_geojson(node_path) if node_path.is_file() else {"type": "FeatureCollection", "features": []}
+    road_payload = _load_geojson(road_path) if road_path.is_file() else {"type": "FeatureCollection", "features": []}
     inter_declared_crs = _normalize_epsg_name(_extract_declared_crs(inter_payload))
     drive_declared_crs = _normalize_epsg_name(_extract_declared_crs(drive_payload_raw))
     div_declared_crs = _normalize_epsg_name(_extract_declared_crs(div_payload_raw)) if divstrip_path.is_file() else None
@@ -378,7 +403,14 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
         to_input=_make_transformer(dst_crs, inter_crs),
     )
 
-    intersections = _extract_intersections(inter_payload, inter_to_metric)
+    node_kind = _extract_node_kind_map(node_payload)
+    road_prior_node_ids = _extract_road_prior_node_ids(road_payload) if road_path.is_file() else set()
+    intersections_raw = _extract_intersections(inter_payload, inter_to_metric)
+    intersections, intersection_nodeid_fix = _canonicalize_intersection_nodeids(
+        intersections_raw,
+        node_kind_map=node_kind,
+        road_prior_node_ids=road_prior_node_ids,
+    )
     lane_boundaries = _extract_linestrings(lane_payload, lane_to_metric)
     lane_used = bool(lane_boundaries)
     lane_fix_info = dict(lane_fix_info)
@@ -405,7 +437,6 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
         div_fix_info["skipped_reason"] = None
     if drivezone_zone is None or drivezone_zone.is_empty:
         raise InputDataError(f"drivezone_empty: {drivezone_path}")
-    node_kind = _extract_node_kind_map(node_payload)
     projected_traj = _project_trajectories(trajectories, dst_crs=dst_crs)
 
     return PatchInputs(
@@ -456,6 +487,9 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
             "drivezone_feature_count": int(len(drive_payload.get("features", []))),
             "has_divstrip_file": divstrip_path.is_file(),
             "divstrip_feature_count": int(div_feature_count_raw),
+            "road_prior_node_count": int(len(road_prior_node_ids)),
+            "intersection_nodeid_remap_count": int(intersection_nodeid_fix.get("remap_count", 0)),
+            "intersection_nodeid_remap_examples": list(intersection_nodeid_fix.get("remap_examples", [])),
         },
     )
 
@@ -1067,6 +1101,88 @@ def _extract_node_kind_map(payload: dict[str, Any]) -> dict[int, int]:
             continue
         out[int(np.int64(nodeid))] = int(np.int32(kind))
     return out
+
+
+def _extract_road_prior_node_ids(payload: dict[str, Any]) -> set[int]:
+    node_ids: set[int] = set()
+    features = payload.get("features", [])
+    if not isinstance(features, list):
+        return node_ids
+    for feat in features:
+        if not isinstance(feat, dict):
+            continue
+        props = normalize_fields(feat.get("properties") or {})
+        src = None
+        dst = None
+        for key in _ROAD_PRIOR_SRC_FIELD_CANDIDATES:
+            src = _safe_int(props.get(key))
+            if src is not None:
+                break
+        for key in _ROAD_PRIOR_DST_FIELD_CANDIDATES:
+            dst = _safe_int(props.get(key))
+            if dst is not None:
+                break
+        if src is not None:
+            node_ids.add(int(src))
+        if dst is not None:
+            node_ids.add(int(dst))
+    return node_ids
+
+
+def _candidate_nodeids_from_props(props: dict[str, Any]) -> list[int]:
+    out: list[int] = []
+    for key in ("nodeid", "mainid", "id"):
+        iv = _safe_int(props.get(key))
+        if iv is None:
+            continue
+        i64 = int(np.int64(iv))
+        if i64 not in out:
+            out.append(i64)
+    return out
+
+
+def _canonicalize_intersection_nodeids(
+    intersections: Sequence[CrossSection],
+    *,
+    node_kind_map: dict[int, int],
+    road_prior_node_ids: set[int],
+) -> tuple[list[CrossSection], dict[str, Any]]:
+    out: list[CrossSection] = []
+    remap_pairs: list[tuple[int, int]] = []
+    for cs in intersections:
+        props = normalize_fields(getattr(cs, "properties", {}) or {})
+        candidates = _candidate_nodeids_from_props(props)
+        chosen = int(cs.nodeid)
+        if candidates:
+            best = int(candidates[0])
+            best_score = -1
+            for idx, cand in enumerate(candidates):
+                score = 0
+                if int(cand) in road_prior_node_ids:
+                    score += 4
+                if int(cand) in node_kind_map:
+                    score += 3
+                if int(cand) == int(cs.nodeid):
+                    score += 2
+                if idx == 0:
+                    score += 1
+                if score > best_score:
+                    best_score = int(score)
+                    best = int(cand)
+            chosen = int(best)
+        if int(chosen) != int(cs.nodeid):
+            remap_pairs.append((int(cs.nodeid), int(chosen)))
+        out.append(
+            CrossSection(
+                nodeid=int(chosen),
+                geometry_metric=cs.geometry_metric,
+                properties=dict(cs.properties),
+            )
+        )
+    return out, {
+        "remap_count": int(len(remap_pairs)),
+        "remap_examples": [[int(src), int(dst)] for src, dst in remap_pairs[:20]],
+    }
 
 
 def _project_trajectories(trajectories: Sequence[TrajectoryData], *, dst_crs: str) -> list[TrajectoryData]:
