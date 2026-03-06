@@ -82,6 +82,7 @@ _SOFT_ENDCAP_WIDTH_CLAMPED = "ENDCAP_WIDTH_CLAMPED"
 _HARD_NO_ADJACENT_PAIR_AFTER_PASS2 = "NO_ADJACENT_PAIR_AFTER_PASS2"
 _HARD_MULTI_CHAIN_SAME_DST = "MULTI_CHAIN_SAME_DST"
 _HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR = "ROAD_OUTSIDE_SEGMENT_CORRIDOR"
+_MAX_SAFE_FLOAT_INT = 9007199254740991  # 2^53 - 1
 
 
 DEFAULT_PARAMS: dict[str, Any] = {
@@ -6932,8 +6933,8 @@ def _to_int_or_none(value: Any) -> int | None:
     if isinstance(value, (int, np.integer)):
         return int(value)
     if isinstance(value, float):
-        if np.isfinite(value):
-            return int(round(float(value)))
+        if np.isfinite(value) and abs(float(value)) <= float(_MAX_SAFE_FLOAT_INT) and float(value).is_integer():
+            return int(value)
         return None
     if isinstance(value, str):
         text = value.strip()
@@ -6946,8 +6947,8 @@ def _to_int_or_none(value: Any) -> int | None:
                 fv = float(text)
             except Exception:
                 return None
-            if np.isfinite(fv):
-                return int(round(float(fv)))
+            if np.isfinite(fv) and abs(float(fv)) <= float(_MAX_SAFE_FLOAT_INT) and float(fv).is_integer():
+                return int(fv)
             return None
     return None
 

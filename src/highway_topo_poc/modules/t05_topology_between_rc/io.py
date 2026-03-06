@@ -24,6 +24,7 @@ _NODE_PRIMARY_NAME = "RCSDNode.geojson"
 _NODE_FALLBACK_NAME = "Node.geojson"
 _ROAD_PRIMARY_NAME = "RCSDRoad.geojson"
 _ROAD_FALLBACK_NAME = "Road.geojson"
+_MAX_SAFE_FLOAT_INT = 9007199254740991  # 2^53 - 1
 
 
 @dataclass(frozen=True)
@@ -962,8 +963,11 @@ def _extract_intersections(payload: dict[str, Any], to_metric: callable) -> list
     for feat in payload.get("features", []):
         props_raw = feat.get("properties") or {}
         props = normalize_fields(props_raw)
-        nodeid_raw = props.get("nodeid", props.get("id", props.get("mainid")))
-        nodeid = _safe_int(nodeid_raw)
+        nodeid = None
+        for key in ("nodeid", "id", "mainid"):
+            nodeid = _safe_int(props.get(key))
+            if nodeid is not None:
+                break
         if nodeid is None:
             continue
 
@@ -1053,7 +1057,11 @@ def _extract_node_kind_map(payload: dict[str, Any]) -> dict[int, int]:
     out: dict[int, int] = {}
     for feat in payload.get("features", []):
         props = normalize_fields(feat.get("properties") or {})
-        nodeid = _safe_int(props.get("nodeid", props.get("mainid", props.get("id"))))
+        nodeid = None
+        for key in ("nodeid", "mainid", "id"):
+            nodeid = _safe_int(props.get(key))
+            if nodeid is not None:
+                break
         kind = _safe_int(props.get("kind", props.get("Kind")))
         if nodeid is None or kind is None:
             continue
@@ -1250,11 +1258,45 @@ def _to_float(v: Any) -> float:
 
 
 def _safe_int(v: Any) -> int | None:
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, float):
+        if not math.isfinite(v):
+            return None
+        if abs(float(v)) > float(_MAX_SAFE_FLOAT_INT):
+            return None
+        if not float(v).is_integer():
+            return None
+        return int(v)
+    if isinstance(v, str):
+        text = str(v).strip()
+        if not text:
+            return None
+        if re.fullmatch(r"[+-]?\d+", text):
+            try:
+                return int(text)
+            except Exception:
+                return None
+        try:
+            fv = float(text)
+        except Exception:
+            return None
+        if not math.isfinite(fv):
+            return None
+        if abs(float(fv)) > float(_MAX_SAFE_FLOAT_INT):
+            return None
+        if not float(fv).is_integer():
+            return None
+        return int(fv)
     try:
         iv = int(v)
-        return iv
     except Exception:
         return None
+    return int(iv)
 
 
 def _stack_xyz(xs: list[np.ndarray], ys: list[np.ndarray], zs: list[np.ndarray]) -> np.ndarray:
