@@ -777,6 +777,10 @@ def _should_fallback_to_drivezone(
     return (abs(float(divstrip_ref_s)) - abs(float(drivezone_split_s))) > float(max_offset_m)
 
 
+def _is_drivezone_position_source(source: str | None) -> bool:
+    return str(source or "").startswith("drivezone_split")
+
+
 def _pick_reference_s(
     *,
     divstrip_ref_s: float | None,
@@ -786,6 +790,8 @@ def _pick_reference_s(
 ) -> tuple[float | None, str, str]:
     if divstrip_ref_s is not None:
         ref_s = float(divstrip_ref_s)
+        if drivezone_split_s is not None and str(divstrip_ref_source) == "tip_projection":
+            return float(drivezone_split_s), "drivezone_split", "drivezone_split_window_tip_projection_ignored"
         pick = f"divstrip_{str(divstrip_ref_source)}_window"
         if drivezone_split_s is not None and _should_fallback_to_drivezone(
             divstrip_ref_s=float(ref_s),
@@ -2567,7 +2573,11 @@ def _evaluate_node(
         return out
 
     window_m = float(divstrip_ref_hard_window_m)
-    if bool(reverse_tip_used):
+    if _is_drivezone_position_source(position_source):
+        window_lo = float(ref_s)
+        window_hi = float(ref_s)
+        target_s = float(ref_s)
+    elif bool(reverse_tip_used):
         # Reverse-tip anomaly branch: probe farther from node to avoid divstrip overlap.
         window_lo, window_hi, target_s = _build_ref_window_away_from_node(
             ref_s=float(ref_s),

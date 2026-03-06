@@ -5,6 +5,7 @@ from pathlib import Path
 
 from shapely.geometry import LineString, Point
 
+import highway_topo_poc.modules.t04_rc_sw_anchor.runner as runner_mod
 from highway_topo_poc.modules.t04_rc_sw_anchor.config import DEFAULT_PARAMS
 from highway_topo_poc.modules.t04_rc_sw_anchor.io_geojson import RoadRecord
 from highway_topo_poc.modules.t04_rc_sw_anchor.road_graph import RoadGraph
@@ -437,7 +438,44 @@ def test_divstrip_far_reference_must_not_override_drivezone_split(tmp_path: Path
 
     far_scan = float(far_item.get("scan_dist_m", 0.0))
     assert abs(far_scan - base_scan) <= 2.0
-    assert str(far_item.get("split_pick_source", "")) == "drivezone_split_window_divstrip_far_ignored"
+    assert str(far_item.get("split_pick_source", "")) == "drivezone_split_window_tip_projection_ignored"
+
+
+def test_drivezone_split_vertex_not_shifted_by_tip_projection(tmp_path: Path, monkeypatch) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    _rewrite_divstrip_far_only(data["divstrip_path"])
+    _data0, out0 = _run_runtime(
+        tmp_path,
+        run_id="drivezone_split_vertex_base",
+        data=data,
+        focus_node_ids=[str(data["node_merge"])],
+    )
+    base_item = _read_json(out0 / "anchors.json")["items"][0]
+    base_split_s = float(base_item.get("s_drivezone_split_m", 0.0))
+    assert str(base_item.get("position_source")) == "drivezone_split"
+    assert abs(float(base_item.get("s_chosen_m", -999.0)) - base_split_s) <= 1e-6
+
+    def _fake_tip_point_from_divstrip(*, divstrip_union, scan_vec, origin_xy=None):
+        assert origin_xy is not None
+        ref_s = float(base_split_s) + 0.25
+        return Point(
+            float(origin_xy[0]) + float(scan_vec[0]) * ref_s,
+            float(origin_xy[1]) + float(scan_vec[1]) * ref_s,
+        )
+
+    monkeypatch.setattr(runner_mod, "tip_point_from_divstrip", _fake_tip_point_from_divstrip)
+    _data1, out1 = _run_runtime(
+        tmp_path,
+        run_id="drivezone_split_vertex_tip_projection",
+        data=data,
+        focus_node_ids=[str(data["node_merge"])],
+    )
+    item = _read_json(out1 / "anchors.json")["items"][0]
+    assert item.get("first_divstrip_hit_dist_m") is None
+    assert str(item.get("divstrip_ref_source")) == "tip_projection"
+    assert str(item.get("position_source")) == "drivezone_split"
+    assert str(item.get("split_pick_source")) == "drivezone_split_window_tip_projection_ignored"
+    assert abs(float(item.get("s_chosen_m", -999.0)) - float(item.get("s_drivezone_split_m", -998.0))) <= 1e-6
 
 
 def test_divstrip_component_near_split_selected_over_wrong_first_hit(tmp_path: Path) -> None:
