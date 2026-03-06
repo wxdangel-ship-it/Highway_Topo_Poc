@@ -799,6 +799,80 @@ def _pick_reference_s(
     return None, "none", "none"
 
 
+def _collect_divstrip_components(divstrip_union: BaseGeometry | None) -> list[BaseGeometry]:
+    if divstrip_union is None or divstrip_union.is_empty:
+        return []
+    gtype = str(getattr(divstrip_union, "geom_type", ""))
+    if gtype == "Polygon":
+        return [divstrip_union]
+    if gtype in {"MultiPolygon", "GeometryCollection"}:
+        geoms = getattr(divstrip_union, "geoms", None)
+        if geoms is None:
+            return []
+        out: list[BaseGeometry] = []
+        for g in geoms:
+            out.extend(_collect_divstrip_components(g))
+        return out
+    return []
+
+
+def _pick_divstrip_component_near_split(
+    *,
+    node_point: Point,
+    scan_vec: tuple[float, float],
+    split_s: float,
+    branch_a: RoadRecord,
+    branch_b: RoadRecord,
+    cross_half_len_m: float,
+    divstrip_components: list[BaseGeometry],
+) -> tuple[BaseGeometry | None, float | None]:
+    if not divstrip_components:
+        return None, None
+    center_xy = (
+        float(node_point.x) + float(scan_vec[0]) * float(split_s),
+        float(node_point.y) + float(scan_vec[1]) * float(split_s),
+    )
+    seg_split, _seg_diag = build_between_branches_segment(
+        center_xy=center_xy,
+        scan_dir=scan_vec,
+        branch_a=branch_a,
+        branch_b=branch_b,
+        crossline_half_len_m=float(cross_half_len_m),
+    )
+    best_geom: BaseGeometry | None = None
+    best_dist: float | None = None
+    for comp in divstrip_components:
+        if comp is None or comp.is_empty:
+            continue
+        dist = float(seg_split.distance(comp))
+        if best_dist is None or dist < best_dist - 1e-9:
+            best_dist = float(dist)
+            best_geom = comp
+    return best_geom, (None if best_dist is None else float(best_dist))
+
+
+def _scan_first_divstrip_hit(
+    *,
+    scan_samples: list[tuple[float, LineString]],
+    divstrip_geom: BaseGeometry | None,
+    div_tol_m: float,
+) -> tuple[float | None, float | None, bool | None]:
+    if divstrip_geom is None or divstrip_geom.is_empty:
+        return None, None, None
+    first_hit_s: float | None = None
+    best_dist_m: float | None = None
+    seg0_intersects: bool | None = None
+    for idx, (s, seg) in enumerate(scan_samples):
+        dist = float(seg.distance(divstrip_geom))
+        if best_dist_m is None or dist < best_dist_m:
+            best_dist_m = float(dist)
+        if first_hit_s is None and dist <= float(div_tol_m):
+            first_hit_s = float(s)
+        if idx == 0:
+            seg0_intersects = bool(seg.intersects(divstrip_geom) or float(dist) <= 1e-9)
+    return first_hit_s, best_dist_m, seg0_intersects
+
+
 def _build_ref_window_away_from_node(*, ref_s: float, window_m: float) -> tuple[float, float, float]:
     w = max(0.0, float(window_m))
     ref = float(ref_s)
@@ -2054,6 +2128,8 @@ def _evaluate_node(
     divstrip_preferred_window_m = max(0.0, float(params.get("divstrip_preferred_window_m", 8.0)))
     divstrip_ref_hard_window_m = max(0.0, float(params.get("divstrip_ref_hard_window_m", 1.0)))
     divstrip_drivezone_max_offset_m = max(0.0, float(params.get("divstrip_drivezone_max_offset_m", 30.0)))
+    divstrip_target_by_split_enabled = bool(params.get("divstrip_target_by_split_enabled", True))
+    divstrip_target_by_split_min_s_m = max(0.0, float(params.get("divstrip_target_by_split_min_s_m", 5.0)))
     split_stage2_extend_m = max(0.0, float(params.get("split_stage2_extend_m", 5.0)))
     reverse_tip_max_m = max(0.0, float(params.get("reverse_tip_max_m", 10.0)))
     output_cross_half_len_m = max(float(half_len), float(params.get("output_cross_half_len_m", 120.0)))
@@ -2133,8 +2209,13 @@ def _evaluate_node(
     best_divstrip_dist_m: float | None = None
     seg0_intersects_divstrip: bool | None = None
     node_to_divstrip_m_at_s0: float | None = None
+    divstrip_components = _collect_divstrip_components(divstrip_union)
+    divstrip_components_count = int(len(divstrip_components))
+    divstrip_component_selected = False
+    divstrip_component_select_dist_m: float | None = None
     last_seg = dummy_line
     last_diag: dict[str, Any] = {"seg_len_m": float(dummy_line.length), "pa_center_dist_m": None, "pb_center_dist_m": None}
+    scan_samples: list[tuple[float, LineString]] = []
 
     def _detect_split_pieces(seg_line: LineString) -> tuple[list[LineString], str | None]:
         pieces_strict = segment_drivezone_pieces(
@@ -2172,6 +2253,7 @@ def _evaluate_node(
         )
         last_seg = seg
         last_diag = seg_diag
+        scan_samples.append((float(s), seg))
 
         dist_div = None
         if divstrip_union is not None:
@@ -2207,6 +2289,36 @@ def _evaluate_node(
             s_drivezone_split_source = "multibranch_main"
         if s_drivezone_split_first_m is None and first_split is not None:
             s_drivezone_split_first_m = float(first_split["s"])
+
+    if (
+        divstrip_target_by_split_enabled
+        and divstrip_union is not None
+        and (not divstrip_union.is_empty)
+        and s_drivezone_split is not None
+        and abs(float(s_drivezone_split)) >= float(divstrip_target_by_split_min_s_m) - 1e-9
+        and divstrip_components_count > 1
+    ):
+        selected_comp, selected_comp_dist = _pick_divstrip_component_near_split(
+            node_point=node.point,
+            scan_vec=scan_vec,
+            split_s=float(s_drivezone_split),
+            branch_a=branch_a,
+            branch_b=branch_b,
+            cross_half_len_m=float(half_len),
+            divstrip_components=divstrip_components,
+        )
+        first_hit_sel, best_dist_sel, seg0_intersects_sel = _scan_first_divstrip_hit(
+            scan_samples=scan_samples,
+            divstrip_geom=selected_comp,
+            div_tol_m=float(div_tol),
+        )
+        if selected_comp is not None and first_hit_sel is not None:
+            first_divstrip_hit_s = float(first_hit_sel)
+            best_divstrip_dist_m = None if best_dist_sel is None else float(best_dist_sel)
+            seg0_intersects_divstrip = seg0_intersects_sel
+            node_to_divstrip_m_at_s0 = float(node.point.distance(selected_comp))
+            divstrip_component_selected = True
+            divstrip_component_select_dist_m = None if selected_comp_dist is None else float(selected_comp_dist)
 
     divstrip_ref_s: float | None = None
     divstrip_ref_source = "none"
@@ -2376,6 +2488,9 @@ def _evaluate_node(
         "untrusted_divstrip_at_node": bool(untrusted_divstrip_at_node),
         "node_to_divstrip_m_at_s0": None if node_to_divstrip_m_at_s0 is None else float(node_to_divstrip_m_at_s0),
         "seg0_intersects_divstrip": seg0_intersects_divstrip,
+        "divstrip_components_count": int(divstrip_components_count),
+        "divstrip_component_selected_by_split": bool(divstrip_component_selected),
+        "divstrip_component_split_dist_m": None if divstrip_component_select_dist_m is None else float(divstrip_component_select_dist_m),
     }
 
     if ref_s is None:
@@ -3272,6 +3387,9 @@ def _evaluate_node(
         "untrusted_divstrip_at_node": bool(untrusted_divstrip_at_node),
         "node_to_divstrip_m_at_s0": None if node_to_divstrip_m_at_s0 is None else float(node_to_divstrip_m_at_s0),
         "seg0_intersects_divstrip": seg0_intersects_divstrip,
+        "divstrip_components_count": int(divstrip_components_count),
+        "divstrip_component_selected_by_split": bool(divstrip_component_selected),
+        "divstrip_component_split_dist_m": None if divstrip_component_select_dist_m is None else float(divstrip_component_select_dist_m),
         "ng_candidates_before_suppress": int(ng_points_xy.shape[0]),
         "ng_candidates_after_suppress": int(ng_points_xy.shape[0]),
         "is_in_continuous_chain": bool(is_in_continuous_chain),
