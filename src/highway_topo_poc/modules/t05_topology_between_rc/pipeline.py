@@ -226,7 +226,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP3_WIDENING_SUPPRESS_ENABLE": 1,
     "STEP3_WIDENING_RATIO_TRIGGER": 1.25,
     "STEP3_WIDENING_REQUIRE_EXPANDED_FLAG": 1,
-    "STEP0_MODE": "lite",
+    "STEP0_MODE": "off",
     "STEP0_LITE_MIN_IN_DRIVEZONE_RATIO": 0.90,
     "STEP0_LITE_MAX_IN_DIVSTRIP_RATIO": 0.01,
     "STEP0_LITE_MIN_LEN_M": 5.0,
@@ -582,29 +582,96 @@ def _run_patch_core(
     # and drift to adjacent roads.
     gore_zone_metric_raw = patch_inputs.divstrip_zone_metric
 
-    if progress is not None:
-        progress.mark("xsec_truncate_start")
-    (
-        xsec_cross_map,
-        xsec_anchor_debug_items,
-        xsec_trunc_debug_items,
-        xsec_gate_all_map,
-        xsec_gate_meta_map,
-        xsec_cross_stats,
-    ) = _truncate_cross_sections_for_crossing(
-        xsec_map=xsec_map,
-        lane_boundaries_metric=patch_inputs.lane_boundaries_metric,
-        trajectories=patch_inputs.trajectories,
-        drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
-        gore_zone_metric=gore_zone_metric_raw,
-        params=params,
-    )
-    if progress is not None:
-        progress.mark(
-            "xsec_truncate_done",
-            xsec_cross_count=int(len(xsec_cross_map)),
-            xsec_gate_enabled=bool(xsec_cross_stats.get("xsec_gate_enabled", False)),
+    step0_mode_runtime = str(params.get("STEP0_MODE", "off")).strip().lower()
+    if step0_mode_runtime in {"off", "disabled", "skip"}:
+        xsec_cross_map = dict(xsec_map)
+        xsec_anchor_debug_items = []
+        xsec_trunc_debug_items = []
+        xsec_gate_all_map = {
+            int(nodeid): cs.geometry_metric
+            for nodeid, cs in xsec_map.items()
+            if getattr(cs, "geometry_metric", None) is not None
+        }
+        xsec_gate_meta_map = {}
+        for nodeid, cs in xsec_map.items():
+            geom = getattr(cs, "geometry_metric", None)
+            len_m = None
+            geom_type = ""
+            if geom is not None:
+                try:
+                    len_m = float(geom.length)
+                except Exception:
+                    len_m = None
+                geom_type = str(getattr(geom, "geom_type", "")) if geom is not None else ""
+            xsec_gate_meta_map[int(nodeid)] = {
+                "len_m": len_m,
+                "geom_type": geom_type,
+                "fallback": False,
+                "mode": "bypass",
+                "selected_by": "step0_bypass",
+                "selection_source": "step0_bypass",
+                "candidate_segment_count": 1,
+                "selected_mid_dist_m": 0.0,
+                "selected_evidence_len_m": 0.0,
+                "in_drivezone_ratio": None,
+                "in_divstrip_ratio": None,
+                "lite_failed_reasons": [],
+                "failed_reason": None,
+            }
+        xsec_cross_stats = {
+            "step0_mode_used": "off",
+            "xsec_truncated_count": 0,
+            "xsec_truncated_fallback_count": 0,
+            "xsec_gate_enabled": False,
+            "xsec_gate_selected_count": int(len(xsec_cross_map)),
+            "xsec_gate_empty_count": 0,
+            "xsec_gate_fallback_count": 0,
+            "xsec_passthrough_count": int(len(xsec_cross_map)),
+            "xsec_repaired_count": 0,
+            "xsec_failed_count": 0,
+            "xsec_drivezone_ratio_p10": None,
+            "xsec_drivezone_ratio_p50": None,
+            "xsec_drivezone_ratio_p90": None,
+            "xsec_divstrip_ratio_p10": None,
+            "xsec_divstrip_ratio_p50": None,
+            "xsec_divstrip_ratio_p90": None,
+            "xsec_gate_traj_evidence_enabled": False,
+            "xsec_gate_traj_evidence_disabled_reason": "step0_bypass",
+            "xsec_gate_traj_point_count": 0,
+            "xsec_gate_traj_point_budget": 0,
+            "xsec_gate_traj_sample_step": 0,
+            "xsec_gate_traj_max_traj": 0,
+        }
+        if progress is not None:
+            progress.mark(
+                "xsec_truncate_bypassed",
+                xsec_cross_count=int(len(xsec_cross_map)),
+                step0_mode="off",
+            )
+    else:
+        if progress is not None:
+            progress.mark("xsec_truncate_start")
+        (
+            xsec_cross_map,
+            xsec_anchor_debug_items,
+            xsec_trunc_debug_items,
+            xsec_gate_all_map,
+            xsec_gate_meta_map,
+            xsec_cross_stats,
+        ) = _truncate_cross_sections_for_crossing(
+            xsec_map=xsec_map,
+            lane_boundaries_metric=patch_inputs.lane_boundaries_metric,
+            trajectories=patch_inputs.trajectories,
+            drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric_raw,
+            params=params,
         )
+        if progress is not None:
+            progress.mark(
+                "xsec_truncate_done",
+                xsec_cross_count=int(len(xsec_cross_map)),
+                xsec_gate_enabled=bool(xsec_cross_stats.get("xsec_gate_enabled", False)),
+            )
     xsec_cross_selected_debug_items: list[dict[str, Any]] = []
     if bool(int(params.get("DEBUG_DUMP", 0))):
         debug_json_payloads["debug/xsec_gate_meta_map.json"] = {
@@ -7432,12 +7499,12 @@ def _build_topology_unique_anchor_decisions(
     straight_features: list[dict[str, Any]] = []
     chain_features: list[dict[str, Any]] = []
 
-    reverse_adj = _reverse_compressed_graph(compressed_adj)
     anchors_out = _collect_topology_anchor_seeds(compressed_adj, cross_nodes=cross_nodes, seed_role="out")
-    anchors_in = _collect_topology_anchor_seeds(reverse_adj, cross_nodes=cross_nodes, seed_role="in")
+    # Business rule: Step1 topology neighbor search is forward-only.
+    # Reverse anchors are disabled to avoid symmetric duplicate pairs.
+    anchors_in: list[dict[str, Any]] = []
     anchor_batches: list[tuple[str, dict[int, list[dict[str, Any]]], list[dict[str, Any]]]] = [
         ("forward", compressed_adj, anchors_out),
-        ("reverse", reverse_adj, anchors_in),
     ]
 
     accepted_anchor_count = 0
@@ -7695,6 +7762,56 @@ def _build_topology_unique_anchor_decisions(
             "has_multi_chain_anchor": bool(has_multi_chain),
             "search_overflow": bool(has_overflow),
         }
+
+    # Deduplicate debug line outputs to keep one segment per logical key.
+    if straight_features:
+        straight_dedup: dict[tuple[int, int], dict[str, Any]] = {}
+        for feat in straight_features:
+            props = feat.get("properties") if isinstance(feat, dict) else None
+            if not isinstance(props, dict):
+                continue
+            src_raw = props.get("src_nodeid")
+            dst_raw = props.get("dst_nodeid")
+            if src_raw is None or dst_raw is None:
+                continue
+            try:
+                key = (int(src_raw), int(dst_raw))
+            except Exception:
+                continue
+            if key not in straight_dedup:
+                feat_keep = dict(feat)
+                props_keep = dict(props)
+                props_keep["dedup_count"] = 1
+                feat_keep["properties"] = props_keep
+                straight_dedup[key] = feat_keep
+            else:
+                prev = straight_dedup[key]
+                prev_props = prev.get("properties")
+                if isinstance(prev_props, dict):
+                    prev_props["dedup_count"] = int(prev_props.get("dedup_count", 1)) + 1
+        straight_features = list(straight_dedup.values())
+
+    if chain_features:
+        chain_dedup: dict[tuple[int, int, tuple[str, ...]], dict[str, Any]] = {}
+        for feat in chain_features:
+            props = feat.get("properties") if isinstance(feat, dict) else None
+            if not isinstance(props, dict):
+                continue
+            src_raw = props.get("src_nodeid")
+            dst_raw = props.get("dst_nodeid")
+            edge_ids_raw = props.get("edge_ids")
+            if src_raw is None or dst_raw is None:
+                continue
+            try:
+                src_i = int(src_raw)
+                dst_i = int(dst_raw)
+            except Exception:
+                continue
+            edge_sig = tuple(str(v) for v in (edge_ids_raw or []))
+            key = (src_i, dst_i, edge_sig)
+            if key not in chain_dedup:
+                chain_dedup[key] = dict(feat)
+        chain_features = list(chain_dedup.values())
 
     stats = {
         "src_count": int(len(cross_nodes)),
@@ -8075,7 +8192,7 @@ def _truncate_cross_sections_for_crossing(
     gate_traj_evidence_zone: BaseGeometry | None = None
     traj_union_ready = False
     traj_evidence_disabled_reason: str | None = None
-    mode_raw = str(params.get("STEP0_MODE", "lite")).strip().lower()
+    mode_raw = str(params.get("STEP0_MODE", "off")).strip().lower()
     step0_mode = mode_raw if mode_raw in {"lite", "audit", "full", "off"} else "lite"
     step0_lite_min_in_drivezone_ratio = float(max(0.0, min(1.0, float(params.get("STEP0_LITE_MIN_IN_DRIVEZONE_RATIO", 0.90)))))
     step0_lite_max_in_divstrip_ratio = float(max(0.0, min(1.0, float(params.get("STEP0_LITE_MAX_IN_DIVSTRIP_RATIO", 0.01)))))
