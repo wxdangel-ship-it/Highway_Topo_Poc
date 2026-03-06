@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -10,6 +11,8 @@ import numpy as np
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
+
+_MAX_SAFE_FLOAT_INT = 9007199254740991  # 2^53 - 1
 
 
 def normalize_fields(
@@ -281,17 +284,52 @@ def _query_grid_radius_count(
 
 
 def _to_int(v: Any) -> int | None:
-    try:
-        if v is None:
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, float):
+        if not math.isfinite(v):
             return None
+        if abs(float(v)) > float(_MAX_SAFE_FLOAT_INT):
+            return None
+        if not float(v).is_integer():
+            return None
+        return int(v)
+    if isinstance(v, str):
+        text = str(v).strip()
+        if not text:
+            return None
+        if re.fullmatch(r"[+-]?\d+", text):
+            try:
+                return int(text)
+            except Exception:
+                return None
+        try:
+            f = float(text)
+        except Exception:
+            return None
+        if not math.isfinite(f):
+            return None
+        if abs(float(f)) > float(_MAX_SAFE_FLOAT_INT):
+            return None
+        if not float(f).is_integer():
+            return None
+        return int(f)
+    try:
         f = float(v)
     except Exception:
         return None
     if not math.isfinite(f):
         return None
-    return int(round(f))
+    if abs(float(f)) > float(_MAX_SAFE_FLOAT_INT):
+        return None
+    if not float(f).is_integer():
+        return None
+    return int(f)
 
 
 def _grid_key(x: float, y: float, cell_size: float) -> tuple[int, int]:
     return (int(math.floor(float(x) / float(cell_size))), int(math.floor(float(y) / float(cell_size))))
-

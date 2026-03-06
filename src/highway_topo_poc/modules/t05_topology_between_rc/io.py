@@ -490,8 +490,6 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
             "road_prior_node_count": int(len(road_prior_node_ids)),
             "intersection_nodeid_remap_count": int(intersection_nodeid_fix.get("remap_count", 0)),
             "intersection_nodeid_remap_examples": list(intersection_nodeid_fix.get("remap_examples", [])),
-            "intersection_nodeid_dropped_count": int(intersection_nodeid_fix.get("dropped_count", 0)),
-            "intersection_nodeid_dropped_examples": list(intersection_nodeid_fix.get("dropped_examples", [])),
         },
     )
 
@@ -1151,13 +1149,16 @@ def _canonicalize_intersection_nodeids(
 ) -> tuple[list[CrossSection], dict[str, Any]]:
     out: list[CrossSection] = []
     remap_pairs: list[tuple[int, int]] = []
-    dropped_ids: list[int] = []
-    road_prior_required = bool(road_prior_node_ids)
     for cs in intersections:
         props = normalize_fields(getattr(cs, "properties", {}) or {})
         candidates = _candidate_nodeids_from_props(props)
         chosen = int(cs.nodeid)
-        if candidates:
+        nodeid_direct = _safe_int(props.get("nodeid"))
+        # Prefer explicit `nodeid` from intersection_l. Do not let fallback ids
+        # (e.g. id/mainid) override it when nodeid already exists.
+        if nodeid_direct is not None:
+            chosen = int(np.int64(nodeid_direct))
+        elif candidates:
             best = int(candidates[0])
             best_score = -1
             for idx, cand in enumerate(candidates):
@@ -1174,11 +1175,6 @@ def _canonicalize_intersection_nodeids(
                     best_score = int(score)
                     best = int(cand)
             chosen = int(best)
-        if road_prior_required and int(chosen) not in road_prior_node_ids:
-            # Hard guard: when road prior exists, intersection node id must be present in road prior graph.
-            # Otherwise this xsec is considered invalid input and excluded from Step1 seeds.
-            dropped_ids.append(int(chosen))
-            continue
         if int(chosen) != int(cs.nodeid):
             remap_pairs.append((int(cs.nodeid), int(chosen)))
         out.append(
@@ -1191,8 +1187,6 @@ def _canonicalize_intersection_nodeids(
     return out, {
         "remap_count": int(len(remap_pairs)),
         "remap_examples": [[int(src), int(dst)] for src, dst in remap_pairs[:20]],
-        "dropped_count": int(len(dropped_ids)),
-        "dropped_examples": [int(v) for v in dropped_ids[:20]],
     }
 
 
