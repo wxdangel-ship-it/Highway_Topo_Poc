@@ -705,6 +705,125 @@ def test_distance_margin_resolves_ambiguous_next_crossing(monkeypatch) -> None: 
     assert not res.ambiguous_events
 
 
+def test_single_support_per_pair_stops_after_first_hit(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    src_key_0 = "t:cross:1:0"
+    src_key_1 = "t:cross:1:1"
+    dst_key = "t:cross:2"
+    ev0 = CrossingEvent(
+        traj_id="t",
+        nodeid=1,
+        seq=10,
+        seg_idx=0,
+        seq_idx=0,
+        station_m=0.0,
+        cross_point=Point(0.0, 0.0),
+        heading_xy=(1.0, 0.0),
+        cross_dist_m=0.0,
+    )
+    ev1 = CrossingEvent(
+        traj_id="t",
+        nodeid=1,
+        seq=20,
+        seg_idx=0,
+        seq_idx=1,
+        station_m=5.0,
+        cross_point=Point(0.0, 1.0),
+        heading_xy=(1.0, 0.0),
+        cross_dist_m=0.0,
+    )
+    fake_graph = geom_mod._GraphBuildResult(
+        nodes={
+            src_key_0: geom_mod._GraphNode(
+                key=src_key_0,
+                traj_id="t",
+                kind="cross",
+                station_m=0.0,
+                point=Point(0.0, 0.0),
+                heading_xy=(1.0, 0.0),
+                cross_nodeid=1,
+                seq_idx=0,
+            ),
+            src_key_1: geom_mod._GraphNode(
+                key=src_key_1,
+                traj_id="t",
+                kind="cross",
+                station_m=5.0,
+                point=Point(0.0, 1.0),
+                heading_xy=(1.0, 0.0),
+                cross_nodeid=1,
+                seq_idx=1,
+            ),
+            dst_key: geom_mod._GraphNode(
+                key=dst_key,
+                traj_id="t",
+                kind="cross",
+                station_m=10.0,
+                point=Point(10.0, 0.0),
+                heading_xy=(1.0, 0.0),
+                cross_nodeid=2,
+                seq_idx=2,
+            ),
+        },
+        edges={
+            src_key_0: [
+                geom_mod._GraphEdge(
+                    to_key=dst_key,
+                    weight=1.0,
+                    kind="traj",
+                    traj_id="t",
+                    station_from=0.0,
+                    station_to=10.0,
+                ),
+            ],
+            src_key_1: [
+                geom_mod._GraphEdge(
+                    to_key=dst_key,
+                    weight=1.0,
+                    kind="traj",
+                    traj_id="t",
+                    station_from=5.0,
+                    station_to=10.0,
+                ),
+            ],
+            dst_key: [],
+        },
+        event_keys_by_traj={"t": [(ev0, src_key_0), (ev1, src_key_1)]},
+        traj_line_map={"t": LineString([(0.0, 0.0), (10.0, 0.0)])},
+        stitch_candidate_count=0,
+        stitch_edge_count=0,
+        stitch_query_count=0,
+        stitch_candidates_total=0,
+        stitch_reject_dist_count=0,
+        stitch_reject_angle_count=0,
+        stitch_reject_forward_count=0,
+        stitch_accept_count=0,
+        stitch_levels_used_hist={},
+    )
+    monkeypatch.setattr(geom_mod, "_build_forward_graph", lambda **kwargs: fake_graph)
+
+    res_full = geom_mod.build_pair_supports(
+        trajectories=[],
+        events_by_traj={"t": [ev0, ev1]},
+        node_type_map={1: "unknown", 2: "unknown"},
+        neighbor_max_dist_m=100.0,
+        single_support_per_pair=False,
+    )
+    res_one = geom_mod.build_pair_supports(
+        trajectories=[],
+        events_by_traj={"t": [ev0, ev1]},
+        node_type_map={1: "unknown", 2: "unknown"},
+        neighbor_max_dist_m=100.0,
+        single_support_per_pair=True,
+        allowed_pairs={(1, 2)},
+        skip_search_after_pair_resolved=True,
+    )
+
+    assert (1, 2) in res_full.supports
+    assert (1, 2) in res_one.supports
+    assert int(res_full.supports[(1, 2)].support_event_count) == 2
+    assert int(res_one.supports[(1, 2)].support_event_count) == 1
+
+
 def test_node_level_multi_neighbor_hard_fail(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     patch_inputs = _mk_patch_inputs(
         tmp_path=tmp_path,

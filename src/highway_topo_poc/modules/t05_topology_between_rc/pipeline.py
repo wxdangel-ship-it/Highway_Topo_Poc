@@ -105,6 +105,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_UNIQUE_DST_EARLY_STOP": 1,
     "STEP1_UNIQUE_DST_DIST_EPS_M": 5.0,
     "STEP1_NODE_VOTE_MIN_RATIO": 1.0,
+    "STEP1_SINGLE_SUPPORT_PER_PAIR": 1,
+    "STEP1_SKIP_SEARCH_AFTER_PAIR_RESOLVED": 1,
     "STEP1_ADJ_MODE": "topology_unique",
     "STEP1_TOPO_RESPECT_DIRECTION": 1,
     "STEP1_TOPO_COMPRESS_DEG2": 1,
@@ -200,6 +202,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.60,
     "STEP1_MULTI_CORRIDOR_HARD": 0,
     "STEP1_DISABLE_PAIR_CLUSTER_WHEN_GATE": 1,
+    "STEP1_PAIR_CLUSTER_ENABLE": 0,
+    "STEP1_DEBUG_SUPPORT_TRAJS_ALL_MAX_PER_PAIR": 1,
     "STEP1_GORE_NEAR_M": 30.0,
     "STEP1_TRAJ_IN_DRIVEZONE_MIN": 0.85,
     "STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN": 0.60,
@@ -997,6 +1001,8 @@ def _run_patch_core(
             unique_dst_dist_eps_m=float(params.get("STEP1_UNIQUE_DST_DIST_EPS_M", 5.0)),
             allowed_dst_by_src=step1_allowed_dst_filter_map,
             allowed_pairs=step1_allowed_pair_filter_set,
+            single_support_per_pair=bool(int(params.get("STEP1_SINGLE_SUPPORT_PER_PAIR", 1))),
+            skip_search_after_pair_resolved=bool(int(params.get("STEP1_SKIP_SEARCH_AFTER_PAIR_RESOLVED", 1))),
         )
         nt_map, indeg_map, outdeg_map = infer_node_types(
             node_ids=node_ids,
@@ -1023,6 +1029,8 @@ def _run_patch_core(
             unique_dst_dist_eps_m=float(params.get("STEP1_UNIQUE_DST_DIST_EPS_M", 5.0)),
             allowed_dst_by_src=step1_allowed_dst_filter_map,
             allowed_pairs=step1_allowed_pair_filter_set,
+            single_support_per_pair=bool(int(params.get("STEP1_SINGLE_SUPPORT_PER_PAIR", 1))),
+            skip_search_after_pair_resolved=bool(int(params.get("STEP1_SKIP_SEARCH_AFTER_PAIR_RESOLVED", 1))),
         )
         return cross_obj, supports_obj, nt_map, indeg_map, outdeg_map
 
@@ -1479,8 +1487,10 @@ def _run_patch_core(
                 "features": amb_features,
             }
 
-    disable_pair_cluster = bool(int(params.get("STEP1_DISABLE_PAIR_CLUSTER_WHEN_GATE", 1))) and bool(
-        xsec_cross_stats.get("xsec_gate_enabled", False)
+    pair_cluster_enable = bool(int(params.get("STEP1_PAIR_CLUSTER_ENABLE", 0)))
+    disable_pair_cluster = (not pair_cluster_enable) or (
+        bool(int(params.get("STEP1_DISABLE_PAIR_CLUSTER_WHEN_GATE", 1)))
+        and bool(xsec_cross_stats.get("xsec_gate_enabled", False))
     )
     pair_cluster_norm_stats = _normalize_support_clusters_for_xsec_gate(
         supports=supports,
@@ -1849,6 +1859,26 @@ def _run_patch_core(
                 except Exception:
                     continue
                 traj_flag_by_idx[idx] = item
+            max_support_all_per_pair = int(params.get("STEP1_DEBUG_SUPPORT_TRAJS_ALL_MAX_PER_PAIR", 1))
+            keep_all_indices: set[int] | None = None
+            if max_support_all_per_pair >= 0:
+                if max_support_all_per_pair <= 0:
+                    keep_all_indices = set()
+                else:
+                    idx_candidates: list[int] = []
+                    for i, seg in enumerate(support.traj_segments):
+                        if isinstance(seg, LineString) and (not seg.is_empty):
+                            idx_candidates.append(int(i))
+                    idx_candidates.sort(
+                        key=lambda ii: (
+                            0 if bool((traj_flag_by_idx.get(int(ii)) or {}).get("selected", False)) else 1,
+                            0 if (traj_flag_by_idx.get(int(ii)) or {}).get("corridor_id") is not None else 1,
+                            -_to_finite_float((traj_flag_by_idx.get(int(ii)) or {}).get("inside_ratio"), -1.0),
+                            int(ii),
+                        )
+                    )
+                    keep_all_indices = set(idx_candidates[: max(1, int(max_support_all_per_pair))])
+
             for i, seg in enumerate(support.traj_segments):
                 if not isinstance(seg, LineString) or seg.is_empty:
                     continue
@@ -1856,24 +1886,25 @@ def _run_patch_core(
                 if i < len(support.evidence_traj_ids):
                     tid = str(support.evidence_traj_ids[i])
                 flag = traj_flag_by_idx.get(int(i), {})
-                debug_layers["step1_support_trajs_all"].append(
-                    {
-                        "geometry": seg,
-                        "properties": {
-                            "road_id": f"{src}_{dst}",
-                            "traj_id": tid,
-                            "gore_fallback_used": bool(flag.get("constraint_violation", False)),
-                            "gore_src_near": bool(flag.get("gore_src_near", False)),
-                            "gore_dst_near": bool(flag.get("gore_dst_near", False)),
-                            "gore_any": bool(flag.get("gore_any", False)),
-                            "gore_intersection_m": float(flag.get("gore_intersection_m", 0.0)),
-                            "inside_ratio": flag.get("inside_ratio"),
-                            "dropped_by_drivezone": bool(flag.get("dropped_by_drivezone", False)),
-                            "corridor_id": flag.get("corridor_id"),
-                            "selected": bool(flag.get("selected", False)),
-                        },
-                    }
-                )
+                if keep_all_indices is None or int(i) in keep_all_indices:
+                    debug_layers["step1_support_trajs_all"].append(
+                        {
+                            "geometry": seg,
+                            "properties": {
+                                "road_id": f"{src}_{dst}",
+                                "traj_id": tid,
+                                "gore_fallback_used": bool(flag.get("constraint_violation", False)),
+                                "gore_src_near": bool(flag.get("gore_src_near", False)),
+                                "gore_dst_near": bool(flag.get("gore_dst_near", False)),
+                                "gore_any": bool(flag.get("gore_any", False)),
+                                "gore_intersection_m": float(flag.get("gore_intersection_m", 0.0)),
+                                "inside_ratio": flag.get("inside_ratio"),
+                                "dropped_by_drivezone": bool(flag.get("dropped_by_drivezone", False)),
+                                "corridor_id": flag.get("corridor_id"),
+                                "selected": bool(flag.get("selected", False)),
+                            },
+                        }
+                    )
                 if flag.get("corridor_id") is None:
                     continue
                 debug_layers["step1_support_trajs"].append(

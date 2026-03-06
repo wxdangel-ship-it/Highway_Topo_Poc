@@ -286,6 +286,8 @@ def build_pair_supports(
     unique_dst_dist_eps_m: float = 5.0,
     allowed_dst_by_src: dict[int, set[int]] | None = None,
     allowed_pairs: set[tuple[int, int]] | None = None,
+    single_support_per_pair: bool = False,
+    skip_search_after_pair_resolved: bool = False,
 ) -> PairSupportBuildResult:
     levels = _normalize_stitch_levels(
         stitch_max_dist_levels_m=stitch_max_dist_levels_m,
@@ -322,15 +324,21 @@ def build_pair_supports(
 
     for traj_id, items in graph.event_keys_by_traj.items():
         for ev, source_key in items:
+            src_nodeid_i = int(ev.nodeid)
             allowed_pair_dsts_for_src: set[int] | None = None
             if allowed_pairs_dst_by_src is not None:
-                allowed_pair_dsts_for_src = set(allowed_pairs_dst_by_src.get(int(ev.nodeid), set()))
+                allowed_pair_dsts_for_src = set(allowed_pairs_dst_by_src.get(src_nodeid_i, set()))
                 # Topology-first mode: only process events from accepted src nodes.
                 if not allowed_pair_dsts_for_src:
                     continue
+                if bool(skip_search_after_pair_resolved) and len(allowed_pair_dsts_for_src) == 1:
+                    only_dst = int(next(iter(allowed_pair_dsts_for_src)))
+                    hit_pair = supports.get((src_nodeid_i, only_dst))
+                    if hit_pair is not None and int(hit_pair.support_event_count) > 0:
+                        continue
             search = _search_next_crossing(
                 source_key=source_key,
-                source_nodeid=int(ev.nodeid),
+                source_nodeid=src_nodeid_i,
                 nodes=graph.nodes,
                 edges=graph.edges,
                 max_dist_m=float(neighbor_max_dist_m),
@@ -339,7 +347,7 @@ def build_pair_supports(
             hit_targets_raw = list(search.hit_targets)
             allowed_dsts_for_src: set[int] | None = None
             if allowed_dst_by_src is not None:
-                raw = allowed_dst_by_src.get(int(ev.nodeid))
+                raw = allowed_dst_by_src.get(src_nodeid_i)
                 if raw is not None:
                     allowed_dsts_for_src = {int(v) for v in raw}
             if allowed_pair_dsts_for_src is not None:
@@ -378,7 +386,7 @@ def build_pair_supports(
                     dst_candidates = [dict(top_sorted[0])]
             next_crossing_candidates.append(
                 {
-                    "src_nodeid": int(ev.nodeid),
+                    "src_nodeid": src_nodeid_i,
                     "src_cross_id": str(source_key),
                     "traj_id": str(traj_id),
                     "seq_idx": int(ev.seq_idx),
@@ -422,7 +430,7 @@ def build_pair_supports(
                 ambiguous_events.append(
                     {
                         "road_id": f"na_{ev.nodeid}_{traj_id}_{ev.seq_idx}",
-                        "src_nodeid": int(ev.nodeid),
+                        "src_nodeid": src_nodeid_i,
                         "dst_nodeid": None,
                         "traj_id": str(traj_id),
                         "seq_range": [int(ev.seq_idx), int(ev.seq_idx)],
@@ -450,7 +458,7 @@ def build_pair_supports(
                 unresolved_events.append(
                     {
                         "road_id": f"na_{ev.nodeid}_{traj_id}_{ev.seq_idx}",
-                        "src_nodeid": int(ev.nodeid),
+                        "src_nodeid": src_nodeid_i,
                         "dst_nodeid": None,
                         "traj_id": str(traj_id),
                         "seq_range": [int(ev.seq_idx), int(ev.seq_idx)],
@@ -481,14 +489,13 @@ def build_pair_supports(
                 continue
 
             dst_nodeid = int(target_node.cross_nodeid)
-            if dst_nodeid == int(ev.nodeid):
+            if dst_nodeid == src_nodeid_i:
                 continue
 
-            pair = (int(ev.nodeid), int(dst_nodeid))
+            pair = (src_nodeid_i, int(dst_nodeid))
             support = supports.get(pair)
-            if support is None:
-                support = PairSupport(src_nodeid=pair[0], dst_nodeid=pair[1])
-                supports[pair] = support
+            if support is not None and bool(single_support_per_pair) and int(support.support_event_count) > 0:
+                continue
 
             path_keys = _reconstruct_path(source_key=source_key, target_key=target_key, prev=search.prev)
             path_line = _build_path_linestring(
@@ -502,7 +509,7 @@ def build_pair_supports(
                 unresolved_events.append(
                     {
                         "road_id": f"na_{ev.nodeid}_{traj_id}_{ev.seq_idx}",
-                        "src_nodeid": int(ev.nodeid),
+                        "src_nodeid": src_nodeid_i,
                         "dst_nodeid": int(dst_nodeid),
                         "traj_id": str(traj_id),
                         "seq_range": [int(ev.seq_idx), int(ev.seq_idx)],
@@ -524,6 +531,10 @@ def build_pair_supports(
                 )
                 continue
 
+            if support is None:
+                support = PairSupport(src_nodeid=pair[0], dst_nodeid=pair[1])
+                supports[pair] = support
+
             path_traj_ids = _extract_path_traj_ids(path_keys=path_keys, nodes=graph.nodes)
             if not path_traj_ids:
                 path_traj_ids = {traj_id}
@@ -537,7 +548,7 @@ def build_pair_supports(
             support.evidence_traj_ids.append(str(traj_id))
             support.evidence_cluster_ids.append(0)
             support.evidence_lengths_m.append(float(target_dist_m))
-            src_vote = node_dst_votes.setdefault(int(ev.nodeid), {})
+            src_vote = node_dst_votes.setdefault(src_nodeid_i, {})
             src_vote[int(dst_nodeid)] = int(src_vote.get(int(dst_nodeid), 0) + 1)
 
             is_open_end = ("start" in edge_kinds) or ("end" in edge_kinds)
@@ -551,7 +562,7 @@ def build_pair_supports(
                 path_keys=path_keys,
                 nodes=graph.nodes,
                 node_type_map=node_type_map,
-                src_nodeid=int(ev.nodeid),
+                src_nodeid=src_nodeid_i,
             )
             dst_type = node_type_map.get(dst_nodeid, "unknown")
             if non_rc_hit is not None or dst_type == "non_rc":
