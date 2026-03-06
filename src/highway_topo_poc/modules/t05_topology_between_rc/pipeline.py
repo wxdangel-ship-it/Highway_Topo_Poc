@@ -630,6 +630,8 @@ def _run_patch_core(
                     },
                 }
             )
+    # Step1 must consume only cross-sections that pass Step0 audit/gate.
+    node_ids = sorted(int(k) for k in xsec_cross_map.keys())
     pair_cluster_norm_stats: dict[str, Any] = {
         "step1_pair_cluster_disabled": False,
         "step1_pair_cluster_disabled_pair_count": 0,
@@ -688,7 +690,7 @@ def _run_patch_core(
             ) = _build_topology_unique_anchor_decisions(
                 topo_comp_graph,
                 cross_nodes={int(v) for v in node_ids},
-                xsec_map=xsec_map,
+                xsec_map=xsec_cross_map,
                 require_unique_chain=bool(int(params.get("STEP1_TOPO_REQUIRE_UNIQUE_CHAIN", 1))),
                 max_expansions=int(max(100, int(params.get("STEP1_TOPO_MAX_EXPANSIONS", 50000)))),
             )
@@ -8074,7 +8076,7 @@ def _truncate_cross_sections_for_crossing(
     traj_union_ready = False
     traj_evidence_disabled_reason: str | None = None
     mode_raw = str(params.get("STEP0_MODE", "lite")).strip().lower()
-    step0_mode = mode_raw if mode_raw in {"lite", "full", "off"} else "lite"
+    step0_mode = mode_raw if mode_raw in {"lite", "audit", "full", "off"} else "lite"
     step0_lite_min_in_drivezone_ratio = float(max(0.0, min(1.0, float(params.get("STEP0_LITE_MIN_IN_DRIVEZONE_RATIO", 0.90)))))
     step0_lite_max_in_divstrip_ratio = float(max(0.0, min(1.0, float(params.get("STEP0_LITE_MAX_IN_DIVSTRIP_RATIO", 0.01)))))
     step0_lite_min_len_m = float(max(0.0, float(params.get("STEP0_LITE_MIN_LEN_M", 5.0))))
@@ -8234,7 +8236,7 @@ def _truncate_cross_sections_for_crossing(
             elif not step0_lite_allow_passthrough_when_divstrip_missing:
                 lite_failed_reasons.append("divstrip_missing_blocked_passthrough")
 
-        if step0_mode == "off" or (step0_mode == "lite" and not lite_failed_reasons):
+        if step0_mode == "off" or (step0_mode in {"lite", "audit"} and not lite_failed_reasons):
             gate_selected_count += 1
             passthrough_count += 1
             out[int(nodeid)] = CrossSection(
@@ -8282,6 +8284,56 @@ def _truncate_cross_sections_for_crossing(
                         "xsec_gate_mode": "passthrough",
                         "xsec_gate_in_drivezone_ratio": seed_drive_ratio,
                         "xsec_gate_in_divstrip_ratio": seed_div_ratio,
+                    },
+                }
+            )
+            continue
+
+        if step0_mode in {"lite", "audit"} and lite_failed_reasons:
+            # Audit mode: reject invalid seed xsec; do not generate repaired geometry for Step1.
+            failed_count += 1
+            gate_empty_count += 1
+            fallback_orig += 1
+            gate_all_map[int(nodeid)] = geom_2d
+            gate_meta_map[int(nodeid)] = {
+                "len_m": float(seed_len_m),
+                "geom_type": str(getattr(geom_2d, "geom_type", "")),
+                "fallback": True,
+                "mode": "failed",
+                "selected_by": "audit_reject",
+                "selection_source": "audit",
+                "candidate_segment_count": 1,
+                "selected_mid_dist_m": 0.0,
+                "selected_evidence_len_m": 0.0,
+                "in_drivezone_ratio": seed_drive_ratio,
+                "in_divstrip_ratio": seed_div_ratio,
+                "lite_failed_reasons": list(lite_failed_reasons),
+                "failed_reason": ";".join(str(v) for v in lite_failed_reasons),
+            }
+            anchor_feats.append(
+                {
+                    "geometry": Point(ax, ay),
+                    "properties": {
+                        "nodeid": int(nodeid),
+                    },
+                }
+            )
+            trunc_feats.append(
+                {
+                    "geometry": geom_2d,
+                    "properties": {
+                        "nodeid": int(nodeid),
+                        "left_extent_m": None,
+                        "right_extent_m": None,
+                        "cut_by_divstrip_left": None,
+                        "cut_by_divstrip_right": None,
+                        "used_trunc": False,
+                        "xsec_gate_selected_by": "audit_reject",
+                        "xsec_gate_fallback": True,
+                        "xsec_gate_mode": "failed",
+                        "xsec_gate_in_drivezone_ratio": seed_drive_ratio,
+                        "xsec_gate_in_divstrip_ratio": seed_div_ratio,
+                        "xsec_gate_failed_reason": ";".join(str(v) for v in lite_failed_reasons),
                     },
                 }
             )
