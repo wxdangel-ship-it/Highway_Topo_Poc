@@ -441,8 +441,9 @@ def test_divstrip_far_reference_must_not_override_drivezone_split(tmp_path: Path
     assert str(far_item.get("split_pick_source", "")) == "drivezone_split_window_tip_projection_ignored"
 
 
-def test_drivezone_split_vertex_not_shifted_by_tip_projection(tmp_path: Path, monkeypatch) -> None:
+def test_drivezone_split_tip_projection_keeps_same_toward_node_choice(tmp_path: Path, monkeypatch) -> None:
     data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    _rewrite_drivezone_split_band(data["drivezone_path"])
     _rewrite_divstrip_far_only(data["divstrip_path"])
     _data0, out0 = _run_runtime(
         tmp_path,
@@ -452,8 +453,9 @@ def test_drivezone_split_vertex_not_shifted_by_tip_projection(tmp_path: Path, mo
     )
     base_item = _read_json(out0 / "anchors.json")["items"][0]
     base_split_s = float(base_item.get("s_drivezone_split_m", 0.0))
+    base_chosen_s = float(base_item.get("s_chosen_m", -999.0))
     assert str(base_item.get("position_source")) == "drivezone_split"
-    assert abs(float(base_item.get("s_chosen_m", -999.0)) - base_split_s) <= 1e-6
+    _assert_toward_node_window(s_chosen=base_chosen_s, ref_s=base_split_s)
 
     def _fake_tip_point_from_divstrip(*, divstrip_union, scan_vec, origin_xy=None):
         assert origin_xy is not None
@@ -475,7 +477,56 @@ def test_drivezone_split_vertex_not_shifted_by_tip_projection(tmp_path: Path, mo
     assert str(item.get("divstrip_ref_source")) == "tip_projection"
     assert str(item.get("position_source")) == "drivezone_split"
     assert str(item.get("split_pick_source")) == "drivezone_split_window_tip_projection_ignored"
-    assert abs(float(item.get("s_chosen_m", -999.0)) - float(item.get("s_drivezone_split_m", -998.0))) <= 1e-6
+    assert abs(float(item.get("s_chosen_m", -999.0)) - base_chosen_s) <= 1e-6
+    _assert_toward_node_window(
+        s_chosen=float(item.get("s_chosen_m", -999.0)),
+        ref_s=float(item.get("s_drivezone_split_m", -998.0)),
+    )
+
+
+def test_drivezone_split_prefers_pre_split_single_piece_when_available(tmp_path: Path, monkeypatch) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    data["divstrip_path"].unlink()
+    node_features = _read_json(data["global_node_path"]).get("features", [])
+    node_feat = next(
+        feat
+        for feat in node_features
+        if int(feat.get("properties", {}).get("id", -1)) == int(data["node_merge"])
+    )
+    node_y = float(node_feat.get("geometry", {}).get("coordinates", [0.0, 0.0])[1])
+
+    def _piece(segment: LineString, start_norm: float, end_norm: float) -> LineString:
+        p0 = segment.interpolate(float(start_norm), normalized=True)
+        p1 = segment.interpolate(float(end_norm), normalized=True)
+        return LineString([(float(p0.x), float(p0.y)), (float(p1.x), float(p1.y))])
+
+    def _fake_segment_drivezone_pieces(*, segment, drivezone_union, min_piece_len_m):
+        s_like = abs(float(segment.centroid.y) - float(node_y))
+        if s_like < 20.0 - 1e-6:
+            return [LineString(segment.coords)]
+        return [
+            _piece(segment, 0.05, 0.45),
+            _piece(segment, 0.55, 0.95),
+        ]
+
+    monkeypatch.setattr(runner_mod, "segment_drivezone_pieces", _fake_segment_drivezone_pieces)
+    _data, out_dir = _run_runtime(
+        tmp_path,
+        run_id="drivezone_split_prefers_pre_split_single_piece",
+        data=data,
+        focus_node_ids=[str(data["node_merge"])],
+    )
+    item = _read_json(out_dir / "anchors.json")["items"][0]
+    assert str(item.get("status")) in {"ok", "suspect"}
+    assert bool(item.get("anchor_found", False)) is True
+    assert str(item.get("position_source")) == "drivezone_split"
+    assert str(item.get("s_drivezone_split_source")) == "strict"
+    assert abs(float(item.get("s_drivezone_split_m", -999.0)) - 20.0) <= 1e-6
+    assert abs(float(item.get("s_chosen_m", -999.0)) - 19.0) <= 1e-6
+    _assert_toward_node_window(
+        s_chosen=float(item.get("s_chosen_m", -999.0)),
+        ref_s=float(item.get("s_drivezone_split_m", -998.0)),
+    )
 
 
 def test_drivezone_split_output_keeps_center_piece_without_divstrip(tmp_path: Path) -> None:
