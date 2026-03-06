@@ -30,6 +30,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "divstrip_anchor_snap_enabled": False,
     "divstrip_preferred_window_m": 8.0,
     "divstrip_ref_hard_window_m": 1.0,
+    "drivezone_split_backtrack_past_node_m": 20.0,
     "divstrip_drivezone_max_offset_m": 30.0,
     "divstrip_target_by_split_enabled": True,
     "divstrip_target_by_split_min_s_m": 5.0,
