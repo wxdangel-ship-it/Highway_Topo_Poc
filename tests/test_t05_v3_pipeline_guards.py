@@ -473,7 +473,7 @@ def test_neighbor_pass2_is_triggered_when_unresolved_high_and_stitch_zero(tmp_pa
 
     def _fake_build_pair_supports(*args, **kwargs):
         calls["n"] += 1
-        return pass1_result if calls["n"] <= 2 else pass2_result
+        return pass1_result if calls["n"] == 1 else pass2_result
 
     monkeypatch.setattr(pipeline, "build_pair_supports", _fake_build_pair_supports)
     monkeypatch.setattr(
@@ -509,7 +509,7 @@ def test_neighbor_pass2_is_triggered_when_unresolved_high_and_stitch_zero(tmp_pa
         run_id="unit_run",
         repo_root=tmp_path,
     )
-    assert calls["n"] >= 4
+    assert calls["n"] >= 2
     assert out["metrics_payload"].get("neighbor_search_pass2_attempted") is True
     assert out["metrics_payload"].get("neighbor_search_pass2_used") is True
     assert out["metrics_payload"].get("neighbor_search_pass") == 2

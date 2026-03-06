@@ -107,6 +107,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_NODE_VOTE_MIN_RATIO": 1.0,
     "STEP1_SINGLE_SUPPORT_PER_PAIR": 1,
     "STEP1_SKIP_SEARCH_AFTER_PAIR_RESOLVED": 1,
+    "STEP1_REBUILD_SUPPORTS_WITH_INFERRED_TYPES": 0,
     "STEP1_ADJ_MODE": "topology_unique",
     "STEP1_TOPO_RESPECT_DIRECTION": 1,
     "STEP1_TOPO_COMPRESS_DEG2": 1,
@@ -1009,29 +1010,33 @@ def _run_patch_core(
             pair_supports=supports_seed_obj.supports,
             node_kind_map=patch_inputs.node_kind_map,
         )
-        supports_obj = build_pair_supports(
-            patch_inputs.trajectories,
-            cross_obj.events_by_traj,
-            node_type_map=nt_map,
-            trj_sample_step_m=float(params["TRJ_SAMPLE_STEP_M"]),
-            stitch_tail_m=float(params["STITCH_TAIL_M"]),
-            stitch_max_dist_levels_m=levels,
-            stitch_max_dist_m=float(stitch_max_dist_m),
-            stitch_max_angle_deg=float(params["STITCH_MAX_ANGLE_DEG"]),
-            stitch_forward_dot_min=float(stitch_forward_dot_min),
-            stitch_min_advance_m=float(params["STITCH_MIN_ADVANCE_M"]),
-            stitch_penalty=float(params["STITCH_PENALTY"]),
-            stitch_topk=int(params["STITCH_TOPK"]),
-            neighbor_max_dist_m=float(neighbor_max_dist_m),
-            multi_road_sep_m=float(params["MULTI_ROAD_SEP_M"]),
-            multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
-            unique_dst_early_stop=bool(int(params.get("STEP1_UNIQUE_DST_EARLY_STOP", 1))),
-            unique_dst_dist_eps_m=float(params.get("STEP1_UNIQUE_DST_DIST_EPS_M", 5.0)),
-            allowed_dst_by_src=step1_allowed_dst_filter_map,
-            allowed_pairs=step1_allowed_pair_filter_set,
-            single_support_per_pair=bool(int(params.get("STEP1_SINGLE_SUPPORT_PER_PAIR", 1))),
-            skip_search_after_pair_resolved=bool(int(params.get("STEP1_SKIP_SEARCH_AFTER_PAIR_RESOLVED", 1))),
-        )
+        rebuild_with_inferred = bool(int(params.get("STEP1_REBUILD_SUPPORTS_WITH_INFERRED_TYPES", 0)))
+        if rebuild_with_inferred:
+            supports_obj = build_pair_supports(
+                patch_inputs.trajectories,
+                cross_obj.events_by_traj,
+                node_type_map=nt_map,
+                trj_sample_step_m=float(params["TRJ_SAMPLE_STEP_M"]),
+                stitch_tail_m=float(params["STITCH_TAIL_M"]),
+                stitch_max_dist_levels_m=levels,
+                stitch_max_dist_m=float(stitch_max_dist_m),
+                stitch_max_angle_deg=float(params["STITCH_MAX_ANGLE_DEG"]),
+                stitch_forward_dot_min=float(stitch_forward_dot_min),
+                stitch_min_advance_m=float(params["STITCH_MIN_ADVANCE_M"]),
+                stitch_penalty=float(params["STITCH_PENALTY"]),
+                stitch_topk=int(params["STITCH_TOPK"]),
+                neighbor_max_dist_m=float(neighbor_max_dist_m),
+                multi_road_sep_m=float(params["MULTI_ROAD_SEP_M"]),
+                multi_road_topn=int(params["MULTI_ROAD_TOPN"]),
+                unique_dst_early_stop=bool(int(params.get("STEP1_UNIQUE_DST_EARLY_STOP", 1))),
+                unique_dst_dist_eps_m=float(params.get("STEP1_UNIQUE_DST_DIST_EPS_M", 5.0)),
+                allowed_dst_by_src=step1_allowed_dst_filter_map,
+                allowed_pairs=step1_allowed_pair_filter_set,
+                single_support_per_pair=bool(int(params.get("STEP1_SINGLE_SUPPORT_PER_PAIR", 1))),
+                skip_search_after_pair_resolved=bool(int(params.get("STEP1_SKIP_SEARCH_AFTER_PAIR_RESOLVED", 1))),
+            )
+        else:
+            supports_obj = supports_seed_obj
         return cross_obj, supports_obj, nt_map, indeg_map, outdeg_map
 
     pass1_cross, pass1_supports, pass1_node_type_map, pass1_in_degree, pass1_out_degree = _run_neighbor_pass(
