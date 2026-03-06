@@ -396,6 +396,9 @@ def _empty_fail_result(
         "scan_dir": str(scan_dir),
         "scan_dist_m": None,
         "stop_dist_m": 0.0,
+        "stop_dist_node_raw_m": None,
+        "stop_dist_chain_override_m": None,
+        "stop_dist_chain_override_applied": False,
         "stop_reason": str(stop_reason),
         "next_intersection_dist_m": None,
         "dist_to_divstrip_m": dist,
@@ -508,6 +511,39 @@ def _compute_abs_s(
     return None
 
 
+def _resolve_scan_stop_boundary(
+    *,
+    nodeid: int,
+    scan_vec: tuple[float, float],
+    road_graph: RoadGraph,
+    params: dict[str, Any],
+) -> tuple[float, str, float | None, dict[str, Any]]:
+    scan_max = float(params["scan_max_limit_m"])
+    stop_dist = float(scan_max)
+    stop_reason = "max_200"
+    next_inter: float | None = None
+    stop_diag: dict[str, Any] = {}
+    if bool(params.get("stop_at_next_intersection", True)):
+        next_inter, stop_diag = road_graph.find_next_intersection_connected_deg3(
+            nodeid=int(nodeid),
+            scan_dir=scan_vec,
+            degree_min=int(params.get("next_intersection_degree_min", 3)),
+            max_hops=64,
+        )
+        if next_inter is not None and float(next_inter) > 0.0:
+            stop_reason = "next_intersection_connected_deg3"
+            stop_dist = min(float(stop_dist), float(next_inter))
+        else:
+            stop_reason = "next_intersection_not_found_deg3"
+    else:
+        stop_reason = "next_intersection_disabled"
+
+    if stop_dist >= scan_max - 1e-9 and stop_reason == "next_intersection_connected_deg3":
+        stop_reason = "max_200"
+
+    return float(max(0.0, stop_dist)), str(stop_reason), (None if next_inter is None else float(next_inter)), dict(stop_diag)
+
+
 def _resolve_ref_s_local(item: dict[str, Any]) -> float | None:
     s_div = item.get("s_divstrip_m")
     s_dz = item.get("s_drivezone_split_m")
@@ -549,6 +585,80 @@ def _abs_window_from_item(item: dict[str, Any], *, window_m: float = 1.0) -> tup
     return (float(min(a0, a1)), float(max(a0, a1)))
 
 
+def _apply_continuous_relative_order_constraints(
+    *,
+    seed_results: list[dict[str, Any]],
+    components: list[ChainComponent],
+    breakpoints: list[dict[str, Any]],
+) -> None:
+    item_by_id: dict[int, dict[str, Any]] = {}
+    for item in seed_results:
+        try:
+            nodeid = int(item.get("nodeid"))
+        except Exception:
+            continue
+        item_by_id[int(nodeid)] = item
+
+    tol = 1e-6
+    for comp in components:
+        for edge in sorted(comp.edges, key=lambda x: (float(x.dist_m), int(x.src), int(x.dst))):
+            src = int(edge.src)
+            dst = int(edge.dst)
+            src_item = item_by_id.get(int(src))
+            dst_item = item_by_id.get(int(dst))
+            if src_item is None or dst_item is None:
+                continue
+            if str(src_item.get("status")) == "fail" or str(dst_item.get("status")) == "fail":
+                continue
+
+            src_abs = src_item.get("abs_s_chosen_m")
+            dst_abs = dst_item.get("abs_s_chosen_m")
+            if src_abs is None or dst_abs is None:
+                continue
+
+            src_abs_f = float(src_abs)
+            dst_abs_f = float(dst_abs)
+            allow_shared_crossline = bool(src_item.get("is_diverge_kind", False)) and bool(dst_item.get("is_merge_kind", False))
+            violate = False
+            reason = "relative_order_unknown"
+            if dst_abs_f < src_abs_f - tol:
+                violate = True
+                reason = "dst_abs_lt_src_abs"
+            elif (not allow_shared_crossline) and dst_abs_f <= src_abs_f + tol:
+                violate = True
+                reason = "dst_abs_not_gt_src_abs"
+
+            if not violate:
+                continue
+
+            breakpoints.append(
+                make_breakpoint(
+                    code=BP_SEQUENTIAL_ORDER_VIOLATION,
+                    severity="hard",
+                    nodeid=int(dst),
+                    message="sequential_relative_order_violation",
+                    extra={
+                        "src_nodeid": int(src),
+                        "dst_nodeid": int(dst),
+                        "src_abs_s_m": float(src_abs_f),
+                        "dst_abs_s_m": float(dst_abs_f),
+                        "reason": str(reason),
+                    },
+                )
+            )
+
+            flags_raw = dst_item.get("flags")
+            flags = list(flags_raw) if isinstance(flags_raw, list) else []
+            if "sequential_relative_order_violation" not in flags:
+                flags.append("sequential_relative_order_violation")
+            dst_item["flags"] = flags
+            dst_item["status"] = "fail"
+            dst_item["anchor_found"] = False
+            dst_item["sequential_ok"] = False
+            dst_item["sequential_violation_reason"] = "relative_order_not_increasing"
+            dst_item["stop_reason"] = "sequential_order_violation"
+
+
 def _apply_continuous_merges(
     *,
     seed_results: list[dict[str, Any]],
@@ -586,6 +696,12 @@ def _apply_continuous_merges(
             if not bool(src_item.get("is_diverge_kind", False)):
                 continue
             if not bool(dst_item.get("is_merge_kind", False)):
+                continue
+            src_offset = src_item.get("chain_node_offset_m", comp.offsets_m.get(int(src)))
+            dst_offset = dst_item.get("chain_node_offset_m", comp.offsets_m.get(int(dst)))
+            if src_offset is None or dst_offset is None:
+                continue
+            if float(src_offset) >= float(dst_offset) - tol:
                 continue
 
             preds = incoming.get(dst, [])
@@ -1631,6 +1747,7 @@ def _evaluate_node(
     chain_component_id: str | None = None,
     chain_node_offset_m: float | None = None,
     required_prev_abs_s: float | None = None,
+    stop_dist_override_m: float | None = None,
 ) -> dict[str, Any]:
     nodeid = int(node.nodeid)
     kind = None if node.kind is None else int(node.kind)
@@ -1639,6 +1756,7 @@ def _evaluate_node(
     is_k16 = bool(kind is not None and (int(kind) & (1 << 16)) != 0)
     chain_offset = None if chain_node_offset_m is None else float(chain_node_offset_m)
     required_prev_abs = None if required_prev_abs_s is None else float(required_prev_abs_s)
+    stop_dist_override = None if stop_dist_override_m is None else float(max(0.0, float(stop_dist_override_m)))
     hard_failed = False
 
     def _add_bp(
@@ -1892,46 +2010,40 @@ def _evaluate_node(
         return out
 
     scan_max = float(params["scan_max_limit_m"])
-    stop_dist = float(scan_max)
-    stop_reason = "max_200"
-    next_inter: float | None = None
-    stop_diag: dict[str, Any] = {}
-    if bool(params.get("stop_at_next_intersection", True)):
-        next_inter, stop_diag = road_graph.find_next_intersection_connected_deg3(
-            nodeid=nodeid,
-            scan_dir=scan_vec,
-            degree_min=int(params.get("next_intersection_degree_min", 3)),
-            max_hops=64,
+    stop_dist_raw, stop_reason, next_inter, stop_diag = _resolve_scan_stop_boundary(
+        nodeid=nodeid,
+        scan_vec=scan_vec,
+        road_graph=road_graph,
+        params=params,
+    )
+    deg_skip = int(stop_diag.get("deg_too_low_skipped", 0))
+    if deg_skip > 0:
+        _add_bp(
+            code=BP_NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED,
+            severity="soft",
+            message="next_intersection_degree_too_low_skipped",
+            extra={"count": int(deg_skip)},
         )
-        deg_skip = int(stop_diag.get("deg_too_low_skipped", 0))
-        if deg_skip > 0:
-            _add_bp(
-                code=BP_NEXT_INTERSECTION_DEG_TOO_LOW_SKIPPED,
-                severity="soft",
-                message="next_intersection_degree_too_low_skipped",
-                extra={"count": int(deg_skip)},
-            )
-        if next_inter is not None and next_inter > 0:
-            stop_reason = "next_intersection_connected_deg3"
-            stop_dist = min(stop_dist, float(next_inter))
-        else:
-            stop_reason = "next_intersection_not_found_deg3"
-            _add_bp(
-                code=BP_NEXT_INTERSECTION_NOT_FOUND_DEG3,
-                severity="soft",
-                message="next_intersection_not_found_deg3",
-                extra={"diag": dict(stop_diag)},
-            )
-    else:
-        stop_reason = "next_intersection_disabled"
+    if stop_reason == "next_intersection_not_found_deg3":
+        _add_bp(
+            code=BP_NEXT_INTERSECTION_NOT_FOUND_DEG3,
+            severity="soft",
+            message="next_intersection_not_found_deg3",
+            extra={"diag": dict(stop_diag)},
+        )
+    if stop_reason == "next_intersection_disabled":
         _add_bp(
             code=BP_NEXT_INTERSECTION_DISABLED,
             severity="soft",
             message="next_intersection_disabled",
         )
 
-    if stop_dist >= scan_max - 1e-9 and stop_reason == "next_intersection_connected_deg3":
-        stop_reason = "max_200"
+    stop_dist = float(stop_dist_raw)
+    stop_dist_chain_override = None if stop_dist_override is None else float(min(scan_max, max(0.0, float(stop_dist_override))))
+    stop_dist_chain_override_applied = False
+    if stop_dist_chain_override is not None and stop_dist_chain_override > stop_dist + 1e-9:
+        stop_dist = float(stop_dist_chain_override)
+        stop_dist_chain_override_applied = True
 
     stop_dist = max(0.0, float(stop_dist))
     step = max(0.25, float(params["scan_step_m"]))
@@ -2286,6 +2398,9 @@ def _evaluate_node(
         out.update(
             {
                 "stop_dist_m": float(stop_dist),
+                "stop_dist_node_raw_m": float(stop_dist_raw),
+                "stop_dist_chain_override_m": None if stop_dist_chain_override is None else float(stop_dist_chain_override),
+                "stop_dist_chain_override_applied": bool(stop_dist_chain_override_applied),
                 "next_intersection_dist_m": None if next_inter is None else float(next_inter),
                 "tip_s_m": None if tip_s is None else float(tip_s),
                 "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
@@ -2565,6 +2680,9 @@ def _evaluate_node(
         out.update(
             {
                 "stop_dist_m": float(stop_dist),
+                "stop_dist_node_raw_m": float(stop_dist_raw),
+                "stop_dist_chain_override_m": None if stop_dist_chain_override is None else float(stop_dist_chain_override),
+                "stop_dist_chain_override_applied": bool(stop_dist_chain_override_applied),
                 "next_intersection_dist_m": None if next_inter is None else float(next_inter),
                 "tip_s_m": None if tip_s is None else float(tip_s),
                 "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
@@ -2670,6 +2788,9 @@ def _evaluate_node(
         out.update(
             {
                 "stop_dist_m": float(stop_dist),
+                "stop_dist_node_raw_m": float(stop_dist_raw),
+                "stop_dist_chain_override_m": None if stop_dist_chain_override is None else float(stop_dist_chain_override),
+                "stop_dist_chain_override_applied": bool(stop_dist_chain_override_applied),
                 "next_intersection_dist_m": None if next_inter is None else float(next_inter),
                 "tip_s_m": None if tip_s is None else float(tip_s),
                 "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
@@ -2723,6 +2844,9 @@ def _evaluate_node(
         out.update(
             {
                 "stop_dist_m": float(stop_dist),
+                "stop_dist_node_raw_m": float(stop_dist_raw),
+                "stop_dist_chain_override_m": None if stop_dist_chain_override is None else float(stop_dist_chain_override),
+                "stop_dist_chain_override_applied": bool(stop_dist_chain_override_applied),
                 "next_intersection_dist_m": None if next_inter is None else float(next_inter),
                 "tip_s_m": None if tip_s is None else float(tip_s),
                 "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
@@ -2817,6 +2941,9 @@ def _evaluate_node(
         out.update(
             {
                 "stop_dist_m": float(stop_dist),
+                "stop_dist_node_raw_m": float(stop_dist_raw),
+                "stop_dist_chain_override_m": None if stop_dist_chain_override is None else float(stop_dist_chain_override),
+                "stop_dist_chain_override_applied": bool(stop_dist_chain_override_applied),
                 "next_intersection_dist_m": None if next_inter is None else float(next_inter),
                 "tip_s_m": None if tip_s is None else float(tip_s),
                 "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
@@ -2921,6 +3048,9 @@ def _evaluate_node(
         out.update(
             {
                 "stop_dist_m": float(stop_dist),
+                "stop_dist_node_raw_m": float(stop_dist_raw),
+                "stop_dist_chain_override_m": None if stop_dist_chain_override is None else float(stop_dist_chain_override),
+                "stop_dist_chain_override_applied": bool(stop_dist_chain_override_applied),
                 "next_intersection_dist_m": None if next_inter is None else float(next_inter),
                 "tip_s_m": None if tip_s is None else float(tip_s),
                 "first_divstrip_hit_dist_m": None if first_divstrip_hit_s is None else float(first_divstrip_hit_s),
@@ -3053,6 +3183,9 @@ def _evaluate_node(
         "scan_dir": scan_dir_label,
         "scan_dist_m": float(scan_dist),
         "stop_dist_m": float(stop_dist),
+        "stop_dist_node_raw_m": float(stop_dist_raw),
+        "stop_dist_chain_override_m": None if stop_dist_chain_override is None else float(stop_dist_chain_override),
+        "stop_dist_chain_override_applied": bool(stop_dist_chain_override_applied),
         "stop_reason": str(stop_reason),
         "next_intersection_dist_m": None if next_inter is None else float(next_inter),
         "dist_to_divstrip_m": dist_to_div,
@@ -3611,10 +3744,39 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
     processed_ids: set[int] = set()
 
     if continuous_enable and chain_components:
+        scan_max_limit_m = float(params.get("scan_max_limit_m", 200.0))
         for comp in sorted(chain_components, key=lambda c: str(c.component_id)):
             comp_seed_ids = [int(x) for x in comp.node_ids if int(x) in seed_by_id]
             if not comp_seed_ids:
                 continue
+            chain_stop_candidates: list[float] = []
+            for nid in comp_seed_ids:
+                node_probe = seed_by_id[int(nid)]
+                kind_probe = None if node_probe.kind is None else int(node_probe.kind)
+                is_merge_probe = bool(kind_probe is not None and (int(kind_probe) & (1 << 3)) != 0)
+                is_diverge_probe = bool(kind_probe is not None and (int(kind_probe) & (1 << 4)) != 0)
+                if not (is_merge_probe or is_diverge_probe):
+                    continue
+                try:
+                    probe_sel = select_branch_pair_and_axis(
+                        nodeid=int(nid),
+                        is_diverge=bool(is_diverge_probe),
+                        roads=road_graph.roads,
+                    )
+                except Exception:
+                    continue
+                probe_stop_dist, _probe_stop_reason, _probe_next_inter, _probe_stop_diag = _resolve_scan_stop_boundary(
+                    nodeid=int(nid),
+                    scan_vec=(float(probe_sel.scan_dir[0]), float(probe_sel.scan_dir[1])),
+                    road_graph=road_graph,
+                    params=params,
+                )
+                chain_stop_candidates.append(float(probe_stop_dist))
+
+            chain_stop_override_m: float | None = None
+            if chain_stop_candidates:
+                chain_stop_override_m = float(min(scan_max_limit_m, max(chain_stop_candidates)))
+
             abs_selected: dict[int, float] = {}
             ordered_ids = sorted(
                 comp_seed_ids,
@@ -3643,6 +3805,7 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
                     chain_component_id=str(comp.component_id),
                     chain_node_offset_m=comp.offsets_m.get(int(nid)),
                     required_prev_abs_s=None if required_prev_abs is None else float(required_prev_abs),
+                    stop_dist_override_m=chain_stop_override_m,
                 )
                 res["ng_candidates_before_suppress"] = int(ng_before_suppress)
                 res["ng_candidates_after_suppress"] = int(ng_after_suppress)
@@ -3674,6 +3837,11 @@ def run_from_runtime(runtime: dict[str, Any]) -> RunResult:
         seed_results.append(res)
 
     if continuous_enable and chain_components:
+        _apply_continuous_relative_order_constraints(
+            seed_results=seed_results,
+            components=chain_components,
+            breakpoints=breakpoints,
+        )
         _apply_continuous_merges(
             seed_results=seed_results,
             components=chain_components,

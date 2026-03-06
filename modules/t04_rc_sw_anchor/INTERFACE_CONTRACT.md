@@ -89,6 +89,10 @@
 - 仅允许：从当前 node 沿扫描方向，在 RCSDRoad 拓扑联通可达的下一个 `degree>=3` 节点。
 - 找不到则 `stop_dist=scan_max_limit_m`，`stop_reason=next_intersection_not_found_deg3`。
 - 禁止几何近邻 fallback（`disable_geometric_stop_fallback=true`）。
+- 连续链节点额外规则：
+  - 不使用“自身节点 stop”作为最终边界。
+  - 使用链级 stop 上界：`min(scan_max_limit_m, max(component_default_stop_dist_m))`。
+  - 其中 `component_default_stop_dist_m` 为组件内各节点按本节默认规则计算的 stop 距离。
 
 ### 5.5 状态机一致性
 - 引入 `found_split`。
@@ -106,7 +110,9 @@
 - 链内顺序约束：
   - `abs_s` 定义：`diverge=offset+s_chosen`，`merge=offset-s_chosen`。
   - 对每节点仅接受 `abs_s_candidate > max(predecessors_abs_s)` 的候选；否则节点 fail 并打 `SEQUENTIAL_ORDER_VIOLATION`。
+  - 结果校验阶段对连续边执行相对顺序校验：下游节点 `abs_s` 不得小于上游节点；若违反则下游节点置 fail 并打 `SEQUENTIAL_ORDER_VIOLATION`。
 - `diverge->merge` 合并：
+  - 仅允许“先分后合”（`diverge->merge` 且 `offset(diverge)<offset(merge)`）共用横截线。
   - 相邻边上、merge 的主要前驱为该 diverge，且两条 `crossline_opt` 几何相交或近邻（`distance<=continuous_merge_geom_tol_m`）时允许合并。
   - `continuous_merge_max_gap_m` 与 window 交集仅保留诊断，不作为阻断门槛。
 
