@@ -31,6 +31,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "divstrip_preferred_window_m": 8.0,
     "divstrip_ref_hard_window_m": 1.0,
     "divstrip_drivezone_max_offset_m": 30.0,
+    "split_stage2_extend_m": 5.0,
     "reverse_tip_max_m": 10.0,
     "multibranch_enable": True,
     "multibranch_span_extra_m": 10.0,
