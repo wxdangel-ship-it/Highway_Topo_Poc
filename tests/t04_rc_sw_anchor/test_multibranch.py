@@ -244,6 +244,78 @@ def test_multibranch_merge_three_incoming_produces_two_events(tmp_path: Path, mo
     assert str(item.get("main_pick_source")) == "forward_first"
 
 
+def test_multibranch_prefers_divstrip_reference_when_available(tmp_path: Path, monkeypatch) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    _add_merge_incoming_branch(data, new_nodeid=70021001, dx=30.0, dy=-52.0, direction=2)
+    node_x, node_y = _node_xy(Path(data["global_node_path"]), int(data["node_merge"]))
+
+    def _fake_extract(**kwargs):
+        _ = kwargs
+        return {
+            "split_events_forward": [3.0, 11.0],
+            "split_events_reverse": [],
+            "split_events_forward_diag": [],
+            "split_events_reverse_diag": [],
+            "s_main_m": 3.0,
+            "main_pick_source": "forward_first",
+            "abnormal_two_sided": False,
+            "s_drivezone_split_first_m": 3.0,
+            "event_lines": _fake_event_lines(node_x, node_y, [(3.0, "forward", 2), (11.0, "forward", 3)]),
+        }
+
+    monkeypatch.setattr(runner_mod, "_extract_multibranch_events", _fake_extract)
+
+    out_dir = _run_runtime(
+        tmp_path,
+        run_id="multibranch_prefers_divstrip",
+        data=data,
+        focus_node_ids=[str(data["node_merge"])],
+    )
+    item = _read_json(out_dir / "anchors.json")["items"][0]
+    assert bool(item.get("multibranch_enabled", False)) is True
+    assert item.get("first_divstrip_hit_dist_m") is not None
+    assert str(item.get("position_source_forward")) == "divstrip_ref"
+    assert str(item.get("position_source")) == "divstrip_ref"
+    assert str(item.get("split_pick_source", "")).startswith("divstrip_")
+    assert float(item.get("s_drivezone_split_m")) == 3.0
+
+
+def test_multibranch_fallbacks_to_drivezone_when_divstrip_too_far(tmp_path: Path, monkeypatch) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    _add_merge_incoming_branch(data, new_nodeid=70021002, dx=30.0, dy=-52.0, direction=2)
+    node_x, node_y = _node_xy(Path(data["global_node_path"]), int(data["node_merge"]))
+
+    def _fake_extract(**kwargs):
+        _ = kwargs
+        return {
+            "split_events_forward": [3.0, 11.0],
+            "split_events_reverse": [],
+            "split_events_forward_diag": [],
+            "split_events_reverse_diag": [],
+            "s_main_m": 3.0,
+            "main_pick_source": "forward_first",
+            "abnormal_two_sided": False,
+            "s_drivezone_split_first_m": 3.0,
+            "event_lines": _fake_event_lines(node_x, node_y, [(3.0, "forward", 2), (11.0, "forward", 3)]),
+        }
+
+    monkeypatch.setattr(runner_mod, "_extract_multibranch_events", _fake_extract)
+
+    out_dir = _run_runtime(
+        tmp_path,
+        run_id="multibranch_drivezone_fallback_on_far_divstrip",
+        data=data,
+        focus_node_ids=[str(data["node_merge"])],
+        params_override={"divstrip_drivezone_max_offset_m": 1.0},
+    )
+    item = _read_json(out_dir / "anchors.json")["items"][0]
+    assert bool(item.get("multibranch_enabled", False)) is True
+    assert str(item.get("position_source_forward")) == "drivezone_split_fwd_first"
+    assert str(item.get("position_source")) == "drivezone_split_fwd_first"
+    assert str(item.get("split_pick_source")) == "drivezone_split_multibranch_fwd_first"
+    assert float(item.get("s_drivezone_split_m")) == 3.0
+
+
 def test_multibranch_abnormal_two_sided_picks_reverse_farthest(tmp_path: Path, monkeypatch) -> None:
     data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
     _add_diverge_outgoing_branch(data, new_nodeid=70030001, dx=26.0, dy=44.0, direction=2)

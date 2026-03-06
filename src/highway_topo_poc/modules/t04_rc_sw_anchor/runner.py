@@ -2194,17 +2194,15 @@ def _evaluate_node(
     elif tip_s is not None and float(tip_s) >= -1e-6 and float(tip_s) <= float(stop_dist) + 1e-6:
         divstrip_ref_s = float(max(0.0, min(float(stop_dist), float(tip_s))))
         divstrip_ref_source = "tip_projection"
-    if multibranch_enabled:
-        divstrip_ref_s = None
-        divstrip_ref_source = "none"
-
     ref_s_forward, position_source_forward, split_pick_source_forward = _pick_reference_s(
         divstrip_ref_s=divstrip_ref_s,
         divstrip_ref_source=divstrip_ref_source,
         drivezone_split_s=s_drivezone_split,
         max_offset_m=divstrip_drivezone_max_offset_m,
     )
-    if multibranch_enabled and ref_s_forward is not None:
+    # In multibranch mode, only relabel when the final forward reference is drivezone-based.
+    # Keep divstrip as the chosen source when divstrip reference is available and valid.
+    if multibranch_enabled and ref_s_forward is not None and str(position_source_forward).startswith("drivezone_split"):
         if str(main_pick_source) == "forward_first":
             position_source_forward = "drivezone_split_fwd_first"
             split_pick_source_forward = "drivezone_split_multibranch_fwd_first"
