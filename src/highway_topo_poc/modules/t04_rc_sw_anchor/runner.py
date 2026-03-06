@@ -2574,11 +2574,17 @@ def _evaluate_node(
         return out
 
     window_m = float(divstrip_ref_hard_window_m)
-    if _is_drivezone_position_source(position_source):
+    exact_drivezone_split_ref = bool(
+        _is_drivezone_position_source(position_source)
+        and str(s_drivezone_split_source_out or "") == "extended"
+        and abs(float(ref_s)) <= float(step) + 1e-9
+    )
+    if exact_drivezone_split_ref:
+        # Keep near-node weak extended splits pinned to the split position so they can fail closed.
         window_lo = float(ref_s)
         window_hi = float(ref_s)
         target_s = float(ref_s)
-    elif bool(reverse_tip_used):
+    elif bool(reverse_tip_used) and (not _is_drivezone_position_source(position_source)):
         # Reverse-tip anomaly branch: probe farther from node to avoid divstrip overlap.
         window_lo, window_hi, target_s = _build_ref_window_away_from_node(
             ref_s=float(ref_s),
