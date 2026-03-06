@@ -105,8 +105,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_UNIQUE_DST_EARLY_STOP": 1,
     "STEP1_UNIQUE_DST_DIST_EPS_M": 5.0,
     "STEP1_NODE_VOTE_MIN_RATIO": 1.0,
-    "STEP1_SINGLE_SUPPORT_PER_PAIR": 1,
-    "STEP1_SKIP_SEARCH_AFTER_PAIR_RESOLVED": 1,
+    "STEP1_SINGLE_SUPPORT_PER_PAIR": 0,
+    "STEP1_SKIP_SEARCH_AFTER_PAIR_RESOLVED": 0,
     "STEP1_REBUILD_SUPPORTS_WITH_INFERRED_TYPES": 0,
     "STEP1_ADJ_MODE": "topology_unique",
     "STEP1_TOPO_RESPECT_DIRECTION": 1,
@@ -202,6 +202,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_MULTI_CORRIDOR_DIST_M": 8.0,
     "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.60,
     "STEP1_MULTI_CORRIDOR_HARD": 0,
+    "STEP1_PRIMARY_PICK_TOPK": 8,
     "STEP1_DISABLE_PAIR_CLUSTER_WHEN_GATE": 1,
     "STEP1_PAIR_CLUSTER_ENABLE": 0,
     "STEP1_DEBUG_SUPPORT_TRAJS_ALL_MAX_PER_PAIR": 1,
@@ -3560,22 +3561,28 @@ def _pick_step1_primary_item(items: Sequence[dict[str, Any]]) -> dict[str, Any] 
         return None
     if len(valid) == 1:
         return valid[0]
-    mids: list[tuple[float, float]] = []
-    for it in valid:
-        seg = it.get("seg")
-        if not isinstance(seg, LineString) or seg.is_empty or seg.length <= 1e-6:
-            mids.append((0.0, 0.0))
-            continue
-        p = seg.interpolate(0.5, normalized=True)
-        mids.append((float(p.x), float(p.y)))
-    arr = np.asarray(mids, dtype=np.float64)
-    dm = np.linalg.norm(arr[:, None, :] - arr[None, :, :], axis=2)
-    score = np.sum(dm, axis=1)
-    for i, it in enumerate(valid):
-        score[i] += 0.05 * float(max(0.0, it.get("d_seed", 0.0)))
-        score[i] -= 0.0005 * float(max(0.0, it.get("length_m", 0.0)))
-    idx = int(np.argmin(score))
-    return valid[idx]
+    # 质量优先：双端可达 > 路面内比例 > 无约束冲突/无gore > 贴近端点 > 短seed距离 > 较长长度
+    def _k(it: dict[str, Any]) -> tuple[float, float, float, float, float, float, float]:
+        inside_ratio = _to_finite_float(it.get("inside_ratio"), 0.0)
+        reaches = bool(it.get("reaches_other_end", False))
+        violation = bool(it.get("constraint_violation", False))
+        gore_any = bool(it.get("gore_any", False))
+        d_src = _to_finite_float(it.get("dist_to_src_xsec_m"), 1e9)
+        d_dst = _to_finite_float(it.get("dist_to_dst_xsec_m"), 1e9)
+        d_seed = _to_finite_float(it.get("d_seed"), 1e9)
+        seg_len = _to_finite_float(it.get("length_m"), 0.0)
+        return (
+            0.0 if reaches else 1.0,
+            1.0 - inside_ratio,
+            1.0 if violation else 0.0,
+            1.0 if gore_any else 0.0,
+            d_src + d_dst,
+            d_seed,
+            -seg_len,
+        )
+
+    ranked = sorted(valid, key=_k)
+    return ranked[0]
 
 
 def _point_in_gore(pt: Point | None, gore_zone_metric: BaseGeometry | None) -> bool:
@@ -3849,7 +3856,21 @@ def _build_step1_corridor_for_pair(
         it["reaches_other_end"] = bool(np.isfinite(d_src) and np.isfinite(d_dst) and d_src <= reach_xsec_m and d_dst <= reach_xsec_m)
     ranked_reach = [it for it in ranked_used if bool(it.get("reaches_other_end", False))]
     ranked_main = ranked_reach if ranked_reach else ranked_used
-    topk_debug = ranked_main[:3]
+    topk_pick = int(max(1, int(params.get("STEP1_PRIMARY_PICK_TOPK", 8))))
+    ranked_main = sorted(
+        ranked_main,
+        key=lambda it: (
+            0.0 if bool(it.get("reaches_other_end", False)) else 1.0,
+            1.0 - _to_finite_float(it.get("inside_ratio"), 0.0),
+            1.0 if bool(it.get("constraint_violation", False)) else 0.0,
+            1.0 if bool(it.get("gore_any", False)) else 0.0,
+            _to_finite_float(it.get("dist_to_src_xsec_m"), 1e9) + _to_finite_float(it.get("dist_to_dst_xsec_m"), 1e9),
+            _to_finite_float(it.get("d_seed"), 1e9),
+            -_to_finite_float(it.get("length_m"), 0.0),
+            int(it.get("idx", -1)),
+        ),
+    )
+    topk_debug = ranked_main[:topk_pick]
     if not topk_debug:
         out["hard_reason"] = HARD_CENTER_EMPTY
         out["hard_hint"] = "step1_no_candidate_after_filter"
