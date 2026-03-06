@@ -900,6 +900,44 @@ def _build_ref_window_toward_node(*, ref_s: float, window_m: float) -> tuple[flo
     return float(lo), float(hi), float(near_s)
 
 
+def _build_drivezone_backtrack_candidates(
+    *,
+    ref_s: float,
+    start_s: float,
+    probe_step: float,
+    past_node_m: float,
+) -> list[float]:
+    step = max(0.05, abs(float(probe_step)))
+    past = max(0.0, float(past_node_m))
+    sign = -1.0 if float(ref_s) < 0.0 else 1.0
+    out: list[float] = []
+
+    cur = float(start_s) - sign * step
+    while (cur >= -1e-9) if sign > 0.0 else (cur <= 1e-9):
+        s_val = 0.0 if abs(float(cur)) <= 1e-9 else float(cur)
+        out.append(float(s_val))
+        if abs(float(s_val)) <= 1e-9:
+            break
+        cur -= sign * step
+    if past > 1e-9:
+        cur = -sign * step
+        while abs(float(cur)) <= past + 1e-9:
+            out.append(float(cur))
+            cur -= sign * step
+        if not out or abs(float(out[-1])) < past - 1e-9:
+            out.append(float(-sign * past))
+
+    dedup: list[float] = []
+    seen: set[float] = set()
+    for s_val in out:
+        key = round(float(s_val), 6)
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(float(s_val))
+    return dedup
+
+
 def _build_continuous_line_from_crossline(
     *,
     crossline: LineString,
@@ -2372,6 +2410,13 @@ def _evaluate_node(
     s_drivezone_split_source_rev: str | None = None
     first_divstrip_hit_s_rev: float | None = None
     best_divstrip_dist_m_rev: float | None = None
+    drivezone_backtrack_past_node_m = max(
+        0.0,
+        float(params.get("drivezone_split_backtrack_past_node_m", 20.0)),
+    )
+    drivezone_backtrack_used = False
+    drivezone_backtrack_cross_node = False
+    drivezone_backtrack_candidate_count = 0
 
     forward_missing_ref = bool(divstrip_ref_s is None and s_drivezone_split is None)
     first_hit_no_split = bool(
@@ -2486,6 +2531,10 @@ def _evaluate_node(
         "reverse_tip_not_improved": bool(reverse_tip_not_improved),
         "reverse_search_max_m": float(reverse_tip_max_m),
         "reverse_trigger": reverse_trigger,
+        "drivezone_backtrack_used": bool(drivezone_backtrack_used),
+        "drivezone_backtrack_cross_node": bool(drivezone_backtrack_cross_node),
+        "drivezone_backtrack_candidate_count": int(drivezone_backtrack_candidate_count),
+        "drivezone_backtrack_past_node_m": float(drivezone_backtrack_past_node_m),
         "ref_s_forward_m": None if ref_s_forward is None else float(ref_s_forward),
         "position_source_forward": None if position_source_forward == "none" else str(position_source_forward),
         "ref_s_reverse_m": None if ref_s_reverse is None else float(ref_s_reverse),
@@ -2688,6 +2737,120 @@ def _evaluate_node(
             dedup_candidates.append(float(s_val))
         scan_candidates = dedup_candidates
 
+    def _probe_scan_candidates(
+        scan_values: list[float],
+        *,
+        start_rank: int,
+    ) -> tuple[list[dict[str, Any]], int, int, int, int]:
+        local_hits: list[dict[str, Any]] = []
+        local_seq_pre_candidates = 0
+        local_seq_filtered_out = 0
+        local_guard_reject_no_split_count = 0
+        local_guard_reject_divstrip_intersect_count = 0
+        for idx, s_probe in enumerate(scan_values):
+            rank = int(start_rank + idx)
+            if guard_near_zero_tip_projection and abs(float(s_probe)) < float(tip_projection_guard_min_abs_m) - 1e-9:
+                continue
+            crossline_probe = LocalFrame.from_tangent(
+                origin_xy=(float(node.point.x), float(node.point.y)),
+                tangent_xy=scan_vec,
+            ).crossline(
+                scan_dist_m=float(s_probe),
+                cross_half_len_m=float(output_cross_half_len_m),
+            )
+            pieces_probe = segment_drivezone_pieces(
+                segment=crossline_probe,
+                drivezone_union=drivezone_union,
+                min_piece_len_m=min_piece_len_m,
+            )
+            if not pieces_probe:
+                continue
+            local_seq_pre_candidates += 1
+            if required_prev_abs is not None and chain_offset is not None:
+                abs_s_candidate = _compute_abs_s(
+                    is_diverge=bool(is_diverge),
+                    is_merge=bool(is_merge),
+                    node_offset_m=float(chain_offset),
+                    s_local=float(s_probe),
+                )
+                if abs_s_candidate is None or float(abs_s_candidate) <= float(required_prev_abs) + 1e-9:
+                    local_seq_filtered_out += 1
+                    continue
+            center_probe = Point(
+                float(node.point.x) + float(scan_vec[0]) * float(s_probe),
+                float(node.point.y) + float(scan_vec[1]) * float(s_probe),
+            )
+            center_s_probe = float(crossline_probe.project(center_probe))
+            has_center_piece = False
+            piece_info_probe: list[tuple[LineString, float, float, float]] = []
+            for piece in pieces_probe:
+                vals: list[float] = []
+                for coord in list(piece.coords):
+                    if len(coord) < 2:
+                        continue
+                    vals.append(float(crossline_probe.project(Point(float(coord[0]), float(coord[1])))))
+                if not vals:
+                    continue
+                s0 = float(min(vals))
+                s1 = float(max(vals))
+                sm = 0.5 * (s0 + s1)
+                piece_info_probe.append((piece, s0, s1, sm))
+                if s0 - 1e-6 <= center_s_probe <= s1 + 1e-6:
+                    has_center_piece = True
+            selected_piece_div_dist_m: float | None = None
+            if piece_info_probe and divstrip_union is not None and (not divstrip_union.is_empty):
+                center_hits_probe = [x for x in piece_info_probe if float(x[1]) - 1e-6 <= center_s_probe <= float(x[2]) + 1e-6]
+                if center_hits_probe:
+                    selected_piece_probe = min(
+                        center_hits_probe,
+                        key=lambda x: (
+                            abs(float(x[3]) - center_s_probe),
+                            -float(x[0].length),
+                        ),
+                    )
+                else:
+                    selected_piece_probe = min(
+                        piece_info_probe,
+                        key=lambda x: (
+                            min(abs(center_s_probe - float(x[1])), abs(center_s_probe - float(x[2])), abs(center_s_probe - float(x[3]))),
+                            abs(float(x[3]) - center_s_probe),
+                            -float(x[0].length),
+                        ),
+                    )
+                selected_piece_div_dist_m = float(selected_piece_probe[0].distance(divstrip_union))
+            raw_count = int(len(pieces_probe))
+            if guard_near_zero_tip_projection:
+                split_ok = bool(raw_count >= 2)
+                div_clear = bool(
+                    selected_piece_div_dist_m is not None
+                    and float(selected_piece_div_dist_m) > float(div_tol) + 1e-9
+                )
+                if not split_ok:
+                    local_guard_reject_no_split_count += 1
+                if not div_clear:
+                    local_guard_reject_divstrip_intersect_count += 1
+                if not (split_ok and div_clear):
+                    continue
+            local_hits.append(
+                {
+                    "rank": int(rank),
+                    "s": float(s_probe),
+                    "crossline": crossline_probe,
+                    "pieces_raw": list(pieces_probe),
+                    "has_center_piece": bool(has_center_piece),
+                    "has_extra": bool(len(pieces_probe) > 1),
+                    "raw_count": int(raw_count),
+                    "selected_piece_div_dist_m": None if selected_piece_div_dist_m is None else float(selected_piece_div_dist_m),
+                }
+            )
+        return (
+            local_hits,
+            int(local_seq_pre_candidates),
+            int(local_seq_filtered_out),
+            int(local_guard_reject_no_split_count),
+            int(local_guard_reject_divstrip_intersect_count),
+        )
+
     chosen_scan_dist: float | None = None
     output_crossline: LineString | None = None
     output_pieces_raw: list[LineString] = []
@@ -2697,101 +2860,15 @@ def _evaluate_node(
     seq_filtered_out = 0
     guard_reject_no_split_count = 0
     guard_reject_divstrip_intersect_count = 0
-    for rank, s_probe in enumerate(scan_candidates):
-        if guard_near_zero_tip_projection and abs(float(s_probe)) < float(tip_projection_guard_min_abs_m) - 1e-9:
-            continue
-        crossline_probe = LocalFrame.from_tangent(
-            origin_xy=(float(node.point.x), float(node.point.y)),
-            tangent_xy=scan_vec,
-        ).crossline(
-            scan_dist_m=float(s_probe),
-            cross_half_len_m=float(output_cross_half_len_m),
-        )
-        pieces_probe = segment_drivezone_pieces(
-            segment=crossline_probe,
-            drivezone_union=drivezone_union,
-            min_piece_len_m=min_piece_len_m,
-        )
-        if not pieces_probe:
-            continue
-        seq_pre_candidates += 1
-        if required_prev_abs is not None and chain_offset is not None:
-            abs_s_candidate = _compute_abs_s(
-                is_diverge=bool(is_diverge),
-                is_merge=bool(is_merge),
-                node_offset_m=float(chain_offset),
-                s_local=float(s_probe),
-            )
-            if abs_s_candidate is None or float(abs_s_candidate) <= float(required_prev_abs) + 1e-9:
-                seq_filtered_out += 1
-                continue
-        center_probe = Point(
-            float(node.point.x) + float(scan_vec[0]) * float(s_probe),
-            float(node.point.y) + float(scan_vec[1]) * float(s_probe),
-        )
-        center_s_probe = float(crossline_probe.project(center_probe))
-        has_center_piece = False
-        piece_info_probe: list[tuple[LineString, float, float, float]] = []
-        for piece in pieces_probe:
-            vals: list[float] = []
-            for coord in list(piece.coords):
-                if len(coord) < 2:
-                    continue
-                vals.append(float(crossline_probe.project(Point(float(coord[0]), float(coord[1])))))
-            if not vals:
-                continue
-            s0 = float(min(vals))
-            s1 = float(max(vals))
-            sm = 0.5 * (s0 + s1)
-            piece_info_probe.append((piece, s0, s1, sm))
-            if s0 - 1e-6 <= center_s_probe <= s1 + 1e-6:
-                has_center_piece = True
-        selected_piece_div_dist_m: float | None = None
-        if piece_info_probe and divstrip_union is not None and (not divstrip_union.is_empty):
-            center_hits_probe = [x for x in piece_info_probe if float(x[1]) - 1e-6 <= center_s_probe <= float(x[2]) + 1e-6]
-            if center_hits_probe:
-                selected_piece_probe = min(
-                    center_hits_probe,
-                    key=lambda x: (
-                        abs(float(x[3]) - center_s_probe),
-                        -float(x[0].length),
-                    ),
-                )
-            else:
-                selected_piece_probe = min(
-                    piece_info_probe,
-                    key=lambda x: (
-                        min(abs(center_s_probe - float(x[1])), abs(center_s_probe - float(x[2])), abs(center_s_probe - float(x[3]))),
-                        abs(float(x[3]) - center_s_probe),
-                        -float(x[0].length),
-                    ),
-                )
-            selected_piece_div_dist_m = float(selected_piece_probe[0].distance(divstrip_union))
-        raw_count = int(len(pieces_probe))
-        if guard_near_zero_tip_projection:
-            split_ok = bool(raw_count >= 2)
-            div_clear = bool(
-                selected_piece_div_dist_m is not None
-                and float(selected_piece_div_dist_m) > float(div_tol) + 1e-9
-            )
-            if not split_ok:
-                guard_reject_no_split_count += 1
-            if not div_clear:
-                guard_reject_divstrip_intersect_count += 1
-            if not (split_ok and div_clear):
-                continue
-        candidate_hits.append(
-            {
-                "rank": int(rank),
-                "s": float(s_probe),
-                "crossline": crossline_probe,
-                "pieces_raw": list(pieces_probe),
-                "has_center_piece": bool(has_center_piece),
-                "has_extra": bool(len(pieces_probe) > 1),
-                "raw_count": int(raw_count),
-                "selected_piece_div_dist_m": None if selected_piece_div_dist_m is None else float(selected_piece_div_dist_m),
-            }
-        )
+    initial_hits, seq_pre_delta, seq_filtered_delta, guard_no_split_delta, guard_div_delta = _probe_scan_candidates(
+        scan_candidates,
+        start_rank=0,
+    )
+    candidate_hits.extend(initial_hits)
+    seq_pre_candidates += int(seq_pre_delta)
+    seq_filtered_out += int(seq_filtered_delta)
+    guard_reject_no_split_count += int(guard_no_split_delta)
+    guard_reject_divstrip_intersect_count += int(guard_div_delta)
 
     if guard_near_zero_tip_projection and (not candidate_hits):
         output_crossline = LocalFrame.from_tangent(
@@ -2861,8 +2938,53 @@ def _evaluate_node(
         )
         return out
 
+    backtrack_hits: list[dict[str, Any]] = []
+    backtrack_single_hit: dict[str, Any] | None = None
+    drivezone_backtrack_mode = bool(
+        _is_drivezone_position_source(position_source)
+        and (not exact_drivezone_split_ref)
+        and (not reverse_tip_used)
+        and float(drivezone_backtrack_past_node_m) > 1e-9
+    )
+    window_has_single_piece = any(int(x.get("raw_count", 0)) == 1 for x in initial_hits)
+    if drivezone_backtrack_mode and (not window_has_single_piece):
+        backtrack_candidates = _build_drivezone_backtrack_candidates(
+            ref_s=float(ref_s),
+            start_s=float(target_in_window),
+            probe_step=float(probe_step),
+            past_node_m=float(drivezone_backtrack_past_node_m),
+        )
+        drivezone_backtrack_candidate_count = int(len(backtrack_candidates))
+        reverse_diag_payload["drivezone_backtrack_candidate_count"] = int(drivezone_backtrack_candidate_count)
+        if backtrack_candidates:
+            backtrack_hits, seq_pre_delta, seq_filtered_delta, _guard_no_split_delta, _guard_div_delta = _probe_scan_candidates(
+                backtrack_candidates,
+                start_rank=len(scan_candidates),
+            )
+            candidate_hits.extend(backtrack_hits)
+            seq_pre_candidates += int(seq_pre_delta)
+            seq_filtered_out += int(seq_filtered_delta)
+            for hit in backtrack_hits:
+                if int(hit.get("raw_count", 0)) == 1 and bool(hit.get("has_center_piece", False)):
+                    backtrack_single_hit = hit
+                    break
+            if backtrack_single_hit is None:
+                for hit in backtrack_hits:
+                    if int(hit.get("raw_count", 0)) == 1:
+                        backtrack_single_hit = hit
+                        break
+
     if candidate_hits:
-        if prefer_non_intersect_reverse:
+        if backtrack_single_hit is not None:
+            best_hit = backtrack_single_hit
+            drivezone_backtrack_used = True
+            drivezone_backtrack_cross_node = bool(float(best_hit.get("s", 0.0)) * float(ref_s) < -1e-9)
+            split_pick_source = (
+                f"{split_pick_source}_backtrack_cross_node_single_piece"
+                if drivezone_backtrack_cross_node
+                else f"{split_pick_source}_backtrack_single_piece"
+            )
+        elif prefer_non_intersect_reverse:
             best_hit = min(
                 candidate_hits,
                 key=lambda x: (
@@ -2896,6 +3018,8 @@ def _evaluate_node(
         has_extra_piece = bool(best_hit["has_extra"])
         if guard_near_zero_tip_projection and s_drivezone_split_out is None and int(best_hit.get("raw_count", 0)) >= 2:
             s_drivezone_split_out = float(chosen_scan_dist)
+        reverse_diag_payload["drivezone_backtrack_used"] = bool(drivezone_backtrack_used)
+        reverse_diag_payload["drivezone_backtrack_cross_node"] = bool(drivezone_backtrack_cross_node)
 
     if output_crossline is None:
         output_crossline = LocalFrame.from_tangent(
@@ -3423,6 +3547,10 @@ def _evaluate_node(
         "reverse_tip_not_improved": bool(reverse_tip_not_improved),
         "reverse_search_max_m": float(reverse_tip_max_m),
         "reverse_trigger": reverse_trigger,
+        "drivezone_backtrack_used": bool(drivezone_backtrack_used),
+        "drivezone_backtrack_cross_node": bool(drivezone_backtrack_cross_node),
+        "drivezone_backtrack_candidate_count": int(drivezone_backtrack_candidate_count),
+        "drivezone_backtrack_past_node_m": float(drivezone_backtrack_past_node_m),
         "ref_s_forward_m": None if ref_s_forward is None else float(ref_s_forward),
         "position_source_forward": None if position_source_forward == "none" else str(position_source_forward),
         "ref_s_reverse_m": None if ref_s_reverse is None else float(ref_s_reverse),
