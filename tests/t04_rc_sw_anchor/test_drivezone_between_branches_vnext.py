@@ -478,7 +478,7 @@ def test_drivezone_split_vertex_not_shifted_by_tip_projection(tmp_path: Path, mo
     assert abs(float(item.get("s_chosen_m", -999.0)) - float(item.get("s_drivezone_split_m", -998.0))) <= 1e-6
 
 
-def test_drivezone_split_output_uses_gap_instead_of_center_piece(tmp_path: Path) -> None:
+def test_drivezone_split_output_keeps_center_piece_without_divstrip(tmp_path: Path) -> None:
     data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
     data["divstrip_path"].unlink()
     _rewrite_drivezone_split_band(data["drivezone_path"])
@@ -490,10 +490,10 @@ def test_drivezone_split_output_uses_gap_instead_of_center_piece(tmp_path: Path)
     )
     item = _read_json(out_dir / "anchors.json")["items"][0]
     assert str(item.get("position_source")) == "drivezone_split"
-    assert str(item.get("clip_piece_type")) == "drivezone_split_gap"
-    assert int(item.get("selected_piece_count", 0)) == 2
-    assert float(item.get("gap_len_m", 0.0)) > 0.0
-    assert abs(float(item.get("clipped_len_m", -1.0)) - float(item.get("gap_len_m", -2.0))) <= 1e-6
+    assert str(item.get("clip_piece_type")) in {"continuous_center_piece", "continuous_nearest_piece_fallback"}
+    assert int(item.get("selected_piece_count", 0)) == 1
+    assert item.get("gap_len_m") is None
+    assert float(item.get("clipped_len_m", 0.0)) > 5.0
 
 
 def test_near_node_extended_split_multipiece_without_divstrip_is_fail(tmp_path: Path, monkeypatch) -> None:
@@ -538,7 +538,7 @@ def test_near_node_extended_split_multipiece_without_divstrip_is_fail(tmp_path: 
     assert str(item.get("s_drivezone_split_source")) == "extended"
     assert abs(float(item.get("scan_dist_m", -1.0)) - 1.0) <= 1e-6
     assert int(item.get("pieces_count", 0)) == 3
-    assert str(item.get("clip_piece_type")) == "drivezone_split_gap"
+    assert str(item.get("clip_piece_type")) == "continuous_center_piece"
     assert bool(item.get("has_divstrip_nearby", True)) is False
     bp = _read_json(out_dir / "breakpoints.json")
     by_code = {str(x.get("code")): int(x.get("count", 0)) for x in bp.get("by_code", [])}
