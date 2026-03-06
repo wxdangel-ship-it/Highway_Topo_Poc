@@ -250,6 +250,32 @@ def _rewrite_divstrip_merge_priority(path: Path) -> None:
     _write_json(path, payload)
 
 
+def _rewrite_divstrip_wrong_then_target(path: Path) -> None:
+    payload = _read_json(path)
+    cx, cy = _layer_center_xy(path)
+    payload["features"] = [
+        {
+            "type": "Feature",
+            "properties": {"name": "wrong_earlier_component"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [_box(cx, cy + 35.0, -2.0, -3.0, 2.0, 3.0)],
+            },
+        },
+        {
+            "type": "Feature",
+            "properties": {"name": "target_near_split"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [_box(cx, cy + 20.0, -2.0, -3.0, 2.0, 3.0)],
+            },
+        },
+    ]
+    payload.pop("crs", None)
+    payload["crs"] = {"type": "name", "properties": {"name": "EPSG:3857"}}
+    _write_json(path, payload)
+
+
 def _rewrite_drivezone_crs_unknown(path: Path) -> None:
     payload = _read_json(path)
     payload.pop("crs", None)
@@ -412,6 +438,26 @@ def test_divstrip_far_reference_must_not_override_drivezone_split(tmp_path: Path
     far_scan = float(far_item.get("scan_dist_m", 0.0))
     assert abs(far_scan - base_scan) <= 2.0
     assert str(far_item.get("split_pick_source", "")) == "drivezone_split_window_divstrip_far_ignored"
+
+
+def test_divstrip_component_near_split_selected_over_wrong_first_hit(tmp_path: Path) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    _rewrite_drivezone_split_band(data["drivezone_path"])
+    _rewrite_divstrip_wrong_then_target(data["divstrip_path"])
+    _data, out_dir = _run_runtime(
+        tmp_path,
+        run_id="divstrip_component_near_split_selected",
+        data=data,
+        focus_node_ids=[str(data["node_merge"])],
+    )
+    item = _read_json(out_dir / "anchors.json")["items"][0]
+    assert str(item.get("status")) in {"ok", "suspect"}
+    assert bool(item.get("anchor_found", False)) is True
+    assert str(item.get("split_pick_source", "")).startswith("divstrip_")
+    assert float(item.get("s_divstrip_m", 0.0)) >= 20.0
+    assert float(item.get("s_divstrip_m", 0.0)) >= float(item.get("s_drivezone_split_m", 0.0)) - 2.0
+    assert bool(item.get("divstrip_component_selected_by_split", False)) is True
+    assert int(item.get("divstrip_components_count", 0)) >= 2
 
 
 def test_divstrip_hard_window_requires_split_within_1m(tmp_path: Path) -> None:
