@@ -26,6 +26,7 @@ from .k16_ops import (
 )
 from .local_frame import LocalFrame
 from .metrics_breakpoints import (
+    BP_ANCHOR_GAP_UNSTABLE,
     BP_AMBIGUOUS_KIND,
     BP_CRS_UNKNOWN,
     BP_DIVSTRIP_NON_INTERSECT_NOT_FOUND,
@@ -877,6 +878,37 @@ def _scan_first_divstrip_hit(
         if idx == 0:
             seg0_intersects = bool(seg.intersects(divstrip_geom) or float(dist) <= 1e-9)
     return first_hit_s, best_dist_m, seg0_intersects
+
+
+def _pick_piece_pair_around_center(
+    *,
+    piece_info: list[tuple[LineString, float, float, float]],
+    center_s: float,
+) -> tuple[tuple[LineString, float, float, float], tuple[LineString, float, float, float]] | None:
+    if len(piece_info) < 2:
+        return None
+    left = [x for x in piece_info if float(x[3]) <= float(center_s)]
+    right = [x for x in piece_info if float(x[3]) >= float(center_s)]
+
+    chosen: list[tuple[LineString, float, float, float]] = []
+    if left:
+        chosen.append(min(left, key=lambda x: abs(float(center_s) - float(x[3]))))
+    if right:
+        cand = min(right, key=lambda x: abs(float(x[3]) - float(center_s)))
+        if not chosen or cand is not chosen[0]:
+            chosen.append(cand)
+    if len(chosen) < 2:
+        chosen = sorted(
+            piece_info,
+            key=lambda x: (
+                abs(float(x[3]) - float(center_s)),
+                -float(x[0].length),
+            ),
+        )[:2]
+    if len(chosen) < 2:
+        return None
+    chosen = sorted(chosen, key=lambda x: float(x[1]))
+    return chosen[0], chosen[1]
 
 
 def _build_ref_window_away_from_node(*, ref_s: float, window_m: float) -> tuple[float, float, float]:
@@ -3154,6 +3186,10 @@ def _evaluate_node(
 
     left_extended_to_piece_edge = False
     right_extended_to_piece_edge = False
+    split_gap_used = False
+    gap_len = None
+    selected_lines = [selected_piece[0]]
+    selected_piece_lens = [float(selected_piece[0].length)]
     edge_touch_tol_m = 0.1
     if drivezone_union is not None and (not drivezone_union.is_empty):
         p0_probe = output_crossline.interpolate(span_start)
@@ -3166,6 +3202,22 @@ def _evaluate_node(
         if right_probe_dist > edge_touch_tol_m + 1e-9 and span_end < base_s1 - 1e-9:
             span_end = base_s1
             right_extended_to_piece_edge = True
+
+    if _is_drivezone_position_source(position_source_final) and abs(float(scan_dist)) >= max(0.5, 0.5 * float(step)) - 1e-9:
+        split_pair = _pick_piece_pair_around_center(piece_info=piece_info, center_s=float(center_s))
+        if split_pair is not None:
+            left_piece_info, right_piece_info = split_pair
+            gap_start = float(left_piece_info[2])
+            gap_end = float(right_piece_info[1])
+            if gap_end - gap_start > 1e-6:
+                span_start = float(gap_start)
+                span_end = float(gap_end)
+                split_gap_used = True
+                gap_len = float(gap_end - gap_start)
+                selected_lines = [left_piece_info[0], right_piece_info[0]]
+                selected_piece_lens = [float(left_piece_info[0].length), float(right_piece_info[0].length)]
+                left_extended_to_piece_edge = False
+                right_extended_to_piece_edge = False
 
     if (not math.isfinite(span_start)) or (not math.isfinite(span_end)) or (span_end - span_start) <= 1e-6:
         _add_bp(
@@ -3228,9 +3280,6 @@ def _evaluate_node(
     left_end_to_dz_edge = None if drivezone_union is None else float(p0.distance(drivezone_union.boundary))
     right_end_to_dz_edge = None if drivezone_union is None else float(p1.distance(drivezone_union.boundary))
     gap_mid = final_geom.interpolate(0.5, normalized=True) if final_geom.length > 1e-9 else center_pt
-    gap_len = None
-    selected_lines = [selected_piece[0]]
-    selected_piece_lens = [float(selected_piece[0].length)]
 
     has_divstrip_nearby = False
     dist_line_to_div = None
@@ -3263,6 +3312,36 @@ def _evaluate_node(
 
     piece_lens = [float(ln.length) for ln in output_pieces_raw]
     clipped_len = float(final_geom.length)
+    if split_gap_used:
+        clip_piece_type = "drivezone_split_gap"
+    else:
+        clip_piece_type = "continuous_center_piece" if center_piece_hit else "continuous_nearest_piece_fallback"
+    near_node_extended_split_unstable = bool(
+        _is_drivezone_position_source(position_source_final)
+        and str(s_drivezone_split_source_out or "") == "extended"
+        and abs(float(scan_dist)) > 1e-9
+        and abs(float(scan_dist)) <= float(step) + 1e-9
+        and (not has_divstrip_nearby)
+        and (
+            int(len(output_pieces_raw)) >= 3
+            or str(clip_piece_type) == "continuous_center_piece"
+        )
+    )
+    if near_node_extended_split_unstable:
+        _add_bp(
+            code=BP_ANCHOR_GAP_UNSTABLE,
+            severity="hard",
+            message="near_node_extended_split_unstable",
+            extra={
+                "scan_dist_m": float(scan_dist),
+                "scan_step_m": float(step),
+                "pieces_count": int(len(output_pieces_raw)),
+                "clip_piece_type": str(clip_piece_type),
+                "has_divstrip_nearby": bool(has_divstrip_nearby),
+                "position_source": str(position_source_final),
+                "s_drivezone_split_source": None if s_drivezone_split_source_out is None else str(s_drivezone_split_source_out),
+            },
+        )
     flags: list[str] = []
     if scan_dist > float(params.get("scan_near_limit_m", 20.0)):
         flags.append("scan_dist_gt_near_limit")
@@ -3274,12 +3353,16 @@ def _evaluate_node(
         flags.append("divstrip_ref_used")
     if divstrip_ref_offset is not None and divstrip_ref_offset > float(divstrip_preferred_window_m):
         flags.append("divstrip_ref_offset_gt_window")
-    if not center_piece_hit:
+    if split_gap_used:
+        flags.append("drivezone_split_gap_used")
+    elif not center_piece_hit:
         flags.append("center_piece_missing_fallback")
     if left_extended_to_piece_edge:
         flags.append("left_extended_to_piece_edge")
     if right_extended_to_piece_edge:
         flags.append("right_extended_to_piece_edge")
+    if near_node_extended_split_unstable:
+        flags.append("near_node_extended_split_unstable")
 
     status = "suspect" if flags else "ok"
     if hard_failed:
@@ -3296,7 +3379,6 @@ def _evaluate_node(
     conf = compute_confidence(trigger=trigger, scan_dist_m=scan_dist)
     anchor_found = bool((not hard_failed) and status in {"ok", "suspect"})
     dist_line_to_dz_edge = None if drivezone_union is None else float(final_geom.distance(drivezone_union.boundary))
-    clip_piece_type = "continuous_center_piece" if center_piece_hit else "continuous_nearest_piece_fallback"
     abs_s_chosen = _compute_abs_s(
         is_diverge=bool(is_diverge),
         is_merge=bool(is_merge),
