@@ -478,6 +478,73 @@ def test_drivezone_split_vertex_not_shifted_by_tip_projection(tmp_path: Path, mo
     assert abs(float(item.get("s_chosen_m", -999.0)) - float(item.get("s_drivezone_split_m", -998.0))) <= 1e-6
 
 
+def test_drivezone_split_output_uses_gap_instead_of_center_piece(tmp_path: Path) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    data["divstrip_path"].unlink()
+    _rewrite_drivezone_split_band(data["drivezone_path"])
+    _data, out_dir = _run_runtime(
+        tmp_path,
+        run_id="drivezone_split_gap_output",
+        data=data,
+        focus_node_ids=[str(data["node_merge"])],
+    )
+    item = _read_json(out_dir / "anchors.json")["items"][0]
+    assert str(item.get("position_source")) == "drivezone_split"
+    assert str(item.get("clip_piece_type")) == "drivezone_split_gap"
+    assert int(item.get("selected_piece_count", 0)) == 2
+    assert float(item.get("gap_len_m", 0.0)) > 0.0
+    assert abs(float(item.get("clipped_len_m", -1.0)) - float(item.get("gap_len_m", -2.0))) <= 1e-6
+
+
+def test_near_node_extended_split_multipiece_without_divstrip_is_fail(tmp_path: Path, monkeypatch) -> None:
+    data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
+    data["divstrip_path"].unlink()
+    node_features = _read_json(data["global_node_path"]).get("features", [])
+    node_feat = next(
+        feat
+        for feat in node_features
+        if int(feat.get("properties", {}).get("id", -1)) == int(data["node_diverge"])
+    )
+    node_y = float(node_feat.get("geometry", {}).get("coordinates", [0.0, 0.0])[1])
+
+    def _piece(segment: LineString, start_norm: float, end_norm: float) -> LineString:
+        p0 = segment.interpolate(float(start_norm), normalized=True)
+        p1 = segment.interpolate(float(end_norm), normalized=True)
+        return LineString([(float(p0.x), float(p0.y)), (float(p1.x), float(p1.y))])
+
+    def _fake_segment_drivezone_pieces(*, segment, drivezone_union, min_piece_len_m):
+        cy = float(segment.centroid.y)
+        if cy < node_y + 0.75:
+            return [] if float(segment.length) <= 1e-6 else [LineString(segment.coords)]
+        if float(segment.length) < 5.0:
+            return [LineString(segment.coords)]
+        return [
+            _piece(segment, 0.05, 0.28),
+            _piece(segment, 0.43, 0.57),
+            _piece(segment, 0.72, 0.95),
+        ]
+
+    monkeypatch.setattr(runner_mod, "segment_drivezone_pieces", _fake_segment_drivezone_pieces)
+    _data, out_dir = _run_runtime(
+        tmp_path,
+        run_id="near_node_extended_split_multipiece_fail",
+        data=data,
+        focus_node_ids=[str(data["node_diverge"])],
+    )
+    item = _read_json(out_dir / "anchors.json")["items"][0]
+    assert str(item.get("status")) == "fail"
+    assert bool(item.get("anchor_found", True)) is False
+    assert str(item.get("position_source")) == "drivezone_split"
+    assert str(item.get("s_drivezone_split_source")) == "extended"
+    assert abs(float(item.get("scan_dist_m", -1.0)) - 1.0) <= 1e-6
+    assert int(item.get("pieces_count", 0)) == 3
+    assert str(item.get("clip_piece_type")) == "drivezone_split_gap"
+    assert bool(item.get("has_divstrip_nearby", True)) is False
+    bp = _read_json(out_dir / "breakpoints.json")
+    by_code = {str(x.get("code")): int(x.get("count", 0)) for x in bp.get("by_code", [])}
+    assert by_code.get("ANCHOR_GAP_UNSTABLE", 0) >= 1
+
+
 def test_divstrip_component_near_split_selected_over_wrong_first_hit(tmp_path: Path) -> None:
     data = create_synth_patch(tmp_path, kind_key="kind", id_mode="id", crs_mode="3857")
     _rewrite_drivezone_split_band(data["drivezone_path"])
