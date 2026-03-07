@@ -1249,6 +1249,53 @@ def test_same_pair_multi_road_selection_can_use_shape_ref_to_keep_parallel_branc
     assert len(selected) == 2
 
 
+def test_same_pair_branch_supports_use_xsec_station_gap_to_split_close_parallel_events() -> None:
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t0", "t1"},
+        support_event_count=2,
+        traj_segments=[
+            LineString([(0.0, 1.0), (10.0, 1.2)]),
+            LineString([(0.0, 4.0), (10.0, 4.1)]),
+        ],
+        src_cross_points=[Point(0.0, 1.0), Point(0.0, 4.0)],
+        dst_cross_points=[Point(10.0, 1.2), Point(10.0, 4.1)],
+        repr_traj_ids=["t0", "t1"],
+    )
+    branch_defs = [
+        {
+            "branch_id": "1_2__b0",
+            "shape_ref_metric": LineString([(0.0, 0.0), (10.0, 0.0)]),
+            "src_station_m": 1.0,
+            "dst_station_m": 1.2,
+        },
+        {
+            "branch_id": "1_2__b1",
+            "shape_ref_metric": LineString([(0.0, 0.0), (10.0, 0.0)]),
+            "src_station_m": 4.0,
+            "dst_station_m": 4.1,
+        },
+    ]
+    src_xsec = LineString([(0.0, 0.0), (0.0, 6.0)])
+    dst_xsec = LineString([(10.0, 0.0), (10.0, 6.0)])
+
+    out = pipeline._build_same_pair_multichain_branch_supports(
+        support,
+        branch_defs=branch_defs,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+    )
+
+    assert len(out) == 2
+    assert out[0][0]["branch_id"] == "1_2__b0"
+    assert out[1][0]["branch_id"] == "1_2__b1"
+    assert int(out[0][1].support_event_count) == 1
+    assert int(out[1][1].support_event_count) == 1
+    assert abs(float(out[0][1].src_cross_points[0].y) - 1.0) <= 1e-6
+    assert abs(float(out[1][1].src_cross_points[0].y) - 4.0) <= 1e-6
+
+
 def test_allowed_pairs_skips_non_topology_src(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     src_key = "t:cross:1"
     dst_key = "t:cross:2"

@@ -236,8 +236,10 @@ def test_traj_surface_enforced_endpoint_outside_is_hard(tmp_path: Path) -> None:
 
     assert result["traj_surface_enforced"] is True
     assert "ROAD_OUTSIDE_TRAJ_SURFACE" in hard_flags
+    assert str(result.get("traj_surface_gate_failure_mode")) == "endpoint_both"
     assert not soft_flags
     assert any(str(bp.get("severity")) == "hard" for bp in breakpoints)
+    assert any("gate_failure_mode=endpoint_both" in str(bp.get("hint")) for bp in breakpoints)
 
 
 def test_traj_surface_endpoint_hole_tolerance_allows_small_miss(tmp_path: Path) -> None:

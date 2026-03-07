@@ -540,6 +540,10 @@ def build_pair_supports(
                     closure_failure_mode = "expanded_no_allowed_dst_closure"
                 else:
                     closure_failure_mode = "no_candidate"
+                raw_hit_topk = ",".join(
+                    f"{int(dst)}:{float(hit_dist):.1f}"
+                    for _key, dst, hit_dist, _hops in list(search.raw_hit_targets)[:5]
+                )
                 unresolved_events.append(
                     {
                         "road_id": f"na_{ev.nodeid}_{traj_id}_{ev.seq_idx}",
@@ -560,6 +564,7 @@ def build_pair_supports(
                             f"dst_found={int(len(dst_nodeids_found))};"
                             f"raw_hit_targets={int(search.raw_hit_target_count)};"
                             f"allowed_hit_targets={int(search.allowed_hit_target_count)};"
+                            f"raw_hit_topk={raw_hit_topk if raw_hit_topk else 'na'};"
                             f"closure_failure_mode={closure_failure_mode}"
                         ),
                         "max_explored_dist_m": float(search.max_explored_dist_m),
@@ -816,6 +821,7 @@ class _SearchResult:
     explored_node_count: int
     explored_stitch_candidates: int
     hit_targets: list[tuple[str, int, float, int]]
+    raw_hit_targets: list[tuple[str, int, float, int]]
     raw_hit_target_count: int
     allowed_hit_target_count: int
     filtered_hit_target_count: int
@@ -1157,6 +1163,55 @@ def _search_next_crossing(
     }
     proximity_hit_buffer_m = float(max(0.0, allowed_dst_close_hit_buffer_m))
 
+    def _record_allowed_proximity_hits(
+        *,
+        node_key: str,
+        node_point: Point | None,
+        dist_m: float,
+        stitch_hops: int,
+    ) -> None:
+        if allowed_dst_filter is None or proximity_hit_buffer_m <= 0.0:
+            return
+        if not isinstance(node_point, Point) or node_point.is_empty:
+            return
+        for dst_nodeid in allowed_dst_filter:
+            dst_points = allowed_dst_points.get(int(dst_nodeid), [])
+            if not dst_points:
+                continue
+            point_dist = float("inf")
+            for dst_pt in dst_points:
+                try:
+                    curr_dist = float(node_point.distance(dst_pt))
+                except Exception:
+                    continue
+                if curr_dist < point_dist:
+                    point_dist = float(curr_dist)
+            if not np.isfinite(point_dist) or point_dist > proximity_hit_buffer_m + 1e-9:
+                continue
+            prev_prox = proximity_hit_by_dst.get(int(dst_nodeid))
+            curr_key = (float(point_dist), float(dist_m), int(stitch_hops), str(node_key))
+            if prev_prox is None:
+                proximity_hit_by_dst[int(dst_nodeid)] = (
+                    str(node_key),
+                    float(dist_m),
+                    int(stitch_hops),
+                    float(point_dist),
+                )
+            else:
+                prev_key = (
+                    float(prev_prox[3]),
+                    float(prev_prox[1]),
+                    int(prev_prox[2]),
+                    str(prev_prox[0]),
+                )
+                if curr_key < prev_key:
+                    proximity_hit_by_dst[int(dst_nodeid)] = (
+                        str(node_key),
+                        float(dist_m),
+                        int(stitch_hops),
+                        float(point_dist),
+                    )
+
     while heap:
         dist, hops, key = heapq.heappop(heap)
         rec = best.get(key)
@@ -1204,46 +1259,12 @@ def _search_next_crossing(
                     break
                 # Crossing nodes remain absorbing only when they are viable downstream targets.
                 continue
-        if allowed_dst_filter is not None and proximity_hit_buffer_m > 0.0:
-            node_pt = getattr(node, "point", None)
-            if isinstance(node_pt, Point) and (not node_pt.is_empty):
-                for dst_nodeid in allowed_dst_filter:
-                    dst_points = allowed_dst_points.get(int(dst_nodeid), [])
-                    if not dst_points:
-                        continue
-                    point_dist = float("inf")
-                    for dst_pt in dst_points:
-                        try:
-                            curr_dist = float(node_pt.distance(dst_pt))
-                        except Exception:
-                            continue
-                        if curr_dist < point_dist:
-                            point_dist = float(curr_dist)
-                    if not np.isfinite(point_dist) or point_dist > proximity_hit_buffer_m + 1e-9:
-                        continue
-                    prev_prox = proximity_hit_by_dst.get(int(dst_nodeid))
-                    curr_key = (float(point_dist), float(dist), int(hops), str(key))
-                    if prev_prox is None:
-                        proximity_hit_by_dst[int(dst_nodeid)] = (
-                            str(key),
-                            float(dist),
-                            int(hops),
-                            float(point_dist),
-                        )
-                    else:
-                        prev_key = (
-                            float(prev_prox[3]),
-                            float(prev_prox[1]),
-                            int(prev_prox[2]),
-                            str(prev_prox[0]),
-                        )
-                        if curr_key < prev_key:
-                            proximity_hit_by_dst[int(dst_nodeid)] = (
-                                str(key),
-                                float(dist),
-                                int(hops),
-                                float(point_dist),
-                            )
+        _record_allowed_proximity_hits(
+            node_key=str(key),
+            node_point=getattr(node, "point", None),
+            dist_m=float(dist),
+            stitch_hops=int(hops),
+        )
 
         for edge in edges.get(key, []):
             nd = float(dist + edge.weight)
@@ -1260,6 +1281,14 @@ def _search_next_crossing(
             prev[edge.to_key] = key
             prev_edge[edge.to_key] = edge
             heapq.heappush(heap, (nd, nh, edge.to_key))
+
+    ordered_raw_hits = sorted(
+        (
+            (hit_key, int(dst_nodeid), float(hit_dist), int(hit_hops))
+            for dst_nodeid, (hit_key, hit_dist, hit_hops) in raw_hit_by_dst.items()
+        ),
+        key=lambda it: (float(it[2]), int(it[3]), int(it[1]), str(it[0])),
+    )
 
     if hit_by_dst:
         ordered_hits = sorted(
@@ -1282,6 +1311,7 @@ def _search_next_crossing(
             explored_node_count=int(len(explored_keys)),
             explored_stitch_candidates=int(explored_stitch_candidates),
             hit_targets=list(ordered_hits),
+            raw_hit_targets=list(ordered_raw_hits),
             raw_hit_target_count=int(len(raw_hit_by_dst)),
             allowed_hit_target_count=int(len(hit_by_dst)),
             filtered_hit_target_count=int(max(0, len(raw_hit_by_dst) - len(hit_by_dst))),
@@ -1310,6 +1340,7 @@ def _search_next_crossing(
             explored_node_count=int(len(explored_keys)),
             explored_stitch_candidates=int(explored_stitch_candidates),
             hit_targets=[],
+            raw_hit_targets=list(ordered_raw_hits),
             raw_hit_target_count=int(len(raw_hit_by_dst)),
             allowed_hit_target_count=int(len(hit_by_dst)),
             filtered_hit_target_count=int(max(0, len(raw_hit_by_dst) - len(hit_by_dst))),
@@ -1329,6 +1360,7 @@ def _search_next_crossing(
         explored_node_count=int(len(explored_keys)),
         explored_stitch_candidates=int(explored_stitch_candidates),
         hit_targets=[],
+        raw_hit_targets=list(ordered_raw_hits),
         raw_hit_target_count=int(len(raw_hit_by_dst)),
         allowed_hit_target_count=int(len(hit_by_dst)),
         filtered_hit_target_count=int(max(0, len(raw_hit_by_dst) - len(hit_by_dst))),

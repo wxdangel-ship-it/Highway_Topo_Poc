@@ -5902,6 +5902,7 @@ def _eval_traj_surface_gate(
     result["endpoint_dist_to_traj_surface_dst_m"] = endpoint_dist_dst_m
     result["endpoint_traj_surface_tolerance_used_src"] = bool(endpoint_tol_used_src)
     result["endpoint_traj_surface_tolerance_used_dst"] = bool(endpoint_tol_used_dst)
+    result["traj_surface_gate_failure_mode"] = None
 
     gaps = _station_gap_intervals(stations=stations, valid_mask=valid_mask)
     if gaps:
@@ -5976,7 +5977,16 @@ def _eval_traj_surface_gate(
         and bool(endpoint_in_dst)
     )
     if not pass_gate:
+        if bool(endpoint_in_src) and bool(endpoint_in_dst):
+            gate_failure_mode = "in_ratio_only"
+        elif (not bool(endpoint_in_src)) and (not bool(endpoint_in_dst)):
+            gate_failure_mode = "endpoint_both"
+        elif (not bool(endpoint_in_src)) or (not bool(endpoint_in_dst)):
+            gate_failure_mode = "endpoint_single"
+        else:
+            gate_failure_mode = "mixed"
         hard_flags.add(SOFT_ROAD_OUTSIDE_TRAJ_SURFACE)
+        result["traj_surface_gate_failure_mode"] = str(gate_failure_mode)
         bp = build_breakpoint(
             road=road,
             reason=SOFT_ROAD_OUTSIDE_TRAJ_SURFACE,
@@ -5988,6 +5998,7 @@ def _eval_traj_surface_gate(
                 f"endpoint_src_dist_m={endpoint_dist_src_m if endpoint_dist_src_m is not None else 'na'};"
                 f"endpoint_dst_dist_m={endpoint_dist_dst_m if endpoint_dist_dst_m is not None else 'na'};"
                 f"endpoint_tol_src={bool(endpoint_tol_used_src)};endpoint_tol_dst={bool(endpoint_tol_used_dst)};"
+                f"gate_failure_mode={gate_failure_mode};"
                 f"threshold={in_ratio_min:.2f}"
             ),
         )
@@ -9024,6 +9035,19 @@ def _line_xsec_station(
         return float("inf")
 
 
+def _point_xsec_station(
+    point: Point | None,
+    *,
+    xsec: LineString,
+) -> float:
+    if not isinstance(point, Point) or point.is_empty or not isinstance(xsec, LineString) or xsec.is_empty:
+        return float("inf")
+    try:
+        return float(xsec.project(point))
+    except Exception:
+        return float("inf")
+
+
 def _build_same_pair_multichain_branch_defs(
     anchor_decisions: dict[str, dict[str, Any]],
     *,
@@ -9083,6 +9107,10 @@ def _support_item_distance_to_branch(
     src_pt: Point,
     dst_pt: Point,
     branch_ref: LineString,
+    src_xsec: LineString | None = None,
+    dst_xsec: LineString | None = None,
+    branch_src_station_m: float | None = None,
+    branch_dst_station_m: float | None = None,
 ) -> float:
     try:
         if isinstance(seg, LineString) and (not seg.is_empty) and float(seg.length) > 1e-6:
@@ -9095,7 +9123,18 @@ def _support_item_distance_to_branch(
         d_mid = float(mid.distance(branch_ref))
         d_src = float(src_pt.distance(branch_ref))
         d_dst = float(dst_pt.distance(branch_ref))
-        return float(d_mid + 0.25 * (d_src + d_dst))
+        score = float(d_mid + 0.25 * (d_src + d_dst))
+        if isinstance(src_xsec, LineString) and not src_xsec.is_empty:
+            src_station = _point_xsec_station(src_pt, xsec=src_xsec)
+            branch_src_station = _to_finite_float(branch_src_station_m, float("inf"))
+            if np.isfinite(src_station) and np.isfinite(branch_src_station):
+                score += 0.75 * abs(float(src_station) - float(branch_src_station))
+        if isinstance(dst_xsec, LineString) and not dst_xsec.is_empty:
+            dst_station = _point_xsec_station(dst_pt, xsec=dst_xsec)
+            branch_dst_station = _to_finite_float(branch_dst_station_m, float("inf"))
+            if np.isfinite(dst_station) and np.isfinite(branch_dst_station):
+                score += 0.75 * abs(float(dst_station) - float(branch_dst_station))
+        return float(score)
     except Exception:
         return float("inf")
 
@@ -9153,6 +9192,8 @@ def _build_same_pair_multichain_branch_supports(
     support: PairSupport,
     *,
     branch_defs: Sequence[dict[str, Any]],
+    src_xsec: LineString,
+    dst_xsec: LineString,
 ) -> list[tuple[dict[str, Any], PairSupport]]:
     if not branch_defs:
         return []
@@ -9172,6 +9213,10 @@ def _build_same_pair_multichain_branch_supports(
                 src_pt=src_pt,
                 dst_pt=dst_pt,
                 branch_ref=ref_line,
+                src_xsec=src_xsec,
+                dst_xsec=dst_xsec,
+                branch_src_station_m=branch.get("src_station_m"),
+                branch_dst_station_m=branch.get("dst_station_m"),
             )
             if score < best_score:
                 best_score = score
@@ -9219,6 +9264,8 @@ def _build_same_pair_multichain_variants(
     branch_supports = _build_same_pair_multichain_branch_supports(
         support,
         branch_defs=branch_defs,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
     )
     if int(len(branch_supports)) <= 1:
         return []
@@ -9269,8 +9316,6 @@ def _should_enable_road_prior_gap_fill(
     if not bool(step1_used_road_prior):
         return False
     if str(step1_road_prior_mode or "").strip().lower() != "step1_no_traj":
-        return False
-    if bool(same_pair_multichain):
         return False
     return True
 

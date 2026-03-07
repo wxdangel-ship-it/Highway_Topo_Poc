@@ -429,7 +429,7 @@ def test_same_pair_multichain_shape_ref_fallback_downgrades_center_empty(tmp_pat
     assert isinstance(road.get("_geometry_metric"), LineString)
 
 
-def test_should_enable_road_prior_gap_fill_requires_step1_prior_and_not_same_pair_multichain() -> None:
+def test_should_enable_road_prior_gap_fill_allows_same_pair_when_step1_no_traj() -> None:
     assert (
         pipeline._should_enable_road_prior_gap_fill(
             road_prior_shape_ref_valid=True,
@@ -468,7 +468,7 @@ def test_should_enable_road_prior_gap_fill_requires_step1_prior_and_not_same_pai
             step1_road_prior_mode="step1_no_traj",
             same_pair_multichain=True,
         )
-        is False
+        is True
     )
 
 
