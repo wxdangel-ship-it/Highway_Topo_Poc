@@ -497,6 +497,83 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
     )
 
 
+def load_patch_trajectory_lines(
+    data_root: Path | str,
+    patch_id: str | None = None,
+    *,
+    out_crs: str = "patch",
+) -> tuple[str, list[LineString], list[dict[str, Any]]]:
+    root = Path(data_root)
+    if not root.exists() or not root.is_dir():
+        raise InputDataError(f"data_root_not_found: {root}")
+    patch_id_value = str(patch_id or "").strip()
+    if not patch_id_value:
+        raise InputDataError("patch_id_required")
+
+    patch_dir = _resolve_patch_dir(root, patch_id_value)
+    traj_dir = patch_dir / "Traj"
+    vector_dir = patch_dir / "Vector"
+    intersection_path = vector_dir / "intersection_l.geojson"
+
+    patch_crs = "EPSG:3857"
+    if intersection_path.is_file():
+        inter_payload = _load_geojson(intersection_path)
+        patch_crs = (
+            _require_geojson_crs(
+                inter_payload,
+                path=intersection_path,
+                allow_empty_if_no_features=False,
+                prefer_projected_crs="EPSG:3857",
+            )
+            or "EPSG:3857"
+        )
+
+    raw_trajectories = _load_trajectories(
+        traj_dir,
+        prefer_projected_crs=patch_crs,
+        align_missing_to_crs=patch_crs,
+    )
+    if not raw_trajectories:
+        raise InputDataError(f"trajectory_not_found: {traj_dir}")
+
+    mode = str(out_crs or "patch").strip().lower()
+    if mode not in {"patch", "metric"}:
+        raise InputDataError(f"invalid_out_crs: {out_crs}")
+    target_crs = patch_crs if mode == "patch" else "EPSG:3857"
+    trajectories = _project_trajectories(raw_trajectories, dst_crs=target_crs)
+
+    lines: list[LineString] = []
+    properties_list: list[dict[str, Any]] = []
+    for traj in trajectories:
+        xy = np.asarray(traj.xyz_metric[:, :2], dtype=np.float64)
+        finite = np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])
+        xy = xy[finite, :]
+        if xy.shape[0] < 2:
+            continue
+        try:
+            line = LineString([(float(x), float(y)) for x, y in xy])
+        except Exception:
+            continue
+        if line.is_empty:
+            continue
+        seq_arr = np.asarray(traj.seq, dtype=np.int64)
+        lines.append(line)
+        properties_list.append(
+            {
+                "patch_id": patch_id_value,
+                "traj_id": str(traj.traj_id),
+                "point_count": int(xy.shape[0]),
+                "seq_min": (int(seq_arr.min()) if seq_arr.size else None),
+                "seq_max": (int(seq_arr.max()) if seq_arr.size else None),
+                "source_path": traj.source_path.as_posix(),
+                "source_crs": str(traj.source_crs),
+                "output_crs": target_crs,
+            }
+        )
+
+    return target_crs, lines, properties_list
+
+
 def list_point_cloud_files(pointcloud_dir: Path) -> list[Path]:
     if not pointcloud_dir.is_dir():
         return []
@@ -1466,6 +1543,7 @@ __all__ = [
     "git_short_sha",
     "infer_coord_scale",
     "load_patch_inputs",
+    "load_patch_trajectory_lines",
     "load_point_cloud_window",
     "make_run_id",
     "metric_lines_to_input_crs",
