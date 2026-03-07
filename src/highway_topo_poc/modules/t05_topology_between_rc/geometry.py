@@ -288,6 +288,8 @@ def build_pair_supports(
     allowed_pairs: set[tuple[int, int]] | None = None,
     single_support_per_pair: bool = False,
     skip_search_after_pair_resolved: bool = False,
+    src_nodeid_alias_by_nodeid: dict[int, int] | None = None,
+    dst_nodeid_alias_by_nodeid: dict[int, int] | None = None,
 ) -> PairSupportBuildResult:
     levels = _normalize_stitch_levels(
         stitch_max_dist_levels_m=stitch_max_dist_levels_m,
@@ -324,7 +326,12 @@ def build_pair_supports(
 
     for traj_id, items in graph.event_keys_by_traj.items():
         for ev, source_key in items:
-            src_nodeid_i = int(ev.nodeid)
+            src_nodeid_raw = int(ev.nodeid)
+            src_nodeid_i = int(
+                src_nodeid_alias_by_nodeid.get(src_nodeid_raw, src_nodeid_raw)
+                if src_nodeid_alias_by_nodeid is not None
+                else src_nodeid_raw
+            )
             allowed_pair_dsts_for_src: set[int] | None = None
             if allowed_pairs_dst_by_src is not None:
                 allowed_pair_dsts_for_src = set(allowed_pairs_dst_by_src.get(src_nodeid_i, set()))
@@ -338,7 +345,7 @@ def build_pair_supports(
                         continue
             search = _search_next_crossing(
                 source_key=source_key,
-                source_nodeid=src_nodeid_i,
+                source_nodeid=src_nodeid_raw,
                 nodes=graph.nodes,
                 edges=graph.edges,
                 max_dist_m=float(neighbor_max_dist_m),
@@ -357,16 +364,53 @@ def build_pair_supports(
                     allowed_dsts_for_src = {
                         int(v) for v in allowed_dsts_for_src if int(v) in allowed_pair_dsts_for_src
                     }
-            hit_targets = list(hit_targets_raw)
-            if allowed_dsts_for_src is not None:
-                hit_targets = [it for it in hit_targets if int(it[1]) in allowed_dsts_for_src]
-            dst_nodeids_found = sorted({int(item[1]) for item in hit_targets})
-            dst_candidates = [
-                {
-                    "dst_nodeid": int(item[1]),
+            hit_targets_by_dst: dict[int, dict[str, Any]] = {}
+            for item in hit_targets_raw:
+                raw_dst_nodeid = int(item[1])
+                dst_nodeid = int(
+                    dst_nodeid_alias_by_nodeid.get(raw_dst_nodeid, raw_dst_nodeid)
+                    if dst_nodeid_alias_by_nodeid is not None
+                    else raw_dst_nodeid
+                )
+                if dst_nodeid == src_nodeid_i:
+                    continue
+                if allowed_dsts_for_src is not None and int(dst_nodeid) not in allowed_dsts_for_src:
+                    continue
+                cand = {
+                    "dst_nodeid": int(dst_nodeid),
+                    "raw_dst_nodeid": int(raw_dst_nodeid),
                     "dist_m": float(item[2]),
                     "stitch_hops": int(item[3]),
                     "target_key": str(item[0]),
+                }
+                prev = hit_targets_by_dst.get(int(dst_nodeid))
+                if prev is None:
+                    hit_targets_by_dst[int(dst_nodeid)] = cand
+                    continue
+                prev_key = (
+                    float(prev.get("dist_m", float("inf"))),
+                    int(prev.get("stitch_hops", 0)),
+                    int(prev.get("raw_dst_nodeid", prev.get("dst_nodeid", 0))),
+                    str(prev.get("target_key", "")),
+                )
+                curr_key = (
+                    float(cand.get("dist_m", float("inf"))),
+                    int(cand.get("stitch_hops", 0)),
+                    int(cand.get("raw_dst_nodeid", cand.get("dst_nodeid", 0))),
+                    str(cand.get("target_key", "")),
+                )
+                if curr_key < prev_key:
+                    hit_targets_by_dst[int(dst_nodeid)] = cand
+
+            hit_targets = list(hit_targets_by_dst.values())
+            dst_nodeids_found = sorted(int(item["dst_nodeid"]) for item in hit_targets)
+            dst_candidates = [
+                {
+                    "dst_nodeid": int(item["dst_nodeid"]),
+                    "raw_dst_nodeid": int(item["raw_dst_nodeid"]),
+                    "dist_m": float(item["dist_m"]),
+                    "stitch_hops": int(item["stitch_hops"]),
+                    "target_key": str(item["target_key"]),
                 }
                 for item in hit_targets
             ]
@@ -488,7 +532,12 @@ def build_pair_supports(
             if target_node is None or target_node.cross_nodeid is None:
                 continue
 
-            dst_nodeid = int(target_node.cross_nodeid)
+            raw_dst_nodeid = int(target_node.cross_nodeid)
+            dst_nodeid = int(
+                dst_nodeid_alias_by_nodeid.get(raw_dst_nodeid, raw_dst_nodeid)
+                if dst_nodeid_alias_by_nodeid is not None
+                else raw_dst_nodeid
+            )
             if dst_nodeid == src_nodeid_i:
                 continue
 

@@ -211,6 +211,147 @@ def test_drivezone_priority_over_traj(tmp_path: Path, monkeypatch) -> None:
     assert HARD_ROAD_OUTSIDE_DRIVEZONE in set(road.get("hard_reasons", []))
 
 
+def test_prior_gap_fill_prefers_road_prior_shape_ref(tmp_path: Path, monkeypatch) -> None:
+    src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
+    dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
+    step1_shape_ref = LineString([(0.0, 1.0), (100.0, 1.0)])
+    prior_shape_ref = LineString([(0.0, 0.0), (50.0, 2.0), (100.0, 0.0)])
+    drivezone = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t1"},
+        support_event_count=1,
+        traj_segments=[LineString([(0.0, 0.0), (100.0, 0.0)])],
+    )
+    patch_inputs = _mk_patch_inputs(tmp_path, drivezone=drivezone)
+    params = dict(pipeline.DEFAULT_PARAMS)
+    captured: dict[str, object] = {}
+
+    def _fake_centerline(**kwargs):  # type: ignore[no-untyped-def]
+        captured["shape_ref_hint_metric"] = kwargs.get("shape_ref_hint_metric")
+        captured["traj_surface_metric"] = kwargs.get("traj_surface_metric")
+        line = kwargs.get("shape_ref_hint_metric")
+        assert isinstance(line, LineString)
+        return _mk_center(line, line)
+
+    def _fake_traj_gate(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return (
+            {
+                "traj_surface_enforced": False,
+                "traj_in_ratio": None,
+                "traj_in_ratio_est": None,
+                "endpoint_in_traj_surface_src": None,
+                "endpoint_in_traj_surface_dst": None,
+            },
+            {"TRAJ_SURFACE_INSUFFICIENT"},
+            set(),
+            [],
+        )
+
+    monkeypatch.setattr(pipeline, "estimate_centerline", _fake_centerline)
+    monkeypatch.setattr(pipeline, "_eval_traj_surface_gate", _fake_traj_gate)
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="merge",
+        dst_type="merge",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": False, "surface_metric": drivezone},
+        shape_ref_hint_metric=step1_shape_ref,
+        road_prior_shape_ref_metric=prior_shape_ref,
+    )
+
+    captured_shape = captured.get("shape_ref_hint_metric")
+    assert isinstance(captured_shape, LineString)
+    assert list(captured_shape.coords) == list(prior_shape_ref.coords)
+    assert captured.get("traj_surface_metric") is None
+    assert bool(road.get("road_prior_shape_ref_used")) is True
+    assert bool(road.get("road_prior_gap_fill_mode")) is True
+    assert str(road.get("segment_corridor_source")) == "road_prior"
+
+
+def test_prior_gap_fill_overrides_drivezone_hard_when_prior_chain_same_outside(tmp_path: Path, monkeypatch) -> None:
+    src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
+    dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
+    prior_shape_ref = LineString([(0.0, 0.0), (100.0, 0.0)])
+    drivezone = Polygon([(10.0, -10.0), (90.0, -10.0), (90.0, 10.0), (10.0, 10.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t1"},
+        support_event_count=1,
+        traj_segments=[LineString([(10.0, 0.0), (90.0, 0.0)])],
+    )
+    patch_inputs = _mk_patch_inputs(tmp_path, drivezone=drivezone)
+    params = dict(pipeline.DEFAULT_PARAMS)
+
+    def _fake_centerline(**kwargs):  # type: ignore[no-untyped-def]
+        line = kwargs.get("shape_ref_hint_metric")
+        assert isinstance(line, LineString)
+        return _mk_center(line, line)
+
+    def _fake_traj_gate(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return (
+            {
+                "traj_surface_enforced": False,
+                "traj_in_ratio": None,
+                "traj_in_ratio_est": None,
+                "endpoint_in_traj_surface_src": None,
+                "endpoint_in_traj_surface_dst": None,
+            },
+            {"TRAJ_SURFACE_INSUFFICIENT"},
+            set(),
+            [],
+        )
+
+    monkeypatch.setattr(pipeline, "estimate_centerline", _fake_centerline)
+    monkeypatch.setattr(pipeline, "_eval_traj_surface_gate", _fake_traj_gate)
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="merge",
+        dst_type="merge",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": False, "surface_metric": None},
+        shape_ref_hint_metric=None,
+        road_prior_shape_ref_metric=prior_shape_ref,
+    )
+
+    assert HARD_ROAD_OUTSIDE_DRIVEZONE not in set(road.get("hard_reasons", []))
+    assert bool(road.get("road_prior_drivezone_override_used")) is True
+
+
 def test_no_pointcloud_default(tmp_path: Path, monkeypatch) -> None:
     drivezone = Polygon([(-50.0, -50.0), (150.0, -50.0), (150.0, 50.0), (-50.0, 50.0)])
     pc_path = tmp_path / "PointCloud" / "merged_cleaned_classified_3857.laz"
