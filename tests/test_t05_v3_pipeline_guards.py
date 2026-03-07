@@ -375,6 +375,86 @@ def test_bridge_guard_skips_clean_long_segment_without_violation(tmp_path: Path,
     assert "BRIDGE_SEGMENT_TOO_LONG" not in reasons
 
 
+def test_endpoint_anchor_guard_adds_hard_breakpoint(tmp_path: Path, monkeypatch) -> None:
+    xsecs = [
+        CrossSection(nodeid=1, geometry_metric=LineString([(0.0, -5.0), (0.0, 5.0)]), properties={"nodeid": 1}),
+        CrossSection(nodeid=2, geometry_metric=LineString([(10.0, -5.0), (10.0, 5.0)]), properties={"nodeid": 2}),
+    ]
+    patch_inputs = _mk_patch_inputs(tmp_path=tmp_path, intersection_lines=xsecs, trajectories=[])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t1"},
+        support_event_count=1,
+        repr_traj_ids=["t1"],
+    )
+    build_result = PairSupportBuildResult(
+        supports={(1, 2): support},
+        unresolved_events=[],
+        graph_node_count=0,
+        graph_edge_count=0,
+        stitch_candidate_count=0,
+        stitch_edge_count=0,
+        stitch_query_count=0,
+        stitch_candidates_total=0,
+        stitch_reject_dist_count=0,
+        stitch_reject_angle_count=0,
+        stitch_reject_forward_count=0,
+        stitch_accept_count=0,
+        stitch_levels_used_hist={},
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "extract_crossing_events",
+        lambda *args, **kwargs: CrossingExtractResult(
+            events_by_traj={},
+            raw_hit_count=0,
+            dedup_drop_count=0,
+            n_cross_empty_skipped=0,
+            n_cross_geom_unexpected=0,
+            n_cross_distance_gate_reject=0,
+        ),
+    )
+    monkeypatch.setattr(pipeline, "build_pair_supports", lambda *args, **kwargs: build_result)
+    monkeypatch.setattr(
+        pipeline,
+        "infer_node_types",
+        lambda **kwargs: ({1: "unknown", 2: "unknown"}, {1: 0, 2: 0}, {1: 0, 2: 0}),
+    )
+
+    def _fake_evaluate_candidate_road(**kwargs):  # type: ignore[no-untyped-def]
+        road = pipeline._make_base_road_record(
+            src=1,
+            dst=2,
+            support=support,
+            src_type="unknown",
+            dst_type="unknown",
+            neighbor_search_pass=1,
+        )
+        road["_geometry_metric"] = LineString([(100.0, 0.0), (110.0, 0.0)])
+        road["length_m"] = 10.0
+        road["conf"] = 0.8
+        road["hard_anomaly"] = False
+        road["hard_reasons"] = []
+        road["soft_issue_flags"] = []
+        return road
+
+    monkeypatch.setattr(pipeline, "_evaluate_candidate_road", _fake_evaluate_candidate_road)
+
+    out = pipeline._run_patch_core(
+        patch_inputs,
+        params=dict(pipeline.DEFAULT_PARAMS),
+        run_id="unit_run",
+        repo_root=tmp_path,
+    )
+
+    reasons = {str(bp.get("reason")) for bp in out["hard_breakpoints"]}
+    assert out["overall_pass"] is False
+    assert "ENDPOINT_NOT_ON_XSEC" in reasons
+    assert out["gate_payload"]["hard_breakpoints"]
+
+
 def test_neighbor_pass2_is_triggered_when_no_supports(tmp_path: Path) -> None:
     patch_inputs = _mk_patch_inputs(
         tmp_path=tmp_path,

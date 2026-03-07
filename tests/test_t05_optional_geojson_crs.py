@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from highway_topo_poc.modules.t05_topology_between_rc import run as run_mod
 from highway_topo_poc.modules.t05_topology_between_rc.io import InputDataError, load_patch_inputs
 from highway_topo_poc.modules.t05_topology_between_rc.pipeline import run_patch
 
@@ -102,6 +103,53 @@ def _build_patch(
         ],
     )
     return patch_dir
+
+
+def test_load_patch_inputs_requires_patch_id(tmp_path: Path) -> None:
+    lane_payload = {
+        "type": "FeatureCollection",
+        "features": [],
+    }
+    patch_dir = _build_patch(tmp_path, patch_id="p_need_patch_id", lane_payload=lane_payload)
+
+    with pytest.raises(InputDataError, match="patch_id_required"):
+        load_patch_inputs(patch_dir.parent, patch_id=None)
+
+
+def test_run_patch_requires_patch_id(tmp_path: Path) -> None:
+    lane_payload = {
+        "type": "FeatureCollection",
+        "features": [],
+    }
+    patch_dir = _build_patch(tmp_path, patch_id="p_need_patch_id_api", lane_payload=lane_payload)
+
+    with pytest.raises(InputDataError, match="patch_id_required"):
+        run_patch(
+            data_root=patch_dir.parent,
+            patch_id=None,
+            run_id="unit_patch_id_required",
+            out_root=tmp_path / "out",
+        )
+
+
+def test_run_cli_requires_patch_id(tmp_path: Path, capsys) -> None:
+    data_root = tmp_path / "data_root"
+    data_root.mkdir(parents=True, exist_ok=True)
+
+    rc = run_mod.main(
+        [
+            "--data_root",
+            str(data_root),
+            "--run_id",
+            "unit_patch_id_required_cli",
+            "--out_root",
+            str(tmp_path / "out"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "patch_id_required" in str(captured.err)
 
 
 def test_optional_laneboundary_missing_crs_projected_inherit_drivezone(tmp_path: Path) -> None:

@@ -2,7 +2,7 @@
 
 ## 1. 目标与范围
 - 模块 ID：`t05_topology_between_rc`
-- 目标：基于 `intersection_l`、轨迹、点云与 `LaneBoundary`，生成 RC 路口间有向 `Road` 中心线。
+- 目标：基于 `intersection_l`、轨迹与 `DriveZone`，结合 `LaneBoundary`、点云与 `RCSDRoad` prior，生成 RC 路口间有向 `Road` 中心线。
 - 产物几何：`LineString`（方向为 `src_nodeid -> dst_nodeid`）。
 
 ## 2. 输入（Input）
@@ -15,10 +15,21 @@ Patch 根目录默认位于 `data/synth_local/<patch_id>/`。
 - `Traj/*/raw_dat_pose.geojson`
   - 几何：`Point`
   - 序列键优先级：`seq > frame_id > timestamp > index`
-- `PointCloud/*.las|*.laz`
-  - 必须可读取 `xyz`
-  - `classification` 可选但推荐
+- `Vector/DriveZone.geojson`
+  - 几何：`Polygon|MultiPolygon`
+  - 当前实现按强制输入处理
+
+增强依赖：
 - `Vector/LaneBoundary.geojson`
+  - 当前主要用于 shape/trend 参考，缺失时允许降级
+- `Vector/RCSDRoad.geojson`
+  - 当前参与 Step1 邻接过滤与唯一链推断
+
+兜底输入：
+- `PointCloud/*.las|*.laz`
+  - 当前默认不启用
+  - 启用时必须可读取 `xyz`
+  - `classification` 可选但推荐
 
 推荐输入：
 - `Vector/RCSDNode.geojson`（`Kind` bit3/bit4 用于 merge/diverge）
@@ -64,7 +75,7 @@ Patch 根目录默认位于 `data/synth_local/<patch_id>/`。
 ## 5. 参数（Parameters）
 CLI 关键参数：
 - `--data_root`：patch 数据根目录
-- `--patch_id`：可选，指定单 patch
+- `--patch_id`：必需，显式指定单 patch
 - `--run_id`：运行标识，`auto` 自动生成
 - `--out_root`：输出目录根（必须写入 `outputs/_work/...`）
 - `--xsec_min_points`：横截最小点数阈值
@@ -107,6 +118,11 @@ Soft gate（不直接失败，但必须报告）：
 - `WIGGLY_CENTERLINE`
 - `OPEN_END`
 
+过渡期说明：
+- 当前实现仍可能输出扩展 gate reason；在正式扩容前，以 `gate.json` 为运行时权威。
+- 其中 `ROAD_OUTSIDE_TRAJ_SURFACE` 当前按 Hard 处理。
+- 任一 `overall_pass=false` 的结果必须至少包含一条 `hard_breakpoints`。
+
 置信度：
 - `f_support = 1 - exp(-support_traj_count / 2)`
 - `f_coverage = center_sample_coverage`
@@ -121,6 +137,7 @@ RUN_ID="$(date +%Y%m%d_%H%M%S)"
 OUT_ROOT="outputs/_work/t05_topology_between_rc/${RUN_ID}"
 python -m highway_topo_poc.modules.t05_topology_between_rc.run \
   --data_root data/synth_local \
+  --patch_id <patch_id> \
   --run_id smoke_min \
   --out_root "${OUT_ROOT}" \
   --xsec_min_points 50 \
@@ -129,6 +146,7 @@ python -m highway_topo_poc.modules.t05_topology_between_rc.run \
 
 ## 8. 验收（Accept）
 - 命令退出码为 `0`
+- 未传 `--patch_id` 时必须非零退出，并给出明确错误
 - `${OUT_ROOT}/smoke_min/patches/<patch_id>/` 下存在：
   - `RCSDRoad.geojson`
   - `metrics.json`
@@ -136,4 +154,5 @@ python -m highway_topo_poc.modules.t05_topology_between_rc.run \
   - `summary.txt`
   - `gate.json`
 - `gate.json` 必须包含 `overall_pass`
+- 若 `overall_pass=false`，则 `gate.json.hard_breakpoints` 不得为空
 - `RCSDRoad.geojson` 必须是合法 GeoJSON

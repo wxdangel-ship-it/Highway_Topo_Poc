@@ -249,8 +249,11 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
     root = Path(data_root)
     if not root.exists() or not root.is_dir():
         raise InputDataError(f"data_root_not_found: {root}")
+    patch_id_value = str(patch_id or "").strip()
+    if not patch_id_value:
+        raise InputDataError("patch_id_required")
 
-    patch_dir = _resolve_patch_dir(root, patch_id)
+    patch_dir = _resolve_patch_dir(root, patch_id_value)
     vector_dir = patch_dir / "Vector"
     traj_dir = patch_dir / "Traj"
     pointcloud_dir = patch_dir / "PointCloud"

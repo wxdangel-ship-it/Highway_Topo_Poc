@@ -7,8 +7,17 @@ import traceback
 from pathlib import Path
 from typing import Iterable
 
-from .io import make_run_id, resolve_repo_root
+from .io import git_short_sha, make_run_id, resolve_repo_root
+from .metrics import params_digest
 from .pipeline import DEFAULT_PARAMS, run_patch
+from .qa_audit import emit_qa_artifacts
+
+
+def _trim_error(message: str, *, limit: int = 160) -> str:
+    text = " ".join(str(message or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
 
 
 def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
@@ -313,14 +322,34 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
         type=int,
         default=int(DEFAULT_PARAMS.get("DEBUG_LAYER_MAX_ITEMS", 2000)),
     )
+    p.add_argument("--qa_enable", type=int, choices=[0, 1], default=1)
+    p.add_argument("--qa_visual_verdict", default="NA")
+    p.add_argument("--qa_execution_goal", default="formal_diagnostic_run")
+    p.add_argument("--qa_focus_question", default="NA")
+    p.add_argument("--qa_audit_topic", default="")
+    p.add_argument("--qa_scope_reason", default="NA")
+    p.add_argument("--qa_question_to_qa", default="NA")
+    p.add_argument("--qa_previous_git_sha", default="NA")
+    p.add_argument("--qa_previous_audit_topic", default="NA")
+    p.add_argument("--qa_previous_priority", default="NA")
+    p.add_argument("--qa_action_taken", default="NA")
 
     return p.parse_args(list(argv) if argv is not None else None)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = _parse_args(argv)
+    patch_id_value = str(args.patch_id or "").strip()
+    if not patch_id_value:
+        print("ERROR: patch_id_required", file=sys.stderr)
+        return 2
     repo_root = resolve_repo_root(Path.cwd())
+    git_sha = git_short_sha(repo_root)
     run_id_val = make_run_id("t05_topology_between_rc", repo_root=repo_root) if str(args.run_id) == "auto" else str(args.run_id)
+    data_root = Path(args.data_root)
+    if not data_root.is_absolute():
+        data_root = (repo_root / data_root).resolve()
+    data_patch_dir = data_root / patch_id_value
     out_root = Path(args.out_root)
     if not out_root.is_absolute():
         out_root = (repo_root / out_root).resolve()
@@ -453,8 +482,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     (run_dir / "params.json").write_text(
         json.dumps(
             {
-                "data_root": str(args.data_root),
-                "patch_id": args.patch_id,
+                "data_root": data_root.as_posix(),
+                "patch_id": patch_id_value,
                 "run_id": run_id_val,
                 "out_root": out_root.as_posix(),
                 "params_override": params_override,
@@ -465,53 +494,155 @@ def main(argv: Iterable[str] | None = None) -> int:
         + "\n",
         encoding="utf-8",
     )
+    qa_enabled = bool(int(args.qa_enable))
+    qa_kwargs = {
+        "repo_root": repo_root,
+        "data_patch_dir": data_patch_dir,
+        "run_id": run_id_val,
+        "patch_id": patch_id_value,
+        "git_sha": git_sha,
+        "visual_verdict": str(args.qa_visual_verdict),
+        "execution_goal": str(args.qa_execution_goal),
+        "focus_question": str(args.qa_focus_question),
+        "audit_topic": str(args.qa_audit_topic or ""),
+        "scope_reason": str(args.qa_scope_reason),
+        "question_to_qa": str(args.qa_question_to_qa),
+        "previous_git_sha": str(args.qa_previous_git_sha),
+        "previous_audit_topic": str(args.qa_previous_audit_topic),
+        "previous_priority": str(args.qa_previous_priority),
+        "action_taken": str(args.qa_action_taken),
+    }
 
     try:
         result = run_patch(
-            data_root=Path(args.data_root),
-            patch_id=args.patch_id,
+            data_root=data_root,
+            patch_id=patch_id_value,
             run_id=run_id_val,
             out_root=out_root,
             params_override=params_override,
         )
     except Exception as exc:
-        patch_label = str(args.patch_id) if args.patch_id else "unknown_patch"
+        patch_label = patch_id_value
         fail_patch_dir = run_dir / "patches" / patch_label
         fail_patch_dir.mkdir(parents=True, exist_ok=True)
         tb_lines = traceback.format_exc().splitlines()
-        top_n = tb_lines[:30]
+        top_n = tb_lines[:10]
+        params_digest_value = params_digest(params_override)
+        hard_breakpoints = [
+            {
+                "road_id": "na",
+                "src_nodeid": None,
+                "dst_nodeid": None,
+                "reason": "RUNTIME_EXCEPTION",
+                "severity": "hard",
+                "hint": f"{type(exc).__name__}: {_trim_error(str(exc))}",
+            }
+        ]
         summary_lines = [
             "=== t05_topology_between_rc summary ===",
             f"run_id: {run_id_val}",
+            f"git_sha: {git_sha}",
             f"patch_id: {patch_label}",
             "overall_pass: false",
+            "",
+            "road_count: 0",
+            "road_features_count: 0",
+            "road_candidate_count: 0",
+            "no_geometry_candidate: false",
+            "hard_anomaly_count: 0",
+            "soft_issue_count: 0",
+            "",
+            "hard_breakpoints_topk:",
+            f"- road_id=na src=na dst=na reason=RUNTIME_EXCEPTION hint={type(exc).__name__}",
+            "",
+            "soft_breakpoints_topk:",
+            "- (none)",
             "",
             "error:",
             f"- type={type(exc).__name__}",
             f"- message={exc}",
-            "- traceback_top30:",
+            "- traceback_top10:",
             *[f"  {line}" for line in top_n],
+            "",
+            "params:",
+            f"- params_digest={params_digest_value}",
         ]
         (fail_patch_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
-        (fail_patch_dir / "gate.json").write_text(
+        metrics_payload = {
+            "patch_id": patch_label,
+            "road_count": 0,
+            "road_features_count": 0,
+            "road_candidate_count": 0,
+            "no_geometry_candidate": False,
+            "unique_pair_count": 0,
+            "hard_anomaly_count": 0,
+            "soft_issue_count": 0,
+            "low_support_road_count": 0,
+            "avg_conf": None,
+            "p10_conf": None,
+            "p50_conf": None,
+            "center_coverage_avg": None,
+            "endpoint_center_offset_p50": None,
+            "endpoint_center_offset_p90": None,
+            "endpoint_center_offset_max": None,
+            "hard_breakpoint_count": 1,
+            "soft_breakpoint_count": 0,
+            "params_digest": params_digest_value,
+            "runtime_exception": True,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        }
+        gate_payload = {
+            "overall_pass": False,
+            "hard_breakpoints": hard_breakpoints,
+            "soft_breakpoints": [],
+            "params_digest": params_digest_value,
+            "version": "t05_gate_v1",
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "traceback_top10": top_n,
+        }
+        (fail_patch_dir / "metrics.json").write_text(
             json.dumps(
-                {
-                    "overall_pass": False,
-                    "hard_breakpoints": [],
-                    "soft_breakpoints": [],
-                    "version": "t05_gate_v1",
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                    "traceback_top30": top_n,
-                },
+                metrics_payload,
                 ensure_ascii=True,
                 indent=2,
             )
             + "\n",
             encoding="utf-8",
         )
+        (fail_patch_dir / "gate.json").write_text(
+            json.dumps(
+                gate_payload,
+                ensure_ascii=True,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        if qa_enabled:
+            audit_result = emit_qa_artifacts(
+                patch_out_dir=fail_patch_dir,
+                runtime_exception_type=type(exc).__name__,
+                runtime_exception_summary=str(exc),
+                **qa_kwargs,
+            )
+            if audit_result.bundle_path is None:
+                print("ERROR: qa_bundle_missing_after_failure", file=sys.stderr)
+                return 1
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
+
+    if qa_enabled:
+        audit_result = emit_qa_artifacts(
+            patch_out_dir=result.output_dir,
+            runtime_exception_type=None,
+            runtime_exception_summary=None,
+            **qa_kwargs,
+        )
+        if audit_result.bundle_path is None:
+            print("ERROR: qa_bundle_missing_after_success", file=sys.stderr)
+            return 1
 
     print(
         "OK run_id={run_id} patch_id={patch_id} roads={roads} overall_pass={overall} out_dir={out}".format(

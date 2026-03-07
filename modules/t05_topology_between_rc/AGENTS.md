@@ -1,7 +1,7 @@
 # t05_topology_between_rc - AGENTS
 
 ## 模块目标
-- 基于 `intersection_l`、轨迹、点云和 `LaneBoundary`，生成 RC 路口间有向 `Road` 中心线。
+- 基于 `intersection_l`、轨迹和 `DriveZone`，结合 `LaneBoundary`、点云与 `RCSDRoad` prior，生成 RC 路口间有向 `Road` 中心线。
 - 输出可复核的质量产物：`RCSDRoad.geojson`、`metrics.json`、`intervals.json`、`summary.txt`、`gate.json`。
 
 ## 职责边界
@@ -11,11 +11,11 @@
 - 文档契约只放在 `modules/t05_topology_between_rc/`。
 
 ## 输入
-- `Vector/intersection_l.geojson`
-- `Traj/*/raw_dat_pose.geojson`
-- `PointCloud/*.las|*.laz`
-- `Vector/LaneBoundary.geojson`
-- 可选：`Vector/RCSDNode.geojson`、`Vector/DivStripZone.geojson`
+- 必需：`Vector/intersection_l.geojson`、`Traj/*/raw_dat_pose.geojson`、`Vector/DriveZone.geojson`
+- 增强依赖：`Vector/LaneBoundary.geojson`、`Vector/RCSDRoad.geojson`
+- 兜底/预留：`PointCloud/*.las|*.laz`（当前默认不启用）
+- 可选诊断：`Vector/RCSDNode.geojson`、`Vector/DivStripZone.geojson`
+- `RCSDRoad` prior 当前参与 Step1 邻接过滤与唯一链推断。
 
 ## 输出
 固定写入：

@@ -398,8 +398,11 @@ def run_patch(
     params_override: dict[str, Any] | None = None,
 ) -> RunResult:
     repo_root = resolve_repo_root(Path.cwd())
+    patch_id_value = str(patch_id or "").strip()
+    if not patch_id_value:
+        raise InputDataError("patch_id_required")
     t0_load = perf_counter()
-    patch_inputs = load_patch_inputs(data_root, patch_id)
+    patch_inputs = load_patch_inputs(data_root, patch_id_value)
     t_load_inputs_ms = (perf_counter() - t0_load) * 1000.0
 
     run_id_val = make_run_id("t05_topology_between_rc", repo_root=repo_root) if run_id == "auto" else str(run_id)
@@ -2380,6 +2383,29 @@ def _run_patch_core(
             endpoint_anchor_dist_vals.append(float(d1))
         # 仅在明显跑飞时标记总体失败（避免 intersection_l 精度误差造成误报）。
         if d0 > float(endpoint_anchor_max_dist) * 3.0 or d1 > float(endpoint_anchor_max_dist) * 3.0:
+            hard_reasons = [str(v) for v in list(road.get("hard_reasons") or [])]
+            if HARD_ENDPOINT not in hard_reasons:
+                hard_reasons.append(HARD_ENDPOINT)
+            road["hard_reasons"] = hard_reasons
+            road["hard_anomaly"] = True
+            if not any(
+                str(bp.get("road_id")) == str(road.get("road_id")) and str(bp.get("reason")) == HARD_ENDPOINT
+                for bp in hard_breakpoints
+            ):
+                bp = build_breakpoint(
+                    road=road,
+                    reason=HARD_ENDPOINT,
+                    severity="hard",
+                    hint=(
+                        "anchor_distance_guard;"
+                        f"src_dist={float(d0):.3f};"
+                        f"dst_dist={float(d1):.3f};"
+                        f"limit={float(endpoint_anchor_max_dist):.3f}"
+                    ),
+                )
+                bp["endpoint_anchor_dist_src_m"] = float(d0)
+                bp["endpoint_anchor_dist_dst_m"] = float(d1)
+                hard_breakpoints.append(bp)
             overall_pass = False
 
     endpoint_vals: list[float] = []

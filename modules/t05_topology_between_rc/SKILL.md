@@ -5,11 +5,12 @@
 1) 候选连接构建
 - 从轨迹与 `intersection_l` 穿越事件构建有向候选对 `src_nodeid -> dst_nodeid`。
 - 轨迹序列键优先级：`seq > frame_id > timestamp > index`。
+- 使用 `RCSDRoad.geojson` prior 参与 Step1 邻接过滤与唯一链推断。
 
 2) 中心线生成
-- 优先使用可贯通 `src->dst` 的 `LaneBoundary` 作为 shape 参考。
-- 结合点云横截统计估计中心偏移，并进行平滑。
-- 应用稳定区规则（默认 50m）和端点贴合约束，确保端点落在目标横截线上。
+- 优先使用可贯通 `src->dst` 的 `LaneBoundary` 作为 shape 参考；其为增强依赖，缺失时允许降级。
+- 点云当前默认不启用，仅作为兜底策略。
+- 应用稳定区规则（默认 50m）和 `intersection_l` 锚点窗口约束，确保端点不明显跑飞。
 
 3) hard/soft 门禁
 - Hard（命中即 fail）：
@@ -24,6 +25,8 @@
   - `NO_LB_CONTINUOUS`
   - `WIGGLY_CENTERLINE`
   - `OPEN_END`
+- 过渡期说明：实现仍可能输出扩展 gate reason；其中 `ROAD_OUTSIDE_TRAJ_SURFACE` 当前按 Hard 处理。
+- 任何 `overall_pass=false` 的结果都必须伴随至少一条 `hard_breakpoints`。
 
 4) 置信度计算
 - `f_support = 1 - exp(-support_traj_count / 2)`
