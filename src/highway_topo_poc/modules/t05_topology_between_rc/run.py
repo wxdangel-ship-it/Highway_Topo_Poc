@@ -26,6 +26,21 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--patch_id", default=None)
     p.add_argument("--run_id", default="auto")
     p.add_argument("--out_root", default="outputs/_work/t05_topology_between_rc")
+    p.add_argument(
+        "--traj_split_max_gap_m",
+        type=float,
+        default=float(DEFAULT_PARAMS.get("TRAJ_SPLIT_MAX_GAP_M", 20.0)),
+    )
+    p.add_argument(
+        "--traj_split_max_time_gap_s",
+        type=float,
+        default=float(DEFAULT_PARAMS.get("TRAJ_SPLIT_MAX_TIME_GAP_S", 2.0)),
+    )
+    p.add_argument(
+        "--traj_split_max_seq_gap",
+        type=int,
+        default=int(DEFAULT_PARAMS.get("TRAJ_SPLIT_MAX_SEQ_GAP", 5)),
+    )
 
     p.add_argument("--traj_xsec_hit_buffer_m", type=float, default=float(DEFAULT_PARAMS["TRAJ_XSEC_HIT_BUFFER_M"]))
     p.add_argument("--xsec_min_points", type=int, default=int(DEFAULT_PARAMS["XSEC_MIN_POINTS"]))
@@ -372,6 +387,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         level_values = [float(args.surf_slice_half_win_m), 5.0, 10.0]
 
     params_override = {
+        "TRAJ_SPLIT_MAX_GAP_M": float(args.traj_split_max_gap_m),
+        "TRAJ_SPLIT_MAX_TIME_GAP_S": float(args.traj_split_max_time_gap_s),
+        "TRAJ_SPLIT_MAX_SEQ_GAP": int(args.traj_split_max_seq_gap),
         "TRAJ_XSEC_HIT_BUFFER_M": float(args.traj_xsec_hit_buffer_m),
         "XSEC_MIN_POINTS": int(args.xsec_min_points),
         "MIN_SUPPORT_TRAJ": int(args.min_support_traj),

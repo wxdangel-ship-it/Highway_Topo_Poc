@@ -5,7 +5,16 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
-from .io import InputDataError, load_patch_trajectory_lines, resolve_repo_root, write_geojson_lines, write_json
+from .io import (
+    TRAJ_SPLIT_MAX_GAP_M_DEFAULT,
+    TRAJ_SPLIT_MAX_SEQ_GAP_DEFAULT,
+    TRAJ_SPLIT_MAX_TIME_GAP_S_DEFAULT,
+    InputDataError,
+    load_patch_trajectory_lines,
+    resolve_repo_root,
+    write_geojson_lines,
+    write_json,
+)
 
 
 def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
@@ -14,6 +23,9 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument("--patch_id", required=True)
     p.add_argument("--out", default=None)
     p.add_argument("--out_crs", choices=["patch", "metric"], default="patch")
+    p.add_argument("--traj_split_max_gap_m", type=float, default=TRAJ_SPLIT_MAX_GAP_M_DEFAULT)
+    p.add_argument("--traj_split_max_time_gap_s", type=float, default=TRAJ_SPLIT_MAX_TIME_GAP_S_DEFAULT)
+    p.add_argument("--traj_split_max_seq_gap", type=int, default=TRAJ_SPLIT_MAX_SEQ_GAP_DEFAULT)
     return p.parse_args(list(argv) if argv is not None else None)
 
 
@@ -39,10 +51,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
 
     try:
-        crs_name, lines, properties_list = load_patch_trajectory_lines(
+        crs_name, lines, properties_list, summary = load_patch_trajectory_lines(
             args.data_root,
             patch_id=args.patch_id,
             out_crs=args.out_crs,
+            traj_split_max_gap_m=float(args.traj_split_max_gap_m),
+            traj_split_max_time_gap_s=float(args.traj_split_max_time_gap_s),
+            traj_split_max_seq_gap=int(args.traj_split_max_seq_gap),
         )
     except InputDataError as exc:
         print(str(exc), file=sys.stderr)
@@ -57,10 +72,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     write_json(
         out_path.with_suffix(".summary.json"),
         {
-            "patch_id": str(args.patch_id),
-            "out_crs": str(args.out_crs),
-            "crs_name": str(crs_name),
-            "trajectory_count": int(len(lines)),
+            **dict(summary),
             "out_path": out_path.as_posix(),
         },
     )

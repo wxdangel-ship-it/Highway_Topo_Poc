@@ -49,6 +49,9 @@ _ROAD_PRIOR_DST_FIELD_CANDIDATES = (
     "tnodeid",
     "enode",
 )
+TRAJ_SPLIT_MAX_GAP_M_DEFAULT = 20.0
+TRAJ_SPLIT_MAX_TIME_GAP_S_DEFAULT = 2.0
+TRAJ_SPLIT_MAX_SEQ_GAP_DEFAULT = 5
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,9 @@ class TrajectoryData:
     xyz_metric: np.ndarray
     source_path: Path
     source_crs: str
+    source_traj_id: str | None = None
+    segment_index: int = 0
+    timestamps_s: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -245,7 +251,14 @@ def probe_patch(patch_dir: Path) -> PatchProbe:
     )
 
 
-def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> PatchInputs:
+def load_patch_inputs(
+    data_root: Path | str,
+    patch_id: str | None = None,
+    *,
+    traj_split_max_gap_m: float = TRAJ_SPLIT_MAX_GAP_M_DEFAULT,
+    traj_split_max_time_gap_s: float = TRAJ_SPLIT_MAX_TIME_GAP_S_DEFAULT,
+    traj_split_max_seq_gap: int = TRAJ_SPLIT_MAX_SEQ_GAP_DEFAULT,
+) -> PatchInputs:
     root = Path(data_root)
     if not root.exists() or not root.is_dir():
         raise InputDataError(f"data_root_not_found: {root}")
@@ -322,10 +335,13 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
         drive_crs_alignment_reason = "align_to_intersection_crs_type_reproject"
         drivezone_crs_reprojected = True
     patch_crs_name = drive_crs
-    trajectories = _load_trajectories(
+    trajectories, traj_split_stats = _load_trajectories(
         traj_dir,
         prefer_projected_crs=inter_crs,
         align_missing_to_crs=inter_crs,
+        traj_split_max_gap_m=float(traj_split_max_gap_m),
+        traj_split_max_time_gap_s=float(traj_split_max_time_gap_s),
+        traj_split_max_seq_gap=int(traj_split_max_seq_gap),
     )
     lane_fix_info: dict[str, Any]
     if laneboundary_path.is_file():
@@ -493,6 +509,7 @@ def load_patch_inputs(data_root: Path | str, patch_id: str | None = None) -> Pat
             "road_prior_node_count": int(len(road_prior_node_ids)),
             "intersection_nodeid_remap_count": int(intersection_nodeid_fix.get("remap_count", 0)),
             "intersection_nodeid_remap_examples": list(intersection_nodeid_fix.get("remap_examples", [])),
+            **dict(traj_split_stats),
         },
     )
 
@@ -502,7 +519,10 @@ def load_patch_trajectory_lines(
     patch_id: str | None = None,
     *,
     out_crs: str = "patch",
-) -> tuple[str, list[LineString], list[dict[str, Any]]]:
+    traj_split_max_gap_m: float = TRAJ_SPLIT_MAX_GAP_M_DEFAULT,
+    traj_split_max_time_gap_s: float = TRAJ_SPLIT_MAX_TIME_GAP_S_DEFAULT,
+    traj_split_max_seq_gap: int = TRAJ_SPLIT_MAX_SEQ_GAP_DEFAULT,
+) -> tuple[str, list[LineString], list[dict[str, Any]], dict[str, Any]]:
     root = Path(data_root)
     if not root.exists() or not root.is_dir():
         raise InputDataError(f"data_root_not_found: {root}")
@@ -528,10 +548,13 @@ def load_patch_trajectory_lines(
             or "EPSG:3857"
         )
 
-    raw_trajectories = _load_trajectories(
+    raw_trajectories, traj_split_stats = _load_trajectories(
         traj_dir,
         prefer_projected_crs=patch_crs,
         align_missing_to_crs=patch_crs,
+        traj_split_max_gap_m=float(traj_split_max_gap_m),
+        traj_split_max_time_gap_s=float(traj_split_max_time_gap_s),
+        traj_split_max_seq_gap=int(traj_split_max_seq_gap),
     )
     if not raw_trajectories:
         raise InputDataError(f"trajectory_not_found: {traj_dir}")
@@ -562,16 +585,27 @@ def load_patch_trajectory_lines(
             {
                 "patch_id": patch_id_value,
                 "traj_id": str(traj.traj_id),
+                "source_traj_id": str(traj.source_traj_id or traj.traj_id),
+                "segment_index": int(traj.segment_index),
                 "point_count": int(xy.shape[0]),
                 "seq_min": (int(seq_arr.min()) if seq_arr.size else None),
                 "seq_max": (int(seq_arr.max()) if seq_arr.size else None),
+                "ts_min": _safe_nanmin(traj.timestamps_s),
+                "ts_max": _safe_nanmax(traj.timestamps_s),
                 "source_path": traj.source_path.as_posix(),
                 "source_crs": str(traj.source_crs),
                 "output_crs": target_crs,
             }
         )
 
-    return target_crs, lines, properties_list
+    summary = {
+        "patch_id": str(patch_id_value),
+        "out_crs": str(mode),
+        "crs_name": str(target_crs),
+        "trajectory_count": int(len(lines)),
+        **dict(traj_split_stats),
+    }
+    return target_crs, lines, properties_list, summary
 
 
 def list_point_cloud_files(pointcloud_dir: Path) -> list[Path]:
@@ -771,15 +805,20 @@ def _load_trajectories(
     *,
     prefer_projected_crs: str | None = "EPSG:3857",
     align_missing_to_crs: str | None = None,
-) -> list[TrajectoryData]:
+    traj_split_max_gap_m: float = TRAJ_SPLIT_MAX_GAP_M_DEFAULT,
+    traj_split_max_time_gap_s: float = TRAJ_SPLIT_MAX_TIME_GAP_S_DEFAULT,
+    traj_split_max_seq_gap: int = TRAJ_SPLIT_MAX_SEQ_GAP_DEFAULT,
+) -> tuple[list[TrajectoryData], dict[str, Any]]:
     files = sorted(traj_dir.rglob(_TRAJ_FILE_NAME)) if traj_dir.is_dir() else []
     out: list[TrajectoryData] = []
+    split_stats = _init_traj_split_stats()
 
     for fp in files:
         try:
             payload = _load_geojson(fp)
         except Exception:
             continue
+        split_stats["traj_source_count"] += 1
         declared_crs = _normalize_epsg_name(_extract_declared_crs(payload))
         src_crs = _require_geojson_crs(
             payload,
@@ -802,6 +841,7 @@ def _load_trajectories(
         ys: list[float] = []
         zs: list[float] = []
         seq: list[int] = []
+        timestamps_s: list[float] = []
 
         for idx, feat in enumerate(feats):
             geom = feat.get("geometry") or {}
@@ -818,11 +858,13 @@ def _load_trajectories(
 
             props = feat.get("properties") or {}
             seq_val = int(_extract_seq(props, fallback_idx=idx))
+            ts_val = _extract_timestamp_s(props)
 
             xs.append(x)
             ys.append(y)
             zs.append(z)
             seq.append(seq_val)
+            timestamps_s.append(float(ts_val) if ts_val is not None and math.isfinite(float(ts_val)) else float("nan"))
 
         if len(xs) < 2:
             continue
@@ -836,19 +878,27 @@ def _load_trajectories(
             )
         )
         seq_arr = np.asarray(seq, dtype=np.int64)[order]
+        ts_arr = np.asarray(timestamps_s, dtype=np.float64)[order]
 
-        traj_id = fp.parent.name
-        out.append(
-            TrajectoryData(
-                traj_id=traj_id,
+        source_traj_id = fp.parent.name
+        for seg_idx, seg in enumerate(
+            _split_ordered_trajectory(
+                xyz=xyz,
                 seq=seq_arr,
-                xyz_metric=xyz,
+                timestamps_s=ts_arr,
+                source_traj_id=source_traj_id,
                 source_path=fp,
-                source_crs=src_crs or "EPSG:3857",
+                source_crs=(src_crs or "EPSG:3857"),
+                prefer_projected_crs=prefer_projected_crs,
+                traj_split_max_gap_m=float(traj_split_max_gap_m),
+                traj_split_max_time_gap_s=float(traj_split_max_time_gap_s),
+                traj_split_max_seq_gap=int(traj_split_max_seq_gap),
+                split_stats=split_stats,
             )
-        )
+        ):
+            out.append(seg)
 
-    return out
+    return out, _finalize_traj_split_stats(split_stats)
 
 
 def _extract_seq(props: dict[str, Any], *, fallback_idx: int) -> int:
@@ -861,16 +911,226 @@ def _extract_seq(props: dict[str, Any], *, fallback_idx: int) -> int:
             if math.isfinite(v):
                 return int(round(float(v)))
 
-    ts = props.get("timestamp")
-    if ts is not None:
-        try:
-            from datetime import datetime as dt
-
-            return int(round(float(dt.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp() * 1000.0)))
-        except Exception:
-            pass
+    ts_s = _extract_timestamp_s(props)
+    if ts_s is not None and math.isfinite(float(ts_s)):
+        return int(round(float(ts_s) * 1000.0))
 
     return int(fallback_idx)
+
+
+def _extract_timestamp_s(props: dict[str, Any]) -> float | None:
+    for key in ("time_stamp", "timestamp", "ts", "time", "timeStamp"):
+        if key not in props:
+            continue
+        ts = _parse_timestamp_s(props.get(key))
+        if ts is not None and math.isfinite(float(ts)):
+            return float(ts)
+    return None
+
+
+def _parse_timestamp_s(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        v = float(value)
+        if math.isfinite(v):
+            return _normalize_epoch_seconds(v)
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    fv = _to_float(text)
+    if math.isfinite(fv):
+        return _normalize_epoch_seconds(float(fv))
+    try:
+        return float(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+    except Exception:
+        return None
+
+
+def _normalize_epoch_seconds(value: float) -> float:
+    v = float(value)
+    av = abs(v)
+    if av > 1e14:
+        return v / 1_000_000.0
+    if av > 1e11:
+        return v / 1000.0
+    return v
+
+
+def _trajectory_gap_metric_crs(src_crs_name: str | None, prefer_projected_crs: str | None) -> str:
+    prefer = _normalize_epsg_name(prefer_projected_crs)
+    if prefer is not None and (not _is_geographic_crs_name(prefer)):
+        return prefer
+    src = _normalize_epsg_name(src_crs_name)
+    if src is not None and (not _is_geographic_crs_name(src)):
+        return src
+    return "EPSG:3857"
+
+
+def _split_ordered_trajectory(
+    *,
+    xyz: np.ndarray,
+    seq: np.ndarray,
+    timestamps_s: np.ndarray,
+    source_traj_id: str,
+    source_path: Path,
+    source_crs: str,
+    prefer_projected_crs: str | None,
+    traj_split_max_gap_m: float,
+    traj_split_max_time_gap_s: float,
+    traj_split_max_seq_gap: int,
+    split_stats: dict[str, Any],
+) -> list[TrajectoryData]:
+    if xyz.shape[0] < 2:
+        return []
+
+    metric_crs = _trajectory_gap_metric_crs(source_crs, prefer_projected_crs)
+    metric_xy = np.asarray(xyz[:, :2], dtype=np.float64)
+    if _normalize_epsg_name(source_crs) != _normalize_epsg_name(metric_crs):
+        tf = _make_transformer(source_crs, metric_crs)
+        mx, my = tf(metric_xy[:, 0], metric_xy[:, 1])
+        metric_xy = np.column_stack((np.asarray(mx, dtype=np.float64), np.asarray(my, dtype=np.float64)))
+
+    split_points: list[int] = [0]
+    source_split = False
+    for idx in range(1, int(xyz.shape[0])):
+        dx = float(metric_xy[idx, 0] - metric_xy[idx - 1, 0])
+        dy = float(metric_xy[idx, 1] - metric_xy[idx - 1, 1])
+        dist_gap_m = math.hypot(dx, dy)
+        ts_prev = float(timestamps_s[idx - 1]) if idx - 1 < timestamps_s.size else float("nan")
+        ts_curr = float(timestamps_s[idx]) if idx < timestamps_s.size else float("nan")
+        time_gap_s = (
+            float(ts_curr - ts_prev)
+            if math.isfinite(ts_prev) and math.isfinite(ts_curr)
+            else float("nan")
+        )
+        seq_gap = int(seq[idx] - seq[idx - 1]) if idx < seq.size else 0
+        reasons: list[str] = []
+        if math.isfinite(dist_gap_m) and dist_gap_m > float(traj_split_max_gap_m):
+            reasons.append("distance")
+            split_stats["traj_split_by_distance_count"] += 1
+            split_stats["_distance_gaps"].append(float(dist_gap_m))
+        if math.isfinite(time_gap_s) and time_gap_s > float(traj_split_max_time_gap_s):
+            reasons.append("time")
+            split_stats["traj_split_by_time_count"] += 1
+            split_stats["_time_gaps"].append(float(time_gap_s))
+        if int(seq_gap) > int(traj_split_max_seq_gap):
+            reasons.append("seq")
+            split_stats["traj_split_by_seq_count"] += 1
+            split_stats["_seq_gaps"].append(int(seq_gap))
+        if not reasons:
+            continue
+        source_split = True
+        split_points.append(int(idx))
+        split_stats["_split_examples"].append(
+            {
+                "source_traj_id": str(source_traj_id),
+                "break_after_segment_index": int(len(split_points) - 1),
+                "source_path": source_path.as_posix(),
+                "reason": "+".join(reasons),
+                "distance_gap_m": (round(float(dist_gap_m), 3) if math.isfinite(dist_gap_m) else None),
+                "time_gap_s": (round(float(time_gap_s), 3) if math.isfinite(time_gap_s) else None),
+                "seq_gap": int(seq_gap),
+                "prev_seq": int(seq[idx - 1]),
+                "next_seq": int(seq[idx]),
+            }
+        )
+    split_points.append(int(xyz.shape[0]))
+    if source_split:
+        split_stats["traj_split_source_count"] += 1
+
+    out: list[TrajectoryData] = []
+    for seg_idx, (start, end) in enumerate(zip(split_points[:-1], split_points[1:]), start=1):
+        seg_xyz = np.asarray(xyz[start:end], dtype=np.float64)
+        if seg_xyz.shape[0] < 2:
+            continue
+        seg_seq = np.asarray(seq[start:end], dtype=np.int64)
+        seg_ts = np.asarray(timestamps_s[start:end], dtype=np.float64)
+        out.append(
+            TrajectoryData(
+                traj_id=f"{source_traj_id}__seg{seg_idx:04d}",
+                seq=seg_seq,
+                xyz_metric=seg_xyz,
+                source_path=source_path,
+                source_crs=source_crs,
+                source_traj_id=source_traj_id,
+                segment_index=int(seg_idx),
+                timestamps_s=seg_ts,
+            )
+        )
+        split_stats["traj_segment_count"] += 1
+    return out
+
+
+def _init_traj_split_stats() -> dict[str, Any]:
+    return {
+        "traj_source_count": 0,
+        "traj_segment_count": 0,
+        "traj_split_source_count": 0,
+        "traj_split_by_distance_count": 0,
+        "traj_split_by_time_count": 0,
+        "traj_split_by_seq_count": 0,
+        "_distance_gaps": [],
+        "_time_gaps": [],
+        "_seq_gaps": [],
+        "_split_examples": [],
+    }
+
+
+def _finalize_traj_split_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    out = {k: v for k, v in stats.items() if not str(k).startswith("_")}
+    out["traj_split_distance_gap_m_p50"] = _safe_percentile_value(stats.get("_distance_gaps", []), 50.0)
+    out["traj_split_distance_gap_m_p90"] = _safe_percentile_value(stats.get("_distance_gaps", []), 90.0)
+    out["traj_split_distance_gap_m_max"] = _safe_max_value(stats.get("_distance_gaps", []))
+    out["traj_split_time_gap_s_p50"] = _safe_percentile_value(stats.get("_time_gaps", []), 50.0)
+    out["traj_split_time_gap_s_p90"] = _safe_percentile_value(stats.get("_time_gaps", []), 90.0)
+    out["traj_split_time_gap_s_max"] = _safe_max_value(stats.get("_time_gaps", []))
+    out["traj_split_seq_gap_p50"] = _safe_percentile_value(stats.get("_seq_gaps", []), 50.0)
+    out["traj_split_seq_gap_p90"] = _safe_percentile_value(stats.get("_seq_gaps", []), 90.0)
+    out["traj_split_seq_gap_max"] = _safe_max_value(stats.get("_seq_gaps", []))
+    out["traj_split_examples"] = list(stats.get("_split_examples", []))[:20]
+    return out
+
+
+def _safe_percentile_value(values: Sequence[float] | Sequence[int], q: float) -> float | None:
+    if not values:
+        return None
+    arr = np.asarray(values, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    return float(np.percentile(arr, float(q)))
+
+
+def _safe_max_value(values: Sequence[float] | Sequence[int]) -> float | None:
+    if not values:
+        return None
+    arr = np.asarray(values, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    return float(np.max(arr))
+
+
+def _safe_nanmin(values: np.ndarray | None) -> float | None:
+    if values is None:
+        return None
+    arr = np.asarray(values, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    return float(np.min(arr))
+
+
+def _safe_nanmax(values: np.ndarray | None) -> float | None:
+    if values is None:
+        return None
+    arr = np.asarray(values, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    return float(np.max(arr))
 
 
 def _build_projection(
@@ -1289,8 +1549,18 @@ def _project_trajectories(trajectories: Sequence[TrajectoryData], *, dst_crs: st
         if not np.all(finite):
             pxyz = pxyz[finite]
             seq = traj.seq[finite]
+            ts_arr = (
+                np.asarray(traj.timestamps_s, dtype=np.float64)[finite]
+                if traj.timestamps_s is not None
+                else None
+            )
         else:
             seq = traj.seq
+            ts_arr = (
+                np.asarray(traj.timestamps_s, dtype=np.float64)
+                if traj.timestamps_s is not None
+                else None
+            )
 
         out.append(
             TrajectoryData(
@@ -1299,6 +1569,9 @@ def _project_trajectories(trajectories: Sequence[TrajectoryData], *, dst_crs: st
                 xyz_metric=pxyz,
                 source_path=traj.source_path,
                 source_crs=dst_crs,
+                source_traj_id=traj.source_traj_id,
+                segment_index=int(traj.segment_index),
+                timestamps_s=ts_arr,
             )
         )
 

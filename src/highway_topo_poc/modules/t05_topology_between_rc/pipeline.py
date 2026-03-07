@@ -56,6 +56,9 @@ from .io import (
     CrossSection,
     InputDataError,
     PatchInputs,
+    TRAJ_SPLIT_MAX_GAP_M_DEFAULT,
+    TRAJ_SPLIT_MAX_SEQ_GAP_DEFAULT,
+    TRAJ_SPLIT_MAX_TIME_GAP_S_DEFAULT,
     git_short_sha,
     load_patch_inputs,
     load_point_cloud_window,
@@ -242,6 +245,9 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP0_LITE_ALLOW_PASSTHROUGH_WHEN_DIVSTRIP_MISSING": 1,
     "STEP0_STATS_ENABLE": 1,
     "CACHE_ENABLED": 1,
+    "TRAJ_SPLIT_MAX_GAP_M": TRAJ_SPLIT_MAX_GAP_M_DEFAULT,
+    "TRAJ_SPLIT_MAX_TIME_GAP_S": TRAJ_SPLIT_MAX_TIME_GAP_S_DEFAULT,
+    "TRAJ_SPLIT_MAX_SEQ_GAP": TRAJ_SPLIT_MAX_SEQ_GAP_DEFAULT,
 }
 
 @dataclass(frozen=True)
@@ -444,8 +450,19 @@ def run_patch(
     patch_id_value = str(patch_id or "").strip()
     if not patch_id_value:
         raise InputDataError("patch_id_required")
+    params = dict(DEFAULT_PARAMS)
+    if params_override:
+        params.update(params_override)
     t0_load = perf_counter()
-    patch_inputs = load_patch_inputs(data_root, patch_id_value)
+    patch_inputs = load_patch_inputs(
+        data_root,
+        patch_id_value,
+        traj_split_max_gap_m=float(params.get("TRAJ_SPLIT_MAX_GAP_M", TRAJ_SPLIT_MAX_GAP_M_DEFAULT)),
+        traj_split_max_time_gap_s=float(
+            params.get("TRAJ_SPLIT_MAX_TIME_GAP_S", TRAJ_SPLIT_MAX_TIME_GAP_S_DEFAULT)
+        ),
+        traj_split_max_seq_gap=int(params.get("TRAJ_SPLIT_MAX_SEQ_GAP", TRAJ_SPLIT_MAX_SEQ_GAP_DEFAULT)),
+    )
     t_load_inputs_ms = (perf_counter() - t0_load) * 1000.0
 
     run_id_val = make_run_id("t05_topology_between_rc", repo_root=repo_root) if run_id == "auto" else str(run_id)
@@ -455,10 +472,6 @@ def run_patch(
         out_dir = (repo_root / out_dir).resolve()
     patch_out = out_dir / run_id_val / "patches" / patch_inputs.patch_id
     progress = _ProgressLogger(patch_out / "progress.ndjson")
-
-    params = dict(DEFAULT_PARAMS)
-    if params_override:
-        params.update(params_override)
     progress.mark(
         "run_patch_start",
         run_id=run_id_val,
@@ -962,6 +975,25 @@ def _run_patch_core(
         payload["lane_boundary_src_crs_name"] = str(lane_boundary_src_crs_name)
         payload["lane_boundary_crs_name_final"] = str(lane_boundary_crs_name_final)
         payload["lane_boundary_skipped_reason"] = lane_boundary_skipped_reason
+        for key in (
+            "traj_source_count",
+            "traj_segment_count",
+            "traj_split_source_count",
+            "traj_split_by_distance_count",
+            "traj_split_by_time_count",
+            "traj_split_by_seq_count",
+            "traj_split_distance_gap_m_p50",
+            "traj_split_distance_gap_m_p90",
+            "traj_split_distance_gap_m_max",
+            "traj_split_time_gap_s_p50",
+            "traj_split_time_gap_s_p90",
+            "traj_split_time_gap_s_max",
+            "traj_split_seq_gap_p50",
+            "traj_split_seq_gap_p90",
+            "traj_split_seq_gap_max",
+        ):
+            if key in patch_inputs.input_summary:
+                payload[str(key)] = patch_inputs.input_summary.get(key)
         payload["step1_road_prior_filter_enabled"] = bool(step1_road_prior_filter_enabled)
         payload["step1_road_prior_respect_direction"] = bool(step1_road_prior_respect_direction)
         payload["step1_road_prior_edge_count"] = int(road_prior_stats.get("edge_count", 0))
@@ -11038,6 +11070,7 @@ def _finalize_payloads(
                 or sk.startswith("bridge_seg_")
                 or sk.startswith("traj_in_ratio")
                 or sk.startswith("traj_surface_")
+                or sk.startswith("traj_split_")
                 or sk.startswith("divstrip_")
                 or sk.startswith("slice_half_win_")
                 or sk.startswith("pointcloud_")
@@ -11058,7 +11091,14 @@ def _finalize_payloads(
                 or sk.startswith("xsec_samples_passable_ratio_")
                 or sk.startswith("road_outside_drivezone_")
                 or sk == "traj_drop_count_by_drivezone"
-                or sk in {"expanded_end_count", "gore_tip_end_count", "fallback_end_count", "divstrip_missing"}
+                or sk in {
+                    "expanded_end_count",
+                    "gore_tip_end_count",
+                    "fallback_end_count",
+                    "divstrip_missing",
+                    "traj_source_count",
+                    "traj_segment_count",
+                }
             ):
                 summary_params[str(k)] = v
 
