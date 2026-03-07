@@ -66,11 +66,19 @@ def build_metrics_payload(
     low_support_count = sum(1 for r in roads if "LOW_SUPPORT" in set(r.get("soft_issue_flags", [])))
 
     pair_set = {(int(r.get("src_nodeid", -1)), int(r.get("dst_nodeid", -1))) for r in roads}
+    same_pair_roads = [r for r in roads if bool(r.get("same_pair_multi_road", False))]
+    same_pair_pair_set = {
+        (int(r.get("src_nodeid", -1)), int(r.get("dst_nodeid", -1)))
+        for r in same_pair_roads
+    }
 
     return {
         "patch_id": patch_id,
         "road_count": int(len(roads)),
+        "pair_count": int(len(pair_set)),
         "unique_pair_count": int(len(pair_set)),
+        "same_pair_multi_road_pair_count": int(len(same_pair_pair_set)),
+        "same_pair_multi_road_output_count": int(len(same_pair_roads)),
         "hard_anomaly_count": int(hard_count),
         "soft_issue_count": int(soft_count),
         "low_support_road_count": int(low_support_count),
@@ -192,11 +200,21 @@ def build_summary_text(
 
     candidate_count = int(road_candidate_count) if road_candidate_count is not None else int(len(roads))
     road_count = int(road_features_count) if road_features_count is not None else int(len(roads))
+    pair_count = int(
+        len({(int(r.get("src_nodeid", -1)), int(r.get("dst_nodeid", -1))) for r in roads})
+    )
+    same_pair_roads = [r for r in roads if bool(r.get("same_pair_multi_road", False))]
+    same_pair_pair_count = int(
+        len({(int(r.get("src_nodeid", -1)), int(r.get("dst_nodeid", -1))) for r in same_pair_roads})
+    )
     hard_count = sum(1 for r in roads if bool(r.get("hard_anomaly", False)))
     soft_count = sum(len(list(r.get("soft_issue_flags", []))) for r in roads)
     lines.append(f"road_count: {road_count}")
     lines.append(f"road_features_count: {road_count}")
     lines.append(f"road_candidate_count: {candidate_count}")
+    lines.append(f"pair_count: {pair_count}")
+    lines.append(f"same_pair_multi_road_pair_count: {same_pair_pair_count}")
+    lines.append(f"same_pair_multi_road_output_count: {int(len(same_pair_roads))}")
     if candidate_count > road_count:
         lines.append("no_geometry_candidate: true")
         lines.append(f"no_geometry_candidate_count: {candidate_count - road_count}")

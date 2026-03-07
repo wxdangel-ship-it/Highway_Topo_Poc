@@ -1977,7 +1977,10 @@ def _run_patch_core(
                 road_k["step1_same_pair_multichain"] = True
                 road_k["step1_same_pair_multichain_count"] = int(same_pair_multi_chain_info.get("chain_count", 0))
                 road_k["same_pair_multi_road_branch_id"] = branch_id
+                road_k["same_pair_multi_road_branch_rank"] = int(variant.get("branch_rank", cluster_id + 1))
                 road_k["same_pair_multi_road_signature"] = list(variant.get("signature") or [])
+                road_k["same_pair_multi_road_src_station_m"] = variant.get("src_station_m")
+                road_k["same_pair_multi_road_dst_station_m"] = variant.get("dst_station_m")
                 stage_timer.add("t_build_lane_graph", float(road_k.get("_timing_lb_graph_ms", 0.0)))
                 sp_ms = float(road_k.get("_timing_shortest_path_ms", 0.0))
                 shortest_timing_per_k[key_k] = sp_ms
@@ -2119,7 +2122,7 @@ def _run_patch_core(
             road["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
             road["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
             road["hard_anomaly"] = True
-            road["hard_reasons"] = [HARD_MULTI_ROAD if same_pair_multi_chain_info is not None else HARD_CENTER_EMPTY]
+            road["hard_reasons"] = [HARD_CENTER_EMPTY]
             road["soft_issue_flags"] = [SOFT_TRAJ_SURFACE_INSUFFICIENT]
             road["no_geometry_candidate"] = True
             if same_pair_multi_chain_info is not None:
@@ -2130,7 +2133,7 @@ def _run_patch_core(
             hard_breakpoints.append(
                 build_breakpoint(
                     road=road,
-                    reason=HARD_MULTI_ROAD if same_pair_multi_chain_info is not None else HARD_CENTER_EMPTY,
+                    reason=HARD_CENTER_EMPTY,
                     severity="hard",
                     hint=(
                         f"branch_candidate_count={int(len(same_pair_variants))};viable_candidate_count=0"
@@ -2166,15 +2169,64 @@ def _run_patch_core(
             for c in ranked_candidates[:3]
         ]
         if same_pair_multi_chain_info is not None:
-            if len(viable_candidates) == 1:
-                selected = viable_candidates[0]
-                selected["chosen_cluster_id"] = int(selected.get("candidate_cluster_id", 0))
-                selected["no_geometry_candidate"] = False
-                selected["cluster_score_top2"] = list(ranked_cluster_summary)
-                selected["step1_same_pair_multichain"] = True
-                selected["step1_same_pair_multichain_count"] = int(same_pair_multi_chain_info.get("chain_count", 0))
+            branch_total = int(max(1, len(same_pair_variants)))
+            min_sep_base = _to_finite_float(
+                support.cluster_sep_m_est,
+                float(params["MULTI_ROAD_SEP_M"]),
+            )
+            min_sep_m = max(1.0, min(4.0, float(min_sep_base) * 0.25))
+            selected_multi_pick = _select_non_conflicting_multi_road_candidates(
+                sorted(viable_candidates, key=_candidate_sort_key, reverse=True),
+                min_sep_m=float(min_sep_m),
+            )
+            selected_ids = {id(c) for c in selected_multi_pick}
+            ordered_candidates = sorted(
+                ranked_candidates,
+                key=lambda c: (
+                    int(c.get("same_pair_multi_road_branch_rank", c.get("candidate_cluster_id", 0) + 1) or 0),
+                    int(c.get("candidate_cluster_id", 0)),
+                ),
+            )
+            for cand in ordered_candidates:
+                cand["chosen_cluster_id"] = int(cand.get("candidate_cluster_id", 0))
+                cand["cluster_score_top2"] = list(ranked_cluster_summary)
+                cand["step1_same_pair_multichain"] = True
+                cand["step1_same_pair_multichain_count"] = int(same_pair_multi_chain_info.get("chain_count", 0))
+                channel_rank = int(
+                    cand.get("same_pair_multi_road_branch_rank", cand.get("candidate_cluster_id", 0) + 1) or 0
+                )
+                _assign_multi_road_channel_identity(
+                    cand,
+                    channel_rank=channel_rank,
+                    channel_count=branch_total,
+                    same_pair=True,
+                )
+                if id(cand) in selected_ids:
+                    cand["no_geometry_candidate"] = False
+                    _append_selected_candidate_road(
+                        selected=cand,
+                        road_records=road_records,
+                        road_lines_metric=road_lines_metric,
+                        road_feature_props=road_feature_props,
+                        hard_breakpoints=hard_breakpoints,
+                        soft_breakpoints=soft_breakpoints,
+                        debug_layers=debug_layers,
+                        debug_enabled=debug_enabled,
+                        stage_timer=stage_timer,
+                        src_xsec=src_xsec.geometry_metric,
+                        dst_xsec=dst_xsec.geometry_metric,
+                        gore_zone_metric=gore_zone_metric,
+                        params=params,
+                    )
+                    continue
+                cand["_geometry_metric"] = None
+                cand["no_geometry_candidate"] = True
+                if bool(cand.get("_candidate_has_geometry", False)) and bool(cand.get("_candidate_feasible", False)):
+                    cand["hard_reasons"] = [HARD_MULTI_ROAD]
+                    cand["soft_issue_flags"] = []
+                    cand["hard_anomaly"] = True
                 _append_selected_candidate_road(
-                    selected=selected,
+                    selected=cand,
                     road_records=road_records,
                     road_lines_metric=road_lines_metric,
                     road_feature_props=road_feature_props,
@@ -2188,49 +2240,6 @@ def _run_patch_core(
                     gore_zone_metric=gore_zone_metric,
                     params=params,
                 )
-                continue
-            road = _make_base_road_record(
-                src=src,
-                dst=dst,
-                support=support,
-                src_type=src_type,
-                dst_type=dst_type,
-                neighbor_search_pass=int(neighbor_search_pass),
-            )
-            _apply_xsec_gate_meta_to_road(road=road, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
-            road["step1_strategy"] = step1_corridor.get("strategy")
-            road["step1_reason"] = step1_corridor.get("hard_reason")
-            road["step1_corridor_count"] = step1_corridor.get("corridor_count")
-            road["step1_main_corridor_ratio"] = step1_corridor.get("main_corridor_ratio")
-            road["gore_fallback_used_src"] = bool(step1_corridor.get("gore_fallback_used_src", False))
-            road["gore_fallback_used_dst"] = bool(step1_corridor.get("gore_fallback_used_dst", False))
-            road["traj_drop_count_by_drivezone"] = int(step1_corridor.get("traj_drop_count_by_drivezone", 0))
-            road["drivezone_fallback_used"] = bool(step1_corridor.get("drivezone_fallback_used", False))
-            road["step1_corridor_zone_area_m2"] = step1_corridor.get("corridor_zone_area_m2")
-            road["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
-            road["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
-            road["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
-            road["hard_anomaly"] = True
-            road["hard_reasons"] = [HARD_MULTI_ROAD]
-            road["soft_issue_flags"] = []
-            road["no_geometry_candidate"] = True
-            road["cluster_score_top2"] = list(ranked_cluster_summary)
-            road["step1_same_pair_multichain"] = True
-            road["step1_same_pair_multichain_count"] = int(same_pair_multi_chain_info.get("chain_count", 0))
-            road["_geometry_metric"] = None
-            road_records.append(road)
-            hard_breakpoints.append(
-                build_breakpoint(
-                    road=road,
-                    reason=HARD_MULTI_ROAD,
-                    severity="hard",
-                    hint=(
-                        f"viable_candidate_count={int(len(viable_candidates))};"
-                        f"branch_candidate_count={int(len(same_pair_variants))};"
-                        f"pair_has_multiple_channel_clusters"
-                    ),
-                )
-            )
             continue
         if len(viable_candidates) > 1:
             min_sep_base = _to_finite_float(
@@ -2248,8 +2257,12 @@ def _run_patch_core(
                     cand["chosen_cluster_id"] = int(cand.get("candidate_cluster_id", 0))
                     cand["no_geometry_candidate"] = False
                     cand["cluster_score_top2"] = list(ranked_cluster_summary)
-                    cand["same_pair_multi_road_rank"] = int(idx)
-                    _assign_same_pair_multi_road_identity(cand, multi_count=multi_count)
+                    _assign_multi_road_channel_identity(
+                        cand,
+                        channel_rank=int(idx),
+                        channel_count=multi_count,
+                        same_pair=False,
+                    )
                     _append_selected_candidate_road(
                         selected=cand,
                         road_records=road_records,
@@ -7182,19 +7195,24 @@ def _collect_debug_layers_for_selected(
                 )
 
 
-def _assign_same_pair_multi_road_identity(
+def _assign_multi_road_channel_identity(
     road: dict[str, Any],
     *,
-    multi_count: int,
+    channel_rank: int,
+    channel_count: int,
+    same_pair: bool,
 ) -> None:
-    if int(multi_count) <= 1:
+    if int(channel_rank) <= 0 or int(channel_count) <= 0:
         return
-    base_road_id = str(road.get("road_id") or "")
+    base_road_id = re.sub(r"__(?:k|ch)\d+$", "", str(road.get("road_id") or ""))
     cluster_id = int(road.get("candidate_cluster_id", road.get("chosen_cluster_id", 0)) or 0)
-    tagged_road_id = f"{base_road_id}__k{int(cluster_id)}"
+    tagged_road_id = f"{base_road_id}__ch{int(channel_rank)}"
     road["road_id"] = tagged_road_id
-    road["same_pair_multi_road"] = True
-    road["same_pair_multi_road_count"] = int(multi_count)
+    road["channel_id"] = f"ch{int(channel_rank)}"
+    road["channel_rank"] = int(channel_rank)
+    road["channel_count"] = int(channel_count)
+    road["same_pair_multi_road"] = bool(same_pair)
+    road["same_pair_multi_road_count"] = int(channel_count) if bool(same_pair) else None
     road["same_pair_multi_road_cluster_id"] = int(cluster_id)
     for key in ("_candidate_hard_breakpoints", "_candidate_soft_breakpoints"):
         for bp in list(road.get(key) or []):
@@ -7386,7 +7404,8 @@ def _append_selected_candidate_road(
     if not (isinstance(road_line, LineString) and (not road_line.is_empty)):
         selected["no_geometry_candidate"] = True
         sel_hard = set(selected.get("hard_reasons", []))
-        sel_hard.add(HARD_CENTER_EMPTY)
+        if not sel_hard:
+            sel_hard.add(HARD_CENTER_EMPTY)
         selected["hard_reasons"] = sorted(sel_hard)
         selected["hard_anomaly"] = True
     road_records.append(selected)
@@ -8723,10 +8742,28 @@ def _line_from_edge_signature(
     return None
 
 
+def _line_xsec_station(
+    line: LineString | None,
+    *,
+    xsec: LineString,
+) -> float:
+    if not isinstance(line, LineString) or line.is_empty or not isinstance(xsec, LineString) or xsec.is_empty:
+        return float("inf")
+    try:
+        _line_pt, xsec_pt = nearest_points(line, xsec)
+        if not isinstance(xsec_pt, Point) or xsec_pt.is_empty:
+            return float("inf")
+        return float(xsec.project(xsec_pt))
+    except Exception:
+        return float("inf")
+
+
 def _build_same_pair_multichain_branch_defs(
     anchor_decisions: dict[str, dict[str, Any]],
     *,
     pair: tuple[int, int],
+    src_xsec: LineString,
+    dst_xsec: LineString,
     edge_geometry_by_id: dict[str, LineString],
 ) -> list[dict[str, Any]]:
     src_i, dst_i = int(pair[0]), int(pair[1])
@@ -8754,12 +8791,23 @@ def _build_same_pair_multichain_branch_defs(
         seen.add(signature)
         out.append(
             {
-                "branch_id": f"{int(src_i)}_{int(dst_i)}__b{int(len(out))}",
                 "anchor_id": str(anchor_id),
                 "signature": [str(v) for v in signature],
                 "shape_ref_metric": shape_ref_metric,
+                "src_station_m": _line_xsec_station(shape_ref_metric, xsec=src_xsec),
+                "dst_station_m": _line_xsec_station(shape_ref_metric, xsec=dst_xsec),
             }
         )
+    out.sort(
+        key=lambda item: (
+            _to_finite_float(item.get("src_station_m"), float("inf")),
+            _to_finite_float(item.get("dst_station_m"), float("inf")),
+            str(item.get("anchor_id") or ""),
+        )
+    )
+    for branch_rank, branch in enumerate(out, start=1):
+        branch["branch_rank"] = int(branch_rank)
+        branch["branch_id"] = f"{int(src_i)}_{int(dst_i)}__b{int(branch_rank - 1)}"
     return out
 
 
@@ -8896,6 +8944,8 @@ def _build_same_pair_multichain_variants(
     branch_defs = _build_same_pair_multichain_branch_defs(
         anchor_decisions,
         pair=pair,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
         edge_geometry_by_id=edge_geometry_by_id,
     )
     if int(len(branch_defs)) <= 1:
@@ -8926,7 +8976,10 @@ def _build_same_pair_multichain_variants(
             {
                 "branch_id": str(branch_def.get("branch_id") or f"{int(pair[0])}_{int(pair[1])}__b{int(branch_rank)}"),
                 "cluster_id": int(branch_rank),
+                "branch_rank": int(branch_def.get("branch_rank", branch_rank + 1)),
                 "signature": [str(v) for v in (branch_def.get("signature") or [])],
+                "src_station_m": branch_def.get("src_station_m"),
+                "dst_station_m": branch_def.get("dst_station_m"),
                 "support": branch_support,
                 "road_prior_shape_ref_metric": branch_shape_ref,
                 "step1_corridor": step1_corridor,
@@ -10481,7 +10534,7 @@ def _finalize_payloads(
     metrics_payload["road_features_count"] = int(road_features_count)
     metrics_payload["road_count"] = int(road_features_count)
     metrics_payload["no_geometry_candidate_count"] = int(no_geometry_candidate_count)
-    metrics_payload["no_geometry_candidate"] = bool(road_candidate_count > 0 and road_features_count == 0)
+    metrics_payload["no_geometry_candidate"] = bool(no_geometry_candidate_count > 0)
     metrics_payload["params_digest"] = digest
     if extra_metrics:
         metrics_payload.update(extra_metrics)
@@ -10502,7 +10555,7 @@ def _finalize_payloads(
     summary_params["road_features_count"] = int(road_features_count)
     summary_params["road_candidate_count"] = int(road_candidate_count)
     summary_params["no_geometry_candidate_count"] = int(no_geometry_candidate_count)
-    summary_params["no_geometry_candidate"] = bool(road_candidate_count > 0 and road_features_count == 0)
+    summary_params["no_geometry_candidate"] = bool(no_geometry_candidate_count > 0)
     if extra_metrics:
         for k, v in extra_metrics.items():
             sk = str(k)

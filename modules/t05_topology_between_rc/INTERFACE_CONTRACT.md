@@ -1,5 +1,17 @@
 # t05_topology_between_rc - INTERFACE_CONTRACT
 
+## 0. Same-Pair Multi-Road Clarification
+- A single `(src_nodeid, dst_nodeid)` pair may legitimately emit multiple final `Road` features when T05 detects stable same-pair multichain branches.
+- Same-pair multi-road is valid output, not a failure by itself.
+- Each final same-pair road must expose stable channel identity fields:
+  - `channel_id:string`
+  - `channel_rank:int` (1-based)
+  - `channel_count:int`
+- `MULTI_ROAD_SAME_PAIR` is `hard` only when same-pair branches cannot be separated into stable non-crossing outputs.
+- `pair_count` counts unique final `(src_nodeid, dst_nodeid)` pairs.
+- `same_pair_multi_road_pair_count` counts pairs that emitted more than one final road.
+- `same_pair_multi_road_output_count` counts final road features emitted under same-pair multi-road handling.
+
 ## 1. 目标与范围
 - 模块 ID：`t05_topology_between_rc`
 - 目标：基于 `intersection_l`、轨迹与 `DriveZone`，结合 `LaneBoundary`、点云与 `RCSDRoad` prior，生成 RC 路口间有向 `Road` 中心线。

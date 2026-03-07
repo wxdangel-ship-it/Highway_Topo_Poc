@@ -841,7 +841,7 @@ def test_run_patch_core_keeps_single_road_for_single_cluster_pair(tmp_path: Path
     assert bool(out["gate_payload"]["overall_pass"]) is True
 
 
-def test_topology_unique_mode_same_pair_multichain_keeps_internal_branch_eval_but_hard_fails_final_multi_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_topology_unique_mode_same_pair_multichain_outputs_multi_roads_with_channel_identity(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     road_path = tmp_path / "RCSDRoad.geojson"
     road_payload = {
         "type": "FeatureCollection",
@@ -1016,12 +1016,20 @@ def test_topology_unique_mode_same_pair_multichain_keeps_internal_branch_eval_bu
     assert len(eval_calls) == 2
     assert {str(item["candidate_branch_id"]) for item in eval_calls} == {"1_2__b0", "1_2__b1"}
     assert all(bool(item["same_pair_multichain"]) for item in eval_calls)
-    assert out["road_count"] == 0
-    assert not out["road_properties"]
+    assert out["road_count"] == 2
+    assert len(out["road_properties"]) == 2
+    road_ids = {str(props["road_id"]) for props in out["road_properties"]}
+    assert road_ids == {"1_2__ch1", "1_2__ch2"}
+    channel_ids = {str(props.get("channel_id")) for props in out["road_properties"]}
+    assert channel_ids == {"ch1", "ch2"}
+    assert {int(props.get("channel_count", 0)) for props in out["road_properties"]} == {2}
+    assert all(bool(props.get("same_pair_multi_road", False)) for props in out["road_properties"])
     assert int(out["metrics_payload"].get("step1_same_pair_multichain_pair_count", 0)) == 1
-    assert bool(out["gate_payload"]["overall_pass"]) is False
-    reasons = {str(item.get("reason")) for item in out["hard_breakpoints"]}
-    assert HARD_MULTI_ROAD in reasons
+    assert int(out["metrics_payload"].get("pair_count", 0)) == 1
+    assert int(out["metrics_payload"].get("same_pair_multi_road_pair_count", 0)) == 1
+    assert int(out["metrics_payload"].get("same_pair_multi_road_output_count", 0)) == 2
+    assert bool(out["gate_payload"]["overall_pass"]) is True
+    assert not out["hard_breakpoints"]
 
 
 def test_allowed_pairs_skips_non_topology_src(monkeypatch) -> None:  # type: ignore[no-untyped-def]

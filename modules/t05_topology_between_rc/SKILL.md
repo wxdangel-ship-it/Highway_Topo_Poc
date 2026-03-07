@@ -1,5 +1,11 @@
 # t05_topology_between_rc - SKILL
 
+## Contract Delta
+- Same-pair multichain branches may legitimately produce multiple final `Road` features for one `(src_nodeid, dst_nodeid)` pair.
+- Multi-road output is valid only when channels are stable, non-crossing, and preserve cross-section order.
+- Each final same-pair road should carry `channel_id`, `channel_rank`, and `channel_count`.
+- `MULTI_ROAD_SAME_PAIR` is reserved for unresolved same-pair branch conflicts, not for valid same-pair multi-road output.
+
 ## 算法口径（MVP 冻结）
 
 1) 候选连接构建
