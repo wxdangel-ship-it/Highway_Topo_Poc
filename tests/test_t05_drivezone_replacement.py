@@ -275,6 +275,8 @@ def test_prior_gap_fill_prefers_road_prior_shape_ref(tmp_path: Path, monkeypatch
         traj_surface_hint={"traj_surface_enforced": False, "surface_metric": drivezone},
         shape_ref_hint_metric=step1_shape_ref,
         road_prior_shape_ref_metric=prior_shape_ref,
+        step1_used_road_prior=True,
+        step1_road_prior_mode="step1_no_traj",
     )
 
     captured_shape = captured.get("shape_ref_hint_metric")
@@ -346,10 +348,55 @@ def test_prior_gap_fill_overrides_drivezone_hard_when_prior_chain_same_outside(t
         traj_surface_hint={"traj_surface_enforced": False, "surface_metric": None},
         shape_ref_hint_metric=None,
         road_prior_shape_ref_metric=prior_shape_ref,
+        step1_used_road_prior=True,
+        step1_road_prior_mode="step1_no_traj",
     )
 
     assert HARD_ROAD_OUTSIDE_DRIVEZONE not in set(road.get("hard_reasons", []))
     assert bool(road.get("road_prior_drivezone_override_used")) is True
+
+
+def test_should_enable_road_prior_gap_fill_requires_step1_prior_and_not_same_pair_multichain() -> None:
+    assert (
+        pipeline._should_enable_road_prior_gap_fill(
+            road_prior_shape_ref_valid=True,
+            traj_surface_enforced=False,
+            step1_used_road_prior=True,
+            step1_road_prior_mode="step1_no_traj",
+            same_pair_multichain=False,
+        )
+        is True
+    )
+    assert (
+        pipeline._should_enable_road_prior_gap_fill(
+            road_prior_shape_ref_valid=True,
+            traj_surface_enforced=False,
+            step1_used_road_prior=False,
+            step1_road_prior_mode="step1_no_traj",
+            same_pair_multichain=False,
+        )
+        is False
+    )
+    assert (
+        pipeline._should_enable_road_prior_gap_fill(
+            road_prior_shape_ref_valid=True,
+            traj_surface_enforced=False,
+            step1_used_road_prior=True,
+            step1_road_prior_mode="step1_post_filter_empty",
+            same_pair_multichain=False,
+        )
+        is False
+    )
+    assert (
+        pipeline._should_enable_road_prior_gap_fill(
+            road_prior_shape_ref_valid=True,
+            traj_surface_enforced=False,
+            step1_used_road_prior=True,
+            step1_road_prior_mode="step1_no_traj",
+            same_pair_multichain=True,
+        )
+        is False
+    )
 
 
 def test_no_pointcloud_default(tmp_path: Path, monkeypatch) -> None:

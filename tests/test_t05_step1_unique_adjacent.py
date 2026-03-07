@@ -684,7 +684,7 @@ def test_step1_corridor_falls_back_to_road_prior_when_no_traj() -> None:
     assert out.get("hard_reason") is None
 
 
-def test_run_patch_core_outputs_multi_roads_for_same_pair_clusters(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_run_patch_core_keeps_single_road_for_single_cluster_pair(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     patch_inputs = _mk_patch_inputs(
         tmp_path=tmp_path,
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
@@ -703,17 +703,17 @@ def test_run_patch_core_outputs_multi_roads_for_same_pair_clusters(tmp_path: Pat
         src_cross_points=[Point(0.0, 0.0), Point(0.0, 0.5), Point(0.0, 10.0), Point(0.0, 10.5)],
         dst_cross_points=[Point(100.0, 0.0), Point(100.0, 0.5), Point(100.0, 10.0), Point(100.0, 10.5)],
         repr_traj_ids=["t0", "t1", "t2", "t3"],
-        hard_anomalies={HARD_MULTI_ROAD},
+        hard_anomalies=set(),
         evidence_traj_ids=["t0", "t1", "t2", "t3"],
-        evidence_cluster_ids=[0, 0, 1, 1],
+        evidence_cluster_ids=[0, 0, 0, 0],
         evidence_lengths_m=[100.0, 100.0, 100.0, 100.0],
         open_end_flags=[False, False, False, False],
     )
-    support.cluster_count = 2
+    support.cluster_count = 1
     support.main_cluster_id = 0
-    support.main_cluster_ratio = 0.5
-    support.cluster_sep_m_est = 10.0
-    support.cluster_sizes = [2, 2]
+    support.main_cluster_ratio = 1.0
+    support.cluster_sep_m_est = None
+    support.cluster_sizes = [4]
 
     monkeypatch.setattr(
         pipeline,
@@ -834,10 +834,10 @@ def test_run_patch_core_outputs_multi_roads_for_same_pair_clusters(tmp_path: Pat
     )
 
     road_ids = [str(props["road_id"]) for props in out["road_properties"]]
-    assert out["road_count"] == 2
-    assert len(road_ids) == 2
-    assert len(set(road_ids)) == 2
-    assert all("__k" in road_id for road_id in road_ids)
+    assert out["road_count"] == 1
+    assert len(road_ids) == 1
+    assert len(set(road_ids)) == 1
+    assert "__k" not in road_ids[0]
     assert bool(out["gate_payload"]["overall_pass"]) is True
 
 
