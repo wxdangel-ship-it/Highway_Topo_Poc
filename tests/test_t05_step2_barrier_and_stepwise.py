@@ -155,6 +155,73 @@ def test_step1_seed_selected_is_projected_from_selected_corridor() -> None:
     assert float(cp_dst.distance(Point(88.0, 12.0))) > 1.0
 
 
+def test_step1_diverge_to_merge_uses_forward_trace() -> None:
+    support = PairSupport(
+        src_nodeid=120,
+        dst_nodeid=220,
+        support_traj_ids={"main"},
+        support_event_count=1,
+        traj_segments=[LineString([(0.0, 4.0), (50.0, 4.0), (100.0, 4.0)])],
+        src_cross_points=[Point(0.0, 4.0)],
+        dst_cross_points=[Point(100.0, 4.0)],
+        evidence_traj_ids=["main"],
+        cluster_count=1,
+        main_cluster_ratio=1.0,
+    )
+    src_xsec = LineString([(0.0, -20.0), (0.0, 20.0)])
+    dst_xsec = LineString([(100.0, -20.0), (100.0, 20.0)])
+
+    out = pipeline._build_step1_corridor_for_pair(
+        support=support,
+        src_type="diverge",
+        dst_type="merge",
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=None,
+        gore_zone_metric=None,
+        params={"STEP1_MULTI_CORRIDOR_DIST_M": 8.0, "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.6},
+    )
+
+    line = out.get("shape_ref_line")
+    assert isinstance(line, LineString)
+    assert str(out.get("strategy", "")).startswith("diverge_to_merge_forward_trace")
+    assert out.get("hard_reason") is None
+    assert float(line.distance(support.traj_segments[0])) <= 1e-6
+
+
+def test_shared_intersection_group_marks_internal_diverge_merge_pair() -> None:
+    cs = CrossSection(
+        nodeid=9101,
+        geometry_metric=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        properties={
+            "nodeid": 9101,
+            "nodeids": [9101, 9102],
+            "roles": ["diverge", "merge"],
+            "merged_group_id": "chain:g1",
+        },
+    )
+    patch_inputs = SimpleNamespace(intersection_lines=[cs])
+
+    group_by_nodeid, role_by_nodeid = pipeline._build_shared_intersection_group_maps(patch_inputs)
+
+    assert group_by_nodeid == {9101: "chain:g1", 9102: "chain:g1"}
+    assert role_by_nodeid == {9101: "diverge", 9102: "merge"}
+    assert pipeline._is_shared_intersection_internal_pair(
+        src=9101,
+        dst=9102,
+        src_type="diverge",
+        dst_type="merge",
+        group_by_nodeid=group_by_nodeid,
+    )
+    assert not pipeline._is_shared_intersection_internal_pair(
+        src=9101,
+        dst=9102,
+        src_type="merge",
+        dst_type="diverge",
+        group_by_nodeid=group_by_nodeid,
+    )
+
+
 def test_step1_prefers_gore_free_corridor_when_constraints_equal() -> None:
     support = PairSupport(
         src_nodeid=101,

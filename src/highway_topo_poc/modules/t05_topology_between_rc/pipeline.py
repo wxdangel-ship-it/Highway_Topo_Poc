@@ -506,6 +506,7 @@ def _run_patch_core(
 
     xsec_map = _build_cross_section_map(patch_inputs)
     node_ids = sorted(xsec_map.keys())
+    shared_xsec_group_by_nodeid, _shared_xsec_role_by_nodeid = _build_shared_intersection_group_maps(patch_inputs)
     if progress is not None:
         progress.mark("xsec_map_ready", node_count=int(len(node_ids)))
 
@@ -1688,6 +1689,16 @@ def _run_patch_core(
         if progress is not None and (idx == 1 or idx % 20 == 0 or idx == total_pairs):
             progress.mark("road_eval_progress", pair_index=int(idx), total_pairs=total_pairs)
         src, dst = pair
+        src_type = node_type_map.get(src, "unknown")
+        dst_type = node_type_map.get(dst, "unknown")
+        if _is_shared_intersection_internal_pair(
+            src=int(src),
+            dst=int(dst),
+            src_type=str(src_type),
+            dst_type=str(dst_type),
+            group_by_nodeid=shared_xsec_group_by_nodeid,
+        ):
+            continue
         src_xsec = xsec_map.get(src)
         dst_xsec = xsec_map.get(dst)
         src_xsec_gate = xsec_cross_map.get(src)
@@ -1700,8 +1711,8 @@ def _run_patch_core(
                 src=src,
                 dst=dst,
                 support=support,
-                src_type=node_type_map.get(src, "unknown"),
-                dst_type=node_type_map.get(dst, "unknown"),
+                src_type=src_type,
+                dst_type=dst_type,
                 neighbor_search_pass=int(neighbor_search_pass),
             )
             _apply_xsec_gate_meta_to_road(road=road, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
@@ -1729,8 +1740,6 @@ def _run_patch_core(
             )
             continue
 
-        src_type = node_type_map.get(src, "unknown")
-        dst_type = node_type_map.get(dst, "unknown")
         if debug_enabled:
             for ls in _iter_line_parts(xsec_gate_all_map.get(int(src))):
                 debug_layers["xsec_gate_all_src"].append(
@@ -3739,14 +3748,12 @@ def _build_step1_corridor_for_pair(
     if str(dst_type) == "diverge":
         strategy = "dst_diverge_reverse_trace"
         seed_xsec = dst_xsec
+    elif str(src_type) == "diverge" and str(dst_type) == "merge":
+        strategy = "diverge_to_merge_forward_trace"
+        seed_xsec = src_xsec
     elif str(dst_type) == "merge" and str(src_type) == "merge":
         strategy = "merge_to_merge_forward_trace"
         seed_xsec = src_xsec
-    elif str(dst_type) == "merge" and str(src_type) == "diverge":
-        out["strategy"] = "unsupported"
-        out["hard_reason"] = HARD_NO_STRATEGY_MERGE_TO_DIVERGE
-        out["hard_hint"] = "dst=merge_src=diverge_no_strategy"
-        return out
     else:
         strategy = "generic_forward_trace"
         seed_xsec = src_xsec
@@ -8086,6 +8093,94 @@ def _build_cross_section_map(patch_inputs: PatchInputs) -> dict[int, Any]:
         else:
             out[cs.nodeid] = cs
     return out
+
+
+def _safe_int_list(value: Any) -> list[int]:
+    if value is None:
+        return []
+    items = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = [part.strip() for part in text.split(",") if part.strip()]
+        items = parsed
+    if not isinstance(items, (list, tuple)):
+        items = [items]
+    out: list[int] = []
+    for item in items:
+        try:
+            if isinstance(item, bool):
+                continue
+            iv = int(np.int64(item))
+        except Exception:
+            continue
+        if iv not in out:
+            out.append(iv)
+    return out
+
+
+def _safe_str_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    items = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = [part.strip() for part in text.split(",") if part.strip()]
+        items = parsed
+    if not isinstance(items, (list, tuple)):
+        items = [items]
+    out: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _build_shared_intersection_group_maps(patch_inputs: PatchInputs) -> tuple[dict[int, str], dict[int, str]]:
+    group_by_nodeid: dict[int, str] = {}
+    role_by_nodeid: dict[int, str] = {}
+    for cs in patch_inputs.intersection_lines:
+        props = getattr(cs, "properties", {}) or {}
+        members = _safe_int_list(props.get("nodeids"))
+        if not members:
+            continue
+        if int(cs.nodeid) not in members:
+            members = [int(cs.nodeid), *members]
+        if len(members) <= 1:
+            continue
+        group_id_raw = str(props.get("merged_group_id") or "").strip()
+        group_id = group_id_raw or ("shared_xsec:" + "|".join(str(v) for v in sorted(members)))
+        roles = _safe_str_list(props.get("roles"))
+        for idx, nodeid in enumerate(members):
+            group_by_nodeid[int(nodeid)] = str(group_id)
+            if idx < len(roles):
+                role_by_nodeid[int(nodeid)] = str(roles[idx])
+    return group_by_nodeid, role_by_nodeid
+
+
+def _is_shared_intersection_internal_pair(
+    *,
+    src: int,
+    dst: int,
+    src_type: str,
+    dst_type: str,
+    group_by_nodeid: dict[int, str],
+) -> bool:
+    if str(src_type) != "diverge" or str(dst_type) != "merge":
+        return False
+    src_group = str(group_by_nodeid.get(int(src)) or "")
+    dst_group = str(group_by_nodeid.get(int(dst)) or "")
+    return bool(src_group and dst_group and src_group == dst_group)
 
 
 def _estimate_trajectory_point_count(trajectories: Sequence[Any]) -> int:
