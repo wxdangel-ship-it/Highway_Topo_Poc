@@ -119,8 +119,10 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "PASS2_NEIGHBOR_MAX_DIST_M": 8000.0,
     "PASS2_UNRESOLVED_MIN_COUNT": 20,
     "PASS2_UNRESOLVED_PER_SUPPORT": 10.0,
+    "PASS2_UNRESOLVED_RATIO_TRIGGER": 6.0,
     "PASS2_FORCE_WHEN_STITCH_ACCEPT_ZERO": 1,
     "MULTI_ROAD_SEP_M": 8.0,
+    "SAME_PAIR_MULTI_STATION_GAP_MIN_M": 0.5,
     "MULTI_ROAD_TOPN": 10,
     "STABLE_OFFSET_M": 50.0,
     "STABLE_OFFSET_MARGIN_M": 5.0,
@@ -1120,14 +1122,26 @@ def _run_patch_core(
     pass1_stitch_accept_count = int(pass1_supports.stitch_accept_count)
     pass2_unresolved_min = int(max(1, int(params.get("PASS2_UNRESOLVED_MIN_COUNT", 20))))
     pass2_unresolved_per_support = float(max(1.0, float(params.get("PASS2_UNRESOLVED_PER_SUPPORT", 10.0))))
+    pass2_unresolved_ratio_trigger = float(max(1.0, float(params.get("PASS2_UNRESOLVED_RATIO_TRIGGER", 6.0))))
     pass2_force_when_no_stitch = bool(int(params.get("PASS2_FORCE_WHEN_STITCH_ACCEPT_ZERO", 1)))
+    pass1_cross_distance_reject_count = int(getattr(pass1_cross, "n_cross_distance_gate_reject", 0) or 0)
+    pass1_has_recall_signal = bool(pass1_cross_distance_reject_count > 0 or pass1_supports.next_crossing_candidates)
     unresolved_trigger = pass1_unresolved_count >= max(
         pass2_unresolved_min,
         int(math.ceil(pass2_unresolved_per_support * max(1, pass1_pair_count))),
     )
+    dense_unresolved_trigger = (
+        bool(pass1_has_recall_signal)
+        and pass1_pair_count > 0
+        and pass1_unresolved_count >= max(
+            pass2_unresolved_min,
+            int(math.ceil(pass2_unresolved_ratio_trigger * max(1, pass1_pair_count))),
+        )
+    )
     sparse_support_trigger = pass1_pair_count <= 1 and pass1_unresolved_count >= max(5, pass2_unresolved_min // 2)
     should_try_pass2 = (
         pass1_pair_count == 0
+        or dense_unresolved_trigger
         or (
             pass2_force_when_no_stitch
             and pass1_stitch_accept_count <= 0
@@ -2175,9 +2189,11 @@ def _run_patch_core(
                 float(params["MULTI_ROAD_SEP_M"]),
             )
             min_sep_m = max(1.0, min(4.0, float(min_sep_base) * 0.25))
+            same_pair_station_gap_min_m = float(max(0.1, float(params.get("SAME_PAIR_MULTI_STATION_GAP_MIN_M", 0.5))))
             selected_multi_pick = _select_non_conflicting_multi_road_candidates(
                 sorted(viable_candidates, key=_candidate_sort_key, reverse=True),
                 min_sep_m=float(min_sep_m),
+                same_pair_station_gap_min_m=float(same_pair_station_gap_min_m),
             )
             selected_ids = {id(c) for c in selected_multi_pick}
             ordered_candidates = sorted(
@@ -2250,6 +2266,7 @@ def _run_patch_core(
             selected_multi = _select_non_conflicting_multi_road_candidates(
                 viable_candidates,
                 min_sep_m=float(min_sep_m),
+                same_pair_station_gap_min_m=float(max(0.1, float(params.get("SAME_PAIR_MULTI_STATION_GAP_MIN_M", 0.5)))),
             )
             if len(selected_multi) >= 2:
                 multi_count = int(len(selected_multi))
@@ -6286,6 +6303,16 @@ def _evaluate_candidate_road(
             src_xsec=src_xsec,
             dst_xsec=dst_xsec,
         )
+        if (
+            not _is_valid_linestring(fallback_line)
+            and bool(same_pair_multichain)
+            and _is_valid_linestring(primary_shape_ref_metric)
+        ):
+            fallback_line = _orient_axis_line(
+                primary_shape_ref_metric,
+                src_xsec=src_xsec,
+                dst_xsec=dst_xsec,
+            )
         if isinstance(fallback_line, LineString) and (not fallback_line.is_empty):
             road_line = fallback_line
             centerline_fallback_used = True
@@ -6324,12 +6351,21 @@ def _evaluate_candidate_road(
                 if road.get("_endpoint_before_dst_metric") is None:
                     road["_endpoint_before_dst_metric"] = Point(road_line.coords[-1])
     if centerline_fallback_used and HARD_CENTER_EMPTY in hard_flags and _is_valid_linestring(road_line):
-        endpoint_tol = float(max(0.5, float(params.get("ENDPOINT_ON_XSEC_TOL_M", 1.0))))
-        src_dist = _to_finite_float(road.get("endpoint_dist_to_xsec_src_m"), float("nan"))
-        dst_dist = _to_finite_float(road.get("endpoint_dist_to_xsec_dst_m"), float("nan"))
-        if np.isfinite(src_dist) and np.isfinite(dst_dist) and src_dist <= endpoint_tol + 1e-6 and dst_dist <= endpoint_tol + 1e-6:
+        if bool(same_pair_multichain) and _is_valid_linestring(primary_shape_ref_metric):
             hard_flags.discard(HARD_CENTER_EMPTY)
             center_empty_downgraded = True
+        else:
+            endpoint_tol = float(max(0.5, float(params.get("ENDPOINT_ON_XSEC_TOL_M", 1.0))))
+            src_dist = _to_finite_float(road.get("endpoint_dist_to_xsec_src_m"), float("nan"))
+            dst_dist = _to_finite_float(road.get("endpoint_dist_to_xsec_dst_m"), float("nan"))
+            if (
+                np.isfinite(src_dist)
+                and np.isfinite(dst_dist)
+                and src_dist <= endpoint_tol + 1e-6
+                and dst_dist <= endpoint_tol + 1e-6
+            ):
+                hard_flags.discard(HARD_CENTER_EMPTY)
+                center_empty_downgraded = True
 
     src_width_ratio = _safe_width_ratio(road.get("src_width_near_m"), road.get("src_width_base_m"))
     dst_width_ratio = _safe_width_ratio(road.get("dst_width_near_m"), road.get("dst_width_base_m"))
@@ -6655,10 +6691,83 @@ def _candidate_lines_conflict(lhs: LineString, rhs: LineString, *, min_sep_m: fl
     return False
 
 
+def _same_pair_multi_road_station_gap(lhs: dict[str, Any], rhs: dict[str, Any]) -> float | None:
+    gaps: list[float] = []
+    for key in ("same_pair_multi_road_src_station_m", "same_pair_multi_road_dst_station_m"):
+        lhs_v = lhs.get(key)
+        rhs_v = rhs.get(key)
+        if lhs_v is None or rhs_v is None:
+            continue
+        try:
+            gap = abs(float(lhs_v) - float(rhs_v))
+        except Exception:
+            continue
+        if np.isfinite(gap):
+            gaps.append(float(gap))
+    if not gaps:
+        return None
+    return float(max(gaps))
+
+
+def _same_pair_multi_road_allows_close_parallel(
+    lhs: dict[str, Any],
+    rhs: dict[str, Any],
+    *,
+    min_station_gap_m: float,
+) -> bool:
+    if int(lhs.get("src_nodeid", -1)) != int(rhs.get("src_nodeid", -2)):
+        return False
+    if int(lhs.get("dst_nodeid", -1)) != int(rhs.get("dst_nodeid", -2)):
+        return False
+    if not (bool(lhs.get("step1_same_pair_multichain", False)) and bool(rhs.get("step1_same_pair_multichain", False))):
+        return False
+
+    lhs_branch = str(lhs.get("same_pair_multi_road_branch_id") or lhs.get("candidate_branch_id") or "")
+    rhs_branch = str(rhs.get("same_pair_multi_road_branch_id") or rhs.get("candidate_branch_id") or "")
+    if (not lhs_branch) or (not rhs_branch) or lhs_branch == rhs_branch:
+        return False
+
+    lhs_sig = tuple(str(v) for v in (lhs.get("same_pair_multi_road_signature") or []) if str(v))
+    rhs_sig = tuple(str(v) for v in (rhs.get("same_pair_multi_road_signature") or []) if str(v))
+    if lhs_sig and rhs_sig and lhs_sig == rhs_sig:
+        return False
+
+    station_gap = _same_pair_multi_road_station_gap(lhs, rhs)
+    if station_gap is None:
+        return False
+    return bool(float(station_gap) >= float(min_station_gap_m))
+
+
+def _candidate_roads_conflict(
+    lhs: dict[str, Any],
+    rhs: dict[str, Any],
+    *,
+    min_sep_m: float,
+    same_pair_station_gap_min_m: float,
+) -> bool:
+    lhs_line = lhs.get("_geometry_metric")
+    rhs_line = rhs.get("_geometry_metric")
+    if not isinstance(lhs_line, LineString) or lhs_line.is_empty:
+        return False
+    if not isinstance(rhs_line, LineString) or rhs_line.is_empty:
+        return False
+    allow_close_parallel = _same_pair_multi_road_allows_close_parallel(
+        lhs,
+        rhs,
+        min_station_gap_m=float(same_pair_station_gap_min_m),
+    )
+    return _candidate_lines_conflict(
+        lhs_line,
+        rhs_line,
+        min_sep_m=(0.0 if allow_close_parallel else float(min_sep_m)),
+    )
+
+
 def _select_non_conflicting_multi_road_candidates(
     candidates: Sequence[dict[str, Any]],
     *,
     min_sep_m: float,
+    same_pair_station_gap_min_m: float = 0.5,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for cand in candidates:
@@ -6666,13 +6775,13 @@ def _select_non_conflicting_multi_road_candidates(
         if not isinstance(line, LineString) or line.is_empty:
             continue
         if any(
-            _candidate_lines_conflict(
-                line,
-                prev.get("_geometry_metric"),
+            _candidate_roads_conflict(
+                cand,
+                prev,
                 min_sep_m=float(min_sep_m),
+                same_pair_station_gap_min_m=float(same_pair_station_gap_min_m),
             )
             for prev in out
-            if isinstance(prev.get("_geometry_metric"), LineString)
         ):
             continue
         out.append(cand)

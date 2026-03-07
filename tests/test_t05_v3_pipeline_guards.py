@@ -595,6 +595,134 @@ def test_neighbor_pass2_is_triggered_when_unresolved_high_and_stitch_zero(tmp_pa
     assert out["metrics_payload"].get("neighbor_search_pass") == 2
 
 
+def test_neighbor_pass2_is_triggered_when_unresolved_dense_with_cross_distance_reject(
+    tmp_path: Path, monkeypatch
+) -> None:
+    xsecs = [
+        CrossSection(nodeid=1, geometry_metric=LineString([(0.0, -2.0), (0.0, 2.0)]), properties={"nodeid": 1}),
+        CrossSection(nodeid=2, geometry_metric=LineString([(120.0, -2.0), (120.0, 2.0)]), properties={"nodeid": 2}),
+    ]
+    patch_inputs = _mk_patch_inputs(tmp_path=tmp_path, intersection_lines=xsecs, trajectories=[])
+
+    pass1_support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t1"},
+        support_event_count=1,
+        repr_traj_ids=["t1"],
+    )
+    pass2_support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t1", "t2", "t3"},
+        support_event_count=3,
+        repr_traj_ids=["t1", "t2", "t3"],
+    )
+    unresolved = [
+        {"reason": "UNRESOLVED_NEIGHBOR", "traj_id": f"t{i}", "src_nodeid": 1, "dst_nodeid": None}
+        for i in range(24)
+    ]
+    pass1_result = PairSupportBuildResult(
+        supports={(1, 2): pass1_support},
+        unresolved_events=unresolved,
+        graph_node_count=100,
+        graph_edge_count=120,
+        stitch_candidate_count=10,
+        stitch_edge_count=5,
+        stitch_query_count=40,
+        stitch_candidates_total=10,
+        stitch_reject_dist_count=0,
+        stitch_reject_angle_count=0,
+        stitch_reject_forward_count=0,
+        stitch_accept_count=5,
+        stitch_levels_used_hist={"12": 5},
+        next_crossing_candidates=[
+            {
+                "src_nodeid": 1,
+                "src_cross_id": "t:cross:1",
+                "traj_id": "t0",
+                "seq_idx": 0,
+                "station_m": 0.0,
+                "src_point": Point(0.0, 0.0),
+                "dst_candidates": [],
+            }
+        ],
+    )
+    pass2_result = PairSupportBuildResult(
+        supports={(1, 2): pass2_support},
+        unresolved_events=[],
+        graph_node_count=120,
+        graph_edge_count=200,
+        stitch_candidate_count=20,
+        stitch_edge_count=10,
+        stitch_query_count=40,
+        stitch_candidates_total=20,
+        stitch_reject_dist_count=0,
+        stitch_reject_angle_count=0,
+        stitch_reject_forward_count=0,
+        stitch_accept_count=10,
+        stitch_levels_used_hist={"25": 3},
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "extract_crossing_events",
+        lambda *args, **kwargs: CrossingExtractResult(
+            events_by_traj={},
+            raw_hit_count=0,
+            dedup_drop_count=0,
+            n_cross_empty_skipped=0,
+            n_cross_geom_unexpected=0,
+            n_cross_distance_gate_reject=50,
+        ),
+    )
+    calls = {"n": 0}
+
+    def _fake_build_pair_supports(*args, **kwargs):
+        calls["n"] += 1
+        return pass1_result if calls["n"] == 1 else pass2_result
+
+    monkeypatch.setattr(pipeline, "build_pair_supports", _fake_build_pair_supports)
+    monkeypatch.setattr(
+        pipeline,
+        "infer_node_types",
+        lambda **kwargs: ({1: "unknown", 2: "unknown"}, {1: 0, 2: 0}, {1: 0, 2: 0}),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: _mk_center(LineString([(0.0, 0.0), (120.0, 0.0)])),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: (
+            {
+                "traj_surface_enforced": False,
+                "traj_in_ratio": None,
+                "traj_in_ratio_est": None,
+                "endpoint_in_traj_surface_src": None,
+                "endpoint_in_traj_surface_dst": None,
+            },
+            set(),
+            set(),
+            [],
+        ),
+    )
+
+    out = pipeline._run_patch_core(
+        patch_inputs,
+        params=dict(pipeline.DEFAULT_PARAMS),
+        run_id="unit_run",
+        repo_root=tmp_path,
+    )
+
+    assert calls["n"] >= 2
+    assert out["metrics_payload"].get("neighbor_search_pass2_attempted") is True
+    assert out["metrics_payload"].get("neighbor_search_pass2_used") is True
+    assert out["metrics_payload"].get("neighbor_search_pass") == 2
+
+
 def test_surface_point_cache_skips_second_laz_read(tmp_path: Path, monkeypatch) -> None:
     xsec = CrossSection(
         nodeid=1,

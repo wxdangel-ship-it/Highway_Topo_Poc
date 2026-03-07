@@ -1032,6 +1032,37 @@ def test_topology_unique_mode_same_pair_multichain_outputs_multi_roads_with_chan
     assert not out["hard_breakpoints"]
 
 
+def test_same_pair_multi_road_selection_keeps_close_parallel_branches() -> None:
+    cand1 = {
+        "src_nodeid": 1,
+        "dst_nodeid": 2,
+        "step1_same_pair_multichain": True,
+        "same_pair_multi_road_branch_id": "1_2__b0",
+        "same_pair_multi_road_signature": ["e0"],
+        "same_pair_multi_road_src_station_m": 1.0,
+        "same_pair_multi_road_dst_station_m": 1.2,
+        "_geometry_metric": LineString([(0.0, 0.0), (100.0, 0.0)]),
+    }
+    cand2 = {
+        "src_nodeid": 1,
+        "dst_nodeid": 2,
+        "step1_same_pair_multichain": True,
+        "same_pair_multi_road_branch_id": "1_2__b1",
+        "same_pair_multi_road_signature": ["e1"],
+        "same_pair_multi_road_src_station_m": 4.0,
+        "same_pair_multi_road_dst_station_m": 4.2,
+        "_geometry_metric": LineString([(0.0, 0.2), (100.0, 0.2)]),
+    }
+
+    selected = pipeline._select_non_conflicting_multi_road_candidates(
+        [cand1, cand2],
+        min_sep_m=2.0,
+        same_pair_station_gap_min_m=0.5,
+    )
+
+    assert len(selected) == 2
+
+
 def test_allowed_pairs_skips_non_topology_src(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     src_key = "t:cross:1"
     dst_key = "t:cross:2"

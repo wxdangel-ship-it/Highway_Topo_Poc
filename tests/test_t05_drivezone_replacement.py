@@ -356,6 +356,79 @@ def test_prior_gap_fill_overrides_drivezone_hard_when_prior_chain_same_outside(t
     assert bool(road.get("road_prior_drivezone_override_used")) is True
 
 
+def test_same_pair_multichain_shape_ref_fallback_downgrades_center_empty(tmp_path: Path, monkeypatch) -> None:
+    src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
+    dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
+    shape_ref = LineString([(0.0, 0.0), (50.0, 0.5), (100.0, 0.0)])
+    drivezone = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t1"},
+        support_event_count=1,
+        traj_segments=[LineString([(0.0, 0.0), (100.0, 0.0)])],
+        src_cross_points=[Point(0.0, 0.0)],
+        dst_cross_points=[Point(100.0, 0.0)],
+        evidence_traj_ids=["t1"],
+    )
+    patch_inputs = _mk_patch_inputs(tmp_path, drivezone=drivezone)
+    params = dict(pipeline.DEFAULT_PARAMS)
+
+    def _fake_centerline(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        center = _mk_center(LineString(), shape_ref)
+        center.hard_flags = {pipeline.HARD_CENTER_EMPTY}
+        return center
+
+    def _fake_traj_gate(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return (
+            {
+                "traj_surface_enforced": False,
+                "traj_in_ratio": None,
+                "traj_in_ratio_est": None,
+                "endpoint_in_traj_surface_src": None,
+                "endpoint_in_traj_surface_dst": None,
+            },
+            {"TRAJ_SURFACE_INSUFFICIENT"},
+            set(),
+            [],
+        )
+
+    monkeypatch.setattr(pipeline, "estimate_centerline", _fake_centerline)
+    monkeypatch.setattr(pipeline, "_eval_traj_surface_gate", _fake_traj_gate)
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="merge",
+        dst_type="merge",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": False, "surface_metric": None},
+        shape_ref_hint_metric=shape_ref,
+        same_pair_multichain=True,
+        candidate_branch_id="1_2__b0",
+    )
+
+    assert pipeline.HARD_CENTER_EMPTY not in set(road.get("hard_reasons", []))
+    assert bool(road.get("centerline_fallback_geometry_used")) is True
+    assert bool(road.get("center_estimate_empty_downgraded")) is True
+    assert isinstance(road.get("_geometry_metric"), LineString)
+
+
 def test_should_enable_road_prior_gap_fill_requires_step1_prior_and_not_same_pair_multichain() -> None:
     assert (
         pipeline._should_enable_road_prior_gap_fill(
