@@ -285,6 +285,76 @@ def test_topology_unique_anchor_decisions_include_incoming_anchor_paths() -> Non
     )
 
 
+def test_collect_topology_anchor_seeds_can_borrow_shared_member_edges() -> None:
+    compressed = {
+        55353307: [
+            {
+                "to": 608638238,
+                "edge_ids": ["edge_shared_out"],
+                "path_nodes": [55353307, 608638238],
+            }
+        ]
+    }
+
+    seeds = pipeline._collect_topology_anchor_seeds(
+        compressed,
+        cross_nodes={55353307, 23287538, 608638238},
+        seed_role="out",
+        shared_group_members_by_nodeid={
+            55353307: [55353307, 23287538],
+            23287538: [55353307, 23287538],
+        },
+    )
+
+    by_src = {int(item["src_nodeid"]): item for item in seeds if int(item["src_nodeid"]) in {55353307, 23287538}}
+    assert int(by_src[55353307]["start_to"]) == 608638238
+    assert int(by_src[23287538]["start_to"]) == 608638238
+    assert by_src[23287538]["start_path_nodes"] == [23287538, 608638238]
+    assert int(by_src[23287538]["borrowed_from_src"]) == 55353307
+
+
+def test_topology_unique_anchor_decisions_accept_shared_member_via_borrowed_edges() -> None:
+    compressed = {
+        55353307: [
+            {
+                "to": 608638238,
+                "edge_ids": ["edge_shared_out"],
+                "path_nodes": [55353307, 608638238],
+            }
+        ]
+    }
+    xsec_map = {
+        55353307: _mk_xsec(55353307, 0.0),
+        23287538: _mk_xsec(23287538, 0.0),
+        608638238: _mk_xsec(608638238, 10.0),
+    }
+
+    (
+        allowed_dst,
+        allowed_pairs,
+        node_decisions,
+        _anchor_decisions,
+        topo_stats,
+        _straight,
+        _chain,
+    ) = pipeline._build_topology_unique_anchor_decisions(
+        compressed,
+        cross_nodes={55353307, 23287538, 608638238},
+        xsec_map=xsec_map,
+        require_unique_chain=True,
+        max_expansions=1000,
+        shared_group_members_by_nodeid={
+            55353307: [55353307, 23287538],
+            23287538: [55353307, 23287538],
+        },
+    )
+
+    assert (23287538, 608638238) in allowed_pairs
+    assert 608638238 in allowed_dst.get(23287538, set())
+    assert str(node_decisions[23287538]["status"]) == "accepted"
+    assert int(topo_stats.get("accepted_src_count", 0)) >= 2
+
+
 def test_crossing_absorbing_state_prevents_third_party_crossing_expansion() -> None:
     src_key = "t:cross:1"
     mid_key = "t:cross:2"
@@ -1956,10 +2026,11 @@ def test_run_patch_core_uses_shared_intersection_alias_lookup(tmp_path: Path, mo
             n_cross_distance_gate_reject=0,
         ),
     )
-    monkeypatch.setattr(
-        pipeline,
-        "build_pair_supports",
-        lambda *args, **kwargs: PairSupportBuildResult(
+    captured_support_kwargs: list[dict[str, object]] = []
+
+    def _fake_build_pair_supports(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured_support_kwargs.append(dict(kwargs))
+        return PairSupportBuildResult(
             supports={(9101, 9202): support},
             unresolved_events=[],
             graph_node_count=0,
@@ -1976,8 +2047,9 @@ def test_run_patch_core_uses_shared_intersection_alias_lookup(tmp_path: Path, mo
             ambiguous_events=[],
             next_crossing_candidates=[],
             node_dst_votes={9101: {9202: 1}},
-        ),
-    )
+        )
+
+    monkeypatch.setattr(pipeline, "build_pair_supports", _fake_build_pair_supports)
     monkeypatch.setattr(
         pipeline,
         "infer_node_types",
@@ -2009,6 +2081,12 @@ def test_run_patch_core_uses_shared_intersection_alias_lookup(tmp_path: Path, mo
         repo_root=tmp_path,
     )
 
+    assert captured_support_kwargs
+    first_kwargs = captured_support_kwargs[0]
+    src_alias_map = dict(first_kwargs.get("src_nodeid_alias_by_nodeid") or {})
+    dst_alias_map = dict(first_kwargs.get("dst_nodeid_alias_by_nodeid") or {})
+    assert int(src_alias_map.get(9102, -1)) == 9101
+    assert int(dst_alias_map.get(9201, -1)) == 9202
     assert int(out["metrics_payload"].get("step1_unique_pair_count", 0)) == 1
 
 

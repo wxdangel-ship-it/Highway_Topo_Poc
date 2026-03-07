@@ -562,6 +562,10 @@ def _run_patch_core(
         shared_xsec_src_alias_by_primary,
         shared_xsec_dst_alias_by_primary,
     ) = _build_shared_intersection_alias_maps(patch_inputs)
+    shared_xsec_group_members_by_nodeid = _build_shared_intersection_group_members_map(
+        primary_by_nodeid=shared_xsec_primary_by_nodeid,
+        group_by_nodeid=shared_xsec_group_by_nodeid,
+    )
     xsec_map = _expand_shared_intersection_lookup(
         xsec_raw_map,
         primary_by_nodeid=shared_xsec_primary_by_nodeid,
@@ -856,6 +860,7 @@ def _run_patch_core(
                 xsec_map=xsec_cross_lookup_map,
                 require_unique_chain=bool(int(params.get("STEP1_TOPO_REQUIRE_UNIQUE_CHAIN", 1))),
                 max_expansions=int(max(100, int(params.get("STEP1_TOPO_MAX_EXPANSIONS", 50000)))),
+                shared_group_members_by_nodeid=shared_xsec_group_members_by_nodeid,
             )
             step1_topology_enabled = True
             step1_topology_stats.update({str(k): v for k, v in topo_comp_stats.items()})
@@ -1102,6 +1107,8 @@ def _run_patch_core(
             allowed_pairs=step1_allowed_pair_filter_set,
             single_support_per_pair=bool(int(params.get("STEP1_SINGLE_SUPPORT_PER_PAIR", 1))),
             skip_search_after_pair_resolved=bool(int(params.get("STEP1_SKIP_SEARCH_AFTER_PAIR_RESOLVED", 1))),
+            src_nodeid_alias_by_nodeid=shared_xsec_src_alias_by_primary,
+            dst_nodeid_alias_by_nodeid=shared_xsec_dst_alias_by_primary,
             allowed_dst_close_hit_buffer_m=float(hit_buffer_m),
         )
         nt_map, indeg_map, outdeg_map = infer_node_types(
@@ -8326,12 +8333,24 @@ def _collect_topology_anchor_seeds(
     *,
     cross_nodes: set[int],
     seed_role: str = "out",
+    shared_group_members_by_nodeid: dict[int, list[int]] | None = None,
 ) -> list[dict[str, Any]]:
     role = str(seed_role or "out").strip().lower()
     role_tag = role if role in {"out", "in"} else "out"
     seeds: list[dict[str, Any]] = []
     for src in sorted(int(v) for v in cross_nodes):
         edges = list(compressed_adj.get(int(src), []))
+        borrowed_src: int | None = None
+        if not edges and shared_group_members_by_nodeid:
+            for sibling in shared_group_members_by_nodeid.get(int(src), []):
+                sibling_i = int(sibling)
+                if sibling_i == int(src):
+                    continue
+                sibling_edges = list(compressed_adj.get(int(sibling_i), []))
+                if sibling_edges:
+                    edges = sibling_edges
+                    borrowed_src = int(sibling_i)
+                    break
         if not edges:
             seeds.append(
                 {
@@ -8359,7 +8378,10 @@ def _collect_topology_anchor_seeds(
                 start_to = None
             path_nodes = [int(v) for v in edge.get("path_nodes", []) if v is not None]
             if path_nodes and int(path_nodes[0]) != int(src):
-                path_nodes = [int(src)] + path_nodes
+                if borrowed_src is not None and int(path_nodes[0]) == int(borrowed_src):
+                    path_nodes = [int(src)] + [int(v) for v in path_nodes[1:]]
+                else:
+                    path_nodes = [int(src)] + path_nodes
             if not path_nodes:
                 path_nodes = [int(src)]
                 if start_to is not None:
@@ -8372,6 +8394,7 @@ def _collect_topology_anchor_seeds(
                     "start_edge_ids": edge_ids,
                     "start_path_nodes": [int(v) for v in path_nodes],
                     "anchor_role": str(role_tag),
+                    "borrowed_from_src": int(borrowed_src) if borrowed_src is not None else None,
                 }
             )
     return seeds
@@ -8541,6 +8564,7 @@ def _build_topology_unique_anchor_decisions(
     xsec_map: dict[int, Any],
     require_unique_chain: bool,
     max_expansions: int,
+    shared_group_members_by_nodeid: dict[int, list[int]] | None = None,
 ) -> tuple[
     dict[int, set[int]],
     set[tuple[int, int]],
@@ -8557,7 +8581,12 @@ def _build_topology_unique_anchor_decisions(
     straight_features: list[dict[str, Any]] = []
     chain_features: list[dict[str, Any]] = []
 
-    anchors_out = _collect_topology_anchor_seeds(compressed_adj, cross_nodes=cross_nodes, seed_role="out")
+    anchors_out = _collect_topology_anchor_seeds(
+        compressed_adj,
+        cross_nodes=cross_nodes,
+        seed_role="out",
+        shared_group_members_by_nodeid=shared_group_members_by_nodeid,
+    )
     # Only supplement reverse anchors for NO_EDGE nodes that still have incoming topology.
     # This recovers sink / patch-truncated cases without turning every accepted pair into
     # a symmetric duplicate anchor.
@@ -8571,6 +8600,7 @@ def _build_topology_unique_anchor_decisions(
         reverse_adj,
         cross_nodes=reverse_seed_nodes,
         seed_role="in",
+        shared_group_members_by_nodeid=shared_group_members_by_nodeid,
     )
     anchor_batches: list[tuple[str, dict[int, list[dict[str, Any]]], list[dict[str, Any]]]] = [
         ("forward", compressed_adj, anchors_out),
@@ -9603,6 +9633,46 @@ def _build_shared_intersection_group_maps(patch_inputs: PatchInputs) -> tuple[di
         _build_shared_intersection_alias_maps(patch_inputs)
     )
     return group_by_nodeid, role_by_nodeid
+
+
+def _build_shared_intersection_group_members_map(
+    *,
+    primary_by_nodeid: dict[int, int],
+    group_by_nodeid: dict[int, str],
+) -> dict[int, list[int]]:
+    members_by_group: dict[str, set[int]] = {}
+    for nodeid, group_id in group_by_nodeid.items():
+        if not str(group_id):
+            continue
+        members_by_group.setdefault(str(group_id), set()).add(int(nodeid))
+    for nodeid, primary in primary_by_nodeid.items():
+        group_id = str(group_by_nodeid.get(int(nodeid)) or "")
+        if not group_id:
+            continue
+        members_by_group.setdefault(group_id, set()).add(int(primary))
+    out: dict[int, list[int]] = {}
+    for nodeid, primary in primary_by_nodeid.items():
+        group_id = str(group_by_nodeid.get(int(nodeid)) or "")
+        if not group_id:
+            out[int(nodeid)] = [int(nodeid)]
+            continue
+        members = sorted(int(v) for v in members_by_group.get(group_id, set()) if v is not None)
+        if not members:
+            members = [int(primary)]
+        out[int(nodeid)] = list(members)
+    return out
+
+
+def _expand_shared_intersection_alias_by_nodeid(
+    *,
+    primary_by_nodeid: dict[int, int],
+    alias_by_primary: dict[int, int],
+) -> dict[int, int]:
+    out: dict[int, int] = {}
+    for nodeid, primary in primary_by_nodeid.items():
+        alias = int(alias_by_primary.get(int(primary), int(primary)))
+        out[int(nodeid)] = int(alias)
+    return out
 
 
 def _expand_shared_intersection_lookup(
