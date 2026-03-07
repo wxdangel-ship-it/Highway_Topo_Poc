@@ -403,6 +403,35 @@ def _geometry_hash(geom: BaseGeometry | None) -> str | None:
         return None
 
 
+def _build_traj_lookup_indexes(
+    patch_inputs: PatchInputs,
+) -> tuple[dict[str, np.ndarray], dict[str, dict[str, Any]]]:
+    traj_xy_index: dict[str, np.ndarray] = {}
+    traj_meta_index: dict[str, dict[str, Any]] = {}
+    source_stat_cache: dict[Path, dict[str, Any]] = {}
+    for traj in patch_inputs.trajectories:
+        tid = str(traj.traj_id)
+        xy = np.asarray(traj.xyz_metric[:, :2], dtype=np.float64)
+        if xy.ndim == 2 and xy.shape[0] > 0:
+            finite = np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])
+            xy = xy[finite, :] if np.any(finite) else np.empty((0, 2), dtype=np.float64)
+        else:
+            xy = np.empty((0, 2), dtype=np.float64)
+        traj_xy_index[tid] = xy
+
+        src_path = Path(traj.source_path)
+        meta = source_stat_cache.get(src_path)
+        if meta is None:
+            try:
+                st = src_path.stat()
+                meta = {"size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns)}
+            except Exception:
+                meta = {"missing": True}
+            source_stat_cache[src_path] = meta
+        traj_meta_index[tid] = {"traj_id": tid, **meta}
+    return traj_xy_index, traj_meta_index
+
+
 def run_patch(
     *,
     data_root: str | Path,
@@ -516,7 +545,14 @@ def _run_patch_core(
         "pointcloud_selected_point_count": 0,
         "pointcloud_non_ground_selected_point_count": 0,
         "pointcloud_usage_tags": [],
+        "pointcloud_timing_ms": 0.0,
+        "drivezone_surface_timing_ms": 0.0,
+        "drivezone_surface_cache_hit": False,
+        "drivezone_surface_cache_key": None,
     }
+    t_index_lookup0 = perf_counter()
+    traj_xy_index, traj_meta_index = _build_traj_lookup_indexes(patch_inputs)
+    stage_timer.add("t_index_traj_lookup", (perf_counter() - t_index_lookup0) * 1000.0)
 
     xsec_raw_map = _build_cross_section_map(patch_inputs)
     (
@@ -881,16 +917,22 @@ def _run_patch_core(
         required = (
             "t_load_traj",
             "t_load_pointcloud",
+            "t_sample_drivezone_surface",
             "t_build_traj_projection",
+            "t_build_traj_surface_compute",
             "t_build_surfaces_total",
             "t_build_lane_graph",
             "t_shortest_path_total",
             "t_centerline_offset",
             "t_gate_in_ratio",
             "t_debug_dump",
+            "t_index_traj_lookup",
         )
         payload: dict[str, Any] = {}
         for k in required:
+            if str(k) == "t_build_traj_projection":
+                payload[str(k)] = float(round(stage_timer.ms.get("t_build_traj_surface_compute", 0.0), 3))
+                continue
             payload[str(k)] = float(round(stage_timer.ms.get(str(k), 0.0), 3))
         payload["t_build_surfaces_per_k_ms"] = {k: float(round(v, 3)) for k, v in sorted(surface_timing_per_k.items())}
         payload["t_shortest_path_per_k_ms"] = {k: float(round(v, 3)) for k, v in sorted(shortest_timing_per_k.items())}
@@ -1616,14 +1658,15 @@ def _run_patch_core(
     pointcloud_enabled = bool(int(params.get("POINTCLOUD_ENABLE", 0)))
     if progress is not None:
         progress.mark("surface_points_start", pointcloud_enabled=bool(pointcloud_enabled))
-    with stage_timer.scope("t_load_pointcloud"):
-        points_xyz, non_ground_xy, pointcloud_stats = _load_surface_points(
-            patch_inputs,
-            supports,
-            params,
-            use_pointcloud=pointcloud_enabled,
-            with_non_ground=True,
-        )
+    points_xyz, non_ground_xy, pointcloud_stats = _load_surface_points(
+        patch_inputs,
+        supports,
+        params,
+        use_pointcloud=pointcloud_enabled,
+        with_non_ground=True,
+    )
+    stage_timer.add("t_sample_drivezone_surface", float(pointcloud_stats.get("drivezone_surface_timing_ms", 0.0)))
+    stage_timer.add("t_load_pointcloud", float(pointcloud_stats.get("pointcloud_timing_ms", 0.0)))
     if progress is not None:
         progress.mark(
             "surface_points_done",
@@ -1939,8 +1982,10 @@ def _run_patch_core(
                         gore_zone_metric=gore_zone_metric,
                         params=params,
                         traj_points_cache=traj_points_cache,
+                        traj_xy_index=traj_xy_index,
+                        traj_meta_index=traj_meta_index,
                     )
-                stage_timer.add("t_build_traj_projection", float(surface_hint.get("timing_ms", 0.0)))
+                stage_timer.add("t_build_traj_surface_compute", float(surface_hint.get("timing_ms", 0.0)))
                 key_k = f"{src}_{dst}_k{int(cluster_id)}"
                 surface_timing_per_k[key_k] = float(surface_hint.get("timing_ms", 0.0))
                 if bool(surface_hint.get("cache_hit", False)):
@@ -2020,8 +2065,10 @@ def _run_patch_core(
                         gore_zone_metric=gore_zone_metric,
                         params=params,
                         traj_points_cache=traj_points_cache,
+                        traj_xy_index=traj_xy_index,
+                        traj_meta_index=traj_meta_index,
                     )
-                stage_timer.add("t_build_traj_projection", float(surface_hint.get("timing_ms", 0.0)))
+                stage_timer.add("t_build_traj_surface_compute", float(surface_hint.get("timing_ms", 0.0)))
                 key_k = f"{src}_{dst}_k{int(cluster_id)}"
                 surface_timing_per_k[key_k] = float(surface_hint.get("timing_ms", 0.0))
                 if bool(surface_hint.get("cache_hit", False)):
@@ -3227,7 +3274,11 @@ def _load_surface_points(
         "pointcloud_selected_point_count": 0,
         "pointcloud_non_ground_selected_point_count": 0,
         "pointcloud_usage_tags": ["surface_points", "xsec_barrier"],
+        "pointcloud_timing_ms": 0.0,
         "drivezone_surface_point_count": 0,
+        "drivezone_surface_timing_ms": 0.0,
+        "drivezone_surface_cache_hit": False,
+        "drivezone_surface_cache_key": None,
     }
 
     bbox = _support_union_bbox(patch_inputs, supports, margin_m=float(params["XSEC_ACROSS_HALF_WINDOW_M"]) + 5.0)
@@ -3235,12 +3286,45 @@ def _load_surface_points(
         if with_non_ground:
             return np.empty((0, 3), dtype=np.float64), np.empty((0, 2), dtype=np.float64), stats
         return np.empty((0, 3), dtype=np.float64), stats
-    drive_xyz = _sample_drivezone_surface_points(
-        drivezone_metric=patch_inputs.drivezone_zone_metric,
-        bbox_metric=bbox,
-        step_m=float(params.get("DRIVEZONE_SAMPLE_STEP_M", 2.0)),
-        max_points=900_000,
-    )
+    cache_enabled = bool(int(params.get("CACHE_ENABLED", 1)))
+    drive_xyz = np.empty((0, 3), dtype=np.float64)
+    drive_cache_path: Path | None = None
+    drive_cache_key: str | None = None
+    drive_t0 = perf_counter()
+    drive_hash = _geometry_hash(patch_inputs.drivezone_zone_metric)
+    if cache_enabled and drive_hash is not None:
+        cache_key_payload = {
+            "v": 1,
+            "patch_id": str(patch_inputs.patch_id),
+            "drivezone_hash": str(drive_hash),
+            "bbox": [round(float(v), 3) for v in bbox],
+            "step_m": round(float(params.get("DRIVEZONE_SAMPLE_STEP_M", 2.0)), 3),
+            "max_points": 900_000,
+        }
+        drive_cache_key = _stable_json_digest(cache_key_payload)
+        drive_cache_path = patch_inputs.patch_dir / ".t05_cache" / "drivezone_surface" / f"surface_{drive_cache_key}.npz"
+        stats["drivezone_surface_cache_key"] = drive_cache_key
+        if drive_cache_path.is_file():
+            try:
+                with np.load(drive_cache_path, allow_pickle=False) as zf:
+                    drive_xyz = np.asarray(zf["xyz"], dtype=np.float64)
+                stats["drivezone_surface_cache_hit"] = True
+            except Exception:
+                drive_xyz = np.empty((0, 3), dtype=np.float64)
+    if drive_xyz.shape[0] == 0:
+        drive_xyz = _sample_drivezone_surface_points(
+            drivezone_metric=patch_inputs.drivezone_zone_metric,
+            bbox_metric=bbox,
+            step_m=float(params.get("DRIVEZONE_SAMPLE_STEP_M", 2.0)),
+            max_points=900_000,
+        )
+        if cache_enabled and drive_cache_path is not None:
+            try:
+                drive_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(drive_cache_path, xyz=np.asarray(drive_xyz, dtype=np.float64))
+            except Exception:
+                pass
+    stats["drivezone_surface_timing_ms"] = float((perf_counter() - drive_t0) * 1000.0)
     stats["drivezone_surface_point_count"] = int(drive_xyz.shape[0])
     if not bool(use_pointcloud):
         if with_non_ground:
@@ -3251,8 +3335,8 @@ def _load_surface_points(
             return drive_xyz, np.empty((0, 2), dtype=np.float64), stats
         return drive_xyz, stats
     stats["pointcloud_attempted"] = True
+    pointcloud_t0 = perf_counter()
 
-    cache_enabled = bool(int(params.get("CACHE_ENABLED", 1)))
     cache_path: Path | None = None
     cache_ng_path: Path | None = None
     cache_key: str | None = None
@@ -3296,6 +3380,7 @@ def _load_surface_points(
                         "pointcloud_non_ground_selected_point_count": int(ng_sel_cnt),
                     }
                 )
+                stats["pointcloud_timing_ms"] = float((perf_counter() - pointcloud_t0) * 1000.0)
                 if with_non_ground:
                     base_xyz = drive_xyz if drive_xyz.shape[0] > 0 else xyz
                     return base_xyz, ng_xy, stats
@@ -3367,12 +3452,14 @@ def _load_surface_points(
                     )
             except Exception:
                 pass
+        stats["pointcloud_timing_ms"] = float((perf_counter() - pointcloud_t0) * 1000.0)
         if with_non_ground:
             base_xyz = drive_xyz if drive_xyz.shape[0] > 0 else xyz
             return base_xyz, ng_xy, stats
         base_xyz = drive_xyz if drive_xyz.shape[0] > 0 else xyz
         return base_xyz, stats
     except InputDataError:
+        stats["pointcloud_timing_ms"] = float((perf_counter() - pointcloud_t0) * 1000.0)
         if with_non_ground:
             return drive_xyz, np.empty((0, 2), dtype=np.float64), stats
         return drive_xyz, stats
@@ -4515,10 +4602,24 @@ def _enforce_gore_free_geometry(
 def _collect_support_traj_points(
     patch_inputs: PatchInputs,
     support: PairSupport,
+    *,
+    traj_xy_index: dict[str, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, int]:
     if not support.support_traj_ids:
         return np.empty((0, 2), dtype=np.float64), 0
     ids = {str(v) for v in support.support_traj_ids}
+    if traj_xy_index is not None:
+        pts: list[np.ndarray] = []
+        used = 0
+        for tid in ids:
+            xy = traj_xy_index.get(tid)
+            if xy is None or xy.shape[0] < 2:
+                continue
+            pts.append(xy)
+            used += 1
+        if not pts:
+            return np.empty((0, 2), dtype=np.float64), 0
+        return np.vstack(pts), int(used)
     pts: list[np.ndarray] = []
     used = 0
     for traj in patch_inputs.trajectories:
@@ -5130,10 +5231,18 @@ def _traj_surface_cache_path(
     src_xsec: LineString,
     dst_xsec: LineString,
     params: dict[str, Any],
+    traj_meta_index: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[Path, str]:
     traj_meta: list[dict[str, Any]] = []
-    by_id = {str(t.traj_id): t for t in patch_inputs.trajectories}
+    by_id = {str(t.traj_id): t for t in patch_inputs.trajectories} if traj_meta_index is None else {}
     for tid in sorted({str(v) for v in support.support_traj_ids}):
+        if traj_meta_index is not None:
+            meta = traj_meta_index.get(tid)
+            if meta is None:
+                traj_meta.append({"traj_id": tid, "missing": True})
+            else:
+                traj_meta.append(dict(meta))
+            continue
         t = by_id.get(tid)
         if t is None:
             traj_meta.append({"traj_id": tid, "missing": True})
@@ -5185,13 +5294,19 @@ def _build_traj_surface_hint_for_cluster(
     gore_zone_metric: BaseGeometry | None,
     params: dict[str, Any],
     traj_points_cache: dict[tuple[str, ...], tuple[np.ndarray, int]] | None = None,
+    traj_xy_index: dict[str, np.ndarray] | None = None,
+    traj_meta_index: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     t0 = perf_counter()
     ids_key = tuple(sorted(str(v) for v in support.support_traj_ids))
     if traj_points_cache is not None and ids_key in traj_points_cache:
         traj_xy, unique_traj_count = traj_points_cache[ids_key]
     else:
-        traj_xy, unique_traj_count = _collect_support_traj_points(patch_inputs, support)
+        traj_xy, unique_traj_count = _collect_support_traj_points(
+            patch_inputs,
+            support,
+            traj_xy_index=traj_xy_index,
+        )
         if traj_points_cache is not None:
             traj_points_cache[ids_key] = (traj_xy, unique_traj_count)
     out: dict[str, Any] = {
@@ -5257,6 +5372,7 @@ def _build_traj_surface_hint_for_cluster(
                 src_xsec=src_xsec,
                 dst_xsec=dst_xsec,
                 params=params,
+                traj_meta_index=traj_meta_index,
             )
             out["cache_key"] = cache_key
             if cache_path.is_file():
