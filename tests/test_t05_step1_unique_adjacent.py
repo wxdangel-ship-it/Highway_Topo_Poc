@@ -841,7 +841,7 @@ def test_run_patch_core_keeps_single_road_for_single_cluster_pair(tmp_path: Path
     assert bool(out["gate_payload"]["overall_pass"]) is True
 
 
-def test_topology_unique_mode_outputs_multi_roads_for_same_pair_multichain(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_topology_unique_mode_same_pair_multichain_keeps_internal_branch_eval_but_hard_fails_final_multi_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     road_path = tmp_path / "RCSDRoad.geojson"
     road_payload = {
         "type": "FeatureCollection",
@@ -969,9 +969,18 @@ def test_topology_unique_mode_outputs_multi_roads_for_same_pair_multichain(tmp_p
         },
     )
 
+    eval_calls: list[dict[str, object]] = []
+
     def _fake_eval(**kwargs):  # type: ignore[no-untyped-def]
         cluster_id = int(kwargs["cluster_id"])
         y = 0.0 if cluster_id == 0 else 10.0
+        eval_calls.append(
+            {
+                "cluster_id": int(cluster_id),
+                "candidate_branch_id": kwargs.get("candidate_branch_id"),
+                "same_pair_multichain": bool(kwargs.get("same_pair_multichain", False)),
+            }
+        )
         road = pipeline._make_base_road_record(
             src=int(kwargs["src"]),
             dst=int(kwargs["dst"]),
@@ -1004,12 +1013,15 @@ def test_topology_unique_mode_outputs_multi_roads_for_same_pair_multichain(tmp_p
         repo_root=tmp_path,
     )
 
-    road_ids = [str(props["road_id"]) for props in out["road_properties"]]
-    assert out["road_count"] == 2
-    assert len(set(road_ids)) == 2
-    assert all("__k" in road_id for road_id in road_ids)
+    assert len(eval_calls) == 2
+    assert {str(item["candidate_branch_id"]) for item in eval_calls} == {"1_2__b0", "1_2__b1"}
+    assert all(bool(item["same_pair_multichain"]) for item in eval_calls)
+    assert out["road_count"] == 0
+    assert not out["road_properties"]
     assert int(out["metrics_payload"].get("step1_same_pair_multichain_pair_count", 0)) == 1
-    assert bool(out["gate_payload"]["overall_pass"]) is True
+    assert bool(out["gate_payload"]["overall_pass"]) is False
+    reasons = {str(item.get("reason")) for item in out["hard_breakpoints"]}
+    assert HARD_MULTI_ROAD in reasons
 
 
 def test_allowed_pairs_skips_non_topology_src(monkeypatch) -> None:  # type: ignore[no-untyped-def]

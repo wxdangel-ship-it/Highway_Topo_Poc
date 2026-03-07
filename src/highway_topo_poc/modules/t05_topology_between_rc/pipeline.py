@@ -2166,42 +2166,28 @@ def _run_patch_core(
             for c in ranked_candidates[:3]
         ]
         if same_pair_multi_chain_info is not None:
-            min_sep_base = _to_finite_float(
-                support.cluster_sep_m_est,
-                float(params["MULTI_ROAD_SEP_M"]),
-            )
-            min_sep_m = max(1.0, min(4.0, float(min_sep_base) * 0.25))
-            selected_multi = _select_non_conflicting_multi_road_candidates(
-                viable_candidates,
-                min_sep_m=float(min_sep_m),
-            )
-            required_multi_count = max(2, int(len(same_pair_variants)))
-            if len(selected_multi) >= required_multi_count:
-                multi_count = int(len(selected_multi))
-                for idx, cand in enumerate(selected_multi, start=1):
-                    cand["chosen_cluster_id"] = int(cand.get("candidate_cluster_id", 0))
-                    cand["no_geometry_candidate"] = False
-                    cand["cluster_score_top2"] = list(ranked_cluster_summary)
-                    if same_pair_multi_chain_info is not None:
-                        cand["step1_same_pair_multichain"] = True
-                        cand["step1_same_pair_multichain_count"] = int(same_pair_multi_chain_info.get("chain_count", 0))
-                    cand["same_pair_multi_road_rank"] = int(idx)
-                    _assign_same_pair_multi_road_identity(cand, multi_count=multi_count)
-                    _append_selected_candidate_road(
-                        selected=cand,
-                        road_records=road_records,
-                        road_lines_metric=road_lines_metric,
-                        road_feature_props=road_feature_props,
-                        hard_breakpoints=hard_breakpoints,
-                        soft_breakpoints=soft_breakpoints,
-                        debug_layers=debug_layers,
-                        debug_enabled=debug_enabled,
-                        stage_timer=stage_timer,
-                        src_xsec=src_xsec.geometry_metric,
-                        dst_xsec=dst_xsec.geometry_metric,
-                        gore_zone_metric=gore_zone_metric,
-                        params=params,
-                    )
+            if len(viable_candidates) == 1:
+                selected = viable_candidates[0]
+                selected["chosen_cluster_id"] = int(selected.get("candidate_cluster_id", 0))
+                selected["no_geometry_candidate"] = False
+                selected["cluster_score_top2"] = list(ranked_cluster_summary)
+                selected["step1_same_pair_multichain"] = True
+                selected["step1_same_pair_multichain_count"] = int(same_pair_multi_chain_info.get("chain_count", 0))
+                _append_selected_candidate_road(
+                    selected=selected,
+                    road_records=road_records,
+                    road_lines_metric=road_lines_metric,
+                    road_feature_props=road_feature_props,
+                    hard_breakpoints=hard_breakpoints,
+                    soft_breakpoints=soft_breakpoints,
+                    debug_layers=debug_layers,
+                    debug_enabled=debug_enabled,
+                    stage_timer=stage_timer,
+                    src_xsec=src_xsec.geometry_metric,
+                    dst_xsec=dst_xsec.geometry_metric,
+                    gore_zone_metric=gore_zone_metric,
+                    params=params,
+                )
                 continue
             road = _make_base_road_record(
                 src=src,
@@ -2240,7 +2226,7 @@ def _run_patch_core(
                     severity="hard",
                     hint=(
                         f"viable_candidate_count={int(len(viable_candidates))};"
-                        f"required_multi_count={int(required_multi_count)};"
+                        f"branch_candidate_count={int(len(same_pair_variants))};"
                         f"pair_has_multiple_channel_clusters"
                     ),
                 )
