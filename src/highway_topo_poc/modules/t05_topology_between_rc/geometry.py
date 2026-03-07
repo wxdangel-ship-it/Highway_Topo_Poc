@@ -290,6 +290,7 @@ def build_pair_supports(
     skip_search_after_pair_resolved: bool = False,
     src_nodeid_alias_by_nodeid: dict[int, int] | None = None,
     dst_nodeid_alias_by_nodeid: dict[int, int] | None = None,
+    allowed_dst_close_hit_buffer_m: float = 0.0,
 ) -> PairSupportBuildResult:
     levels = _normalize_stitch_levels(
         stitch_max_dist_levels_m=stitch_max_dist_levels_m,
@@ -315,6 +316,7 @@ def build_pair_supports(
     node_dst_votes: dict[int, dict[int, int]] = {}
     dst_dist_eps_m = float(max(0.0, unique_dst_dist_eps_m))
     allowed_pairs_dst_by_src: dict[int, set[int]] | None = None
+    cross_points_by_nodeid: dict[int, list[Point]] = {}
     if allowed_pairs is not None:
         allowed_pairs_dst_by_src = {}
         for pair in allowed_pairs:
@@ -323,6 +325,16 @@ def build_pair_supports(
             src_i = int(pair[0])
             dst_i = int(pair[1])
             allowed_pairs_dst_by_src.setdefault(src_i, set()).add(dst_i)
+    for items in events_by_traj.values():
+        for ev in items:
+            raw_nodeid = int(ev.nodeid)
+            aliased_nodeid = int(
+                dst_nodeid_alias_by_nodeid.get(raw_nodeid, raw_nodeid)
+                if dst_nodeid_alias_by_nodeid is not None
+                else raw_nodeid
+            )
+            for nodeid_i in {raw_nodeid, aliased_nodeid}:
+                cross_points_by_nodeid.setdefault(int(nodeid_i), []).append(ev.cross_point)
 
     for traj_id, items in graph.event_keys_by_traj.items():
         for ev, source_key in items:
@@ -371,6 +383,15 @@ def build_pair_supports(
                 max_dist_m=float(neighbor_max_dist_m),
                 unique_dst_early_stop=bool(unique_dst_early_stop),
                 allowed_dst_nodeids=allowed_dsts_for_src,
+                allowed_dst_points_by_nodeid=(
+                    {
+                        int(dst_i): list(cross_points_by_nodeid.get(int(dst_i), []))
+                        for dst_i in (allowed_dsts_for_src or set())
+                    }
+                    if allowed_dsts_for_src
+                    else None
+                ),
+                allowed_dst_close_hit_buffer_m=float(max(0.0, allowed_dst_close_hit_buffer_m)),
             )
             hit_targets_raw = list(search.hit_targets)
             hit_targets_by_dst: dict[int, dict[str, Any]] = {}
@@ -468,6 +489,11 @@ def build_pair_supports(
                         if allowed_pair_dsts_for_src is not None
                         else None
                     ),
+                    "raw_hit_target_count": int(search.raw_hit_target_count),
+                    "allowed_hit_target_count": int(search.allowed_hit_target_count),
+                    "filtered_hit_target_count": int(search.filtered_hit_target_count),
+                    "used_proximity_closure": bool(search.used_proximity_closure),
+                    "proximity_closure_dist_m": search.proximity_closure_dist_m,
                 }
             )
 
@@ -508,6 +534,12 @@ def build_pair_supports(
                 last_stitch_candidates = _count_outgoing_stitch_edges(graph.edges.get(search.last_key, []))
                 explored_stitch_candidates = int(max(0, search.explored_stitch_candidates))
                 stitch_candidate_count = int(max(last_stitch_candidates, explored_stitch_candidates))
+                if int(search.raw_hit_target_count) > 0 and int(search.allowed_hit_target_count) <= 0:
+                    closure_failure_mode = "filtered_non_target_crossing_only"
+                elif stitch_candidate_count > 0 or int(search.explored_node_count) > 0:
+                    closure_failure_mode = "expanded_no_allowed_dst_closure"
+                else:
+                    closure_failure_mode = "no_candidate"
                 unresolved_events.append(
                     {
                         "road_id": f"na_{ev.nodeid}_{traj_id}_{ev.seq_idx}",
@@ -525,7 +557,10 @@ def build_pair_supports(
                             f"stitch_candidates_last={last_stitch_candidates};"
                             f"stitch_candidates_explored={explored_stitch_candidates};"
                             f"explored_nodes={int(search.explored_node_count)};"
-                            f"dst_found={int(len(dst_nodeids_found))}"
+                            f"dst_found={int(len(dst_nodeids_found))};"
+                            f"raw_hit_targets={int(search.raw_hit_target_count)};"
+                            f"allowed_hit_targets={int(search.allowed_hit_target_count)};"
+                            f"closure_failure_mode={closure_failure_mode}"
                         ),
                         "max_explored_dist_m": float(search.max_explored_dist_m),
                         "last_node_ref": str(search.last_key),
@@ -533,15 +568,24 @@ def build_pair_supports(
                         "stitch_candidate_count_last": int(last_stitch_candidates),
                         "stitch_candidate_count_explored": int(explored_stitch_candidates),
                         "explored_node_count": int(search.explored_node_count),
+                        "raw_hit_target_count": int(search.raw_hit_target_count),
+                        "allowed_hit_target_count": int(search.allowed_hit_target_count),
+                        "filtered_hit_target_count": int(search.filtered_hit_target_count),
+                        "closure_failure_mode": str(closure_failure_mode),
                     }
                 )
                 continue
 
             target_node = graph.nodes.get(target_key)
-            if target_node is None or target_node.cross_nodeid is None:
+            if target_node is None:
                 continue
 
-            raw_dst_nodeid = int(target_node.cross_nodeid)
+            raw_dst_nodeid_value = search.target_cross_nodeid
+            if raw_dst_nodeid_value is None and target_node.cross_nodeid is not None:
+                raw_dst_nodeid_value = int(target_node.cross_nodeid)
+            if raw_dst_nodeid_value is None:
+                continue
+            raw_dst_nodeid = int(raw_dst_nodeid_value)
             dst_nodeid = int(
                 dst_nodeid_alias_by_nodeid.get(raw_dst_nodeid, raw_dst_nodeid)
                 if dst_nodeid_alias_by_nodeid is not None
@@ -600,7 +644,13 @@ def build_pair_supports(
             support.support_traj_ids.update(path_traj_ids)
             support.support_event_count += 1
             support.src_cross_points.append(ev.cross_point)
-            support.dst_cross_points.append(target_node.point)
+            dst_cross_points = list(cross_points_by_nodeid.get(int(dst_nodeid), [])) or list(
+                cross_points_by_nodeid.get(int(raw_dst_nodeid), [])
+            )
+            if dst_cross_points:
+                support.dst_cross_points.append(dst_cross_points[0])
+            else:
+                support.dst_cross_points.append(target_node.point)
             support.traj_segments.append(path_line)
             support.stitch_hops.append(int(target_stitch_hops))
             support.evidence_traj_ids.append(str(traj_id))
@@ -756,6 +806,7 @@ class _GraphBuildResult:
 @dataclass(frozen=True)
 class _SearchResult:
     target_key: str | None
+    target_cross_nodeid: int | None
     distance_m: float
     stitch_hops: int
     prev: dict[str, str]
@@ -765,6 +816,11 @@ class _SearchResult:
     explored_node_count: int
     explored_stitch_candidates: int
     hit_targets: list[tuple[str, int, float, int]]
+    raw_hit_target_count: int
+    allowed_hit_target_count: int
+    filtered_hit_target_count: int
+    used_proximity_closure: bool
+    proximity_closure_dist_m: float | None
 
 
 @dataclass(frozen=True)
@@ -1079,6 +1135,8 @@ def _search_next_crossing(
     max_dist_m: float,
     unique_dst_early_stop: bool = True,
     allowed_dst_nodeids: set[int] | None = None,
+    allowed_dst_points_by_nodeid: dict[int, list[Point]] | None = None,
+    allowed_dst_close_hit_buffer_m: float = 0.0,
 ) -> _SearchResult:
     best: dict[str, tuple[float, int]] = {source_key: (0.0, 0)}
     prev: dict[str, str] = {}
@@ -1090,7 +1148,14 @@ def _search_next_crossing(
     explored_keys: set[str] = set()
     explored_stitch_candidates = 0
     hit_by_dst: dict[int, tuple[str, float, int]] = {}
+    proximity_hit_by_dst: dict[int, tuple[str, float, int, float]] = {}
+    raw_hit_by_dst: dict[int, tuple[str, float, int]] = {}
     allowed_dst_filter = {int(v) for v in allowed_dst_nodeids} if allowed_dst_nodeids else None
+    allowed_dst_points = {
+        int(k): [pt for pt in vals if isinstance(pt, Point) and (not pt.is_empty)]
+        for k, vals in dict(allowed_dst_points_by_nodeid or {}).items()
+    }
+    proximity_hit_buffer_m = float(max(0.0, allowed_dst_close_hit_buffer_m))
 
     while heap:
         dist, hops, key = heapq.heappop(heap)
@@ -1116,6 +1181,15 @@ def _search_next_crossing(
             explored_stitch_candidates += int(_count_outgoing_stitch_edges(edges.get(key, [])))
         if node.kind == "cross" and node.cross_nodeid is not None and int(node.cross_nodeid) != int(source_nodeid):
             dst_nodeid = int(node.cross_nodeid)
+            prev_raw_hit = raw_hit_by_dst.get(dst_nodeid)
+            if prev_raw_hit is None:
+                raw_hit_by_dst[dst_nodeid] = (str(key), float(dist), int(hops))
+            else:
+                old_key, old_dist, old_hops = prev_raw_hit
+                if float(dist) < float(old_dist) - 1e-9 or (
+                    abs(float(dist) - float(old_dist)) <= 1e-9 and int(hops) < int(old_hops)
+                ):
+                    raw_hit_by_dst[dst_nodeid] = (str(key), float(dist), int(hops))
             if allowed_dst_filter is None or int(dst_nodeid) in allowed_dst_filter:
                 prev_hit = hit_by_dst.get(dst_nodeid)
                 if prev_hit is None:
@@ -1130,6 +1204,46 @@ def _search_next_crossing(
                     break
                 # Crossing nodes remain absorbing only when they are viable downstream targets.
                 continue
+        if allowed_dst_filter is not None and proximity_hit_buffer_m > 0.0:
+            node_pt = getattr(node, "point", None)
+            if isinstance(node_pt, Point) and (not node_pt.is_empty):
+                for dst_nodeid in allowed_dst_filter:
+                    dst_points = allowed_dst_points.get(int(dst_nodeid), [])
+                    if not dst_points:
+                        continue
+                    point_dist = float("inf")
+                    for dst_pt in dst_points:
+                        try:
+                            curr_dist = float(node_pt.distance(dst_pt))
+                        except Exception:
+                            continue
+                        if curr_dist < point_dist:
+                            point_dist = float(curr_dist)
+                    if not np.isfinite(point_dist) or point_dist > proximity_hit_buffer_m + 1e-9:
+                        continue
+                    prev_prox = proximity_hit_by_dst.get(int(dst_nodeid))
+                    curr_key = (float(point_dist), float(dist), int(hops), str(key))
+                    if prev_prox is None:
+                        proximity_hit_by_dst[int(dst_nodeid)] = (
+                            str(key),
+                            float(dist),
+                            int(hops),
+                            float(point_dist),
+                        )
+                    else:
+                        prev_key = (
+                            float(prev_prox[3]),
+                            float(prev_prox[1]),
+                            int(prev_prox[2]),
+                            str(prev_prox[0]),
+                        )
+                        if curr_key < prev_key:
+                            proximity_hit_by_dst[int(dst_nodeid)] = (
+                                str(key),
+                                float(dist),
+                                int(hops),
+                                float(point_dist),
+                            )
 
         for edge in edges.get(key, []):
             nd = float(dist + edge.weight)
@@ -1158,6 +1272,7 @@ def _search_next_crossing(
         chosen = ordered_hits[0]
         return _SearchResult(
             target_key=str(chosen[0]),
+            target_cross_nodeid=int(chosen[1]),
             distance_m=float(chosen[2]),
             stitch_hops=int(chosen[3]),
             prev=prev,
@@ -1167,10 +1282,44 @@ def _search_next_crossing(
             explored_node_count=int(len(explored_keys)),
             explored_stitch_candidates=int(explored_stitch_candidates),
             hit_targets=list(ordered_hits),
+            raw_hit_target_count=int(len(raw_hit_by_dst)),
+            allowed_hit_target_count=int(len(hit_by_dst)),
+            filtered_hit_target_count=int(max(0, len(raw_hit_by_dst) - len(hit_by_dst))),
+            used_proximity_closure=False,
+            proximity_closure_dist_m=0.0,
+        )
+
+    if proximity_hit_by_dst:
+        ordered_prox_hits = sorted(
+            (
+                (hit_key, int(dst_nodeid), float(hit_dist), int(hit_hops), float(hit_point_dist))
+                for dst_nodeid, (hit_key, hit_dist, hit_hops, hit_point_dist) in proximity_hit_by_dst.items()
+            ),
+            key=lambda it: (float(it[4]), float(it[2]), int(it[3]), int(it[1]), str(it[0])),
+        )
+        chosen_prox = ordered_prox_hits[0]
+        return _SearchResult(
+            target_key=str(chosen_prox[0]),
+            target_cross_nodeid=int(chosen_prox[1]),
+            distance_m=float(chosen_prox[2]),
+            stitch_hops=int(chosen_prox[3]),
+            prev=prev,
+            prev_edge=prev_edge,
+            max_explored_dist_m=float(max_explored),
+            last_key=str(last_key),
+            explored_node_count=int(len(explored_keys)),
+            explored_stitch_candidates=int(explored_stitch_candidates),
+            hit_targets=[],
+            raw_hit_target_count=int(len(raw_hit_by_dst)),
+            allowed_hit_target_count=int(len(hit_by_dst)),
+            filtered_hit_target_count=int(max(0, len(raw_hit_by_dst) - len(hit_by_dst))),
+            used_proximity_closure=True,
+            proximity_closure_dist_m=float(chosen_prox[4]),
         )
 
     return _SearchResult(
         target_key=None,
+        target_cross_nodeid=None,
         distance_m=float(max_explored),
         stitch_hops=0,
         prev=prev,
@@ -1180,6 +1329,11 @@ def _search_next_crossing(
         explored_node_count=int(len(explored_keys)),
         explored_stitch_candidates=int(explored_stitch_candidates),
         hit_targets=[],
+        raw_hit_target_count=int(len(raw_hit_by_dst)),
+        allowed_hit_target_count=int(len(hit_by_dst)),
+        filtered_hit_target_count=int(max(0, len(raw_hit_by_dst) - len(hit_by_dst))),
+        used_proximity_closure=False,
+        proximity_closure_dist_m=None,
     )
 
 

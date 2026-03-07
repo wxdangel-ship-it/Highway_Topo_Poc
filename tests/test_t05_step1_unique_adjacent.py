@@ -398,6 +398,54 @@ def test_allowed_dst_filter_can_skip_non_target_crossing_absorbing_state() -> No
     assert int(res.hit_targets[0][1]) == 3
 
 
+def test_allowed_dst_proximity_closure_can_recover_missing_crossing_event() -> None:
+    src_key = "t:cross:1"
+    sample_key = "t:sample:1"
+    nodes = {
+        src_key: geom_mod._GraphNode(
+            key=src_key,
+            traj_id="t",
+            kind="cross",
+            station_m=0.0,
+            point=Point(0.0, 0.0),
+            heading_xy=(1.0, 0.0),
+            cross_nodeid=1,
+            seq_idx=0,
+        ),
+        sample_key: geom_mod._GraphNode(
+            key=sample_key,
+            traj_id="t",
+            kind="sample",
+            station_m=10.0,
+            point=Point(10.2, 0.0),
+            heading_xy=(1.0, 0.0),
+            cross_nodeid=None,
+            seq_idx=1,
+        ),
+    }
+    edges = {
+        src_key: [geom_mod._GraphEdge(to_key=sample_key, weight=1.0, kind="traj", traj_id="t", station_from=0.0, station_to=10.0)],
+        sample_key: [],
+    }
+
+    res = geom_mod._search_next_crossing(
+        source_key=src_key,
+        source_nodeid=1,
+        nodes=nodes,
+        edges=edges,
+        max_dist_m=100.0,
+        unique_dst_early_stop=False,
+        allowed_dst_nodeids={2},
+        allowed_dst_points_by_nodeid={2: [Point(10.0, 0.0)]},
+        allowed_dst_close_hit_buffer_m=0.5,
+    )
+
+    assert res.target_key == sample_key
+    assert int(res.target_cross_nodeid or -1) == 2
+    assert bool(res.used_proximity_closure) is True
+    assert float(res.proximity_closure_dist_m or 0.0) <= 0.5
+
+
 def test_ambiguous_next_crossing_marks_soft_event(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     src_key = "t:cross:1"
     dst_a_key = "t:cross:2"
@@ -1157,6 +1205,39 @@ def test_same_pair_multi_road_selection_keeps_close_parallel_branches() -> None:
         "same_pair_multi_road_src_station_m": 4.0,
         "same_pair_multi_road_dst_station_m": 4.2,
         "_geometry_metric": LineString([(0.0, 0.2), (100.0, 0.2)]),
+    }
+
+    selected = pipeline._select_non_conflicting_multi_road_candidates(
+        [cand1, cand2],
+        min_sep_m=2.0,
+        same_pair_station_gap_min_m=0.5,
+    )
+
+    assert len(selected) == 2
+
+
+def test_same_pair_multi_road_selection_can_use_shape_ref_to_keep_parallel_branches() -> None:
+    cand1 = {
+        "src_nodeid": 1,
+        "dst_nodeid": 2,
+        "step1_same_pair_multichain": True,
+        "same_pair_multi_road_branch_id": "1_2__b0",
+        "same_pair_multi_road_signature": ["e0"],
+        "same_pair_multi_road_src_station_m": 1.0,
+        "same_pair_multi_road_dst_station_m": 1.2,
+        "_geometry_metric": LineString([(0.0, 0.0), (100.0, 0.0)]),
+        "_road_prior_shape_ref_metric": LineString([(0.0, 0.0), (100.0, 0.0)]),
+    }
+    cand2 = {
+        "src_nodeid": 1,
+        "dst_nodeid": 2,
+        "step1_same_pair_multichain": True,
+        "same_pair_multi_road_branch_id": "1_2__b1",
+        "same_pair_multi_road_signature": ["e1"],
+        "same_pair_multi_road_src_station_m": 3.0,
+        "same_pair_multi_road_dst_station_m": 3.2,
+        "_geometry_metric": LineString([(0.0, 0.0), (100.0, 0.0)]),
+        "_road_prior_shape_ref_metric": LineString([(0.0, 0.6), (100.0, 0.6)]),
     }
 
     selected = pipeline._select_non_conflicting_multi_road_candidates(

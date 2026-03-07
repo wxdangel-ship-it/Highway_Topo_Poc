@@ -1102,6 +1102,7 @@ def _run_patch_core(
             allowed_pairs=step1_allowed_pair_filter_set,
             single_support_per_pair=bool(int(params.get("STEP1_SINGLE_SUPPORT_PER_PAIR", 1))),
             skip_search_after_pair_resolved=bool(int(params.get("STEP1_SKIP_SEARCH_AFTER_PAIR_RESOLVED", 1))),
+            allowed_dst_close_hit_buffer_m=float(hit_buffer_m),
         )
         nt_map, indeg_map, outdeg_map = infer_node_types(
             node_ids=node_ids,
@@ -1134,6 +1135,7 @@ def _run_patch_core(
                 skip_search_after_pair_resolved=bool(int(params.get("STEP1_SKIP_SEARCH_AFTER_PAIR_RESOLVED", 1))),
                 src_nodeid_alias_by_nodeid=shared_xsec_src_alias_by_primary,
                 dst_nodeid_alias_by_nodeid=shared_xsec_dst_alias_by_primary,
+                allowed_dst_close_hit_buffer_m=float(hit_buffer_m),
             )
         else:
             supports_obj = supports_seed_obj
@@ -6854,6 +6856,35 @@ def _same_pair_multi_road_allows_close_parallel(
     return bool(float(station_gap) >= float(min_station_gap_m))
 
 
+def _same_pair_multi_road_ref_line(road: dict[str, Any]) -> LineString | None:
+    for key in ("_road_prior_shape_ref_metric", "_shape_ref_metric"):
+        geom = road.get(key)
+        if isinstance(geom, LineString) and (not geom.is_empty):
+            return geom
+    return None
+
+
+def _same_pair_multi_road_shape_ref_allows_parallel(
+    lhs: dict[str, Any],
+    rhs: dict[str, Any],
+    *,
+    min_station_gap_m: float,
+) -> bool:
+    if not _same_pair_multi_road_allows_close_parallel(
+        lhs,
+        rhs,
+        min_station_gap_m=float(min_station_gap_m),
+    ):
+        return False
+    lhs_ref = _same_pair_multi_road_ref_line(lhs)
+    rhs_ref = _same_pair_multi_road_ref_line(rhs)
+    if not isinstance(lhs_ref, LineString) or lhs_ref.is_empty:
+        return False
+    if not isinstance(rhs_ref, LineString) or rhs_ref.is_empty:
+        return False
+    return not _candidate_lines_conflict(lhs_ref, rhs_ref, min_sep_m=0.0)
+
+
 def _candidate_roads_conflict(
     lhs: dict[str, Any],
     rhs: dict[str, Any],
@@ -6872,11 +6903,20 @@ def _candidate_roads_conflict(
         rhs,
         min_station_gap_m=float(same_pair_station_gap_min_m),
     )
-    return _candidate_lines_conflict(
+    geom_conflict = _candidate_lines_conflict(
         lhs_line,
         rhs_line,
         min_sep_m=(0.0 if allow_close_parallel else float(min_sep_m)),
     )
+    if not geom_conflict:
+        return False
+    if allow_close_parallel and _same_pair_multi_road_shape_ref_allows_parallel(
+        lhs,
+        rhs,
+        min_station_gap_m=float(same_pair_station_gap_min_m),
+    ):
+        return False
+    return True
 
 
 def _select_non_conflicting_multi_road_candidates(
