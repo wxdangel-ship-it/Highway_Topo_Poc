@@ -7436,6 +7436,7 @@ def _assign_multi_road_channel_identity(
     road["channel_id"] = f"ch{int(channel_rank)}"
     road["channel_rank"] = int(channel_rank)
     road["channel_count"] = int(channel_count)
+    road["same_pair_handled"] = bool(same_pair)
     road["same_pair_multi_road"] = bool(same_pair)
     road["same_pair_multi_road_count"] = int(channel_count) if bool(same_pair) else None
     road["same_pair_multi_road_cluster_id"] = int(cluster_id)
@@ -10662,6 +10663,11 @@ def _make_base_road_record(
         "main_cluster_ratio": float(support.main_cluster_ratio),
         "cluster_sep_m_est": support.cluster_sep_m_est,
         "no_geometry_candidate": None,
+        "same_pair_handled": False,
+        "same_pair_resolution_state": None,
+        "same_pair_handled_count_for_pair": None,
+        "same_pair_final_output_count_for_pair": None,
+        "same_pair_unresolved_branch_count_for_pair": None,
         "hard_anomaly": False,
         "hard_reasons": [],
         "soft_issue_flags": [],
@@ -10686,7 +10692,7 @@ def _reason_hint(reason: str) -> str:
         HARD_MULTI_NEIGHBOR_FOR_NODE: "multiple_dst_node_candidates_for_src_node",
         _HARD_MULTI_CHAIN_SAME_DST: "multiple_topology_chains_for_same_dst",
         HARD_NO_STRATEGY_MERGE_TO_DIVERGE: "merge_to_diverge_not_supported",
-        HARD_MULTI_ROAD: "pair_has_multiple_channel_clusters",
+        HARD_MULTI_ROAD: "same_pair_channel_conflict_unresolved",
         HARD_NON_RC: "non_rc_node_used_in_pair",
         HARD_CENTER_EMPTY: "centerline_generation_failed",
         HARD_ENDPOINT: "endpoints_not_on_intersection_l",
@@ -10722,6 +10728,67 @@ def _strip_internal_fields(road: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in road.items() if not k.startswith("_")}
 
 
+def _is_valid_output_geometry(road: dict[str, Any]) -> bool:
+    geom = road.get("_geometry_metric")
+    return isinstance(geom, LineString) and (not geom.is_empty)
+
+
+def _annotate_same_pair_resolution_states(roads: Sequence[dict[str, Any]]) -> dict[str, int]:
+    pair_to_roads: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for road in roads:
+        if not bool(road.get("step1_same_pair_multichain", False) or road.get("same_pair_multi_road", False)):
+            continue
+        key = (int(road.get("src_nodeid", -1)), int(road.get("dst_nodeid", -1)))
+        pair_to_roads.setdefault(key, []).append(road)
+
+    stats = {
+        "same_pair_handled_pair_count": 0,
+        "same_pair_handled_output_count": 0,
+        "same_pair_single_output_pair_count": 0,
+        "same_pair_multi_road_pair_count": 0,
+        "same_pair_multi_road_output_count": 0,
+        "same_pair_partial_unresolved_pair_count": 0,
+        "same_pair_hard_conflict_pair_count": 0,
+    }
+    for pair, pair_roads in pair_to_roads.items():
+        final_roads = [road for road in pair_roads if _is_valid_output_geometry(road)]
+        unresolved_roads = [
+            road
+            for road in pair_roads
+            if (not _is_valid_output_geometry(road))
+            or bool(road.get("no_geometry_candidate", False))
+            or (HARD_MULTI_ROAD in set(road.get("hard_reasons", [])))
+        ]
+        if len(final_roads) >= 2:
+            resolution_state = "multi_output_valid" if not unresolved_roads else "partial_unresolved"
+        elif len(final_roads) == 1:
+            resolution_state = "single_output" if not unresolved_roads else "partial_unresolved"
+        else:
+            resolution_state = "hard_conflict"
+
+        stats["same_pair_handled_pair_count"] += 1
+        stats["same_pair_handled_output_count"] += int(len(final_roads))
+        if resolution_state == "single_output":
+            stats["same_pair_single_output_pair_count"] += 1
+        elif resolution_state == "multi_output_valid":
+            stats["same_pair_multi_road_pair_count"] += 1
+            stats["same_pair_multi_road_output_count"] += int(len(final_roads))
+        elif resolution_state == "partial_unresolved":
+            stats["same_pair_partial_unresolved_pair_count"] += 1
+        else:
+            stats["same_pair_hard_conflict_pair_count"] += 1
+
+        for road in pair_roads:
+            road["same_pair_handled"] = True
+            road["same_pair_resolution_state"] = str(resolution_state)
+            road["same_pair_handled_count_for_pair"] = int(len(pair_roads))
+            road["same_pair_final_output_count_for_pair"] = int(len(final_roads))
+            road["same_pair_unresolved_branch_count_for_pair"] = int(len(unresolved_roads))
+            road["same_pair_pair_key"] = f"{int(pair[0])}_{int(pair[1])}"
+
+    return stats
+
+
 def _finalize_payloads(
     *,
     run_id: str,
@@ -10740,13 +10807,12 @@ def _finalize_payloads(
 ) -> dict[str, Any]:
     git_sha = git_short_sha(repo_root)
     digest = params_digest(params)
+    same_pair_resolution_stats = _annotate_same_pair_resolution_states(roads)
     road_candidate_count = int(len(roads))
-    written_roads: list[dict[str, Any]] = []
-    for road in roads:
-        geom = road.get("_geometry_metric")
-        if isinstance(geom, LineString) and (not geom.is_empty):
-            written_roads.append(road)
-    road_features_count = int(len(road_feature_props))
+    written_roads = [road for road in roads if _is_valid_output_geometry(road)]
+    road_lines_metric_final = [road["_geometry_metric"] for road in written_roads]
+    road_feature_props_final = [_strip_internal_fields(road) for road in written_roads]
+    road_features_count = int(len(road_feature_props_final))
     no_geometry_candidate_count = int(max(0, road_candidate_count - road_features_count))
 
     metrics_payload = build_metrics_payload(
@@ -10761,6 +10827,7 @@ def _finalize_payloads(
     metrics_payload["no_geometry_candidate_count"] = int(no_geometry_candidate_count)
     metrics_payload["no_geometry_candidate"] = bool(no_geometry_candidate_count > 0)
     metrics_payload["params_digest"] = digest
+    metrics_payload.update(same_pair_resolution_stats)
     if extra_metrics:
         metrics_payload.update(extra_metrics)
 
@@ -10774,6 +10841,7 @@ def _finalize_payloads(
         hard_breakpoints=hard_breakpoints,
         soft_breakpoints=soft_breakpoints,
         params_digest_value=digest,
+        same_pair_stats=same_pair_resolution_stats,
     )
 
     summary_params = {**params, "params_digest": digest}
@@ -10781,6 +10849,7 @@ def _finalize_payloads(
     summary_params["road_candidate_count"] = int(road_candidate_count)
     summary_params["no_geometry_candidate_count"] = int(no_geometry_candidate_count)
     summary_params["no_geometry_candidate"] = bool(no_geometry_candidate_count > 0)
+    summary_params.update(same_pair_resolution_stats)
     if extra_metrics:
         for k, v in extra_metrics.items():
             sk = str(k)
@@ -10933,10 +11002,10 @@ def _finalize_payloads(
 
     return {
         "patch_id": patch_id,
-        "road_count": len(road_feature_props),
+        "road_count": len(road_feature_props_final),
         "road_candidate_count": len(roads),
-        "road_properties": road_feature_props,
-        "road_lines_metric": road_lines_metric,
+        "road_properties": road_feature_props_final,
+        "road_lines_metric": road_lines_metric_final,
         "metrics_payload": metrics_payload,
         "intervals_payload": intervals_payload,
         "gate_payload": gate_payload,

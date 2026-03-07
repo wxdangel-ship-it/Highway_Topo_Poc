@@ -66,19 +66,14 @@ def build_metrics_payload(
     low_support_count = sum(1 for r in roads if "LOW_SUPPORT" in set(r.get("soft_issue_flags", [])))
 
     pair_set = {(int(r.get("src_nodeid", -1)), int(r.get("dst_nodeid", -1))) for r in roads}
-    same_pair_roads = [r for r in roads if bool(r.get("same_pair_multi_road", False))]
-    same_pair_pair_set = {
-        (int(r.get("src_nodeid", -1)), int(r.get("dst_nodeid", -1)))
-        for r in same_pair_roads
-    }
+    same_pair_stats = _same_pair_resolution_stats(roads)
 
     return {
         "patch_id": patch_id,
         "road_count": int(len(roads)),
         "pair_count": int(len(pair_set)),
         "unique_pair_count": int(len(pair_set)),
-        "same_pair_multi_road_pair_count": int(len(same_pair_pair_set)),
-        "same_pair_multi_road_output_count": int(len(same_pair_roads)),
+        **same_pair_stats,
         "hard_anomaly_count": int(hard_count),
         "soft_issue_count": int(soft_count),
         "low_support_road_count": int(low_support_count),
@@ -148,15 +143,20 @@ def build_gate_payload(
     hard_breakpoints: Sequence[dict[str, Any]],
     soft_breakpoints: Sequence[dict[str, Any]],
     params_digest_value: str,
+    same_pair_stats: dict[str, Any] | None = None,
     version: str = "t05_gate_v1",
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "overall_pass": bool(overall_pass),
         "hard_breakpoints": list(hard_breakpoints),
         "soft_breakpoints": list(soft_breakpoints),
         "params_digest": str(params_digest_value),
         "version": version,
     }
+    if isinstance(same_pair_stats, dict):
+        for key, value in same_pair_stats.items():
+            payload[str(key)] = value
+    return payload
 
 
 def build_summary_text(
@@ -203,18 +203,33 @@ def build_summary_text(
     pair_count = int(
         len({(int(r.get("src_nodeid", -1)), int(r.get("dst_nodeid", -1))) for r in roads})
     )
-    same_pair_roads = [r for r in roads if bool(r.get("same_pair_multi_road", False))]
-    same_pair_pair_count = int(
-        len({(int(r.get("src_nodeid", -1)), int(r.get("dst_nodeid", -1))) for r in same_pair_roads})
-    )
+    same_pair_stats = _same_pair_resolution_stats(roads)
+    for key in (
+        "same_pair_handled_pair_count",
+        "same_pair_handled_output_count",
+        "same_pair_single_output_pair_count",
+        "same_pair_multi_road_pair_count",
+        "same_pair_multi_road_output_count",
+        "same_pair_partial_unresolved_pair_count",
+        "same_pair_hard_conflict_pair_count",
+    ):
+        if key in params:
+            same_pair_stats[key] = int(params.get(key) or 0)
     hard_count = sum(1 for r in roads if bool(r.get("hard_anomaly", False)))
     soft_count = sum(len(list(r.get("soft_issue_flags", []))) for r in roads)
     lines.append(f"road_count: {road_count}")
     lines.append(f"road_features_count: {road_count}")
     lines.append(f"road_candidate_count: {candidate_count}")
     lines.append(f"pair_count: {pair_count}")
-    lines.append(f"same_pair_multi_road_pair_count: {same_pair_pair_count}")
-    lines.append(f"same_pair_multi_road_output_count: {int(len(same_pair_roads))}")
+    lines.append(f"same_pair_handled_pair_count: {int(same_pair_stats['same_pair_handled_pair_count'])}")
+    lines.append(f"same_pair_handled_output_count: {int(same_pair_stats['same_pair_handled_output_count'])}")
+    lines.append(f"same_pair_single_output_pair_count: {int(same_pair_stats['same_pair_single_output_pair_count'])}")
+    lines.append(f"same_pair_multi_road_pair_count: {int(same_pair_stats['same_pair_multi_road_pair_count'])}")
+    lines.append(f"same_pair_multi_road_output_count: {int(same_pair_stats['same_pair_multi_road_output_count'])}")
+    lines.append(
+        f"same_pair_partial_unresolved_pair_count: {int(same_pair_stats['same_pair_partial_unresolved_pair_count'])}"
+    )
+    lines.append(f"same_pair_hard_conflict_pair_count: {int(same_pair_stats['same_pair_hard_conflict_pair_count'])}")
     if candidate_count > road_count:
         lines.append("no_geometry_candidate: true")
         lines.append(f"no_geometry_candidate_count: {candidate_count - road_count}")
@@ -316,6 +331,56 @@ def apply_size_guard(text: str, *, max_lines: int, max_bytes: int) -> str:
 
     out += f"Truncated: {'true' if truncated else 'false'} (reason={reason})\n"
     return out
+
+
+def _same_pair_resolution_stats(roads: Sequence[dict[str, Any]]) -> dict[str, int]:
+    pair_to_roads: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for road in roads:
+        if not bool(
+            road.get("same_pair_handled", False)
+            or road.get("same_pair_multi_road", False)
+            or road.get("step1_same_pair_multichain", False)
+            or road.get("same_pair_resolution_state")
+        ):
+            continue
+        pair_key = (int(road.get("src_nodeid", -1)), int(road.get("dst_nodeid", -1)))
+        pair_to_roads.setdefault(pair_key, []).append(road)
+
+    stats = {
+        "same_pair_handled_pair_count": 0,
+        "same_pair_handled_output_count": 0,
+        "same_pair_single_output_pair_count": 0,
+        "same_pair_multi_road_pair_count": 0,
+        "same_pair_multi_road_output_count": 0,
+        "same_pair_partial_unresolved_pair_count": 0,
+        "same_pair_hard_conflict_pair_count": 0,
+    }
+    for pair_roads in pair_to_roads.values():
+        state_values = {str(r.get("same_pair_resolution_state") or "").strip() for r in pair_roads}
+        state_values.discard("")
+        if "hard_conflict" in state_values:
+            resolution_state = "hard_conflict"
+        elif "partial_unresolved" in state_values:
+            resolution_state = "partial_unresolved"
+        elif "multi_output_valid" in state_values:
+            resolution_state = "multi_output_valid"
+        elif "single_output" in state_values:
+            resolution_state = "single_output"
+        else:
+            resolution_state = "multi_output_valid" if len(pair_roads) >= 2 else "single_output"
+
+        stats["same_pair_handled_pair_count"] += 1
+        stats["same_pair_handled_output_count"] += int(len(pair_roads))
+        if resolution_state == "single_output":
+            stats["same_pair_single_output_pair_count"] += 1
+        elif resolution_state == "multi_output_valid":
+            stats["same_pair_multi_road_pair_count"] += 1
+            stats["same_pair_multi_road_output_count"] += int(len(pair_roads))
+        elif resolution_state == "partial_unresolved":
+            stats["same_pair_partial_unresolved_pair_count"] += 1
+        else:
+            stats["same_pair_hard_conflict_pair_count"] += 1
+    return stats
 
 
 def _safe_stat(x: np.ndarray, fn: Any) -> float | None:

@@ -9,8 +9,13 @@
   - `channel_count:int`
 - `MULTI_ROAD_SAME_PAIR` is `hard` only when same-pair branches cannot be separated into stable non-crossing outputs.
 - `pair_count` counts unique final `(src_nodeid, dst_nodeid)` pairs.
-- `same_pair_multi_road_pair_count` counts pairs that emitted more than one final road.
-- `same_pair_multi_road_output_count` counts final road features emitted under same-pair multi-road handling.
+- `same_pair_handled_pair_count` counts pairs that entered same-pair branch handling.
+- `same_pair_handled_output_count` counts final road features emitted from same-pair handled pairs.
+- `same_pair_single_output_pair_count` counts same-pair handled pairs that converged to exactly one final road without unresolved branches.
+- `same_pair_multi_road_pair_count` counts same-pair handled pairs whose final state is `multi_output_valid`.
+- `same_pair_multi_road_output_count` counts final road features emitted by `multi_output_valid` same-pair pairs only.
+- `same_pair_partial_unresolved_pair_count` counts same-pair handled pairs that emitted some final road(s) but still retained unresolved branches or no-geometry candidates.
+- `same_pair_hard_conflict_pair_count` counts same-pair handled pairs that failed without any final road output.
 
 ## 1. 目标与范围
 - 模块 ID：`t05_topology_between_rc`

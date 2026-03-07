@@ -5,6 +5,11 @@
 - Multi-road output is valid only when channels are stable, non-crossing, and preserve cross-section order.
 - Each final same-pair road should carry `channel_id`, `channel_rank`, and `channel_count`.
 - `MULTI_ROAD_SAME_PAIR` is reserved for unresolved same-pair branch conflicts, not for valid same-pair multi-road output.
+- same-pair diagnostics should distinguish:
+  - handled pairs
+  - valid final multi-output pairs
+  - partial-unresolved pairs
+  - hard-conflict pairs
 
 ## 算法口径（MVP 冻结）
 

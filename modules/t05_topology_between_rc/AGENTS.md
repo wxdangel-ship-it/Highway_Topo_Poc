@@ -4,6 +4,7 @@
 - Same-pair multi-road is a valid T05 output mode.
 - Final same-pair roads must be emitted with stable channel identity and must remain non-crossing.
 - `MULTI_ROAD_SAME_PAIR` should only mark unresolved same-pair branch conflicts, not valid multi-road output.
+- Same-pair reporting must distinguish handled, valid multi-output, partial-unresolved, and hard-conflict pair states.
 
 ## 模块目标
 - 基于 `intersection_l`、轨迹和 `DriveZone`，结合 `LaneBoundary`、点云与 `RCSDRoad` prior，生成 RC 路口间有向 `Road` 中心线。

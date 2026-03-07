@@ -6,6 +6,8 @@ from pathlib import Path
 from highway_topo_poc.modules.t05_topology_between_rc import run as run_mod
 from highway_topo_poc.modules.t05_topology_between_rc.pipeline import RunResult
 from highway_topo_poc.modules.t05_topology_between_rc.qa_audit import (
+    _selected_metrics,
+    _summary_key_lines,
     emit_qa_artifacts,
     upsert_external_audit_topic,
 )
@@ -258,6 +260,56 @@ def test_emit_qa_artifacts_upgrades_static_topic_to_code_plus_run(tmp_path: Path
     assert "- evidence_type: inner_bundle" in evidence_text
     assert f"- related_run_id: {run_id}" in evidence_text
     assert result.bundle_path.as_posix() in evidence_text
+
+
+def test_same_pair_resolution_metrics_and_summary_keys_are_selected() -> None:
+    payload = {
+        "patch_id": "p1",
+        "road_count": 2,
+        "road_features_count": 2,
+        "road_candidate_count": 3,
+        "pair_count": 1,
+        "unique_pair_count": 1,
+        "same_pair_handled_pair_count": 1,
+        "same_pair_handled_output_count": 2,
+        "same_pair_single_output_pair_count": 0,
+        "same_pair_multi_road_pair_count": 1,
+        "same_pair_multi_road_output_count": 2,
+        "same_pair_partial_unresolved_pair_count": 0,
+        "same_pair_hard_conflict_pair_count": 0,
+        "no_geometry_candidate": True,
+        "no_geometry_candidate_count": 1,
+    }
+
+    selected = _selected_metrics(payload)
+
+    assert selected["same_pair_handled_pair_count"] == 1
+    assert selected["same_pair_handled_output_count"] == 2
+    assert selected["same_pair_single_output_pair_count"] == 0
+    assert selected["same_pair_multi_road_pair_count"] == 1
+    assert selected["same_pair_multi_road_output_count"] == 2
+    assert selected["same_pair_partial_unresolved_pair_count"] == 0
+    assert selected["same_pair_hard_conflict_pair_count"] == 0
+
+    summary_lines = _summary_key_lines(
+        "\n".join(
+            [
+                "run_id: run1",
+                "pair_count: 1",
+                "same_pair_handled_pair_count: 1",
+                "same_pair_handled_output_count: 2",
+                "same_pair_single_output_pair_count: 0",
+                "same_pair_multi_road_pair_count: 1",
+                "same_pair_multi_road_output_count: 2",
+                "same_pair_partial_unresolved_pair_count: 0",
+                "same_pair_hard_conflict_pair_count: 0",
+                "params:",
+                "- params_digest=abc",
+            ]
+        )
+    )
+    assert "same_pair_handled_pair_count: 1" in summary_lines
+    assert "same_pair_partial_unresolved_pair_count: 0" in summary_lines
 
 
 def test_emit_qa_artifacts_acknowledges_previous_report(tmp_path: Path) -> None:

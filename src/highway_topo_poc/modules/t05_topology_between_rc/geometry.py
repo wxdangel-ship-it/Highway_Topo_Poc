@@ -343,15 +343,6 @@ def build_pair_supports(
                     hit_pair = supports.get((src_nodeid_i, only_dst))
                     if hit_pair is not None and int(hit_pair.support_event_count) > 0:
                         continue
-            search = _search_next_crossing(
-                source_key=source_key,
-                source_nodeid=src_nodeid_raw,
-                nodes=graph.nodes,
-                edges=graph.edges,
-                max_dist_m=float(neighbor_max_dist_m),
-                unique_dst_early_stop=bool(unique_dst_early_stop),
-            )
-            hit_targets_raw = list(search.hit_targets)
             allowed_dsts_for_src: set[int] | None = None
             if allowed_dst_by_src is not None:
                 raw = allowed_dst_by_src.get(src_nodeid_i)
@@ -364,6 +355,24 @@ def build_pair_supports(
                     allowed_dsts_for_src = {
                         int(v) for v in allowed_dsts_for_src if int(v) in allowed_pair_dsts_for_src
                     }
+            if allowed_dsts_for_src is not None and dst_nodeid_alias_by_nodeid is not None:
+                allowed_dsts_for_src = {
+                    int(v) for v in allowed_dsts_for_src
+                } | {
+                    int(raw_dst)
+                    for raw_dst, aliased_dst in dst_nodeid_alias_by_nodeid.items()
+                    if int(raw_dst) in allowed_dsts_for_src or int(aliased_dst) in allowed_dsts_for_src
+                }
+            search = _search_next_crossing(
+                source_key=source_key,
+                source_nodeid=src_nodeid_raw,
+                nodes=graph.nodes,
+                edges=graph.edges,
+                max_dist_m=float(neighbor_max_dist_m),
+                unique_dst_early_stop=bool(unique_dst_early_stop),
+                allowed_dst_nodeids=allowed_dsts_for_src,
+            )
+            hit_targets_raw = list(search.hit_targets)
             hit_targets_by_dst: dict[int, dict[str, Any]] = {}
             for item in hit_targets_raw:
                 raw_dst_nodeid = int(item[1])
@@ -1069,6 +1078,7 @@ def _search_next_crossing(
     edges: dict[str, list[_GraphEdge]],
     max_dist_m: float,
     unique_dst_early_stop: bool = True,
+    allowed_dst_nodeids: set[int] | None = None,
 ) -> _SearchResult:
     best: dict[str, tuple[float, int]] = {source_key: (0.0, 0)}
     prev: dict[str, str] = {}
@@ -1080,6 +1090,7 @@ def _search_next_crossing(
     explored_keys: set[str] = set()
     explored_stitch_candidates = 0
     hit_by_dst: dict[int, tuple[str, float, int]] = {}
+    allowed_dst_filter = {int(v) for v in allowed_dst_nodeids} if allowed_dst_nodeids else None
 
     while heap:
         dist, hops, key = heapq.heappop(heap)
@@ -1105,19 +1116,20 @@ def _search_next_crossing(
             explored_stitch_candidates += int(_count_outgoing_stitch_edges(edges.get(key, [])))
         if node.kind == "cross" and node.cross_nodeid is not None and int(node.cross_nodeid) != int(source_nodeid):
             dst_nodeid = int(node.cross_nodeid)
-            prev_hit = hit_by_dst.get(dst_nodeid)
-            if prev_hit is None:
-                hit_by_dst[dst_nodeid] = (str(key), float(dist), int(hops))
-            else:
-                old_key, old_dist, old_hops = prev_hit
-                if float(dist) < float(old_dist) - 1e-9 or (
-                    abs(float(dist) - float(old_dist)) <= 1e-9 and int(hops) < int(old_hops)
-                ):
+            if allowed_dst_filter is None or int(dst_nodeid) in allowed_dst_filter:
+                prev_hit = hit_by_dst.get(dst_nodeid)
+                if prev_hit is None:
                     hit_by_dst[dst_nodeid] = (str(key), float(dist), int(hops))
-            if bool(unique_dst_early_stop) and len(hit_by_dst) >= 2:
-                break
-            # crossing node is an absorbing state for adjacent-by-crossing search.
-            continue
+                else:
+                    old_key, old_dist, old_hops = prev_hit
+                    if float(dist) < float(old_dist) - 1e-9 or (
+                        abs(float(dist) - float(old_dist)) <= 1e-9 and int(hops) < int(old_hops)
+                    ):
+                        hit_by_dst[dst_nodeid] = (str(key), float(dist), int(hops))
+                if bool(unique_dst_early_stop) and len(hit_by_dst) >= 2:
+                    break
+                # Crossing nodes remain absorbing only when they are viable downstream targets.
+                continue
 
         for edge in edges.get(key, []):
             nd = float(dist + edge.weight)

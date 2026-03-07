@@ -341,6 +341,63 @@ def test_crossing_absorbing_state_prevents_third_party_crossing_expansion() -> N
     assert int(res.hit_targets[0][1]) == 2
 
 
+def test_allowed_dst_filter_can_skip_non_target_crossing_absorbing_state() -> None:
+    src_key = "t:cross:1"
+    mid_key = "t:cross:2"
+    dst_key = "u:cross:3"
+    nodes = {
+        src_key: geom_mod._GraphNode(
+            key=src_key,
+            traj_id="t",
+            kind="cross",
+            station_m=0.0,
+            point=Point(0.0, 0.0),
+            heading_xy=(1.0, 0.0),
+            cross_nodeid=1,
+            seq_idx=0,
+        ),
+        mid_key: geom_mod._GraphNode(
+            key=mid_key,
+            traj_id="t",
+            kind="cross",
+            station_m=10.0,
+            point=Point(10.0, 0.0),
+            heading_xy=(1.0, 0.0),
+            cross_nodeid=2,
+            seq_idx=1,
+        ),
+        dst_key: geom_mod._GraphNode(
+            key=dst_key,
+            traj_id="u",
+            kind="cross",
+            station_m=20.0,
+            point=Point(20.0, 0.0),
+            heading_xy=(1.0, 0.0),
+            cross_nodeid=3,
+            seq_idx=2,
+        ),
+    }
+    edges = {
+        src_key: [geom_mod._GraphEdge(to_key=mid_key, weight=1.0, kind="traj", traj_id="t", station_from=0.0, station_to=10.0)],
+        mid_key: [geom_mod._GraphEdge(to_key=dst_key, weight=1.0, kind="stitch", traj_id=None, station_from=None, station_to=None)],
+        dst_key: [],
+    }
+
+    res = geom_mod._search_next_crossing(
+        source_key=src_key,
+        source_nodeid=1,
+        nodes=nodes,
+        edges=edges,
+        max_dist_m=100.0,
+        unique_dst_early_stop=False,
+        allowed_dst_nodeids={3},
+    )
+
+    assert res.target_key == dst_key
+    assert len(res.hit_targets) == 1
+    assert int(res.hit_targets[0][1]) == 3
+
+
 def test_ambiguous_next_crossing_marks_soft_event(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     src_key = "t:cross:1"
     dst_a_key = "t:cross:2"
@@ -1024,12 +1081,60 @@ def test_topology_unique_mode_same_pair_multichain_outputs_multi_roads_with_chan
     assert channel_ids == {"ch1", "ch2"}
     assert {int(props.get("channel_count", 0)) for props in out["road_properties"]} == {2}
     assert all(bool(props.get("same_pair_multi_road", False)) for props in out["road_properties"])
+    assert all(bool(props.get("same_pair_handled", False)) for props in out["road_properties"])
+    assert {str(props.get("same_pair_resolution_state")) for props in out["road_properties"]} == {"multi_output_valid"}
+    assert {int(props.get("same_pair_final_output_count_for_pair", 0)) for props in out["road_properties"]} == {2}
+    assert {int(props.get("same_pair_unresolved_branch_count_for_pair", 0)) for props in out["road_properties"]} == {0}
     assert int(out["metrics_payload"].get("step1_same_pair_multichain_pair_count", 0)) == 1
     assert int(out["metrics_payload"].get("pair_count", 0)) == 1
+    assert int(out["metrics_payload"].get("same_pair_handled_pair_count", 0)) == 1
+    assert int(out["metrics_payload"].get("same_pair_handled_output_count", 0)) == 2
+    assert int(out["metrics_payload"].get("same_pair_single_output_pair_count", 0)) == 0
     assert int(out["metrics_payload"].get("same_pair_multi_road_pair_count", 0)) == 1
     assert int(out["metrics_payload"].get("same_pair_multi_road_output_count", 0)) == 2
+    assert int(out["metrics_payload"].get("same_pair_partial_unresolved_pair_count", 0)) == 0
+    assert int(out["metrics_payload"].get("same_pair_hard_conflict_pair_count", 0)) == 0
     assert bool(out["gate_payload"]["overall_pass"]) is True
     assert not out["hard_breakpoints"]
+
+
+def test_same_pair_resolution_stats_mark_partial_unresolved_pair() -> None:
+    valid = {
+        "road_id": "1_2__ch1",
+        "src_nodeid": 1,
+        "dst_nodeid": 2,
+        "same_pair_handled": True,
+        "same_pair_multi_road": True,
+        "step1_same_pair_multichain": True,
+        "_geometry_metric": LineString([(0.0, 0.0), (10.0, 0.0)]),
+        "hard_reasons": [],
+        "no_geometry_candidate": False,
+    }
+    unresolved = {
+        "road_id": "1_2__ch2",
+        "src_nodeid": 1,
+        "dst_nodeid": 2,
+        "same_pair_handled": True,
+        "same_pair_multi_road": True,
+        "step1_same_pair_multichain": True,
+        "_geometry_metric": None,
+        "hard_reasons": ["MULTI_ROAD_SAME_PAIR"],
+        "no_geometry_candidate": True,
+    }
+
+    stats = pipeline._annotate_same_pair_resolution_states([valid, unresolved])
+
+    assert stats["same_pair_handled_pair_count"] == 1
+    assert stats["same_pair_handled_output_count"] == 1
+    assert stats["same_pair_single_output_pair_count"] == 0
+    assert stats["same_pair_multi_road_pair_count"] == 0
+    assert stats["same_pair_multi_road_output_count"] == 0
+    assert stats["same_pair_partial_unresolved_pair_count"] == 1
+    assert stats["same_pair_hard_conflict_pair_count"] == 0
+    assert valid["same_pair_resolution_state"] == "partial_unresolved"
+    assert unresolved["same_pair_resolution_state"] == "partial_unresolved"
+    assert valid["same_pair_final_output_count_for_pair"] == 1
+    assert valid["same_pair_unresolved_branch_count_for_pair"] == 1
 
 
 def test_same_pair_multi_road_selection_keeps_close_parallel_branches() -> None:
