@@ -29,17 +29,17 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--traj_split_max_gap_m",
         type=float,
-        default=float(DEFAULT_PARAMS.get("TRAJ_SPLIT_MAX_GAP_M", 20.0)),
+        default=float(DEFAULT_PARAMS.get("TRAJ_SPLIT_MAX_GAP_M", 10.0)),
     )
     p.add_argument(
         "--traj_split_max_time_gap_s",
         type=float,
-        default=float(DEFAULT_PARAMS.get("TRAJ_SPLIT_MAX_TIME_GAP_S", 2.0)),
+        default=float(DEFAULT_PARAMS.get("TRAJ_SPLIT_MAX_TIME_GAP_S", 1.0)),
     )
     p.add_argument(
         "--traj_split_max_seq_gap",
         type=int,
-        default=int(DEFAULT_PARAMS.get("TRAJ_SPLIT_MAX_SEQ_GAP", 5)),
+        default=int(DEFAULT_PARAMS.get("TRAJ_SPLIT_MAX_SEQ_GAP", 20000000)),
     )
 
     p.add_argument("--traj_xsec_hit_buffer_m", type=float, default=float(DEFAULT_PARAMS["TRAJ_XSEC_HIT_BUFFER_M"]))
