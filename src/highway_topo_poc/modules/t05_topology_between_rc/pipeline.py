@@ -44,6 +44,7 @@ from .geometry import (
     SOFT_UNRESOLVED_NEIGHBOR,
     SOFT_WIGGLY,
     PairSupport,
+    PairSupportBuildResult,
     _build_lb_graph_path,
     build_pair_endpoint_xsec,
     build_pair_supports,
@@ -1102,6 +1103,7 @@ def _run_patch_core(
         stitch_max_dist_m: float,
         stitch_forward_dot_min: float,
         neighbor_max_dist_m: float,
+        focus_src_nodeids: set[int] | None = None,
     ) -> tuple[Any, Any, dict[int, str], dict[int, int], dict[int, int]]:
         cross_obj = extract_crossing_events(
             patch_inputs.trajectories,
@@ -1143,6 +1145,7 @@ def _run_patch_core(
             src_nodeid_alias_by_nodeid=shared_xsec_src_alias_by_primary,
             dst_nodeid_alias_by_nodeid=shared_xsec_dst_alias_by_primary,
             allowed_dst_close_hit_buffer_m=float(hit_buffer_m),
+            focus_src_nodeids=focus_src_nodeids,
         )
         nt_map, indeg_map, outdeg_map = infer_node_types(
             node_ids=node_ids,
@@ -1176,10 +1179,115 @@ def _run_patch_core(
                 src_nodeid_alias_by_nodeid=shared_xsec_src_alias_by_primary,
                 dst_nodeid_alias_by_nodeid=shared_xsec_dst_alias_by_primary,
                 allowed_dst_close_hit_buffer_m=float(hit_buffer_m),
+                focus_src_nodeids=focus_src_nodeids,
             )
         else:
             supports_obj = supports_seed_obj
         return cross_obj, supports_obj, nt_map, indeg_map, outdeg_map
+
+    def _result_src_nodeid(item: dict[str, Any]) -> int | None:
+        try:
+            return int(item.get("src_nodeid"))
+        except Exception:
+            return None
+
+    def _result_quality_for_src(res: PairSupportBuildResult, src_nodeid: int) -> tuple[int, int, int, int]:
+        src_i = int(src_nodeid)
+        pair_count = 0
+        support_events = 0
+        for (src_raw, _dst_raw), pair_support in res.supports.items():
+            if int(src_raw) != src_i:
+                continue
+            pair_count += 1
+            support_events += max(1, int(pair_support.support_event_count))
+        resolved_hits = sum(
+            1
+            for cand in res.next_crossing_candidates
+            if _result_src_nodeid(cand) == src_i and (not bool(cand.get("unresolved", False)))
+        )
+        unresolved_count = sum(1 for item in res.unresolved_events if _result_src_nodeid(item) == src_i)
+        return (pair_count, support_events, resolved_hits, -unresolved_count)
+
+    def _merge_pair_support_results(
+        base: PairSupportBuildResult,
+        override: PairSupportBuildResult,
+        *,
+        focus_src_nodeids: set[int],
+    ) -> PairSupportBuildResult:
+        focus_srcs = {int(v) for v in focus_src_nodeids}
+        merged_supports = {
+            pair: pair_support
+            for pair, pair_support in base.supports.items()
+            if int(pair[0]) not in focus_srcs
+        }
+        for pair, pair_support in override.supports.items():
+            if int(pair[0]) in focus_srcs:
+                merged_supports[pair] = pair_support
+
+        def _merge_event_list(
+            base_items: list[dict[str, Any]],
+            override_items: list[dict[str, Any]],
+        ) -> list[dict[str, Any]]:
+            merged = [item for item in base_items if _result_src_nodeid(item) not in focus_srcs]
+            merged.extend(item for item in override_items if _result_src_nodeid(item) in focus_srcs)
+            return merged
+
+        merged_votes = {
+            int(src): votes
+            for src, votes in base.node_dst_votes.items()
+            if int(src) not in focus_srcs
+        }
+        for src, votes in override.node_dst_votes.items():
+            src_i = int(src)
+            if src_i in focus_srcs:
+                merged_votes[src_i] = votes
+
+        merged_hist: dict[str, int] = {}
+        for hist in (base.stitch_levels_used_hist, override.stitch_levels_used_hist):
+            for raw_key, raw_val in hist.items():
+                key = str(raw_key)
+                merged_hist[key] = max(int(merged_hist.get(key, 0)), int(raw_val))
+
+        return PairSupportBuildResult(
+            supports=merged_supports,
+            unresolved_events=_merge_event_list(base.unresolved_events, override.unresolved_events),
+            graph_node_count=max(int(base.graph_node_count), int(override.graph_node_count)),
+            graph_edge_count=max(int(base.graph_edge_count), int(override.graph_edge_count)),
+            stitch_candidate_count=max(int(base.stitch_candidate_count), int(override.stitch_candidate_count)),
+            stitch_edge_count=max(int(base.stitch_edge_count), int(override.stitch_edge_count)),
+            stitch_query_count=max(int(base.stitch_query_count), int(override.stitch_query_count)),
+            stitch_candidates_total=max(int(base.stitch_candidates_total), int(override.stitch_candidates_total)),
+            stitch_reject_dist_count=max(int(base.stitch_reject_dist_count), int(override.stitch_reject_dist_count)),
+            stitch_reject_angle_count=max(int(base.stitch_reject_angle_count), int(override.stitch_reject_angle_count)),
+            stitch_reject_forward_count=max(
+                int(base.stitch_reject_forward_count),
+                int(override.stitch_reject_forward_count),
+            ),
+            stitch_accept_count=max(int(base.stitch_accept_count), int(override.stitch_accept_count)),
+            stitch_levels_used_hist=merged_hist,
+            ambiguous_events=_merge_event_list(base.ambiguous_events, override.ambiguous_events),
+            next_crossing_candidates=_merge_event_list(base.next_crossing_candidates, override.next_crossing_candidates),
+            node_dst_votes=merged_votes,
+        )
+
+    def _merge_nodewise_map_for_improved_sources(
+        base_map: dict[int, Any],
+        override_map: dict[int, Any],
+        *,
+        focus_src_nodeids: set[int],
+        override_supports: dict[tuple[int, int], PairSupport],
+    ) -> dict[int, Any]:
+        merged = dict(base_map)
+        touched_nodeids = {int(v) for v in focus_src_nodeids}
+        for (src_i, dst_i), pair_support in override_supports.items():
+            if int(src_i) not in focus_src_nodeids or int(pair_support.support_event_count) <= 0:
+                continue
+            touched_nodeids.add(int(src_i))
+            touched_nodeids.add(int(dst_i))
+        for nodeid in touched_nodeids:
+            if int(nodeid) in override_map:
+                merged[int(nodeid)] = override_map[int(nodeid)]
+        return merged
 
     pass1_cross, pass1_supports, pass1_node_type_map, pass1_in_degree, pass1_out_degree = _run_neighbor_pass(
         hit_buffer_m=float(params["TRAJ_XSEC_HIT_BUFFER_M"]),
@@ -1236,13 +1344,28 @@ def _run_patch_core(
 
     if should_try_pass2:
         pass2_attempted = True
+        pass2_focus_src_nodeids = (
+            {
+                int(src_i)
+                for src_i in (_result_src_nodeid(item) for item in pass1_supports.unresolved_events)
+                if src_i is not None
+            }
+            if pass1_pair_count > 0
+            else None
+        )
+        if pass1_pair_count > 0 and not pass2_focus_src_nodeids:
+            pass2_focus_src_nodeids = None
         if progress is not None:
-            progress.mark("neighbor_pass2_start")
+            progress.mark(
+                "neighbor_pass2_start",
+                focus_src_count=(int(len(pass2_focus_src_nodeids)) if pass2_focus_src_nodeids is not None else None),
+            )
         pass2_cross, pass2_supports, pass2_node_type_map, pass2_in_degree, pass2_out_degree = _run_neighbor_pass(
             hit_buffer_m=float(params["PASS2_TRAJ_XSEC_HIT_BUFFER_M"]),
             stitch_max_dist_m=float(params["PASS2_STITCH_MAX_DIST_M"]),
             stitch_forward_dot_min=float(params["PASS2_STITCH_FORWARD_DOT_MIN"]),
             neighbor_max_dist_m=float(params["PASS2_NEIGHBOR_MAX_DIST_M"]),
+            focus_src_nodeids=pass2_focus_src_nodeids,
         )
         if progress is not None:
             progress.mark(
@@ -1266,6 +1389,38 @@ def _run_patch_core(
             node_type_map = pass2_node_type_map
             in_degree = pass2_in_degree
             out_degree = pass2_out_degree
+        elif pass2_focus_src_nodeids:
+            improved_src_nodeids = {
+                int(src_i)
+                for src_i in pass2_focus_src_nodeids
+                if _result_quality_for_src(pass2_supports, int(src_i))
+                > _result_quality_for_src(pass1_supports, int(src_i))
+            }
+            if improved_src_nodeids:
+                neighbor_search_pass = 2
+                supports_result = _merge_pair_support_results(
+                    pass1_supports,
+                    pass2_supports,
+                    focus_src_nodeids=improved_src_nodeids,
+                )
+                node_type_map = _merge_nodewise_map_for_improved_sources(
+                    pass1_node_type_map,
+                    pass2_node_type_map,
+                    focus_src_nodeids=improved_src_nodeids,
+                    override_supports=pass2_supports.supports,
+                )
+                in_degree = _merge_nodewise_map_for_improved_sources(
+                    pass1_in_degree,
+                    pass2_in_degree,
+                    focus_src_nodeids=improved_src_nodeids,
+                    override_supports=pass2_supports.supports,
+                )
+                out_degree = _merge_nodewise_map_for_improved_sources(
+                    pass1_out_degree,
+                    pass2_out_degree,
+                    focus_src_nodeids=improved_src_nodeids,
+                    override_supports=pass2_supports.supports,
+                )
 
     for cand in supports_result.next_crossing_candidates:
         if not isinstance(cand, dict):
@@ -2059,6 +2214,7 @@ def _run_patch_core(
                     step1_road_prior_mode=branch_corridor.get("road_prior_shape_ref_mode"),
                     same_pair_multichain=True,
                     candidate_branch_id=branch_id,
+                    support_mode=str(variant.get("support_mode") or "traj_support"),
                     src_xsec=src_xsec_gate.geometry_metric,
                     dst_xsec=dst_xsec_gate.geometry_metric,
                 )
@@ -2284,8 +2440,8 @@ def _run_patch_core(
             )
             min_sep_m = max(1.0, min(4.0, float(min_sep_base) * 0.25))
             same_pair_station_gap_min_m = float(max(0.1, float(params.get("SAME_PAIR_MULTI_STATION_GAP_MIN_M", 0.5))))
-            selected_multi_pick = _select_non_conflicting_multi_road_candidates(
-                sorted(viable_candidates, key=_candidate_sort_key, reverse=True),
+            selected_multi_pick = _select_same_pair_multichain_candidates(
+                sorted(ranked_candidates, key=_candidate_sort_key, reverse=True),
                 min_sep_m=float(min_sep_m),
                 same_pair_station_gap_min_m=float(same_pair_station_gap_min_m),
             )
@@ -5477,14 +5633,12 @@ def _traj_surface_cache_path(
             traj_meta.append({"traj_id": tid, "missing": True})
 
     key_payload = {
-        "v": 2,
+        "v": 3,
         "patch_id": str(patch_inputs.patch_id),
         "src": int(support.src_nodeid),
         "dst": int(support.dst_nodeid),
         "cluster_id": int(cluster_id),
         "traj_meta": traj_meta,
-        "src_xsec_bbox": [round(float(v), 3) for v in src_xsec.bounds],
-        "dst_xsec_bbox": [round(float(v), 3) for v in dst_xsec.bounds],
         "axis_source": str(axis_source),
         "axis_len": round(float(ref_axis_line.length), 3),
         "axis_bbox": [round(float(v), 3) for v in ref_axis_line.bounds],
@@ -6330,17 +6484,20 @@ def _evaluate_candidate_road(
     step1_road_prior_mode: str | None = None,
     same_pair_multichain: bool = False,
     candidate_branch_id: str | None = None,
+    support_mode: str | None = None,
 ) -> dict[str, Any]:
     t0_center = perf_counter()
     traj_surface_enforced = bool(traj_surface_hint.get("traj_surface_enforced", False))
     step1_shape_ref_valid = _is_valid_linestring(shape_ref_hint_metric)
     road_prior_shape_ref_valid = _is_valid_linestring(road_prior_shape_ref_metric)
+    support_mode_norm = str(support_mode or "").strip().lower()
     road_prior_gap_fill_mode = _should_enable_road_prior_gap_fill(
         road_prior_shape_ref_valid=bool(road_prior_shape_ref_valid),
         traj_surface_enforced=bool(traj_surface_enforced),
         step1_used_road_prior=bool(step1_used_road_prior),
         step1_road_prior_mode=step1_road_prior_mode,
         same_pair_multichain=bool(same_pair_multichain),
+        support_mode=support_mode_norm,
     )
     use_road_prior_shape_ref = bool(road_prior_shape_ref_valid and (road_prior_gap_fill_mode or (not step1_shape_ref_valid)))
     shape_ref_hint_for_center = road_prior_shape_ref_metric if use_road_prior_shape_ref else shape_ref_hint_metric
@@ -6439,6 +6596,7 @@ def _evaluate_candidate_road(
     road["candidate_branch_id"] = str(candidate_branch_id or "")
     road["same_pair_multi_road_branch_id"] = str(candidate_branch_id or "")
     road["step1_same_pair_multichain"] = bool(same_pair_multichain)
+    road["same_pair_multi_road_support_mode"] = (support_mode_norm if bool(same_pair_multichain) else None)
     road["cluster_count"] = int(parent_support.cluster_count)
     road["main_cluster_ratio"] = float(parent_support.main_cluster_ratio)
     road["cluster_sep_m_est"] = parent_support.cluster_sep_m_est
@@ -6995,14 +7153,27 @@ def _evaluate_candidate_road(
     divstrip_count = 1 if HARD_DIVSTRIP_INTERSECT in hard_flags else 0
     drivezone_count = 1 if HARD_ROAD_OUTSIDE_DRIVEZONE in hard_flags else 0
     corridor_count = 1 if _HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR in hard_flags else 0
+    allow_traj_surface_soft_fail = bool(
+        bool(same_pair_multichain)
+        and support_mode_norm == "road_prior_fallback"
+        and bridge_count <= 0
+        and divstrip_count <= 0
+        and drivezone_count <= 0
+        and corridor_count <= 0
+    )
     score = 10.0 * float(in_ratio) - 0.01 * _to_finite_float(road.get("max_segment_m"), 1e6) - 0.1 * float(
         bridge_count
     ) - 0.1 * float(outside_count) - 0.1 * float(divstrip_count) - 0.1 * float(drivezone_count) - 0.1 * float(
         corridor_count
     )
-    feasible = bool(has_geometry) and (bridge_count <= 0) and (outside_count <= 0) and (divstrip_count <= 0) and (
-        drivezone_count <= 0
-    ) and (corridor_count <= 0)
+    feasible = (
+        bool(has_geometry)
+        and (bridge_count <= 0)
+        and (divstrip_count <= 0)
+        and (drivezone_count <= 0)
+        and (corridor_count <= 0)
+        and ((outside_count <= 0) or allow_traj_surface_soft_fail)
+    )
     road["_candidate_score"] = float(score)
     road["_candidate_feasible"] = bool(feasible)
     road["_candidate_in_ratio"] = float(in_ratio)
@@ -7018,6 +7189,59 @@ def _candidate_sort_key(road: dict[str, Any]) -> tuple[float, float, float, floa
     support_n = float(int(road.get("support_traj_count", 0)))
     cluster_id = float(int(road.get("candidate_cluster_id", 0)))
     return (has_geometry, feasible, score, in_ratio, -max_seg, support_n, -cluster_id)
+
+
+def _same_pair_candidate_has_geometry(road: dict[str, Any]) -> bool:
+    geom = road.get("_geometry_metric")
+    return bool(isinstance(geom, LineString) and (not geom.is_empty) and bool(road.get("_candidate_has_geometry", False)))
+
+
+def _same_pair_candidate_has_blocking_hard_reason(road: dict[str, Any]) -> bool:
+    hard_reasons = {str(v) for v in (road.get("hard_reasons") or []) if str(v)}
+    blocking = {
+        HARD_BRIDGE_SEGMENT,
+        HARD_DIVSTRIP_INTERSECT,
+        HARD_ROAD_OUTSIDE_DRIVEZONE,
+        _HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR,
+    }
+    return any(reason in blocking for reason in hard_reasons)
+
+
+def _same_pair_candidate_is_selectable(road: dict[str, Any]) -> bool:
+    if not _same_pair_candidate_has_geometry(road):
+        return False
+    if _same_pair_candidate_has_blocking_hard_reason(road):
+        return False
+    if bool(road.get("_candidate_feasible", False)):
+        return True
+    support_mode = str(road.get("same_pair_multi_road_support_mode") or "").strip().lower()
+    return bool(road.get("step1_same_pair_multichain", False)) and support_mode == "road_prior_fallback"
+
+
+def _select_same_pair_multichain_candidates(
+    ranked_candidates: Sequence[dict[str, Any]],
+    *,
+    min_sep_m: float,
+    same_pair_station_gap_min_m: float,
+) -> list[dict[str, Any]]:
+    branch_best: list[dict[str, Any]] = []
+    seen_branch_ids: set[str] = set()
+    for cand in ranked_candidates:
+        if not _same_pair_candidate_is_selectable(cand):
+            continue
+        branch_id = str(cand.get("same_pair_multi_road_branch_id") or cand.get("candidate_branch_id") or "")
+        if branch_id:
+            if branch_id in seen_branch_ids:
+                continue
+            seen_branch_ids.add(branch_id)
+        branch_best.append(cand)
+    if not branch_best:
+        return []
+    return _select_non_conflicting_multi_road_candidates(
+        branch_best,
+        min_sep_m=float(min_sep_m),
+        same_pair_station_gap_min_m=float(same_pair_station_gap_min_m),
+    )
 
 
 def _candidate_lines_conflict(lhs: LineString, rhs: LineString, *, min_sep_m: float) -> bool:
@@ -9637,11 +9861,15 @@ def _should_enable_road_prior_gap_fill(
     step1_used_road_prior: bool,
     step1_road_prior_mode: str | None,
     same_pair_multichain: bool,
+    support_mode: str | None = None,
 ) -> bool:
     if not bool(road_prior_shape_ref_valid):
         return False
     if bool(traj_surface_enforced):
         return False
+    support_mode_norm = str(support_mode or "").strip().lower()
+    if bool(same_pair_multichain) and support_mode_norm == "road_prior_fallback":
+        return True
     if not bool(step1_used_road_prior):
         return False
     if str(step1_road_prior_mode or "").strip().lower() != "step1_no_traj":

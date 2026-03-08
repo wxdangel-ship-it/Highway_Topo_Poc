@@ -291,6 +291,7 @@ def build_pair_supports(
     src_nodeid_alias_by_nodeid: dict[int, int] | None = None,
     dst_nodeid_alias_by_nodeid: dict[int, int] | None = None,
     allowed_dst_close_hit_buffer_m: float = 0.0,
+    focus_src_nodeids: set[int] | None = None,
 ) -> PairSupportBuildResult:
     levels = _normalize_stitch_levels(
         stitch_max_dist_levels_m=stitch_max_dist_levels_m,
@@ -317,6 +318,7 @@ def build_pair_supports(
     dst_dist_eps_m = float(max(0.0, unique_dst_dist_eps_m))
     allowed_pairs_dst_by_src: dict[int, set[int]] | None = None
     cross_points_by_nodeid: dict[int, list[Point]] = {}
+    focus_src_nodeids_norm = {int(v) for v in focus_src_nodeids} if focus_src_nodeids else None
 
     def _canonical_dst_nodeid(nodeid: int) -> int:
         raw_i = int(nodeid)
@@ -496,6 +498,8 @@ def build_pair_supports(
                 if src_nodeid_alias_by_nodeid is not None
                 else src_nodeid_raw
             )
+            if focus_src_nodeids_norm is not None and int(src_nodeid_i) not in focus_src_nodeids_norm:
+                continue
             allowed_pair_dsts_for_src: set[int] | None = None
             if allowed_pairs_dst_by_src is not None:
                 allowed_pair_dsts_for_src = set(allowed_pairs_dst_by_src.get(src_nodeid_i, set()))

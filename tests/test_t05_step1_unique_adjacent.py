@@ -1645,6 +1645,48 @@ def test_same_pair_multi_road_selection_can_use_shape_ref_to_keep_parallel_branc
     assert len(selected) == 2
 
 
+def test_same_pair_multichain_selection_keeps_road_prior_fallback_branch_without_traj_surface_feasible() -> None:
+    cand1 = {
+        "src_nodeid": 1,
+        "dst_nodeid": 2,
+        "step1_same_pair_multichain": True,
+        "same_pair_multi_road_branch_id": "1_2__b0",
+        "same_pair_multi_road_signature": ["e0"],
+        "same_pair_multi_road_src_station_m": 1.0,
+        "same_pair_multi_road_dst_station_m": 1.2,
+        "same_pair_multi_road_support_mode": "traj_support",
+        "_candidate_has_geometry": True,
+        "_candidate_feasible": True,
+        "_candidate_score": 10.0,
+        "_geometry_metric": LineString([(0.0, 0.0), (100.0, 0.0)]),
+        "hard_reasons": [],
+    }
+    cand2 = {
+        "src_nodeid": 1,
+        "dst_nodeid": 2,
+        "step1_same_pair_multichain": True,
+        "same_pair_multi_road_branch_id": "1_2__b1",
+        "same_pair_multi_road_signature": ["e1"],
+        "same_pair_multi_road_src_station_m": 3.0,
+        "same_pair_multi_road_dst_station_m": 3.2,
+        "same_pair_multi_road_support_mode": "road_prior_fallback",
+        "_candidate_has_geometry": True,
+        "_candidate_feasible": False,
+        "_candidate_score": 9.0,
+        "_geometry_metric": LineString([(0.0, 0.6), (100.0, 0.6)]),
+        "hard_reasons": [SOFT_ROAD_OUTSIDE_TRAJ_SURFACE],
+    }
+
+    selected = pipeline._select_same_pair_multichain_candidates(
+        sorted([cand1, cand2], key=pipeline._candidate_sort_key, reverse=True),
+        min_sep_m=2.0,
+        same_pair_station_gap_min_m=0.5,
+    )
+
+    assert len(selected) == 2
+    assert {str(item.get("same_pair_multi_road_branch_id")) for item in selected} == {"1_2__b0", "1_2__b1"}
+
+
 def test_same_pair_branch_supports_use_xsec_station_gap_to_split_close_parallel_events() -> None:
     support = PairSupport(
         src_nodeid=1,
@@ -1711,6 +1753,39 @@ def test_build_same_pair_multichain_fallback_support_requires_branch_to_reach_bo
     )
 
     assert out is None
+
+
+def test_traj_surface_cache_key_ignores_xsec_bbox_variation(tmp_path: Path) -> None:
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
+    )
+    support = PairSupport(src_nodeid=1, dst_nodeid=2)
+    params = dict(pipeline.DEFAULT_PARAMS)
+    ref_axis = LineString([(0.0, 0.0), (100.0, 0.0)])
+
+    _path_a, key_a = pipeline._traj_surface_cache_path(
+        patch_inputs=patch_inputs,
+        support=support,
+        cluster_id=0,
+        ref_axis_line=ref_axis,
+        axis_source="shape_ref",
+        src_xsec=LineString([(0.0, -5.0), (0.0, 5.0)]),
+        dst_xsec=LineString([(100.0, -5.0), (100.0, 5.0)]),
+        params=params,
+    )
+    _path_b, key_b = pipeline._traj_surface_cache_path(
+        patch_inputs=patch_inputs,
+        support=support,
+        cluster_id=0,
+        ref_axis_line=ref_axis,
+        axis_source="shape_ref",
+        src_xsec=LineString([(0.0, -20.0), (0.0, 20.0)]),
+        dst_xsec=LineString([(100.0, -20.0), (100.0, 20.0)]),
+        params=params,
+    )
+
+    assert key_a == key_b
 
 
 def test_allowed_pairs_skips_non_topology_src(monkeypatch) -> None:  # type: ignore[no-untyped-def]
