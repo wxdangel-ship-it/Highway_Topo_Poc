@@ -881,6 +881,101 @@ def test_pair_target_first_support_search_allows_intermediate_crossing(monkeypat
     assert [int(v) for v in cand.get("intermediate_dst_nodeids") or []] == [2]
 
 
+def test_pair_target_first_support_search_limits_intermediate_crossings(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    src_key = "t:cross:1"
+    mid_a_key = "t:cross:2"
+    mid_b_key = "u:cross:4"
+    dst_key = "v:cross:3"
+    ev = CrossingEvent(
+        traj_id="t",
+        nodeid=1,
+        seq=10,
+        seg_idx=0,
+        seq_idx=0,
+        station_m=0.0,
+        cross_point=Point(0.0, 0.0),
+        heading_xy=(1.0, 0.0),
+        cross_dist_m=0.0,
+    )
+    fake_graph = geom_mod._GraphBuildResult(
+        nodes={
+            src_key: geom_mod._GraphNode(
+                key=src_key,
+                traj_id="t",
+                kind="cross",
+                station_m=0.0,
+                point=Point(0.0, 0.0),
+                heading_xy=(1.0, 0.0),
+                cross_nodeid=1,
+                seq_idx=0,
+            ),
+            mid_a_key: geom_mod._GraphNode(
+                key=mid_a_key,
+                traj_id="t",
+                kind="cross",
+                station_m=10.0,
+                point=Point(10.0, 0.0),
+                heading_xy=(1.0, 0.0),
+                cross_nodeid=2,
+                seq_idx=1,
+            ),
+            mid_b_key: geom_mod._GraphNode(
+                key=mid_b_key,
+                traj_id="u",
+                kind="cross",
+                station_m=20.0,
+                point=Point(20.0, 0.0),
+                heading_xy=(1.0, 0.0),
+                cross_nodeid=4,
+                seq_idx=2,
+            ),
+            dst_key: geom_mod._GraphNode(
+                key=dst_key,
+                traj_id="v",
+                kind="cross",
+                station_m=30.0,
+                point=Point(30.0, 0.0),
+                heading_xy=(1.0, 0.0),
+                cross_nodeid=3,
+                seq_idx=3,
+            ),
+        },
+        edges={
+            src_key: [geom_mod._GraphEdge(to_key=mid_a_key, weight=1.0, kind="traj", traj_id="t", station_from=0.0, station_to=10.0)],
+            mid_a_key: [geom_mod._GraphEdge(to_key=mid_b_key, weight=1.0, kind="stitch", traj_id=None, station_from=None, station_to=None)],
+            mid_b_key: [geom_mod._GraphEdge(to_key=dst_key, weight=1.0, kind="stitch", traj_id=None, station_from=None, station_to=None)],
+            dst_key: [],
+        },
+        event_keys_by_traj={"t": [(ev, src_key)]},
+        traj_line_map={"t": LineString([(0.0, 0.0), (30.0, 0.0)])},
+        stitch_candidate_count=0,
+        stitch_edge_count=0,
+        stitch_query_count=0,
+        stitch_candidates_total=0,
+        stitch_reject_dist_count=0,
+        stitch_reject_angle_count=0,
+        stitch_reject_forward_count=0,
+        stitch_accept_count=0,
+        stitch_levels_used_hist={},
+    )
+    monkeypatch.setattr(geom_mod, "_build_forward_graph", lambda **kwargs: fake_graph)
+
+    res = geom_mod.build_pair_supports(
+        trajectories=[],
+        events_by_traj={"t": [ev]},
+        node_type_map={1: "unknown", 2: "unknown", 3: "unknown", 4: "unknown"},
+        neighbor_max_dist_m=100.0,
+        allowed_pairs={(1, 3)},
+        pair_target_max_intermediate_crossings=1,
+    )
+
+    assert (1, 3) not in res.supports
+    assert res.unresolved_events
+    unresolved = res.unresolved_events[0]
+    assert int(unresolved.get("dst_nodeid") or -1) == 3
+    assert [int(v) for v in unresolved.get("intermediate_dst_nodeids") or []] == [2, 4]
+
+
 def test_build_pair_supports_remaps_shared_intersection_roles(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     src_key = "t:cross:src"
     dst_key = "t:cross:dst"
@@ -1986,6 +2081,32 @@ def test_evaluate_candidate_road_rescues_corridor_only_failure_with_shape_ref(
     assert str(road.get("segment_corridor_rescue_mode")) == "shape_ref_substring"
     assert pipeline._HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR not in set(road.get("hard_reasons") or [])
     assert bool(road.get("_candidate_feasible", False)) is True
+
+
+def test_build_topology_road_prior_fallback_support_uses_pair_endpoint_xsecs() -> None:
+    params = dict(pipeline.DEFAULT_PARAMS)
+    shape_ref = LineString([(5.0, 0.0), (95.0, 0.0)])
+    src_xsec = LineString([(0.0, -8.0), (0.0, 8.0)])
+    dst_xsec = LineString([(100.0, -8.0), (100.0, 8.0)])
+
+    out = pipeline._build_topology_road_prior_fallback_support(
+        pair=(1, 2),
+        shape_ref_metric=shape_ref,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+        gore_zone_metric=Polygon(),
+        src_type="diverge",
+        dst_type="merge",
+        params=params,
+    )
+
+    assert out is not None
+    assert int(out.src_nodeid) == 1
+    assert int(out.dst_nodeid) == 2
+    assert abs(float(out.src_cross_points[0].x) - 5.0) <= 1e-6
+    assert abs(float(out.dst_cross_points[0].x) - 95.0) <= 1e-6
+    assert out.hints[-1] == "topology_road_prior_fallback"
 
 
 def test_same_pair_resolution_stats_mark_partial_unresolved_pair() -> None:

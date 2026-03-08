@@ -292,6 +292,7 @@ def build_pair_supports(
     dst_nodeid_alias_by_nodeid: dict[int, int] | None = None,
     allowed_dst_close_hit_buffer_m: float = 0.0,
     focus_src_nodeids: set[int] | None = None,
+    pair_target_max_intermediate_crossings: int | None = None,
 ) -> PairSupportBuildResult:
     levels = _normalize_stitch_levels(
         stitch_max_dist_levels_m=stitch_max_dist_levels_m,
@@ -544,6 +545,7 @@ def build_pair_supports(
                         allowed_dst_points_by_nodeid=None,
                         allowed_dst_close_hit_buffer_m=float(max(0.0, allowed_dst_close_hit_buffer_m)),
                         stop_on_first_allowed_hit=True,
+                        max_intermediate_crossings=pair_target_max_intermediate_crossings,
                     )
                     intermediate_dst_nodeids, intermediate_raw_dst_nodeids = _collect_intermediate_dst_ids(
                         search,
@@ -1379,11 +1381,15 @@ def _search_next_crossing(
     allowed_dst_points_by_nodeid: dict[int, list[Point]] | None = None,
     allowed_dst_close_hit_buffer_m: float = 0.0,
     stop_on_first_allowed_hit: bool = False,
+    max_intermediate_crossings: int | None = None,
 ) -> _SearchResult:
-    best: dict[str, tuple[float, int]] = {source_key: (0.0, 0)}
+    enforce_intermediate_limit = (
+        allowed_dst_nodeids is not None and max_intermediate_crossings is not None and int(max_intermediate_crossings) >= 0
+    )
+    best: dict[str, tuple[int, float, int]] = {source_key: (0, 0.0, 0)}
     prev: dict[str, str] = {}
     prev_edge: dict[str, _GraphEdge] = {}
-    heap: list[tuple[float, int, str]] = [(0.0, 0, source_key)]
+    heap: list[tuple[int, float, int, str]] = [(0, 0.0, 0, source_key)]
 
     max_explored = 0.0
     last_key = source_key
@@ -1451,13 +1457,19 @@ def _search_next_crossing(
                     )
 
     while heap:
-        dist, hops, key = heapq.heappop(heap)
+        intermediate_crossings, dist, hops, key = heapq.heappop(heap)
         rec = best.get(key)
         if rec is None:
             continue
-        if dist > rec[0] + 1e-9:
+        if int(intermediate_crossings) > int(rec[0]):
             continue
-        if abs(dist - rec[0]) <= 1e-9 and hops > rec[1]:
+        if int(intermediate_crossings) == int(rec[0]) and dist > rec[1] + 1e-9:
+            continue
+        if (
+            int(intermediate_crossings) == int(rec[0])
+            and abs(dist - rec[1]) <= 1e-9
+            and hops > rec[2]
+        ):
             continue
         if dist > max_dist_m + 1e-6:
             continue
@@ -1472,6 +1484,7 @@ def _search_next_crossing(
         if key not in explored_keys:
             explored_keys.add(key)
             explored_stitch_candidates += int(_count_outgoing_stitch_edges(edges.get(key, [])))
+        next_intermediate_crossings = int(intermediate_crossings)
         if node.kind == "cross" and node.cross_nodeid is not None and int(node.cross_nodeid) != int(source_nodeid):
             dst_nodeid = int(node.cross_nodeid)
             prev_raw_hit = raw_hit_by_dst.get(dst_nodeid)
@@ -1524,6 +1537,10 @@ def _search_next_crossing(
                     break
                 # Crossing nodes remain absorbing only when they are viable downstream targets.
                 continue
+            if enforce_intermediate_limit:
+                next_intermediate_crossings = int(intermediate_crossings) + 1
+                if next_intermediate_crossings > int(max_intermediate_crossings):
+                    continue
         _record_allowed_proximity_hits(
             node_key=str(key),
             node_point=getattr(node, "point", None),
@@ -1536,16 +1553,19 @@ def _search_next_crossing(
             if nd > max_dist_m + 1e-6:
                 continue
             nh = int(hops + (1 if edge.kind == "stitch" else 0))
+            ni = int(next_intermediate_crossings)
             old = best.get(edge.to_key)
             if old is not None:
-                if nd > old[0] + 1e-9:
+                if ni > int(old[0]):
                     continue
-                if abs(nd - old[0]) <= 1e-9 and nh >= old[1]:
+                if ni == int(old[0]) and nd > old[1] + 1e-9:
                     continue
-            best[edge.to_key] = (nd, nh)
+                if ni == int(old[0]) and abs(nd - old[1]) <= 1e-9 and nh >= old[2]:
+                    continue
+            best[edge.to_key] = (ni, nd, nh)
             prev[edge.to_key] = key
             prev_edge[edge.to_key] = edge
-            heapq.heappush(heap, (nd, nh, edge.to_key))
+            heapq.heappush(heap, (ni, nd, nh, edge.to_key))
 
     ordered_raw_hits = sorted(
         (

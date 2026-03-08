@@ -109,6 +109,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "NEIGHBOR_MAX_DIST_M": 2000.0,
     "STEP1_UNIQUE_DST_EARLY_STOP": 1,
     "STEP1_UNIQUE_DST_DIST_EPS_M": 5.0,
+    "STEP1_PAIR_TARGET_MAX_INTERMEDIATE_XSECS": 1,
     "STEP1_NODE_VOTE_MIN_RATIO": 1.0,
     "STEP1_SINGLE_SUPPORT_PER_PAIR": 0,
     "STEP1_SKIP_SEARCH_AFTER_PAIR_RESOLVED": 0,
@@ -1204,6 +1205,11 @@ def _run_patch_core(
             dst_nodeid_alias_by_nodeid=shared_xsec_dst_alias_by_primary,
             allowed_dst_close_hit_buffer_m=float(hit_buffer_m),
             focus_src_nodeids=focus_src_nodeids,
+            pair_target_max_intermediate_crossings=(
+                int(params["STEP1_PAIR_TARGET_MAX_INTERMEDIATE_XSECS"])
+                if params.get("STEP1_PAIR_TARGET_MAX_INTERMEDIATE_XSECS") is not None
+                else None
+            ),
         )
         nt_map, indeg_map, outdeg_map = infer_node_types(
             node_ids=node_ids,
@@ -1238,6 +1244,11 @@ def _run_patch_core(
                 dst_nodeid_alias_by_nodeid=shared_xsec_dst_alias_by_primary,
                 allowed_dst_close_hit_buffer_m=float(hit_buffer_m),
                 focus_src_nodeids=focus_src_nodeids,
+                pair_target_max_intermediate_crossings=(
+                    int(params["STEP1_PAIR_TARGET_MAX_INTERMEDIATE_XSECS"])
+                    if params.get("STEP1_PAIR_TARGET_MAX_INTERMEDIATE_XSECS") is not None
+                    else None
+                ),
             )
         else:
             supports_obj = supports_seed_obj
@@ -1716,6 +1727,9 @@ def _run_patch_core(
                 src_xsec=src_geom if isinstance(src_geom, LineString) else LineString(),
                 dst_xsec=dst_geom if isinstance(dst_geom, LineString) else LineString(),
                 drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
+                gore_zone_metric=patch_inputs.gore_zone_metric,
+                src_type=node_type_map.get(int(src_i)),
+                dst_type=node_type_map.get(int(dst_i)),
                 params=params,
             )
             if fallback_support is not None:
@@ -9979,13 +9993,26 @@ def _build_same_pair_multichain_fallback_support(
     src_xsec: LineString,
     dst_xsec: LineString,
     drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None = None,
+    src_type: str | None = None,
+    dst_type: str | None = None,
     params: dict[str, Any],
 ) -> PairSupport | None:
     branch_shape_ref = branch_def.get("shape_ref_metric")
     if not isinstance(branch_shape_ref, LineString) or branch_shape_ref.is_empty or float(branch_shape_ref.length) <= 1e-6:
         return None
-    src_contact = _line_xsec_contact_point(line=branch_shape_ref, xsec=src_xsec)
-    dst_contact = _line_xsec_contact_point(line=branch_shape_ref, xsec=dst_xsec)
+    shape_ref_line, src_entry_xsec, dst_entry_xsec = _resolve_fallback_support_entry_xsecs(
+        shape_ref_metric=branch_shape_ref,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=drivezone_zone_metric,
+        gore_zone_metric=gore_zone_metric,
+        src_type=src_type,
+        dst_type=dst_type,
+        params=params,
+    )
+    src_contact = _line_xsec_contact_point(line=shape_ref_line, xsec=src_entry_xsec)
+    dst_contact = _line_xsec_contact_point(line=shape_ref_line, xsec=dst_entry_xsec)
     if not isinstance(src_contact, Point) or src_contact.is_empty:
         return None
     if not isinstance(dst_contact, Point) or dst_contact.is_empty:
@@ -10001,18 +10028,18 @@ def _build_same_pair_multichain_fallback_support(
         )
     )
     try:
-        src_gap_m = float(branch_shape_ref.distance(src_xsec))
+        src_gap_m = float(shape_ref_line.distance(src_entry_xsec))
     except Exception:
         src_gap_m = float("inf")
     try:
-        dst_gap_m = float(branch_shape_ref.distance(dst_xsec))
+        dst_gap_m = float(shape_ref_line.distance(dst_entry_xsec))
     except Exception:
         dst_gap_m = float("inf")
     if src_gap_m > reach_xsec_m + 1e-6 or dst_gap_m > reach_xsec_m + 1e-6:
         return None
 
     if drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty):
-        inside_ratio = _line_inside_ratio(branch_shape_ref, drivezone_zone_metric)
+        inside_ratio = _line_inside_ratio(shape_ref_line, drivezone_zone_metric)
         inside_min = float(
             max(0.0, min(1.0, params.get("STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN", 0.60)))
         )
@@ -10046,13 +10073,25 @@ def _build_topology_road_prior_fallback_support(
     src_xsec: LineString,
     dst_xsec: LineString,
     drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None = None,
+    src_type: str | None = None,
+    dst_type: str | None = None,
     params: dict[str, Any],
 ) -> PairSupport | None:
     if not isinstance(shape_ref_metric, LineString) or shape_ref_metric.is_empty or float(shape_ref_metric.length) <= 1e-6:
         return None
-    shape_ref_line = _orient_axis_line(shape_ref_metric, src_xsec=src_xsec, dst_xsec=dst_xsec)
-    src_contact = _line_xsec_contact_point(line=shape_ref_line, xsec=src_xsec)
-    dst_contact = _line_xsec_contact_point(line=shape_ref_line, xsec=dst_xsec)
+    shape_ref_line, src_entry_xsec, dst_entry_xsec = _resolve_fallback_support_entry_xsecs(
+        shape_ref_metric=shape_ref_metric,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=drivezone_zone_metric,
+        gore_zone_metric=gore_zone_metric,
+        src_type=src_type,
+        dst_type=dst_type,
+        params=params,
+    )
+    src_contact = _line_xsec_contact_point(line=shape_ref_line, xsec=src_entry_xsec)
+    dst_contact = _line_xsec_contact_point(line=shape_ref_line, xsec=dst_entry_xsec)
     if not isinstance(src_contact, Point) or src_contact.is_empty:
         return None
     if not isinstance(dst_contact, Point) or dst_contact.is_empty:
@@ -10068,11 +10107,11 @@ def _build_topology_road_prior_fallback_support(
         )
     )
     try:
-        src_gap_m = float(shape_ref_line.distance(src_xsec))
+        src_gap_m = float(shape_ref_line.distance(src_entry_xsec))
     except Exception:
         src_gap_m = float("inf")
     try:
-        dst_gap_m = float(shape_ref_line.distance(dst_xsec))
+        dst_gap_m = float(shape_ref_line.distance(dst_entry_xsec))
     except Exception:
         dst_gap_m = float("inf")
     if src_gap_m > reach_xsec_m + 1e-6 or dst_gap_m > reach_xsec_m + 1e-6:
@@ -10104,6 +10143,58 @@ def _build_topology_road_prior_fallback_support(
     out.cluster_sizes = []
     out.unresolved_neighbor_count = 0
     return out
+
+
+def _resolve_fallback_support_entry_xsecs(
+    *,
+    shape_ref_metric: LineString,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+    src_type: str | None,
+    dst_type: str | None,
+    params: dict[str, Any],
+) -> tuple[LineString, LineString, LineString]:
+    shape_ref_line = _orient_axis_line(shape_ref_metric, src_xsec=src_xsec, dst_xsec=dst_xsec)
+
+    def _entry_xsec(*, xsec_seed: LineString, endpoint_tag: str, node_type: str | None) -> LineString:
+        payload = build_pair_endpoint_xsec(
+            xsec_seed=xsec_seed,
+            shape_ref_line=shape_ref_line,
+            traj_segments=(),
+            drivezone_zone_metric=drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            ref_half_len_m=float(params.get("XSEC_REF_HALF_LEN_M", 80.0)),
+            sample_step_m=float(params.get("XSEC_ROAD_SAMPLE_STEP_M", 1.0)),
+            nonpass_k=int(params.get("XSEC_ROAD_NONPASS_K", 6)),
+            evidence_radius_m=float(params.get("XSEC_ROAD_EVIDENCE_RADIUS_M", 1.0)),
+            min_ground_pts=int(params.get("XSEC_ROAD_MIN_GROUND_PTS", 1)),
+            min_traj_pts=int(params.get("XSEC_ROAD_MIN_TRAJ_PTS", 1)),
+            core_band_m=float(params.get("XSEC_CORE_BAND_M", 20.0)),
+            shift_step_m=float(params.get("XSEC_SHIFT_STEP_M", 5.0)),
+            fallback_short_half_len_m=float(params.get("XSEC_FALLBACK_SHORT_HALF_LEN_M", 15.0)),
+            barrier_min_ng_count=int(params.get("XSEC_BARRIER_MIN_NG_COUNT", 2)),
+            barrier_min_len_m=float(params.get("XSEC_BARRIER_MIN_LEN_M", 4.0)),
+            barrier_along_len_m=float(params.get("XSEC_BARRIER_ALONG_LEN_M", 60.0)),
+            barrier_along_width_m=float(params.get("XSEC_BARRIER_ALONG_WIDTH_M", 2.5)),
+            barrier_bin_step_m=float(params.get("XSEC_BARRIER_BIN_STEP_M", 2.0)),
+            barrier_occ_ratio_min=float(params.get("XSEC_BARRIER_OCC_RATIO_MIN", 0.65)),
+            endcap_window_m=float(params.get("XSEC_ENDCAP_WINDOW_M", 60.0)),
+            caseb_pre_m=float(params.get("XSEC_CASEB_PRE_M", 3.0)),
+            endpoint_tag=endpoint_tag,
+            node_type=node_type,
+            ground_xy=np.empty((0, 2), dtype=np.float64),
+            non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        )
+        cross_ref = payload.get("xsec_cross_ref")
+        if isinstance(cross_ref, LineString) and (not cross_ref.is_empty) and len(cross_ref.coords) >= 2:
+            return cross_ref
+        return xsec_seed
+
+    src_entry_xsec = _entry_xsec(xsec_seed=src_xsec, endpoint_tag="src", node_type=src_type)
+    dst_entry_xsec = _entry_xsec(xsec_seed=dst_xsec, endpoint_tag="dst", node_type=dst_type)
+    return shape_ref_line, src_entry_xsec, dst_entry_xsec
 
 
 def _build_same_pair_multichain_variants(
@@ -10152,6 +10243,9 @@ def _build_same_pair_multichain_variants(
                 src_xsec=src_xsec,
                 dst_xsec=dst_xsec,
                 drivezone_zone_metric=drivezone_zone_metric,
+                gore_zone_metric=gore_zone_metric,
+                src_type=src_type,
+                dst_type=dst_type,
                 params=params,
             )
             if branch_support is None:
