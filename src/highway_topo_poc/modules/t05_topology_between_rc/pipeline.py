@@ -1727,7 +1727,7 @@ def _run_patch_core(
                 src_xsec=src_geom if isinstance(src_geom, LineString) else LineString(),
                 dst_xsec=dst_geom if isinstance(dst_geom, LineString) else LineString(),
                 drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
-                gore_zone_metric=patch_inputs.gore_zone_metric,
+                gore_zone_metric=gore_zone_metric_raw,
                 src_type=node_type_map.get(int(src_i)),
                 dst_type=node_type_map.get(int(dst_i)),
                 params=params,
