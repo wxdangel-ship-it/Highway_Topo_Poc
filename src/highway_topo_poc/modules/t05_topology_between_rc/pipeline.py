@@ -217,6 +217,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_TRAJ_IN_DRIVEZONE_MIN": 0.85,
     "STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN": 0.60,
     "STEP1_CORRIDOR_REACH_XSEC_M": 12.0,
+    "TOPOLOGY_FALLBACK_REACH_XSEC_M": 25.0,
     "SAME_PAIR_FALLBACK_REACH_XSEC_M": 25.0,
     "TRAJ_SURF_ENDPOINT_HOLE_TOL_M": 2.0,
     "TRAJ_SURF_ENDPOINT_HOLE_IN_RATIO_MIN": 0.99,
@@ -238,6 +239,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "XSEC_GATE_TRAJ_EVIDENCE_MAX_TRAJ": 300,
     "STEP2_SEGMENT_CORRIDOR_INSIDE_TOL_M": 0.5,
     "STEP2_SEGMENT_CORRIDOR_MIN_INSIDE_RATIO": 0.999,
+    "STEP2_SEGMENT_CORRIDOR_RESCUE_ENABLE": 1,
+    "STEP2_SEGMENT_CORRIDOR_RESCUE_OUTSIDE_MAX_M": 5.0,
     "STEP3_WIDENING_SUPPRESS_ENABLE": 1,
     "STEP3_WIDENING_RATIO_TRIGGER": 1.25,
     "STEP3_WIDENING_REQUIRE_EXPANDED_FLAG": 1,
@@ -630,6 +633,52 @@ def _run_patch_core(
     )
     lane_boundary_skipped_reason = patch_inputs.input_summary.get("lane_boundary_skipped_reason")
     debug_json_payloads: dict[str, dict[str, Any]] = {}
+    pair_stage_debug: dict[str, dict[str, Any]] = {}
+
+    def _pair_stage_key(src_nodeid: int, dst_nodeid: int) -> str:
+        return f"{int(src_nodeid)}->{int(dst_nodeid)}"
+
+    def _ensure_pair_stage_entry(src_nodeid: int, dst_nodeid: int) -> dict[str, Any]:
+        key = _pair_stage_key(int(src_nodeid), int(dst_nodeid))
+        entry = pair_stage_debug.get(key)
+        if entry is None:
+            entry = {
+                "src_nodeid": int(src_nodeid),
+                "dst_nodeid": int(dst_nodeid),
+                "topology_anchor_status": None,
+                "road_prior_shape_ref_available": False,
+                "support_found": False,
+                "support_mode": None,
+                "support_event_count": 0,
+                "support_traj_count": 0,
+                "step1_corridor_status": None,
+                "step1_corridor_reason": None,
+                "step1_corridor_hint": None,
+                "candidate_count": 0,
+                "viable_candidate_count": 0,
+                "selected_output_count": 0,
+                "selected_or_rejected_stage": None,
+                "no_geometry_candidate": False,
+            }
+            pair_stage_debug[key] = entry
+        return entry
+
+    def _flush_pair_stage_debug() -> None:
+        if not bool(int(params.get("DEBUG_DUMP", 0))):
+            return
+        debug_json_payloads["debug/pair_stage_status.json"] = {
+            "pairs": [
+                dict(pair_stage_debug[key])
+                for key in sorted(
+                    pair_stage_debug.keys(),
+                    key=lambda k: (
+                        int(pair_stage_debug[k].get("src_nodeid", -1)),
+                        int(pair_stage_debug[k].get("dst_nodeid", -1)),
+                    ),
+                )
+            ]
+        }
+
     if bool(int(params.get("DEBUG_DUMP", 0))):
         lane_crs_fix_raw = patch_inputs.input_summary.get("lane_boundary_crs_fix")
         if isinstance(lane_crs_fix_raw, dict) and lane_crs_fix_raw:
@@ -901,6 +950,7 @@ def _run_patch_core(
     step1_road_prior_reject_crossing_count = 0
     step1_road_prior_reject_candidate_total = 0
     step1_resolved_by_dist_margin_count = 0
+    topology_fallback_support_count = 0
     if bool(int(params.get("DEBUG_DUMP", 0))):
         debug_json_payloads["debug/step1_road_prior_adjacency.json"] = {
             "enabled": bool(step1_road_prior_filter_enabled),
@@ -933,6 +983,13 @@ def _run_patch_core(
             "type": "FeatureCollection",
             "features": list(step1_topo_chain_features),
         }
+    for src_i, dst_i in sorted(step1_topology_allowed_pairs, key=lambda it: (int(it[0]), int(it[1]))):
+        pair_stage = _ensure_pair_stage_entry(int(src_i), int(dst_i))
+        pair_stage["topology_anchor_status"] = "accepted"
+        pair_stage["road_prior_shape_ref_available"] = bool(
+            _is_valid_linestring(road_prior_pair_shape_ref_map.get((int(src_i), int(dst_i))))
+        )
+        pair_stage["selected_or_rejected_stage"] = "topology_accepted"
 
     def _timing_extra_metrics() -> dict[str, Any]:
         required = (
@@ -1639,6 +1696,38 @@ def _run_patch_core(
             for (src, dst), support in supports.items()
             if (int(src), int(dst)) in accepted_pairs
         }
+        for src_i, dst_i in sorted(accepted_pairs, key=lambda it: (int(it[0]), int(it[1]))):
+            pair_stage = _ensure_pair_stage_entry(int(src_i), int(dst_i))
+            support_obj = supports.get((int(src_i), int(dst_i)))
+            if support_obj is not None:
+                pair_stage["support_found"] = True
+                pair_stage["support_mode"] = "traj_support"
+                pair_stage["support_event_count"] = int(support_obj.support_event_count)
+                pair_stage["support_traj_count"] = int(len(support_obj.support_traj_ids))
+                pair_stage["selected_or_rejected_stage"] = "support_ready"
+                continue
+            src_cs = xsec_cross_lookup_map.get(int(src_i))
+            dst_cs = xsec_cross_lookup_map.get(int(dst_i))
+            src_geom = getattr(src_cs, "geometry_metric", None)
+            dst_geom = getattr(dst_cs, "geometry_metric", None)
+            fallback_support = _build_topology_road_prior_fallback_support(
+                pair=(int(src_i), int(dst_i)),
+                shape_ref_metric=road_prior_pair_shape_ref_map.get((int(src_i), int(dst_i))),
+                src_xsec=src_geom if isinstance(src_geom, LineString) else LineString(),
+                dst_xsec=dst_geom if isinstance(dst_geom, LineString) else LineString(),
+                drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
+                params=params,
+            )
+            if fallback_support is not None:
+                supports[(int(src_i), int(dst_i))] = fallback_support
+                topology_fallback_support_count += 1
+                pair_stage["support_found"] = True
+                pair_stage["support_mode"] = "topology_road_prior_fallback"
+                pair_stage["support_event_count"] = 0
+                pair_stage["support_traj_count"] = 0
+                pair_stage["selected_or_rejected_stage"] = "support_fallback_ready"
+            else:
+                pair_stage["selected_or_rejected_stage"] = "support_missing_after_topology"
     else:
         step1_same_dst_multi_chain_pairs = {}
         for src_nodeid, vote_raw in sorted(dict(supports_result.node_dst_votes).items(), key=lambda it: int(it[0])):
@@ -1793,6 +1882,7 @@ def _run_patch_core(
             )
         if progress is not None:
             progress.mark("early_exit_no_supports", neighbor_search_pass=int(neighbor_search_pass))
+        _flush_pair_stage_debug()
         return _finalize_payloads(
             run_id=run_id,
             repo_root=repo_root,
@@ -1825,6 +1915,7 @@ def _run_patch_core(
                 "step1_ambiguous_node_count": int(step1_ambiguous_node_count),
                 "step1_unique_pair_count": int(step1_unique_pair_count),
                 "step1_same_pair_multichain_pair_count": int(len(step1_same_dst_multi_chain_pairs)),
+                "topology_fallback_support_count": int(topology_fallback_support_count),
                 "step1_vote_main_ratio_p50": (
                     float(np.percentile(np.asarray(step1_vote_main_ratio_vals, dtype=np.float64), 50.0))
                     if step1_vote_main_ratio_vals
@@ -1956,6 +2047,16 @@ def _run_patch_core(
         if progress is not None and (idx == 1 or idx % 20 == 0 or idx == total_pairs):
             progress.mark("road_eval_progress", pair_index=int(idx), total_pairs=total_pairs)
         src, dst = pair
+        pair_stage = _ensure_pair_stage_entry(int(src), int(dst))
+        pair_stage["support_found"] = True
+        if not pair_stage.get("support_mode"):
+            pair_stage["support_mode"] = (
+                "topology_road_prior_fallback"
+                if "topology_road_prior_fallback" in {str(v) for v in list(support.hints)}
+                else "traj_support"
+            )
+        pair_stage["support_event_count"] = int(support.support_event_count)
+        pair_stage["support_traj_count"] = int(len(support.support_traj_ids))
         src_type = node_type_map.get(src, "unknown")
         dst_type = node_type_map.get(dst, "unknown")
         if _is_shared_intersection_internal_pair(
@@ -1974,6 +2075,7 @@ def _run_patch_core(
         dst_gate_meta = xsec_gate_meta_lookup_map.get(int(dst), {})
 
         if src_xsec is None or dst_xsec is None or src_xsec_gate is None or dst_xsec_gate is None:
+            pair_stage["selected_or_rejected_stage"] = "xsec_missing"
             road = _make_base_road_record(
                 src=src,
                 dst=dst,
@@ -2085,6 +2187,12 @@ def _run_patch_core(
             params=params,
             road_prior_shape_ref_metric=road_prior_pair_shape_ref_map.get((int(src), int(dst))),
         )
+        pair_stage["step1_corridor_status"] = "hard_reject" if step1_corridor.get("hard_reason") else "ok"
+        pair_stage["step1_corridor_reason"] = step1_corridor.get("hard_reason")
+        pair_stage["step1_corridor_hint"] = step1_corridor.get("hard_hint")
+        pair_stage["selected_or_rejected_stage"] = (
+            "step1_corridor_ready" if not step1_corridor.get("hard_reason") else "step1_corridor_rejected"
+        )
         if debug_enabled:
             _append_step1_corridor_debug_layers(
                 debug_layers=debug_layers,
@@ -2112,6 +2220,7 @@ def _run_patch_core(
                 edge_geometry_by_id=road_prior_edge_geometry_map,
             )
         if step1_corridor.get("hard_reason") and not same_pair_variants:
+            pair_stage["selected_or_rejected_stage"] = "step1_corridor_rejected"
             road = _make_base_road_record(
                 src=src,
                 dst=dst,
@@ -2252,6 +2361,74 @@ def _run_patch_core(
                 stage_timer.add("t_gate_in_ratio", float(road_k.get("_timing_gate_ms", 0.0)))
                 candidate_roads.append(road_k)
         else:
+            topology_fallback_mode = bool(
+                int(support.support_event_count) <= 0
+                and bool(step1_corridor.get("road_prior_shape_ref_used", False))
+                and str(step1_corridor.get("road_prior_shape_ref_mode") or "").strip().lower() == "step1_no_traj"
+                and _is_valid_linestring(road_prior_pair_shape_ref_map.get((int(src), int(dst))))
+            )
+            if topology_fallback_mode:
+                key_k = f"{src}_{dst}_k0"
+                surface_timing_per_k[key_k] = 0.0
+                road_k = _evaluate_candidate_road(
+                    src=src,
+                    dst=dst,
+                    src_type=src_type,
+                    dst_type=dst_type,
+                    support=support,
+                    parent_support=support,
+                    cluster_id=0,
+                    neighbor_search_pass=int(neighbor_search_pass),
+                    src_out_degree=out_degree.get(src, 0),
+                    dst_in_degree=in_degree.get(dst, 0),
+                    lane_boundaries_metric=patch_inputs.lane_boundaries_metric,
+                    surface_points_xyz=points_xyz,
+                    non_ground_xy=non_ground_xy,
+                    patch_inputs=patch_inputs,
+                    gore_zone_metric=gore_zone_metric,
+                    params=params,
+                    traj_surface_hint={
+                        "traj_surface_enforced": False,
+                        "surface_metric": None,
+                        "timing_ms": 0.0,
+                        "slice_valid_ratio": 0.0,
+                        "covered_length_ratio": 0.0,
+                        "covered_station_length_m": 0.0,
+                        "unique_traj_count": 0,
+                        "reason": "topology_road_prior_fallback",
+                    },
+                    shape_ref_hint_metric=step1_corridor.get("shape_ref_line"),
+                    segment_corridor_metric=step1_corridor.get("corridor_zone_metric"),
+                    road_prior_shape_ref_metric=road_prior_pair_shape_ref_map.get((int(src), int(dst))),
+                    step1_used_road_prior=bool(step1_corridor.get("road_prior_shape_ref_used", False)),
+                    step1_road_prior_mode=step1_corridor.get("road_prior_shape_ref_mode"),
+                    same_pair_multichain=False,
+                    candidate_branch_id=None,
+                    support_mode="topology_road_prior_fallback",
+                    src_xsec=src_xsec_gate.geometry_metric,
+                    dst_xsec=dst_xsec_gate.geometry_metric,
+                )
+                _apply_xsec_gate_meta_to_road(road=road_k, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
+                road_k["step1_strategy"] = step1_corridor.get("strategy")
+                road_k["step1_reason"] = step1_corridor.get("hard_reason")
+                road_k["step1_corridor_count"] = step1_corridor.get("corridor_count")
+                road_k["step1_main_corridor_ratio"] = step1_corridor.get("main_corridor_ratio")
+                road_k["gore_fallback_used_src"] = bool(step1_corridor.get("gore_fallback_used_src", False))
+                road_k["gore_fallback_used_dst"] = bool(step1_corridor.get("gore_fallback_used_dst", False))
+                road_k["traj_drop_count_by_drivezone"] = int(step1_corridor.get("traj_drop_count_by_drivezone", 0))
+                road_k["drivezone_fallback_used"] = bool(step1_corridor.get("drivezone_fallback_used", False))
+                road_k["step1_corridor_zone_area_m2"] = step1_corridor.get("corridor_zone_area_m2")
+                road_k["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
+                road_k["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
+                road_k["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
+                road_k["pair_support_mode"] = "topology_road_prior_fallback"
+                stage_timer.add("t_build_lane_graph", float(road_k.get("_timing_lb_graph_ms", 0.0)))
+                sp_ms = float(road_k.get("_timing_shortest_path_ms", 0.0))
+                shortest_timing_per_k[key_k] = sp_ms
+                stage_timer.add("t_shortest_path_total", sp_ms)
+                stage_timer.add("t_centerline_offset", float(road_k.get("_timing_centerline_ms", 0.0)))
+                stage_timer.add("t_gate_in_ratio", float(road_k.get("_timing_gate_ms", 0.0)))
+                candidate_roads.append(road_k)
             cluster_ids = _select_cluster_candidates(support, max_clusters=3)
             cluster_inputs: list[tuple[int, PairSupport, dict[str, Any]]] = []
             for cluster_id in cluster_ids:
@@ -2365,6 +2542,10 @@ def _run_patch_core(
                 candidate_roads.append(road_k)
 
         if not candidate_roads:
+            pair_stage["candidate_count"] = 0
+            pair_stage["viable_candidate_count"] = 0
+            pair_stage["no_geometry_candidate"] = True
+            pair_stage["selected_or_rejected_stage"] = "candidate_empty"
             road = _make_base_road_record(
                 src=src,
                 dst=dst,
@@ -2418,6 +2599,9 @@ def _run_patch_core(
             and isinstance(c.get("_geometry_metric"), LineString)
             and (not c.get("_geometry_metric").is_empty)
         ]
+        pair_stage["candidate_count"] = int(len(candidate_roads))
+        pair_stage["viable_candidate_count"] = int(len(viable_candidates))
+        pair_stage["selected_or_rejected_stage"] = "candidate_ready"
         same_pair_multi_chain_info = step1_same_dst_multi_chain_pairs.get((int(src), int(dst)))
         ranked_cluster_summary = [
             {
@@ -2469,6 +2653,8 @@ def _run_patch_core(
                     same_pair=True,
                 )
                 if id(cand) in selected_ids:
+                    pair_stage["selected_output_count"] = int(pair_stage.get("selected_output_count", 0)) + 1
+                    pair_stage["selected_or_rejected_stage"] = "selected"
                     cand["no_geometry_candidate"] = False
                     _append_selected_candidate_road(
                         selected=cand,
@@ -2548,6 +2734,8 @@ def _run_patch_core(
                     )
                 continue
         selected = ranked_candidates[0]
+        pair_stage["selected_output_count"] = int(pair_stage.get("selected_output_count", 0)) + 1
+        pair_stage["selected_or_rejected_stage"] = "selected"
         selected["chosen_cluster_id"] = int(selected.get("candidate_cluster_id", 0))
         selected["no_geometry_candidate"] = False
         selected["cluster_score_top2"] = list(ranked_cluster_summary)
@@ -3163,6 +3351,7 @@ def _run_patch_core(
 
     if progress is not None:
         progress.mark("core_finalize_start", road_candidates=int(len(road_records)))
+    _flush_pair_stage_debug()
     return _finalize_payloads(
         run_id=run_id,
         repo_root=repo_root,
@@ -3196,6 +3385,7 @@ def _run_patch_core(
             "step1_ambiguous_node_count": int(step1_ambiguous_node_count),
             "step1_unique_pair_count": int(step1_unique_pair_count),
             "step1_same_pair_multichain_pair_count": int(len(step1_same_dst_multi_chain_pairs)),
+            "topology_fallback_support_count": int(topology_fallback_support_count),
             "step1_vote_main_ratio_p50": (
                 float(np.percentile(step1_vote_main_ratio_arr, 50.0)) if step1_vote_main_ratio_arr.size > 0 else None
             ),
@@ -6735,6 +6925,7 @@ def _evaluate_candidate_road(
     road["segment_corridor_inside_ratio"] = None
     road["segment_corridor_shape_ref_inside_ratio"] = None
     road["segment_corridor_outside_len_m"] = None
+    road["segment_corridor_rescue_mode"] = None
     road["segment_corridor_inside_tol_m"] = float(
         max(0.0, float(params.get("STEP2_SEGMENT_CORRIDOR_INSIDE_TOL_M", 0.5)))
     )
@@ -7040,7 +7231,38 @@ def _evaluate_candidate_road(
             road["segment_corridor_outside_len_m"] = float(outside_len)
             min_ratio = float(max(0.0, min(1.0, road.get("segment_corridor_min_inside_ratio") or 0.0)))
             if (inside_ratio is None) or (float(inside_ratio) + 1e-9 < min_ratio) or (outside_len > 1e-6):
-                hard_flags.add(_HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR)
+                rescue_applied = False
+                rescue_enable = bool(int(params.get("STEP2_SEGMENT_CORRIDOR_RESCUE_ENABLE", 1)))
+                rescue_outside_max_m = float(max(0.0, float(params.get("STEP2_SEGMENT_CORRIDOR_RESCUE_OUTSIDE_MAX_M", 5.0))))
+                if rescue_enable and outside_len <= rescue_outside_max_m and _is_valid_linestring(primary_shape_ref_metric):
+                    rescue_line = _fallback_geometry_from_shape_ref(
+                        shape_ref_line=primary_shape_ref_metric,
+                        src_xsec=src_xsec,
+                        dst_xsec=dst_xsec,
+                    )
+                    if _is_valid_linestring(rescue_line):
+                        rescue_inside_ratio = _line_inside_ratio(rescue_line, corridor_zone)
+                        try:
+                            rescue_outside_len = float(max(0.0, float(rescue_line.difference(corridor_zone).length)))
+                        except Exception:
+                            rescue_outside_len = float(max(0.0, float(rescue_line.length)))
+                        if (
+                            rescue_inside_ratio is not None
+                            and float(rescue_inside_ratio) + 1e-9 >= min_ratio
+                            and rescue_outside_len <= 1e-6
+                        ):
+                            road_line = rescue_line
+                            centerline_fallback_used = True
+                            road["segment_corridor_rescue_mode"] = "shape_ref_substring"
+                            road["segment_corridor_inside_ratio"] = float(rescue_inside_ratio)
+                            road["segment_corridor_outside_len_m"] = float(rescue_outside_len)
+                            if not road.get("endpoint_fallback_mode_src"):
+                                road["endpoint_fallback_mode_src"] = "segment_corridor_shape_ref_rescue"
+                            if not road.get("endpoint_fallback_mode_dst"):
+                                road["endpoint_fallback_mode_dst"] = "segment_corridor_shape_ref_rescue"
+                            rescue_applied = True
+                if not rescue_applied:
+                    hard_flags.add(_HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR)
 
     drivezone_diag = _drivezone_gate_diagnostics(
         road_line=road_line,
@@ -9814,6 +10036,73 @@ def _build_same_pair_multichain_fallback_support(
     out.cluster_sep_m_est = None
     out.cluster_sizes = []
     out.unresolved_neighbor_count = int(parent_support.unresolved_neighbor_count)
+    return out
+
+
+def _build_topology_road_prior_fallback_support(
+    *,
+    pair: tuple[int, int],
+    shape_ref_metric: LineString | None,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    drivezone_zone_metric: BaseGeometry | None,
+    params: dict[str, Any],
+) -> PairSupport | None:
+    if not isinstance(shape_ref_metric, LineString) or shape_ref_metric.is_empty or float(shape_ref_metric.length) <= 1e-6:
+        return None
+    shape_ref_line = _orient_axis_line(shape_ref_metric, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    src_contact = _line_xsec_contact_point(line=shape_ref_line, xsec=src_xsec)
+    dst_contact = _line_xsec_contact_point(line=shape_ref_line, xsec=dst_xsec)
+    if not isinstance(src_contact, Point) or src_contact.is_empty:
+        return None
+    if not isinstance(dst_contact, Point) or dst_contact.is_empty:
+        return None
+
+    reach_xsec_m = float(
+        max(
+            1.0,
+            params.get(
+                "TOPOLOGY_FALLBACK_REACH_XSEC_M",
+                params.get("SAME_PAIR_FALLBACK_REACH_XSEC_M", params.get("STEP1_CORRIDOR_REACH_XSEC_M", 12.0)),
+            ),
+        )
+    )
+    try:
+        src_gap_m = float(shape_ref_line.distance(src_xsec))
+    except Exception:
+        src_gap_m = float("inf")
+    try:
+        dst_gap_m = float(shape_ref_line.distance(dst_xsec))
+    except Exception:
+        dst_gap_m = float("inf")
+    if src_gap_m > reach_xsec_m + 1e-6 or dst_gap_m > reach_xsec_m + 1e-6:
+        return None
+
+    if drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty):
+        inside_ratio = _line_inside_ratio(shape_ref_line, drivezone_zone_metric)
+        inside_min = float(
+            max(0.0, min(1.0, params.get("STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN", 0.60)))
+        )
+        if inside_ratio is None or float(inside_ratio) + 1e-9 < inside_min:
+            return None
+
+    src_i, dst_i = int(pair[0]), int(pair[1])
+    out = PairSupport(
+        src_nodeid=int(src_i),
+        dst_nodeid=int(dst_i),
+        open_end=False,
+        hard_anomalies=set(),
+    )
+    out.support_event_count = 0
+    out.src_cross_points = [src_contact]
+    out.dst_cross_points = [dst_contact]
+    out.hints = ["topology_road_prior_fallback"]
+    out.cluster_count = 1
+    out.main_cluster_id = 0
+    out.main_cluster_ratio = 0.0
+    out.cluster_sep_m_est = None
+    out.cluster_sizes = []
+    out.unresolved_neighbor_count = 0
     return out
 
 
