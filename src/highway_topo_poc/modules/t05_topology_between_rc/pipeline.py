@@ -537,6 +537,83 @@ def _filter_debug_features_for_focus(
     return out
 
 
+def _collect_focus_cross_nodeids(
+    *,
+    focus_pairs: set[tuple[int, int]],
+    focus_src_nodeids: set[int],
+    topology_allowed_dst_map: dict[int, set[int]],
+    topology_anchor_decisions: dict[str, dict[str, Any]],
+) -> set[int]:
+    nodeids: set[int] = set()
+    pair_keys = {(int(src), int(dst)) for src, dst in focus_pairs}
+    focus_srcs = {int(v) for v in focus_src_nodeids}
+    for src_i, dst_i in pair_keys:
+        nodeids.add(int(src_i))
+        nodeids.add(int(dst_i))
+    for src_i in focus_srcs:
+        nodeids.add(int(src_i))
+        nodeids.update(int(dst_i) for dst_i in topology_allowed_dst_map.get(int(src_i), set()))
+    if not (pair_keys or focus_srcs):
+        return nodeids
+    for anchor in topology_anchor_decisions.values():
+        if not isinstance(anchor, dict):
+            continue
+        pair_src = anchor.get("pair_src_nodeid")
+        pair_dst = anchor.get("pair_dst_nodeid")
+        anchor_src = anchor.get("src_nodeid")
+        try:
+            pair_key = (
+                int(pair_src) if pair_src is not None else None,
+                int(pair_dst) if pair_dst is not None else None,
+            )
+        except Exception:
+            pair_key = (None, None)
+        try:
+            anchor_src_i = int(anchor_src) if anchor_src is not None else None
+        except Exception:
+            anchor_src_i = None
+        if pair_key[0] is not None and pair_key[1] is not None and pair_key in pair_keys:
+            nodeids.add(int(pair_key[0]))
+            nodeids.add(int(pair_key[1]))
+        elif anchor_src_i is not None and anchor_src_i in focus_srcs:
+            nodeids.add(int(anchor_src_i))
+            if pair_key[0] is not None:
+                nodeids.add(int(pair_key[0]))
+            if pair_key[1] is not None:
+                nodeids.add(int(pair_key[1]))
+        else:
+            continue
+        dst_paths_raw = anchor.get("dst_paths")
+        if not isinstance(dst_paths_raw, dict):
+            continue
+        for recs in dst_paths_raw.values():
+            if not isinstance(recs, Sequence):
+                continue
+            for rec in recs:
+                if not isinstance(rec, dict):
+                    continue
+                for node_raw in rec.get("node_path", []) or []:
+                    try:
+                        nodeids.add(int(node_raw))
+                    except Exception:
+                        continue
+    return nodeids
+
+
+def _resolve_focus_cross_sections(
+    *,
+    focus_cross_nodeids: set[int],
+    xsec_lookup_map: dict[int, CrossSection],
+) -> list[CrossSection]:
+    selected: dict[int, CrossSection] = {}
+    for nodeid in sorted(int(v) for v in focus_cross_nodeids):
+        xsec = xsec_lookup_map.get(int(nodeid))
+        if not isinstance(xsec, CrossSection):
+            continue
+        selected[int(xsec.nodeid)] = xsec
+    return [selected[key] for key in sorted(selected)]
+
+
 def _build_traj_lookup_indexes(
     patch_inputs: PatchInputs,
 ) -> tuple[dict[str, np.ndarray], dict[str, dict[str, Any]]]:
@@ -1191,6 +1268,26 @@ def _run_patch_core(
             _is_valid_linestring(road_prior_pair_shape_ref_map.get((int(src_i), int(dst_i))))
         )
         pair_stage["selected_or_rejected_stage"] = "topology_accepted"
+    requested_focus_src_nodeids = set(focus_src_nodeids_filter) if focus_src_nodeids_filter else None
+    focus_cross_nodeids = _collect_focus_cross_nodeids(
+        focus_pairs=focus_pair_filter,
+        focus_src_nodeids=focus_src_nodeids_filter,
+        topology_allowed_dst_map=step1_topology_allowed_dst_map,
+        topology_anchor_decisions=step1_topology_anchor_decisions,
+    )
+    focus_cross_sections = (
+        _resolve_focus_cross_sections(
+            focus_cross_nodeids=focus_cross_nodeids,
+            xsec_lookup_map=xsec_cross_lookup_map,
+        )
+        if focus_cross_nodeids
+        else []
+    )
+    if bool(int(params.get("DEBUG_DUMP", 0))) and focus_cross_sections:
+        debug_json_payloads["debug/focus_cross_sections.json"] = {
+            "nodeids": [int(x.nodeid) for x in focus_cross_sections],
+            "requested_nodeids": [int(v) for v in sorted(focus_cross_nodeids)],
+        }
 
     def _timing_extra_metrics() -> dict[str, Any]:
         required = (
@@ -1219,10 +1316,13 @@ def _run_patch_core(
         payload["traj_surface_cache_miss_count"] = int(surface_cache_miss_count)
         payload["focus_pair_filter_count"] = int(len(focus_pair_filter))
         payload["focus_src_nodeid_count"] = int(len(focus_src_nodeids_filter))
+        payload["focus_cross_section_count"] = int(len(focus_cross_sections))
         if focus_pair_filter:
             payload["focus_pairs"] = [f"{int(src)}->{int(dst)}" for src, dst in sorted(focus_pair_filter)]
         if focus_src_nodeids_filter:
             payload["focus_src_nodeids"] = [int(v) for v in sorted(focus_src_nodeids_filter)]
+        if focus_cross_sections:
+            payload["focus_cross_section_nodeids"] = [int(x.nodeid) for x in focus_cross_sections]
         payload.update(pointcloud_stats)
         payload["drivezone_src_crs"] = drivezone_src_crs
         payload["drivezone_src_crs_before_alignment"] = drivezone_src_crs_before_alignment
@@ -1370,9 +1470,14 @@ def _run_patch_core(
         neighbor_max_dist_m: float,
         focus_src_nodeids: set[int] | None = None,
     ) -> tuple[Any, Any, dict[int, str], dict[int, int], dict[int, int]]:
+        cross_sections_for_pass = (
+            list(focus_cross_sections)
+            if focus_cross_sections
+            else list(xsec_cross_map.values())
+        )
         cross_obj = extract_crossing_events(
             patch_inputs.trajectories,
-            list(xsec_cross_map.values()),
+            cross_sections_for_pass,
             hit_buffer_m=float(hit_buffer_m),
             dedup_gap_m=float(params["TRAJ_XSEC_DEDUP_GAP_M"]),
         )
@@ -1569,7 +1674,7 @@ def _run_patch_core(
         stitch_max_dist_m=float(params["STITCH_MAX_DIST_M"]),
         stitch_forward_dot_min=float(params["STITCH_FORWARD_DOT_MIN"]),
         neighbor_max_dist_m=float(params["NEIGHBOR_MAX_DIST_M"]),
-        focus_src_nodeids=(set(focus_src_nodeids_filter) if focus_src_nodeids_filter else None),
+        focus_src_nodeids=(set(requested_focus_src_nodeids) if requested_focus_src_nodeids else None),
     )
     if progress is not None:
         progress.mark(
@@ -1629,7 +1734,17 @@ def _run_patch_core(
             if pass1_pair_count > 0
             else None
         )
-        if pass1_pair_count > 0 and not pass2_focus_src_nodeids:
+        if requested_focus_src_nodeids:
+            if pass2_focus_src_nodeids is None:
+                pass2_focus_src_nodeids = set(requested_focus_src_nodeids)
+            else:
+                intersected_focus_srcs = {
+                    int(src_i) for src_i in pass2_focus_src_nodeids if int(src_i) in requested_focus_src_nodeids
+                }
+                pass2_focus_src_nodeids = (
+                    intersected_focus_srcs if intersected_focus_srcs else set(requested_focus_src_nodeids)
+                )
+        elif pass1_pair_count > 0 and not pass2_focus_src_nodeids:
             pass2_focus_src_nodeids = None
         if progress is not None:
             progress.mark(

@@ -3359,6 +3359,198 @@ def test_topology_unique_focus_pair_filters_support_builder(tmp_path: Path, monk
     assert len(out["debug_json_payloads"]["debug/step1_pair_straight_segments.geojson"]["features"]) == 1
 
 
+def test_topology_unique_focus_pair_filters_cross_sections_and_keeps_pass2_focus(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    road_path = tmp_path / "RCSDRoad.geojson"
+    road_payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "geometry": None, "properties": {"snodeid": 1, "enodeid": 9, "direction": 2}},
+            {"type": "Feature", "geometry": None, "properties": {"snodeid": 9, "enodeid": 2, "direction": 2}},
+            {"type": "Feature", "geometry": None, "properties": {"snodeid": 3, "enodeid": 4, "direction": 2}},
+        ],
+    }
+    road_path.write_text(json.dumps(road_payload, ensure_ascii=False), encoding="utf-8")
+    base_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 10.0), _mk_xsec(3, 20.0), _mk_xsec(4, 30.0), _mk_xsec(9, 5.0)],
+    )
+    patch_inputs = PatchInputs(
+        patch_id=base_inputs.patch_id,
+        patch_dir=base_inputs.patch_dir,
+        projection=base_inputs.projection,
+        projection_to_metric=base_inputs.projection_to_metric,
+        projection_to_input=base_inputs.projection_to_input,
+        intersection_lines=base_inputs.intersection_lines,
+        lane_boundaries_metric=base_inputs.lane_boundaries_metric,
+        node_kind_map=base_inputs.node_kind_map,
+        trajectories=base_inputs.trajectories,
+        drivezone_zone_metric=base_inputs.drivezone_zone_metric,
+        drivezone_source_path=base_inputs.drivezone_source_path,
+        divstrip_zone_metric=base_inputs.divstrip_zone_metric,
+        divstrip_source_path=base_inputs.divstrip_source_path,
+        point_cloud_path=base_inputs.point_cloud_path,
+        road_prior_path=road_path,
+        tiles_dir=base_inputs.tiles_dir,
+        input_summary=base_inputs.input_summary,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_build_topology_unique_anchor_decisions",
+        lambda *args, **kwargs: (
+            {1: {2}, 3: {4}},
+            {(1, 2), (3, 4)},
+            {
+                1: {
+                    "src_nodeid": 1,
+                    "status": "accepted",
+                    "reason": "accepted",
+                    "dst_nodeids": [2],
+                    "chosen_dst_nodeid": 2,
+                    "anchor_count": 1,
+                    "anchor_ids": ["a12"],
+                    "dst_vote_map": {"2": 1},
+                    "has_multi_dst_anchor": False,
+                    "has_multi_chain_anchor": False,
+                    "search_overflow": False,
+                },
+                3: {
+                    "src_nodeid": 3,
+                    "status": "accepted",
+                    "reason": "accepted",
+                    "dst_nodeids": [4],
+                    "chosen_dst_nodeid": 4,
+                    "anchor_count": 1,
+                    "anchor_ids": ["a34"],
+                    "dst_vote_map": {"4": 1},
+                    "has_multi_dst_anchor": False,
+                    "has_multi_chain_anchor": False,
+                    "search_overflow": False,
+                },
+            },
+            {
+                "a12": {
+                    "anchor_id": "a12",
+                    "anchor_role": "out",
+                    "search_direction": "forward",
+                    "src_nodeid": 1,
+                    "status": "accepted",
+                    "reason": "accepted",
+                    "dst_nodeids": [2],
+                    "chosen_dst_nodeid": 2,
+                    "pair_src_nodeid": 1,
+                    "pair_dst_nodeid": 2,
+                    "chain_count": 1,
+                    "dst_paths": {"2": [{"node_path": [1, 9, 2], "edge_ids": ["e1", "e2"], "chain_len": 2}]},
+                },
+                "a34": {
+                    "anchor_id": "a34",
+                    "anchor_role": "out",
+                    "search_direction": "forward",
+                    "src_nodeid": 3,
+                    "status": "accepted",
+                    "reason": "accepted",
+                    "dst_nodeids": [4],
+                    "chosen_dst_nodeid": 4,
+                    "pair_src_nodeid": 3,
+                    "pair_dst_nodeid": 4,
+                    "chain_count": 1,
+                    "dst_paths": {"4": [{"node_path": [3, 4], "edge_ids": ["e3"], "chain_len": 1}]},
+                },
+            },
+            {
+                "src_count": 2,
+                "accepted_src_count": 2,
+                "unresolved_src_count": 0,
+                "multi_dst_src_count": 0,
+                "multi_chain_src_count": 0,
+                "search_overflow_src_count": 0,
+                "accepted_pair_count": 2,
+            },
+            [],
+            [],
+        ),
+    )
+    monkeypatch.setattr(pipeline, "_build_road_prior_pair_shape_ref_map", lambda *args, **kwargs: ({}, {}))
+    captured_cross_sections: list[list[int]] = []
+
+    def _fake_extract_crossing_events(*args, **kwargs):  # type: ignore[no-untyped-def]
+        cross_sections = list(args[1]) if len(args) >= 2 else list(kwargs.get("cross_sections") or [])
+        captured_cross_sections.append(sorted(int(x.nodeid) for x in cross_sections))
+        return CrossingExtractResult(
+            events_by_traj={},
+            raw_hit_count=0,
+            dedup_drop_count=0,
+            n_cross_empty_skipped=0,
+            n_cross_geom_unexpected=0,
+            n_cross_distance_gate_reject=0,
+        )
+
+    monkeypatch.setattr(pipeline, "extract_crossing_events", _fake_extract_crossing_events)
+    captured_focus_src_nodeids: list[set[int] | None] = []
+
+    def _fake_build_pair_supports(*args, **kwargs):  # type: ignore[no-untyped-def]
+        focus_src_nodeids = kwargs.get("focus_src_nodeids")
+        captured_focus_src_nodeids.append(
+            {int(v) for v in focus_src_nodeids} if focus_src_nodeids is not None else None
+        )
+        return PairSupportBuildResult(
+            supports={},
+            unresolved_events=[],
+            graph_node_count=0,
+            graph_edge_count=0,
+            stitch_candidate_count=0,
+            stitch_edge_count=0,
+            stitch_query_count=0,
+            stitch_candidates_total=0,
+            stitch_reject_dist_count=0,
+            stitch_reject_angle_count=0,
+            stitch_reject_forward_count=0,
+            stitch_accept_count=0,
+            stitch_levels_used_hist={},
+            ambiguous_events=[],
+            next_crossing_candidates=[],
+            node_dst_votes={},
+        )
+
+    monkeypatch.setattr(pipeline, "build_pair_supports", _fake_build_pair_supports)
+    monkeypatch.setattr(
+        pipeline,
+        "infer_node_types",
+        lambda **kwargs: ({1: "unknown", 2: "unknown", 3: "unknown", 4: "unknown", 9: "unknown"}, {}, {}),
+    )
+
+    params = dict(pipeline.DEFAULT_PARAMS)
+    params["FOCUS_PAIR_FILTER"] = [{"src_nodeid": 1, "dst_nodeid": 2}]
+    params["FOCUS_SRC_NODEIDS"] = [1]
+    progress_path = tmp_path / "progress.ndjson"
+    out = pipeline._run_patch_core(
+        patch_inputs,
+        params=params,
+        run_id="unit_run",
+        repo_root=tmp_path,
+        progress=pipeline._ProgressLogger(progress_path),
+    )
+
+    assert captured_cross_sections
+    assert captured_cross_sections[0] == [1, 2, 9]
+    assert len(captured_cross_sections) >= 2
+    assert captured_cross_sections[1] == [1, 2, 9]
+    assert captured_focus_src_nodeids
+    assert captured_focus_src_nodeids[0] == {1}
+    assert captured_focus_src_nodeids[1] == {1}
+    assert int(out["metrics_payload"].get("focus_cross_section_count", 0)) == 3
+    progress_rows = [
+        json.loads(line)
+        for line in progress_path.read_text(encoding="utf-8").splitlines()
+        if str(line).strip()
+    ]
+    pass2_rows = [row for row in progress_rows if str(row.get("stage")) == "neighbor_pass2_start"]
+    assert pass2_rows
+    assert int(pass2_rows[-1].get("focus_src_count")) == 1
+
+
 def test_run_patch_core_uses_shared_intersection_alias_lookup(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     src_xsec = CrossSection(
         nodeid=9102,
