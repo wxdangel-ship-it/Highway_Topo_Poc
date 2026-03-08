@@ -17,7 +17,12 @@ from highway_topo_poc.modules.t05_topology_between_rc.geometry import (
     PairSupportBuildResult,
     SOFT_AMBIGUOUS_NEXT_XSEC,
 )
-from highway_topo_poc.modules.t05_topology_between_rc.io import CrossSection, PatchInputs, ProjectionInfo
+from highway_topo_poc.modules.t05_topology_between_rc.io import (
+    CrossSection,
+    PatchInputs,
+    ProjectionInfo,
+    TrajectoryData,
+)
 
 
 def _mk_patch_inputs(
@@ -25,6 +30,7 @@ def _mk_patch_inputs(
     tmp_path: Path,
     xsecs: list[CrossSection],
     road_prior_path: Path | None = None,
+    trajectories: list[TrajectoryData] | None = None,
 ) -> PatchInputs:
     return PatchInputs(
         patch_id="unit_patch",
@@ -35,7 +41,7 @@ def _mk_patch_inputs(
         intersection_lines=xsecs,
         lane_boundaries_metric=[],
         node_kind_map={},
-        trajectories=[],
+        trajectories=list(trajectories or []),
         drivezone_zone_metric=None,
         drivezone_source_path=None,
         divstrip_zone_metric=None,
@@ -52,6 +58,18 @@ def _mk_xsec(nodeid: int, x: float) -> CrossSection:
         nodeid=int(nodeid),
         geometry_metric=LineString([(float(x), -5.0), (float(x), 5.0)]),
         properties={"nodeid": int(nodeid)},
+    )
+
+
+def _mk_traj(traj_id: str, coords: list[tuple[float, float]]) -> TrajectoryData:
+    xyz = np.asarray([(float(x), float(y), 0.0) for x, y in coords], dtype=np.float64)
+    seq = np.arange(xyz.shape[0], dtype=np.int64)
+    return TrajectoryData(
+        traj_id=str(traj_id),
+        seq=seq,
+        xyz_metric=xyz,
+        source_path=Path(f"/virtual/{traj_id}.geojson"),
+        source_crs="EPSG:3857",
     )
 
 
@@ -3375,6 +3393,10 @@ def test_topology_unique_focus_pair_filters_cross_sections_and_keeps_pass2_focus
     base_inputs = _mk_patch_inputs(
         tmp_path=tmp_path,
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 10.0), _mk_xsec(3, 20.0), _mk_xsec(4, 30.0), _mk_xsec(9, 5.0)],
+        trajectories=[
+            _mk_traj("near", [(0.0, 0.0), (5.0, 0.0), (10.0, 0.0)]),
+            _mk_traj("far", [(500.0, 0.0), (505.0, 0.0), (510.0, 0.0)]),
+        ],
     )
     patch_inputs = PatchInputs(
         patch_id=base_inputs.patch_id,
@@ -3472,12 +3494,22 @@ def test_topology_unique_focus_pair_filters_cross_sections_and_keeps_pass2_focus
             [],
         ),
     )
-    monkeypatch.setattr(pipeline, "_build_road_prior_pair_shape_ref_map", lambda *args, **kwargs: ({}, {}))
-    captured_cross_sections: list[list[int]] = []
+    monkeypatch.setattr(
+        pipeline,
+        "_build_road_prior_pair_shape_ref_map",
+        lambda *args, **kwargs: ({(1, 2): LineString([(0.0, 0.0), (10.0, 0.0)])}, {}),
+    )
+    captured_extract_inputs: list[dict[str, object]] = []
 
     def _fake_extract_crossing_events(*args, **kwargs):  # type: ignore[no-untyped-def]
+        trajectories = list(args[0]) if len(args) >= 1 else list(kwargs.get("trajectories") or [])
         cross_sections = list(args[1]) if len(args) >= 2 else list(kwargs.get("cross_sections") or [])
-        captured_cross_sections.append(sorted(int(x.nodeid) for x in cross_sections))
+        captured_extract_inputs.append(
+            {
+                "traj_ids": [str(traj.traj_id) for traj in trajectories],
+                "cross_nodeids": sorted(int(x.nodeid) for x in cross_sections),
+            }
+        )
         return CrossingExtractResult(
             events_by_traj={},
             raw_hit_count=0,
@@ -3489,9 +3521,12 @@ def test_topology_unique_focus_pair_filters_cross_sections_and_keeps_pass2_focus
 
     monkeypatch.setattr(pipeline, "extract_crossing_events", _fake_extract_crossing_events)
     captured_focus_src_nodeids: list[set[int] | None] = []
+    captured_support_traj_ids: list[list[str]] = []
 
     def _fake_build_pair_supports(*args, **kwargs):  # type: ignore[no-untyped-def]
+        trajectories = list(args[0]) if len(args) >= 1 else list(kwargs.get("trajectories") or [])
         focus_src_nodeids = kwargs.get("focus_src_nodeids")
+        captured_support_traj_ids.append([str(traj.traj_id) for traj in trajectories])
         captured_focus_src_nodeids.append(
             {int(v) for v in focus_src_nodeids} if focus_src_nodeids is not None else None
         )
@@ -3533,22 +3568,48 @@ def test_topology_unique_focus_pair_filters_cross_sections_and_keeps_pass2_focus
         progress=pipeline._ProgressLogger(progress_path),
     )
 
-    assert captured_cross_sections
-    assert captured_cross_sections[0] == [1, 2, 9]
-    assert len(captured_cross_sections) >= 2
-    assert captured_cross_sections[1] == [1, 2, 9]
+    assert captured_extract_inputs
+    assert captured_extract_inputs[0] == {"traj_ids": ["near"], "cross_nodeids": [1, 2, 9]}
+    assert len(captured_extract_inputs) >= 2
+    assert captured_extract_inputs[1] == {"traj_ids": ["near"], "cross_nodeids": [1, 2, 9]}
+    assert captured_support_traj_ids
+    assert captured_support_traj_ids[0] == ["near"]
+    assert captured_support_traj_ids[1] == ["near"]
     assert captured_focus_src_nodeids
     assert captured_focus_src_nodeids[0] == {1}
     assert captured_focus_src_nodeids[1] == {1}
     assert int(out["metrics_payload"].get("focus_cross_section_count", 0)) == 3
+    assert bool(out["metrics_payload"].get("focus_prefilter_enabled", False)) is True
+    assert int(out["metrics_payload"].get("focus_prefilter_trajectory_total", 0)) == 2
+    assert int(out["metrics_payload"].get("focus_prefilter_trajectory_count", 0)) == 1
+    assert int(out["metrics_payload"].get("focus_prefilter_trajectory_filtered_count", 0)) == 1
     progress_rows = [
         json.loads(line)
         for line in progress_path.read_text(encoding="utf-8").splitlines()
         if str(line).strip()
     ]
+    pass1_extract_rows = [
+        row
+        for row in progress_rows
+        if str(row.get("stage")) == "neighbor_pass_extract_start" and str(row.get("pass_label")) == "pass1"
+    ]
+    pass2_extract_rows = [
+        row
+        for row in progress_rows
+        if str(row.get("stage")) == "neighbor_pass_extract_start" and str(row.get("pass_label")) == "pass2"
+    ]
     pass2_rows = [row for row in progress_rows if str(row.get("stage")) == "neighbor_pass2_start"]
+    support_done_rows = [
+        row for row in progress_rows if str(row.get("stage")) == "neighbor_pass_support_done"
+    ]
+    assert pass1_extract_rows
+    assert int(pass1_extract_rows[-1].get("traj_count")) == 1
+    assert int(pass1_extract_rows[-1].get("xsec_count")) == 3
+    assert pass2_extract_rows
+    assert int(pass2_extract_rows[-1].get("traj_count")) == 1
     assert pass2_rows
     assert int(pass2_rows[-1].get("focus_src_count")) == 1
+    assert support_done_rows
 
 
 def test_run_patch_core_uses_shared_intersection_alias_lookup(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

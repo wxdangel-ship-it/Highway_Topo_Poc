@@ -58,6 +58,7 @@ from .io import (
     CrossSection,
     InputDataError,
     PatchInputs,
+    TrajectoryData,
     TRAJ_SPLIT_MAX_GAP_M_DEFAULT,
     TRAJ_SPLIT_MAX_SEQ_GAP_DEFAULT,
     TRAJ_SPLIT_MAX_TIME_GAP_S_DEFAULT,
@@ -614,11 +615,167 @@ def _resolve_focus_cross_sections(
     return [selected[key] for key in sorted(selected)]
 
 
+def _normalize_bounds(bounds: Sequence[float] | None) -> tuple[float, float, float, float] | None:
+    if bounds is None:
+        return None
+    try:
+        minx, miny, maxx, maxy = [float(v) for v in bounds[:4]]
+    except Exception:
+        return None
+    if not (
+        np.isfinite(minx)
+        and np.isfinite(miny)
+        and np.isfinite(maxx)
+        and np.isfinite(maxy)
+        and maxx >= minx
+        and maxy >= miny
+    ):
+        return None
+    return (minx, miny, maxx, maxy)
+
+
+def _merge_bounds(
+    lhs: tuple[float, float, float, float] | None,
+    rhs: tuple[float, float, float, float] | None,
+) -> tuple[float, float, float, float] | None:
+    if lhs is None:
+        return rhs
+    if rhs is None:
+        return lhs
+    return (
+        float(min(lhs[0], rhs[0])),
+        float(min(lhs[1], rhs[1])),
+        float(max(lhs[2], rhs[2])),
+        float(max(lhs[3], rhs[3])),
+    )
+
+
+def _expand_bounds(
+    bounds: tuple[float, float, float, float] | None,
+    *,
+    margin_m: float,
+) -> tuple[float, float, float, float] | None:
+    if bounds is None:
+        return None
+    margin = float(max(0.0, float(margin_m)))
+    return (
+        float(bounds[0] - margin),
+        float(bounds[1] - margin),
+        float(bounds[2] + margin),
+        float(bounds[3] + margin),
+    )
+
+
+def _bounds_from_geometry(geom: BaseGeometry | None) -> tuple[float, float, float, float] | None:
+    if not isinstance(geom, BaseGeometry) or geom.is_empty:
+        return None
+    try:
+        return _normalize_bounds(geom.bounds)
+    except Exception:
+        return None
+
+
+def _bounds_intersect(
+    lhs: tuple[float, float, float, float] | None,
+    rhs: tuple[float, float, float, float] | None,
+) -> bool:
+    if lhs is None or rhs is None:
+        return False
+    return bool(lhs[0] <= rhs[2] and lhs[2] >= rhs[0] and lhs[1] <= rhs[3] and lhs[3] >= rhs[1])
+
+
+def _collect_focus_shape_ref_pairs(
+    *,
+    focus_pairs: set[tuple[int, int]],
+    focus_src_nodeids: set[int],
+    topology_allowed_pairs: set[tuple[int, int]],
+    road_prior_pair_shape_ref_map: dict[tuple[int, int], LineString],
+) -> set[tuple[int, int]]:
+    pairs: set[tuple[int, int]] = {(int(src_i), int(dst_i)) for src_i, dst_i in focus_pairs}
+    for src_i, dst_i in topology_allowed_pairs:
+        if int(src_i) in focus_src_nodeids:
+            pairs.add((int(src_i), int(dst_i)))
+    if focus_src_nodeids:
+        for src_i, dst_i in road_prior_pair_shape_ref_map.keys():
+            if int(src_i) in focus_src_nodeids:
+                pairs.add((int(src_i), int(dst_i)))
+    return pairs
+
+
+def _build_focus_trajectory_prefilter_bbox(
+    *,
+    focus_cross_sections: Sequence[CrossSection],
+    focus_pairs: set[tuple[int, int]],
+    focus_src_nodeids: set[int],
+    topology_allowed_pairs: set[tuple[int, int]],
+    road_prior_pair_shape_ref_map: dict[tuple[int, int], LineString],
+    margin_m: float,
+) -> tuple[float, float, float, float] | None:
+    bounds: tuple[float, float, float, float] | None = None
+    for xsec in focus_cross_sections:
+        bounds = _merge_bounds(bounds, _bounds_from_geometry(xsec.geometry_metric))
+    focus_shape_ref_pairs = _collect_focus_shape_ref_pairs(
+        focus_pairs=focus_pairs,
+        focus_src_nodeids=focus_src_nodeids,
+        topology_allowed_pairs=topology_allowed_pairs,
+        road_prior_pair_shape_ref_map=road_prior_pair_shape_ref_map,
+    )
+    for pair in sorted(focus_shape_ref_pairs):
+        bounds = _merge_bounds(bounds, _bounds_from_geometry(road_prior_pair_shape_ref_map.get(pair)))
+    return _expand_bounds(bounds, margin_m=margin_m)
+
+
+def _filter_trajectories_for_focus(
+    *,
+    trajectories: Sequence[TrajectoryData],
+    traj_bounds_index: dict[str, tuple[float, float, float, float] | None],
+    focus_bbox: tuple[float, float, float, float] | None,
+) -> tuple[list[TrajectoryData], dict[str, Any]]:
+    total_count = int(len(trajectories))
+    stats: dict[str, Any] = {
+        "enabled": bool(focus_bbox is not None),
+        "total_count": total_count,
+        "kept_count": total_count,
+        "filtered_count": 0,
+        "missing_bbox_count": 0,
+        "empty_fallback": False,
+        "bbox": [float(v) for v in focus_bbox] if focus_bbox is not None else None,
+    }
+    if focus_bbox is None:
+        return list(trajectories), stats
+
+    kept: list[TrajectoryData] = []
+    missing_bbox_count = 0
+    for traj in trajectories:
+        tid = str(traj.traj_id)
+        bounds = traj_bounds_index.get(tid)
+        if bounds is None:
+            missing_bbox_count += 1
+            kept.append(traj)
+            continue
+        if _bounds_intersect(bounds, focus_bbox):
+            kept.append(traj)
+    if not kept:
+        stats["empty_fallback"] = True
+        stats["missing_bbox_count"] = int(missing_bbox_count)
+        return list(trajectories), stats
+
+    stats["kept_count"] = int(len(kept))
+    stats["filtered_count"] = int(max(0, total_count - len(kept)))
+    stats["missing_bbox_count"] = int(missing_bbox_count)
+    return kept, stats
+
+
 def _build_traj_lookup_indexes(
     patch_inputs: PatchInputs,
-) -> tuple[dict[str, np.ndarray], dict[str, dict[str, Any]]]:
+) -> tuple[
+    dict[str, np.ndarray],
+    dict[str, dict[str, Any]],
+    dict[str, tuple[float, float, float, float] | None],
+]:
     traj_xy_index: dict[str, np.ndarray] = {}
     traj_meta_index: dict[str, dict[str, Any]] = {}
+    traj_bounds_index: dict[str, tuple[float, float, float, float] | None] = {}
     source_stat_cache: dict[Path, dict[str, Any]] = {}
     for traj in patch_inputs.trajectories:
         tid = str(traj.traj_id)
@@ -629,6 +786,15 @@ def _build_traj_lookup_indexes(
         else:
             xy = np.empty((0, 2), dtype=np.float64)
         traj_xy_index[tid] = xy
+        if xy.shape[0] > 0:
+            traj_bounds_index[tid] = (
+                float(np.min(xy[:, 0])),
+                float(np.min(xy[:, 1])),
+                float(np.max(xy[:, 0])),
+                float(np.max(xy[:, 1])),
+            )
+        else:
+            traj_bounds_index[tid] = None
 
         src_path = Path(traj.source_path)
         meta = source_stat_cache.get(src_path)
@@ -640,7 +806,7 @@ def _build_traj_lookup_indexes(
                 meta = {"missing": True}
             source_stat_cache[src_path] = meta
         traj_meta_index[tid] = {"traj_id": tid, **meta}
-    return traj_xy_index, traj_meta_index
+    return traj_xy_index, traj_meta_index, traj_bounds_index
 
 
 def run_patch(
@@ -769,7 +935,7 @@ def _run_patch_core(
         "drivezone_surface_cache_key": None,
     }
     t_index_lookup0 = perf_counter()
-    traj_xy_index, traj_meta_index = _build_traj_lookup_indexes(patch_inputs)
+    traj_xy_index, traj_meta_index, traj_bounds_index = _build_traj_lookup_indexes(patch_inputs)
     stage_timer.add("t_index_traj_lookup", (perf_counter() - t_index_lookup0) * 1000.0)
 
     xsec_raw_map = _build_cross_section_map(patch_inputs)
@@ -1283,10 +1449,43 @@ def _run_patch_core(
         if focus_cross_nodeids
         else []
     )
+    focus_prefilter_margin_m = float(
+        max(
+            float(params.get("XSEC_ACROSS_HALF_WINDOW_M", 20.0)),
+            float(params.get("PASS2_STITCH_MAX_DIST_M", 50.0)),
+            float(params.get("PASS2_TRAJ_XSEC_HIT_BUFFER_M", 2.0)) * 10.0,
+        )
+    )
+    focus_traj_prefilter_bbox = _build_focus_trajectory_prefilter_bbox(
+        focus_cross_sections=focus_cross_sections,
+        focus_pairs=set(focus_pair_filter),
+        focus_src_nodeids=set(focus_src_nodeids_filter),
+        topology_allowed_pairs=set(step1_topology_allowed_pairs),
+        road_prior_pair_shape_ref_map=road_prior_pair_shape_ref_map,
+        margin_m=focus_prefilter_margin_m,
+    )
+    focus_trajectories, focus_traj_prefilter_stats = _filter_trajectories_for_focus(
+        trajectories=patch_inputs.trajectories,
+        traj_bounds_index=traj_bounds_index,
+        focus_bbox=focus_traj_prefilter_bbox,
+    )
     if bool(int(params.get("DEBUG_DUMP", 0))) and focus_cross_sections:
         debug_json_payloads["debug/focus_cross_sections.json"] = {
             "nodeids": [int(x.nodeid) for x in focus_cross_sections],
             "requested_nodeids": [int(v) for v in sorted(focus_cross_nodeids)],
+        }
+    if bool(int(params.get("DEBUG_DUMP", 0))) and bool(focus_traj_prefilter_stats.get("enabled", False)):
+        kept_traj_ids = [str(traj.traj_id) for traj in focus_trajectories]
+        debug_json_payloads["debug/focus_traj_prefilter.json"] = {
+            "bbox": focus_traj_prefilter_stats.get("bbox"),
+            "margin_m": float(round(focus_prefilter_margin_m, 3)),
+            "total_count": int(focus_traj_prefilter_stats.get("total_count", 0)),
+            "kept_count": int(focus_traj_prefilter_stats.get("kept_count", 0)),
+            "filtered_count": int(focus_traj_prefilter_stats.get("filtered_count", 0)),
+            "missing_bbox_count": int(focus_traj_prefilter_stats.get("missing_bbox_count", 0)),
+            "empty_fallback": bool(focus_traj_prefilter_stats.get("empty_fallback", False)),
+            "trajectory_ids": kept_traj_ids[:200],
+            "trajectory_id_truncated": bool(len(kept_traj_ids) > 200),
         }
 
     def _timing_extra_metrics() -> dict[str, Any]:
@@ -1317,12 +1516,27 @@ def _run_patch_core(
         payload["focus_pair_filter_count"] = int(len(focus_pair_filter))
         payload["focus_src_nodeid_count"] = int(len(focus_src_nodeids_filter))
         payload["focus_cross_section_count"] = int(len(focus_cross_sections))
+        payload["focus_prefilter_enabled"] = bool(focus_traj_prefilter_stats.get("enabled", False))
+        payload["focus_prefilter_trajectory_total"] = int(focus_traj_prefilter_stats.get("total_count", 0))
+        payload["focus_prefilter_trajectory_count"] = int(focus_traj_prefilter_stats.get("kept_count", 0))
+        payload["focus_prefilter_trajectory_filtered_count"] = int(
+            focus_traj_prefilter_stats.get("filtered_count", 0)
+        )
+        payload["focus_prefilter_missing_bbox_count"] = int(
+            focus_traj_prefilter_stats.get("missing_bbox_count", 0)
+        )
+        payload["focus_prefilter_empty_fallback"] = bool(
+            focus_traj_prefilter_stats.get("empty_fallback", False)
+        )
         if focus_pair_filter:
             payload["focus_pairs"] = [f"{int(src)}->{int(dst)}" for src, dst in sorted(focus_pair_filter)]
         if focus_src_nodeids_filter:
             payload["focus_src_nodeids"] = [int(v) for v in sorted(focus_src_nodeids_filter)]
         if focus_cross_sections:
             payload["focus_cross_section_nodeids"] = [int(x.nodeid) for x in focus_cross_sections]
+        if focus_traj_prefilter_bbox is not None:
+            payload["focus_prefilter_bbox"] = [float(round(v, 3)) for v in focus_traj_prefilter_bbox]
+            payload["focus_prefilter_bbox_margin_m"] = float(round(focus_prefilter_margin_m, 3))
         payload.update(pointcloud_stats)
         payload["drivezone_src_crs"] = drivezone_src_crs
         payload["drivezone_src_crs_before_alignment"] = drivezone_src_crs_before_alignment
@@ -1464,6 +1678,7 @@ def _run_patch_core(
 
     def _run_neighbor_pass(
         *,
+        pass_label: str,
         hit_buffer_m: float,
         stitch_max_dist_m: float,
         stitch_forward_dot_min: float,
@@ -1475,12 +1690,39 @@ def _run_patch_core(
             if focus_cross_sections
             else list(xsec_cross_map.values())
         )
+        trajectories_for_pass = (
+            list(focus_trajectories)
+            if bool(focus_traj_prefilter_stats.get("enabled", False)) and focus_traj_prefilter_bbox is not None
+            else list(patch_inputs.trajectories)
+        )
+        if progress is not None:
+            progress.mark(
+                "neighbor_pass_extract_start",
+                pass_label=str(pass_label),
+                traj_count=int(len(trajectories_for_pass)),
+                xsec_count=int(len(cross_sections_for_pass)),
+                focus_prefilter_enabled=bool(focus_traj_prefilter_stats.get("enabled", False)),
+                focus_prefilter_bbox=(
+                    [float(round(v, 3)) for v in focus_traj_prefilter_bbox]
+                    if focus_traj_prefilter_bbox is not None
+                    else None
+                ),
+            )
         cross_obj = extract_crossing_events(
-            patch_inputs.trajectories,
+            trajectories_for_pass,
             cross_sections_for_pass,
             hit_buffer_m=float(hit_buffer_m),
             dedup_gap_m=float(params["TRAJ_XSEC_DEDUP_GAP_M"]),
         )
+        if progress is not None:
+            progress.mark(
+                "neighbor_pass_extract_done",
+                pass_label=str(pass_label),
+                traj_with_events=int(len(cross_obj.events_by_traj)),
+                raw_hit_count=int(cross_obj.raw_hit_count),
+                dedup_drop_count=int(cross_obj.dedup_drop_count),
+                distance_gate_reject_count=int(cross_obj.n_cross_distance_gate_reject),
+            )
         levels = _as_float_list(
             params.get("STITCH_MAX_DIST_LEVELS_M"),
             fallback=[float(stitch_max_dist_m)],
@@ -1490,8 +1732,14 @@ def _run_patch_core(
         else:
             levels = [float(stitch_max_dist_m)]
 
+        if progress is not None:
+            progress.mark(
+                "neighbor_pass_support_start",
+                pass_label=str(pass_label),
+                focus_src_count=(int(len(focus_src_nodeids)) if focus_src_nodeids is not None else None),
+            )
         supports_seed_obj = build_pair_supports(
-            patch_inputs.trajectories,
+            trajectories_for_pass,
             cross_obj.events_by_traj,
             node_type_map=seed_type_map,
             trj_sample_step_m=float(params["TRJ_SAMPLE_STEP_M"]),
@@ -1530,7 +1778,7 @@ def _run_patch_core(
         rebuild_with_inferred = bool(int(params.get("STEP1_REBUILD_SUPPORTS_WITH_INFERRED_TYPES", 0)))
         if rebuild_with_inferred:
             supports_obj = build_pair_supports(
-                patch_inputs.trajectories,
+                trajectories_for_pass,
                 cross_obj.events_by_traj,
                 node_type_map=nt_map,
                 trj_sample_step_m=float(params["TRJ_SAMPLE_STEP_M"]),
@@ -1563,6 +1811,14 @@ def _run_patch_core(
             )
         else:
             supports_obj = supports_seed_obj
+        if progress is not None:
+            progress.mark(
+                "neighbor_pass_support_done",
+                pass_label=str(pass_label),
+                support_pair_count=int(len(supports_obj.supports)),
+                unresolved_count=int(len(supports_obj.unresolved_events)),
+                stitch_accept_count=int(supports_obj.stitch_accept_count),
+            )
         return cross_obj, supports_obj, nt_map, indeg_map, outdeg_map
 
     def _result_src_nodeid(item: dict[str, Any]) -> int | None:
@@ -1670,6 +1926,7 @@ def _run_patch_core(
         return merged
 
     pass1_cross, pass1_supports, pass1_node_type_map, pass1_in_degree, pass1_out_degree = _run_neighbor_pass(
+        pass_label="pass1",
         hit_buffer_m=float(params["TRAJ_XSEC_HIT_BUFFER_M"]),
         stitch_max_dist_m=float(params["STITCH_MAX_DIST_M"]),
         stitch_forward_dot_min=float(params["STITCH_FORWARD_DOT_MIN"]),
@@ -1752,6 +2009,7 @@ def _run_patch_core(
                 focus_src_count=(int(len(pass2_focus_src_nodeids)) if pass2_focus_src_nodeids is not None else None),
             )
         pass2_cross, pass2_supports, pass2_node_type_map, pass2_in_degree, pass2_out_degree = _run_neighbor_pass(
+            pass_label="pass2",
             hit_buffer_m=float(params["PASS2_TRAJ_XSEC_HIT_BUFFER_M"]),
             stitch_max_dist_m=float(params["PASS2_STITCH_MAX_DIST_M"]),
             stitch_forward_dot_min=float(params["PASS2_STITCH_FORWARD_DOT_MIN"]),

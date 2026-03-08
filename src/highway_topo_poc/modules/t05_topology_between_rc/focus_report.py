@@ -139,6 +139,11 @@ def build_focus_report(*, run_dir: Path, pairs: list[tuple[int, int]]) -> str:
         "t_build_surfaces_total",
         "focus_pair_filter_count",
         "focus_src_nodeid_count",
+        "focus_cross_section_count",
+        "focus_prefilter_enabled",
+        "focus_prefilter_trajectory_total",
+        "focus_prefilter_trajectory_count",
+        "focus_prefilter_trajectory_filtered_count",
     ):
         if key in metrics_payload:
             lines.append(f"- {key}={json.dumps(metrics_payload.get(key), ensure_ascii=False)}")
