@@ -6598,6 +6598,7 @@ def _evaluate_candidate_road(
     road["same_pair_multi_road_branch_id"] = str(candidate_branch_id or "")
     road["step1_same_pair_multichain"] = bool(same_pair_multichain)
     road["same_pair_multi_road_support_mode"] = (support_mode_norm if bool(same_pair_multichain) else None)
+    road["same_pair_multi_road_geometry_mode"] = None
     road["cluster_count"] = int(parent_support.cluster_count)
     road["main_cluster_ratio"] = float(parent_support.main_cluster_ratio)
     road["cluster_sep_m_est"] = parent_support.cluster_sep_m_est
@@ -6741,6 +6742,17 @@ def _evaluate_candidate_road(
         max(0.0, min(1.0, float(params.get("STEP2_SEGMENT_CORRIDOR_MIN_INSIDE_RATIO", 0.999))))
     )
     primary_shape_ref_metric = center.shape_ref_metric if _is_valid_linestring(center.shape_ref_metric) else shape_ref_hint_for_center
+    same_pair_direct_fallback_line = None
+    if (
+        bool(same_pair_multichain)
+        and support_mode_norm == "road_prior_fallback"
+        and road_prior_shape_ref_valid
+    ):
+        same_pair_direct_fallback_line = _fallback_geometry_from_shape_ref(
+            shape_ref_line=road_prior_shape_ref_metric,
+            src_xsec=src_xsec,
+            dst_xsec=dst_xsec,
+        )
 
     center_empty_like = bool(HARD_CENTER_EMPTY in set(center.hard_flags)) or (not _is_valid_linestring(center.centerline_metric))
     if center_empty_like:
@@ -6808,6 +6820,16 @@ def _evaluate_candidate_road(
     road_line = center.centerline_metric
     centerline_fallback_used = False
     center_empty_downgraded = False
+    if _is_valid_linestring(same_pair_direct_fallback_line):
+        road_line = same_pair_direct_fallback_line
+        centerline_fallback_used = True
+        road["same_pair_multi_road_geometry_mode"] = "road_prior_direct_fallback"
+        road["endpoint_fallback_mode_src"] = str(
+            road.get("endpoint_fallback_mode_src") or "road_prior_direct_fallback"
+        )
+        road["endpoint_fallback_mode_dst"] = str(
+            road.get("endpoint_fallback_mode_dst") or "road_prior_direct_fallback"
+        )
     if not (isinstance(road_line, LineString) and (not road_line.is_empty)):
         fallback_line = _fallback_geometry_from_shape_ref(
             shape_ref_line=primary_shape_ref_metric,

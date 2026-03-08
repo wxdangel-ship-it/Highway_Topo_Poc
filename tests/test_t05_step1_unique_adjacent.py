@@ -1583,6 +1583,125 @@ def test_topology_unique_mode_same_pair_multichain_uses_road_prior_fallback_for_
     assert int(out["metrics_payload"].get("same_pair_partial_unresolved_pair_count", 0)) == 0
 
 
+def test_evaluate_candidate_road_prefers_direct_road_prior_geometry_for_same_pair_fallback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
+    )
+    params = dict(pipeline.DEFAULT_PARAMS)
+    src_xsec = LineString([(0.0, -5.0), (0.0, 15.0)])
+    dst_xsec = LineString([(100.0, -5.0), (100.0, 15.0)])
+    road_prior_line = LineString([(0.0, 10.0), (100.0, 10.0)])
+    bad_centerline = LineString([(0.0, 0.0), (100.0, 0.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids=set(),
+        support_event_count=0,
+        traj_segments=[],
+        src_cross_points=[Point(0.0, 10.0)],
+        dst_cross_points=[Point(100.0, 10.0)],
+        hard_anomalies={HARD_MULTI_ROAD},
+    )
+    parent_support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"parent"},
+        support_event_count=1,
+        traj_segments=[road_prior_line],
+        src_cross_points=[Point(0.0, 10.0)],
+        dst_cross_points=[Point(100.0, 10.0)],
+        hard_anomalies={HARD_MULTI_ROAD},
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: geom_mod.CenterEstimate(
+            centerline_metric=bad_centerline,
+            shape_ref_metric=bad_centerline,
+            lb_path_found=False,
+            lb_path_edge_count=0,
+            lb_path_length_m=None,
+            stable_offset_m_src=None,
+            stable_offset_m_dst=None,
+            center_sample_coverage=0.0,
+            width_med_m=None,
+            width_p90_m=None,
+            max_turn_deg_per_10m=None,
+            used_lane_boundary=False,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="none",
+            dst_cut_mode="none",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
+            soft_flags=set(),
+            hard_flags=set(),
+            diagnostics={},
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: ({}, set(), set(), []),
+    )
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="merge",
+        dst_type="merge",
+        support=support,
+        parent_support=parent_support,
+        cluster_id=1,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": False, "surface_metric": None, "timing_ms": 0.0},
+        shape_ref_hint_metric=road_prior_line,
+        segment_corridor_metric=None,
+        road_prior_shape_ref_metric=road_prior_line,
+        step1_used_road_prior=True,
+        step1_road_prior_mode="step1_no_traj",
+        same_pair_multichain=True,
+        candidate_branch_id="1_2__b1",
+        support_mode="road_prior_fallback",
+    )
+
+    geom = road.get("_geometry_metric")
+    assert isinstance(geom, LineString)
+    assert float(geom.distance(road_prior_line)) <= 1e-6
+    assert str(road.get("same_pair_multi_road_geometry_mode")) == "road_prior_direct_fallback"
+    assert str(road.get("endpoint_fallback_mode_src")) == "road_prior_direct_fallback"
+    assert str(road.get("endpoint_fallback_mode_dst")) == "road_prior_direct_fallback"
+    assert bool(road.get("_candidate_has_geometry", False)) is True
+
+
 def test_same_pair_resolution_stats_mark_partial_unresolved_pair() -> None:
     valid = {
         "road_id": "1_2__ch1",
