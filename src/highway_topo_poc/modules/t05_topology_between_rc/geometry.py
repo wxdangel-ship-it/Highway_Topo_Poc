@@ -4021,8 +4021,13 @@ def _xsec_half_extent(selected: LineString, anchor_xy: tuple[float, float], *, n
     if selected.is_empty or selected.length <= 1e-6:
         return 0.0
     coords = np.asarray(selected.coords, dtype=np.float64)
-    if coords.shape[0] == 0:
+    if coords.ndim != 2 or coords.shape[0] == 0 or coords.shape[1] < 2:
         return 0.0
+    coords = coords[:, :2]
+    finite = np.isfinite(coords[:, 0]) & np.isfinite(coords[:, 1])
+    if not np.any(finite):
+        return 0.0
+    coords = coords[finite, :]
     rel = coords - np.asarray([float(anchor_xy[0]), float(anchor_xy[1])], dtype=np.float64)[None, :]
     proj = rel[:, 0] * float(nx) + rel[:, 1] * float(ny)
     if proj.size == 0:

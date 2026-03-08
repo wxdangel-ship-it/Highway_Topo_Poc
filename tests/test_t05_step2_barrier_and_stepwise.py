@@ -17,6 +17,7 @@ from highway_topo_poc.modules.t05_topology_between_rc.geometry import (
     _apply_endpoint_trend_projection,
     _build_xsec_road_for_endpoint,
     _choose_shape_ref_with_graph,
+    _xsec_half_extent,
     PairSupport,
 )
 from highway_topo_poc.modules.t05_topology_between_rc import pipeline
@@ -161,6 +162,44 @@ def test_role_outward_cut_shifts_xsec_for_diverge_src() -> None:
     cross_mid = cross_ref.interpolate(0.5, normalized=True)
     assert pytest.approx(float(cross_mid.x), abs=1e-6) == 5.0
     assert str(out.get("selected_by")) != "fallback_short"
+
+
+def test_xsec_half_extent_accepts_3d_linestring() -> None:
+    selected = LineString([(10.0, -4.0, 7.0), (10.0, 6.0, 7.0)])
+
+    left = _xsec_half_extent(selected, (10.0, 0.0), nx=0.0, ny=-1.0)
+    right = _xsec_half_extent(selected, (10.0, 0.0), nx=0.0, ny=1.0)
+
+    assert pytest.approx(left, abs=1e-6) == 4.0
+    assert pytest.approx(right, abs=1e-6) == 6.0
+
+
+def test_step1_pair_endpoint_xsec_accepts_3d_seed() -> None:
+    out = pipeline._build_step1_pair_endpoint_xsec(
+        xsec_seed=LineString([(0.0, -10.0, 2.0), (0.0, 10.0, 2.0)]),
+        endpoint_tag="src",
+        node_type="diverge",
+        shape_ref_line=LineString([(0.0, 0.0), (100.0, 0.0)]),
+        support=PairSupport(
+            src_nodeid=1,
+            dst_nodeid=2,
+            support_traj_ids={"t0"},
+            support_event_count=1,
+            traj_segments=[LineString([(5.0, 0.0), (100.0, 0.0)])],
+            src_cross_points=[Point(0.0, 0.0)],
+            dst_cross_points=[Point(100.0, 0.0)],
+            evidence_traj_ids=["t0"],
+            cluster_count=1,
+            main_cluster_ratio=1.0,
+        ),
+        drivezone_zone_metric=None,
+        gore_zone_metric=None,
+        params=dict(pipeline.DEFAULT_PARAMS),
+    )
+
+    selected = out.get("xsec_road_selected")
+    assert isinstance(selected, LineString)
+    assert not selected.is_empty
 
 
 def test_step1_prefers_non_gore_corridor_at_constrained_end() -> None:
