@@ -3092,6 +3092,125 @@ def test_topology_unique_passes_allowed_pairs_to_support_builder(tmp_path: Path,
     assert int(out["metrics_payload"].get("step1_unique_pair_count", 0)) == 1
 
 
+def test_topology_unique_focus_pair_filters_support_builder(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    road_path = tmp_path / "RCSDRoad.geojson"
+    road_payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "geometry": None, "properties": {"snodeid": 1, "enodeid": 2, "direction": 2}},
+            {"type": "Feature", "geometry": None, "properties": {"snodeid": 3, "enodeid": 4, "direction": 2}},
+        ],
+    }
+    road_path.write_text(json.dumps(road_payload, ensure_ascii=False), encoding="utf-8")
+    base_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 10.0), _mk_xsec(3, 20.0), _mk_xsec(4, 30.0)],
+    )
+    patch_inputs = PatchInputs(
+        patch_id=base_inputs.patch_id,
+        patch_dir=base_inputs.patch_dir,
+        projection=base_inputs.projection,
+        projection_to_metric=base_inputs.projection_to_metric,
+        projection_to_input=base_inputs.projection_to_input,
+        intersection_lines=base_inputs.intersection_lines,
+        lane_boundaries_metric=base_inputs.lane_boundaries_metric,
+        node_kind_map=base_inputs.node_kind_map,
+        trajectories=base_inputs.trajectories,
+        drivezone_zone_metric=base_inputs.drivezone_zone_metric,
+        drivezone_source_path=base_inputs.drivezone_source_path,
+        divstrip_zone_metric=base_inputs.divstrip_zone_metric,
+        divstrip_source_path=base_inputs.divstrip_source_path,
+        point_cloud_path=base_inputs.point_cloud_path,
+        road_prior_path=road_path,
+        tiles_dir=base_inputs.tiles_dir,
+        input_summary=base_inputs.input_summary,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "extract_crossing_events",
+        lambda *args, **kwargs: CrossingExtractResult(
+            events_by_traj={},
+            raw_hit_count=0,
+            dedup_drop_count=0,
+            n_cross_empty_skipped=0,
+            n_cross_geom_unexpected=0,
+            n_cross_distance_gate_reject=0,
+        ),
+    )
+    captured_allowed_pairs: list[set[tuple[int, int]] | None] = []
+    captured_focus_src_nodeids: list[set[int] | None] = []
+
+    def _fake_build_pair_supports(*args, **kwargs):  # type: ignore[no-untyped-def]
+        allowed_pairs = kwargs.get("allowed_pairs")
+        focus_src_nodeids = kwargs.get("focus_src_nodeids")
+        captured_allowed_pairs.append(
+            {(int(src), int(dst)) for src, dst in allowed_pairs} if allowed_pairs is not None else None
+        )
+        captured_focus_src_nodeids.append(
+            {int(v) for v in focus_src_nodeids} if focus_src_nodeids is not None else None
+        )
+        support = PairSupport(src_nodeid=1, dst_nodeid=2, support_traj_ids={"t1"}, support_event_count=1, repr_traj_ids=["t1"])
+        return PairSupportBuildResult(
+            supports={(1, 2): support},
+            unresolved_events=[],
+            graph_node_count=0,
+            graph_edge_count=0,
+            stitch_candidate_count=0,
+            stitch_edge_count=0,
+            stitch_query_count=0,
+            stitch_candidates_total=0,
+            stitch_reject_dist_count=0,
+            stitch_reject_angle_count=0,
+            stitch_reject_forward_count=0,
+            stitch_accept_count=0,
+            stitch_levels_used_hist={},
+            ambiguous_events=[],
+            next_crossing_candidates=[],
+            node_dst_votes={1: {2: 1}},
+        )
+
+    monkeypatch.setattr(pipeline, "build_pair_supports", _fake_build_pair_supports)
+    monkeypatch.setattr(
+        pipeline,
+        "infer_node_types",
+        lambda **kwargs: ({1: "unknown", 2: "unknown", 3: "unknown", 4: "unknown"}, {}, {}),
+    )
+
+    def _fake_step1_corridor(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return {
+            "strategy": "general",
+            "hard_reason": "CENTER_ESTIMATE_EMPTY",
+            "hard_hint": "unit_test_force_stop_after_step1",
+            "corridor_count": 1,
+            "main_corridor_ratio": 1.0,
+            "shape_ref_line": None,
+            "gore_fallback_used_src": False,
+            "gore_fallback_used_dst": False,
+            "traj_drop_count_by_drivezone": 0,
+            "drivezone_fallback_used": False,
+        }
+
+    monkeypatch.setattr(pipeline, "_build_step1_corridor_for_pair", _fake_step1_corridor)
+
+    params = dict(pipeline.DEFAULT_PARAMS)
+    params["FOCUS_PAIR_FILTER"] = [{"src_nodeid": 1, "dst_nodeid": 2}]
+    params["FOCUS_SRC_NODEIDS"] = [1]
+    out = pipeline._run_patch_core(
+        patch_inputs,
+        params=params,
+        run_id="unit_run",
+        repo_root=tmp_path,
+    )
+
+    assert captured_allowed_pairs
+    assert captured_allowed_pairs[0] == {(1, 2)}
+    assert captured_focus_src_nodeids
+    assert captured_focus_src_nodeids[0] == {1}
+    assert out["debug_json_payloads"]["debug/focus_filter.json"]["pairs"] == [{"src_nodeid": 1, "dst_nodeid": 2}]
+    assert len(out["debug_json_payloads"]["debug/step1_pair_straight_segments.geojson"]["features"]) == 1
+
+
 def test_run_patch_core_uses_shared_intersection_alias_lookup(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     src_xsec = CrossSection(
         nodeid=9102,

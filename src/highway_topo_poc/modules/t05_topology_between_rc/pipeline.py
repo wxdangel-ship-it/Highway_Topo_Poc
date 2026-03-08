@@ -255,6 +255,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "TRAJ_SPLIT_MAX_GAP_M": TRAJ_SPLIT_MAX_GAP_M_DEFAULT,
     "TRAJ_SPLIT_MAX_TIME_GAP_S": TRAJ_SPLIT_MAX_TIME_GAP_S_DEFAULT,
     "TRAJ_SPLIT_MAX_SEQ_GAP": TRAJ_SPLIT_MAX_SEQ_GAP_DEFAULT,
+    "FOCUS_PAIR_FILTER": [],
+    "FOCUS_SRC_NODEIDS": [],
 }
 
 @dataclass(frozen=True)
@@ -414,6 +416,125 @@ def _geometry_hash(geom: BaseGeometry | None) -> str | None:
         return hashlib.sha1(bytes(geom.wkb)).hexdigest()[:20]
     except Exception:
         return None
+
+
+def _normalize_focus_pair_filter(raw: Any) -> set[tuple[int, int]]:
+    if raw is None:
+        return set()
+    if isinstance(raw, (str, bytes)):
+        items: Sequence[Any] = [raw]
+    elif isinstance(raw, Sequence):
+        items = list(raw)
+    else:
+        items = [raw]
+    out: set[tuple[int, int]] = set()
+    for item in items:
+        src_raw = None
+        dst_raw = None
+        if isinstance(item, dict):
+            src_raw = item.get("src_nodeid", item.get("src"))
+            dst_raw = item.get("dst_nodeid", item.get("dst"))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            src_raw, dst_raw = item[0], item[1]
+        else:
+            text = str(item or "").strip()
+            for sep in ("->", ":", ","):
+                if sep not in text:
+                    continue
+                lhs, rhs = text.split(sep, 1)
+                src_raw, dst_raw = lhs.strip(), rhs.strip()
+                break
+        if src_raw is None or dst_raw is None:
+            continue
+        try:
+            out.add((int(src_raw), int(dst_raw)))
+        except Exception:
+            continue
+    return out
+
+
+def _normalize_focus_src_nodeids(
+    raw: Any,
+    *,
+    focus_pairs: set[tuple[int, int]] | None = None,
+) -> set[int]:
+    out = {int(src) for src, _ in (focus_pairs or set())}
+    if raw is None:
+        return out
+    if isinstance(raw, (str, bytes)):
+        items: Sequence[Any] = [raw]
+    elif isinstance(raw, Sequence):
+        items = list(raw)
+    else:
+        items = [raw]
+    for item in items:
+        if item is None:
+            continue
+        if isinstance(item, dict):
+            value = item.get("src_nodeid", item.get("nodeid"))
+            if value is None:
+                continue
+            try:
+                out.add(int(value))
+            except Exception:
+                continue
+            continue
+        if isinstance(item, str):
+            text = str(item or "").strip()
+            if not text:
+                continue
+            for token in text.split(","):
+                tok = token.strip()
+                if not tok:
+                    continue
+                try:
+                    out.add(int(tok))
+                except Exception:
+                    continue
+            continue
+        try:
+            out.add(int(item))
+        except Exception:
+            continue
+    return out
+
+
+def _pairs_to_dst_map(pairs: set[tuple[int, int]]) -> dict[int, set[int]]:
+    out: dict[int, set[int]] = {}
+    for src_i, dst_i in sorted(((int(src), int(dst)) for src, dst in pairs), key=lambda it: (it[0], it[1])):
+        out.setdefault(int(src_i), set()).add(int(dst_i))
+    return out
+
+
+def _filter_debug_features_for_focus(
+    features: Sequence[dict[str, Any]],
+    *,
+    focus_pairs: set[tuple[int, int]],
+    focus_src_nodeids: set[int],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for feat in features:
+        if not isinstance(feat, dict):
+            continue
+        props = feat.get("properties")
+        if not isinstance(props, dict):
+            continue
+        try:
+            src_i = int(props.get("src_nodeid"))
+        except Exception:
+            src_i = None
+        try:
+            dst_i = int(props.get("dst_nodeid"))
+        except Exception:
+            dst_i = None
+        if src_i is None:
+            continue
+        if focus_pairs and dst_i is not None and (int(src_i), int(dst_i)) in focus_pairs:
+            out.append(dict(feat))
+            continue
+        if focus_src_nodeids and int(src_i) in focus_src_nodeids:
+            out.append(dict(feat))
+    return out
 
 
 def _build_traj_lookup_indexes(
@@ -861,6 +982,22 @@ def _run_patch_core(
             )
     # Step1 must consume only cross-sections that pass Step0 audit/gate.
     node_ids = sorted(int(k) for k in xsec_cross_lookup_map.keys())
+    focus_pair_filter = _normalize_focus_pair_filter(params.get("FOCUS_PAIR_FILTER"))
+    focus_src_nodeids_filter = _normalize_focus_src_nodeids(
+        params.get("FOCUS_SRC_NODEIDS"),
+        focus_pairs=focus_pair_filter,
+    )
+    if bool(int(params.get("DEBUG_DUMP", 0))) and (focus_pair_filter or focus_src_nodeids_filter):
+        debug_json_payloads["debug/focus_filter.json"] = {
+            "pairs": [
+                {"src_nodeid": int(src), "dst_nodeid": int(dst)}
+                for src, dst in sorted(focus_pair_filter, key=lambda it: (it[0], it[1]))
+            ],
+            "src_nodeids": [int(v) for v in sorted(focus_src_nodeids_filter)],
+        }
+    for src_i, dst_i in sorted(focus_pair_filter, key=lambda it: (int(it[0]), int(it[1]))):
+        pair_stage = _ensure_pair_stage_entry(int(src_i), int(dst_i))
+        pair_stage["selected_or_rejected_stage"] = "focus_requested"
     pair_cluster_norm_stats: dict[str, Any] = {
         "step1_pair_cluster_disabled": False,
         "step1_pair_cluster_disabled_pair_count": 0,
@@ -944,6 +1081,37 @@ def _run_patch_core(
         else:
             step1_topology_fallback_reason = "road_prior_graph_empty_or_missing"
 
+    if focus_pair_filter or focus_src_nodeids_filter:
+        step1_topology_allowed_pairs = {
+            (int(src_i), int(dst_i))
+            for src_i, dst_i in step1_topology_allowed_pairs
+            if (not focus_pair_filter or (int(src_i), int(dst_i)) in focus_pair_filter)
+            and (not focus_src_nodeids_filter or int(src_i) in focus_src_nodeids_filter)
+        }
+        step1_topology_allowed_dst_map = _pairs_to_dst_map(step1_topology_allowed_pairs)
+        if focus_src_nodeids_filter:
+            step1_topology_node_decisions = {
+                int(src_i): dict(decision)
+                for src_i, decision in step1_topology_node_decisions.items()
+                if int(src_i) in focus_src_nodeids_filter
+            }
+            step1_topology_anchor_decisions = {
+                str(anchor_id): dict(anchor)
+                for anchor_id, anchor in step1_topology_anchor_decisions.items()
+                if int(anchor.get("src_nodeid", -1)) in focus_src_nodeids_filter
+            }
+        step1_pair_straight_features = _filter_debug_features_for_focus(
+            step1_pair_straight_features,
+            focus_pairs=focus_pair_filter,
+            focus_src_nodeids=focus_src_nodeids_filter,
+        )
+        step1_topo_chain_features = _filter_debug_features_for_focus(
+            step1_topo_chain_features,
+            focus_pairs=focus_pair_filter,
+            focus_src_nodeids=focus_src_nodeids_filter,
+        )
+        step1_topology_stats["accepted_pair_count"] = int(len(step1_topology_allowed_pairs))
+
     step1_road_prior_filter_enabled = (
         (not bool(step1_topology_enabled))
         and bool(int(params.get("STEP1_USE_ROAD_PRIOR_ADJ_FILTER", 1)))
@@ -957,6 +1125,25 @@ def _run_patch_core(
     step1_allowed_pair_filter_set: set[tuple[int, int]] | None = (
         set(step1_topology_allowed_pairs) if bool(step1_topology_enabled) else None
     )
+    if focus_pair_filter:
+        step1_allowed_pair_filter_set = (
+            set(step1_allowed_pair_filter_set).intersection(focus_pair_filter)
+            if step1_allowed_pair_filter_set is not None
+            else set(focus_pair_filter)
+        )
+    if focus_src_nodeids_filter:
+        if step1_allowed_pair_filter_set is not None:
+            step1_allowed_pair_filter_set = {
+                (int(src_i), int(dst_i))
+                for src_i, dst_i in step1_allowed_pair_filter_set
+                if int(src_i) in focus_src_nodeids_filter
+            }
+        if step1_allowed_dst_filter_map is not None:
+            step1_allowed_dst_filter_map = {
+                int(src_i): {int(v) for v in dsts}
+                for src_i, dsts in step1_allowed_dst_filter_map.items()
+                if int(src_i) in focus_src_nodeids_filter
+            }
     step1_road_prior_reject_crossing_count = 0
     step1_road_prior_reject_candidate_total = 0
     step1_resolved_by_dist_margin_count = 0
@@ -1026,6 +1213,12 @@ def _run_patch_core(
         payload["t_shortest_path_per_k_ms"] = {k: float(round(v, 3)) for k, v in sorted(shortest_timing_per_k.items())}
         payload["traj_surface_cache_hit_count"] = int(surface_cache_hit_count)
         payload["traj_surface_cache_miss_count"] = int(surface_cache_miss_count)
+        payload["focus_pair_filter_count"] = int(len(focus_pair_filter))
+        payload["focus_src_nodeid_count"] = int(len(focus_src_nodeids_filter))
+        if focus_pair_filter:
+            payload["focus_pairs"] = [f"{int(src)}->{int(dst)}" for src, dst in sorted(focus_pair_filter)]
+        if focus_src_nodeids_filter:
+            payload["focus_src_nodeids"] = [int(v) for v in sorted(focus_src_nodeids_filter)]
         payload.update(pointcloud_stats)
         payload["drivezone_src_crs"] = drivezone_src_crs
         payload["drivezone_src_crs_before_alignment"] = drivezone_src_crs_before_alignment
@@ -1372,6 +1565,7 @@ def _run_patch_core(
         stitch_max_dist_m=float(params["STITCH_MAX_DIST_M"]),
         stitch_forward_dot_min=float(params["STITCH_FORWARD_DOT_MIN"]),
         neighbor_max_dist_m=float(params["NEIGHBOR_MAX_DIST_M"]),
+        focus_src_nodeids=(set(focus_src_nodeids_filter) if focus_src_nodeids_filter else None),
     )
     if progress is not None:
         progress.mark(
@@ -1597,6 +1791,16 @@ def _run_patch_core(
     preferred_dst_by_src: dict[int, int] = {}
     if step1_topology_enabled:
         accepted_pairs: set[tuple[int, int]] = set(step1_topology_allowed_pairs)
+        for src_i, dst_i in sorted(focus_pair_filter, key=lambda it: (int(it[0]), int(it[1]))):
+            if (int(src_i), int(dst_i)) in accepted_pairs:
+                continue
+            pair_stage = _ensure_pair_stage_entry(int(src_i), int(dst_i))
+            pair_stage["topology_anchor_status"] = "not_accepted"
+            pair_stage["road_prior_shape_ref_available"] = bool(
+                _is_valid_linestring(road_prior_pair_shape_ref_map.get((int(src_i), int(dst_i))))
+            )
+            if pair_stage.get("selected_or_rejected_stage") in {None, "focus_requested"}:
+                pair_stage["selected_or_rejected_stage"] = "topology_not_accepted"
         for src_i, decision in sorted(step1_topology_node_decisions.items(), key=lambda it: int(it[0])):
             status = str(decision.get("status") or "unresolved")
             dst_nodeids = [int(v) for v in (decision.get("dst_nodeids") or []) if v is not None]

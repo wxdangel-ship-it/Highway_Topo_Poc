@@ -20,12 +20,39 @@ def _trim_error(message: str, *, limit: int = 160) -> str:
     return text[: max(0, limit - 3)] + "..."
 
 
+def _parse_focus_pair_token(value: str) -> tuple[int, int]:
+    text = str(value or "").strip()
+    for sep in ("->", ":", ","):
+        if sep not in text:
+            continue
+        lhs, rhs = text.split(sep, 1)
+        try:
+            return int(lhs.strip()), int(rhs.strip())
+        except Exception as exc:  # pragma: no cover - argparse renders the message
+            raise argparse.ArgumentTypeError(f"invalid_focus_pair={value}") from exc
+    raise argparse.ArgumentTypeError(f"invalid_focus_pair={value}")
+
+
 def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="t05_topology_between_rc")
     p.add_argument("--data_root", default="data/synth_local")
     p.add_argument("--patch_id", default=None)
     p.add_argument("--run_id", default="auto")
     p.add_argument("--out_root", default="outputs/_work/t05_topology_between_rc")
+    p.add_argument(
+        "--focus_pair",
+        action="append",
+        type=_parse_focus_pair_token,
+        default=[],
+        help="Limit execution to a specific pair. Repeatable. Format: SRC:DST or SRC->DST.",
+    )
+    p.add_argument(
+        "--focus_src_nodeid",
+        action="append",
+        type=int,
+        default=[],
+        help="Limit execution to specific src nodeids. Repeatable.",
+    )
     p.add_argument(
         "--traj_split_max_gap_m",
         type=float,
@@ -386,6 +413,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     if not level_values:
         level_values = [float(args.surf_slice_half_win_m), 5.0, 10.0]
 
+    focus_pairs = [(int(src), int(dst)) for src, dst in list(args.focus_pair or [])]
+    focus_src_nodeids = {int(v) for v in list(args.focus_src_nodeid or [])}
+    focus_src_nodeids.update(int(src) for src, _ in focus_pairs)
+
     params_override = {
         "TRAJ_SPLIT_MAX_GAP_M": float(args.traj_split_max_gap_m),
         "TRAJ_SPLIT_MAX_TIME_GAP_S": float(args.traj_split_max_time_gap_s),
@@ -491,6 +522,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         "STEP0_STATS_ENABLE": int(args.step0_stats_enable),
         "DEBUG_LAYER_MAX_ITEMS": int(args.debug_layer_max_items),
     }
+    if focus_pairs:
+        params_override["FOCUS_PAIR_FILTER"] = [
+            {"src_nodeid": int(src), "dst_nodeid": int(dst)}
+            for src, dst in focus_pairs
+        ]
+    if focus_src_nodeids:
+        params_override["FOCUS_SRC_NODEIDS"] = sorted(int(v) for v in focus_src_nodeids)
     levels = list(DEFAULT_PARAMS.get("STITCH_MAX_DIST_LEVELS_M", [float(args.stitch_max_dist_m)]))
     if levels:
         levels[0] = float(args.stitch_max_dist_m)
