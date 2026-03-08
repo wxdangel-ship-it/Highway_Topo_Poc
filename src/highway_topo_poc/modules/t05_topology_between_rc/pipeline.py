@@ -11215,6 +11215,8 @@ def _should_enable_road_prior_gap_fill(
     if bool(traj_surface_enforced):
         return False
     support_mode_norm = str(support_mode or "").strip().lower()
+    if support_mode_norm == "topology_road_prior_fallback":
+        return True
     if bool(same_pair_multichain) and support_mode_norm == "road_prior_fallback":
         return True
     if not bool(step1_used_road_prior):
