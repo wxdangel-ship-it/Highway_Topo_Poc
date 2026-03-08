@@ -60,6 +60,7 @@ def test_build_focus_report_extracts_pair_stage_and_outputs(tmp_path: Path) -> N
                         "src_nodeid": 23287538,
                         "dst_nodeid": 765141,
                         "support_fallback_failure_stage": "reach_xsec",
+                        "support_fallback_src_reach_allow_m": 40.0,
                         "selected_or_rejected_stage": "support_missing_after_topology",
                     }
                 ]
@@ -107,5 +108,6 @@ def test_build_focus_report_extracts_pair_stage_and_outputs(tmp_path: Path) -> N
 
     assert "pair: 23287538->765141" in report
     assert '"support_fallback_failure_stage": "reach_xsec"' in report
+    assert '"support_fallback_src_reach_allow_m": 40.0' in report
     assert "Road.geojson: hits=1" in report
     assert "ROAD_OUTSIDE_DRIVEZONE" in report

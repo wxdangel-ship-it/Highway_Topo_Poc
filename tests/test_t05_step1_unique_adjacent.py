@@ -2171,6 +2171,44 @@ def test_build_topology_road_prior_fallback_support_reports_reach_xsec_failure()
     assert float(debug_out["dst_gap_m"] or 0.0) > float(debug_out["reach_xsec_m"] or 0.0)
 
 
+def test_build_topology_road_prior_fallback_support_allows_shifted_entry_xsec_bonus(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    params = dict(pipeline.DEFAULT_PARAMS)
+    shape_ref = LineString([(23.0, 0.0), (100.0, 0.0)])
+    src_xsec = LineString([(0.0, -8.0), (0.0, 8.0)])
+    dst_xsec = LineString([(100.0, -8.0), (100.0, 8.0)])
+    src_entry_xsec = LineString([(-15.0, -8.0), (-15.0, 8.0)])
+    dst_entry_xsec = LineString([(127.0, -8.0), (127.0, 8.0)])
+    debug_out: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        pipeline,
+        "_resolve_fallback_support_entry_xsecs",
+        lambda **kwargs: (shape_ref, src_entry_xsec, dst_entry_xsec),
+    )
+
+    out = pipeline._build_topology_road_prior_fallback_support(
+        pair=(1, 2),
+        shape_ref_metric=shape_ref,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=Polygon([(-30.0, -20.0), (140.0, -20.0), (140.0, 20.0), (-30.0, 20.0)]),
+        gore_zone_metric=Polygon(),
+        src_type="diverge",
+        dst_type="merge",
+        params=params,
+        debug_out=debug_out,
+    )
+
+    assert out is not None
+    assert debug_out["failure_stage"] == "accepted"
+    assert float(debug_out["src_gap_m"] or 0.0) > float(debug_out["reach_xsec_m"] or 0.0)
+    assert float(debug_out["dst_gap_m"] or 0.0) > float(debug_out["reach_xsec_m"] or 0.0)
+    assert float(debug_out["src_reach_allow_m"] or 0.0) >= float(debug_out["src_gap_m"] or 0.0)
+    assert float(debug_out["dst_reach_allow_m"] or 0.0) >= float(debug_out["dst_gap_m"] or 0.0)
+    assert float(debug_out["src_entry_xsec_shift_m"] or 0.0) > 0.0
+    assert float(debug_out["dst_entry_xsec_shift_m"] or 0.0) > 0.0
+
+
 def test_build_topology_road_prior_fallback_support_reports_drivezone_failure() -> None:
     params = dict(pipeline.DEFAULT_PARAMS)
     shape_ref = LineString([(5.0, 0.0), (95.0, 0.0)])
@@ -2235,6 +2273,116 @@ def test_same_pair_resolution_stats_mark_partial_unresolved_pair() -> None:
     assert unresolved["same_pair_resolution_state"] == "partial_unresolved"
     assert valid["same_pair_final_output_count_for_pair"] == 1
     assert valid["same_pair_unresolved_branch_count_for_pair"] == 1
+
+
+def test_evaluate_candidate_road_same_pair_traj_support_rescues_with_branch_shape_ref(
+    tmp_path: Path, monkeypatch
+) -> None:
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
+    )
+    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -15.0), (120.0, -15.0), (120.0, 15.0), (-20.0, 15.0)])
+    params = dict(pipeline.DEFAULT_PARAMS)
+    src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
+    dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
+    road_prior_line = LineString([(0.0, 0.0), (100.0, 0.0)])
+    bad_centerline = LineString([(0.0, 0.0), (30.0, 0.0), (50.0, 25.0), (70.0, 0.0), (100.0, 0.0)])
+    corridor_zone = road_prior_line.buffer(0.5, cap_style=2)
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t0", "t1"},
+        support_event_count=2,
+        traj_segments=[road_prior_line, road_prior_line],
+        src_cross_points=[Point(0.0, 0.0), Point(0.0, 0.0)],
+        dst_cross_points=[Point(100.0, 0.0), Point(100.0, 0.0)],
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: geom_mod.CenterEstimate(
+            centerline_metric=bad_centerline,
+            shape_ref_metric=road_prior_line,
+            lb_path_found=False,
+            lb_path_edge_count=0,
+            lb_path_length_m=None,
+            stable_offset_m_src=None,
+            stable_offset_m_dst=None,
+            center_sample_coverage=1.0,
+            width_med_m=None,
+            width_p90_m=None,
+            max_turn_deg_per_10m=None,
+            used_lane_boundary=False,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="none",
+            dst_cut_mode="none",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
+            soft_flags=set(),
+            hard_flags=set(),
+            diagnostics={},
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: ({}, set(), set(), []),
+    )
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="merge",
+        dst_type="merge",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": False, "surface_metric": None, "timing_ms": 0.0},
+        shape_ref_hint_metric=road_prior_line,
+        segment_corridor_metric=corridor_zone,
+        road_prior_shape_ref_metric=road_prior_line,
+        step1_used_road_prior=False,
+        step1_road_prior_mode=None,
+        same_pair_multichain=True,
+        candidate_branch_id="1_2__b0",
+        support_mode="traj_support",
+    )
+
+    geom = road.get("_geometry_metric")
+    assert isinstance(geom, LineString)
+    assert float(geom.distance(road_prior_line)) <= 1e-6
+    assert str(road.get("same_pair_multi_road_geometry_mode")) == "road_prior_direct_rescue"
+    assert pipeline.HARD_ROAD_OUTSIDE_DRIVEZONE not in set(road.get("hard_reasons") or [])
+    assert pipeline._HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR not in set(road.get("hard_reasons") or [])
+    assert bool(road.get("_candidate_feasible", False)) is True
 
 
 def test_same_pair_multi_road_selection_keeps_close_parallel_branches() -> None:

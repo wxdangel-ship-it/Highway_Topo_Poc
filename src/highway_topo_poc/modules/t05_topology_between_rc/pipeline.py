@@ -780,6 +780,10 @@ def _run_patch_core(
                 "support_fallback_src_gap_m": None,
                 "support_fallback_dst_gap_m": None,
                 "support_fallback_reach_xsec_m": None,
+                "support_fallback_src_entry_xsec_shift_m": None,
+                "support_fallback_dst_entry_xsec_shift_m": None,
+                "support_fallback_src_reach_allow_m": None,
+                "support_fallback_dst_reach_allow_m": None,
                 "support_fallback_inside_ratio": None,
                 "support_fallback_inside_ratio_min": None,
                 "step1_corridor_status": None,
@@ -1954,6 +1958,10 @@ def _run_patch_core(
             pair_stage["support_fallback_src_gap_m"] = fallback_diag.get("src_gap_m")
             pair_stage["support_fallback_dst_gap_m"] = fallback_diag.get("dst_gap_m")
             pair_stage["support_fallback_reach_xsec_m"] = fallback_diag.get("reach_xsec_m")
+            pair_stage["support_fallback_src_entry_xsec_shift_m"] = fallback_diag.get("src_entry_xsec_shift_m")
+            pair_stage["support_fallback_dst_entry_xsec_shift_m"] = fallback_diag.get("dst_entry_xsec_shift_m")
+            pair_stage["support_fallback_src_reach_allow_m"] = fallback_diag.get("src_reach_allow_m")
+            pair_stage["support_fallback_dst_reach_allow_m"] = fallback_diag.get("dst_reach_allow_m")
             pair_stage["support_fallback_inside_ratio"] = fallback_diag.get("inside_ratio")
             pair_stage["support_fallback_inside_ratio_min"] = fallback_diag.get("inside_ratio_min")
             if fallback_support is not None:
@@ -4264,6 +4272,149 @@ def _line_xsec_contact_point(
     if isinstance(fallback, Point) and (not fallback.is_empty):
         return fallback
     return None
+
+
+def _line_midpoint(line: LineString | None) -> Point | None:
+    if not isinstance(line, LineString) or line.is_empty or float(line.length) <= 1e-6:
+        return None
+    try:
+        pt = line.interpolate(0.5, normalized=True)
+    except Exception:
+        return None
+    return pt if isinstance(pt, Point) and (not pt.is_empty) else None
+
+
+def _fallback_entry_xsec_shift_m(
+    *,
+    seed_xsec: LineString,
+    entry_xsec: LineString,
+) -> float | None:
+    seed_mid = _line_midpoint(seed_xsec)
+    entry_mid = _line_midpoint(entry_xsec)
+    if not isinstance(seed_mid, Point) or seed_mid.is_empty:
+        return None
+    if not isinstance(entry_mid, Point) or entry_mid.is_empty:
+        return None
+    try:
+        dist = float(seed_mid.distance(entry_mid))
+    except Exception:
+        return None
+    return float(dist) if np.isfinite(dist) else None
+
+
+def _fallback_reach_allowances(
+    *,
+    base_reach_xsec_m: float,
+    src_xsec_seed: LineString,
+    dst_xsec_seed: LineString,
+    src_entry_xsec: LineString,
+    dst_entry_xsec: LineString,
+) -> dict[str, float | None]:
+    base = float(max(1.0, base_reach_xsec_m))
+    bonus_cap_m = float(base)
+    src_shift_m = _fallback_entry_xsec_shift_m(seed_xsec=src_xsec_seed, entry_xsec=src_entry_xsec)
+    dst_shift_m = _fallback_entry_xsec_shift_m(seed_xsec=dst_xsec_seed, entry_xsec=dst_entry_xsec)
+    src_allow_m = float(base + min(bonus_cap_m, src_shift_m)) if src_shift_m is not None else float(base)
+    dst_allow_m = float(base + min(bonus_cap_m, dst_shift_m)) if dst_shift_m is not None else float(base)
+    return {
+        "base_reach_xsec_m": float(base),
+        "src_entry_xsec_shift_m": (float(src_shift_m) if src_shift_m is not None else None),
+        "dst_entry_xsec_shift_m": (float(dst_shift_m) if dst_shift_m is not None else None),
+        "src_reach_allow_m": float(src_allow_m),
+        "dst_reach_allow_m": float(dst_allow_m),
+    }
+
+
+def _line_corridor_gate_diag(
+    *,
+    line: LineString | None,
+    corridor_zone_raw: BaseGeometry | None,
+    tol_m: float,
+    min_inside_ratio: float,
+) -> dict[str, float | bool | None]:
+    out: dict[str, float | bool | None] = {
+        "inside_ratio": None,
+        "outside_len_m": None,
+        "blocked": False,
+    }
+    if not isinstance(line, LineString) or line.is_empty:
+        out["blocked"] = True
+        return out
+    if corridor_zone_raw is None or corridor_zone_raw.is_empty:
+        return out
+    corridor_zone = corridor_zone_raw
+    corridor_tol = float(max(0.0, tol_m))
+    if corridor_tol > 1e-9:
+        try:
+            buffered = corridor_zone_raw.buffer(float(corridor_tol))
+            if buffered is not None and (not buffered.is_empty):
+                corridor_zone = buffered
+        except Exception:
+            corridor_zone = corridor_zone_raw
+    inside_ratio = _line_inside_ratio(line, corridor_zone)
+    out["inside_ratio"] = float(inside_ratio) if inside_ratio is not None else None
+    try:
+        outside_len = float(max(0.0, float(line.difference(corridor_zone).length)))
+    except Exception:
+        outside_len = float(max(0.0, float(line.length)))
+    out["outside_len_m"] = float(outside_len)
+    out["blocked"] = bool(
+        (inside_ratio is None)
+        or (float(inside_ratio) + 1e-9 < float(max(0.0, min(1.0, min_inside_ratio))))
+        or (outside_len > 1e-6)
+    )
+    return out
+
+
+def _drivezone_gate_blocked(diag: dict[str, Any]) -> bool:
+    try:
+        outside_len = float(diag.get("road_outside_drivezone_len_m"))
+    except Exception:
+        outside_len = 0.0
+    endpoint_ok = (
+        diag.get("endpoint_in_drivezone_src") is not False
+        and diag.get("endpoint_in_drivezone_dst") is not False
+    )
+    return bool(outside_len > 1e-6 or (not endpoint_ok))
+
+
+def _same_pair_should_use_direct_rescue(
+    *,
+    current_line: LineString | None,
+    rescue_line: LineString | None,
+    corridor_zone_raw: BaseGeometry | None,
+    corridor_tol_m: float,
+    min_inside_ratio: float,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+) -> bool:
+    if not _is_valid_linestring(current_line) or not _is_valid_linestring(rescue_line):
+        return False
+    current_corr = _line_corridor_gate_diag(
+        line=current_line,
+        corridor_zone_raw=corridor_zone_raw,
+        tol_m=float(corridor_tol_m),
+        min_inside_ratio=float(min_inside_ratio),
+    )
+    rescue_corr = _line_corridor_gate_diag(
+        line=rescue_line,
+        corridor_zone_raw=corridor_zone_raw,
+        tol_m=float(corridor_tol_m),
+        min_inside_ratio=float(min_inside_ratio),
+    )
+    current_drive = _drivezone_gate_diagnostics(
+        road_line=current_line,
+        drivezone_zone_metric=drivezone_zone_metric,
+        gore_zone_metric=gore_zone_metric,
+    )
+    rescue_drive = _drivezone_gate_diagnostics(
+        road_line=rescue_line,
+        drivezone_zone_metric=drivezone_zone_metric,
+        gore_zone_metric=gore_zone_metric,
+    )
+    current_blocked = bool(current_corr.get("blocked", False)) or _drivezone_gate_blocked(current_drive)
+    rescue_blocked = bool(rescue_corr.get("blocked", False)) or _drivezone_gate_blocked(rescue_drive)
+    return bool(current_blocked and (not rescue_blocked))
 
 
 def _apply_step1_xsec_metrics(
@@ -7172,16 +7323,21 @@ def _evaluate_candidate_road(
     )
     primary_shape_ref_metric = center.shape_ref_metric if _is_valid_linestring(center.shape_ref_metric) else shape_ref_hint_for_center
     same_pair_direct_fallback_line = None
-    if (
-        bool(same_pair_multichain)
-        and support_mode_norm == "road_prior_fallback"
-        and road_prior_shape_ref_valid
-    ):
+    if bool(same_pair_multichain) and road_prior_shape_ref_valid:
         same_pair_direct_fallback_line = _fallback_geometry_from_shape_ref(
             shape_ref_line=road_prior_shape_ref_metric,
             src_xsec=src_xsec,
             dst_xsec=dst_xsec,
         )
+        if (
+            not _is_valid_linestring(same_pair_direct_fallback_line)
+            and _is_valid_linestring(road_prior_shape_ref_metric)
+        ):
+            same_pair_direct_fallback_line = _orient_axis_line(
+                road_prior_shape_ref_metric,
+                src_xsec=src_xsec,
+                dst_xsec=dst_xsec,
+            )
 
     center_empty_like = bool(HARD_CENTER_EMPTY in set(center.hard_flags)) or (not _is_valid_linestring(center.centerline_metric))
     if center_empty_like:
@@ -7249,7 +7405,7 @@ def _evaluate_candidate_road(
     road_line = center.centerline_metric
     centerline_fallback_used = False
     center_empty_downgraded = False
-    if _is_valid_linestring(same_pair_direct_fallback_line):
+    if _is_valid_linestring(same_pair_direct_fallback_line) and support_mode_norm == "road_prior_fallback":
         road_line = same_pair_direct_fallback_line
         centerline_fallback_used = True
         road["same_pair_multi_road_geometry_mode"] = "road_prior_direct_fallback"
@@ -7312,6 +7468,58 @@ def _evaluate_candidate_road(
                 road["endpoint_snap_dist_dst_after_m"] = float(road["endpoint_dist_to_xsec_dst_m"])
                 if road.get("_endpoint_before_dst_metric") is None:
                     road["_endpoint_before_dst_metric"] = Point(road_line.coords[-1])
+    if (
+        bool(same_pair_multichain)
+        and support_mode_norm != "road_prior_fallback"
+        and _is_valid_linestring(road_line)
+        and _is_valid_linestring(same_pair_direct_fallback_line)
+    ):
+        src_sel_metric = road.get("_xsec_road_selected_src_metric")
+        dst_sel_metric = road.get("_xsec_road_selected_dst_metric")
+        src_sel = src_sel_metric if _is_valid_linestring(src_sel_metric) else src_xsec
+        dst_sel = dst_sel_metric if _is_valid_linestring(dst_sel_metric) else dst_xsec
+        rescue_line = same_pair_direct_fallback_line
+        rescue_snapped_line, rescue_src_after_pt, rescue_dst_after_pt, rescue_src_before_dist, rescue_dst_before_dist = _fallback_bind_endpoints_to_xsec(
+            line=rescue_line,
+            src_xsec=src_sel,
+            dst_xsec=dst_sel,
+            gore_zone_metric=gore_zone_metric,
+            snap_max_m=float(max(1.0, params.get("XSEC_ENDPOINT_MAX_DIST_M", 20.0))),
+        )
+        if _is_valid_linestring(rescue_snapped_line):
+            rescue_line = rescue_snapped_line
+        if _same_pair_should_use_direct_rescue(
+            current_line=road_line,
+            rescue_line=rescue_line,
+            corridor_zone_raw=segment_corridor_for_gate,
+            corridor_tol_m=float(road.get("segment_corridor_inside_tol_m") or 0.0),
+            min_inside_ratio=float(road.get("segment_corridor_min_inside_ratio") or 0.0),
+            drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+        ):
+            road_line = rescue_line
+            centerline_fallback_used = True
+            road["same_pair_multi_road_geometry_mode"] = "road_prior_direct_rescue"
+            road["endpoint_fallback_mode_src"] = str(
+                road.get("endpoint_fallback_mode_src") or "road_prior_direct_rescue"
+            )
+            road["endpoint_fallback_mode_dst"] = str(
+                road.get("endpoint_fallback_mode_dst") or "road_prior_direct_rescue"
+            )
+            if isinstance(rescue_src_after_pt, Point) and not rescue_src_after_pt.is_empty:
+                road["_endpoint_after_src_metric"] = rescue_src_after_pt
+                road["endpoint_dist_to_xsec_src_m"] = float(rescue_src_after_pt.distance(src_sel))
+                if rescue_src_before_dist is not None:
+                    road["endpoint_snap_dist_src_before_m"] = float(rescue_src_before_dist)
+                road["endpoint_snap_dist_src_after_m"] = float(road["endpoint_dist_to_xsec_src_m"])
+                road["_endpoint_before_src_metric"] = Point(road_line.coords[0])
+            if isinstance(rescue_dst_after_pt, Point) and not rescue_dst_after_pt.is_empty:
+                road["_endpoint_after_dst_metric"] = rescue_dst_after_pt
+                road["endpoint_dist_to_xsec_dst_m"] = float(rescue_dst_after_pt.distance(dst_sel))
+                if rescue_dst_before_dist is not None:
+                    road["endpoint_snap_dist_dst_before_m"] = float(rescue_dst_before_dist)
+                road["endpoint_snap_dist_dst_after_m"] = float(road["endpoint_dist_to_xsec_dst_m"])
+                road["_endpoint_before_dst_metric"] = Point(road_line.coords[-1])
     if centerline_fallback_used and HARD_CENTER_EMPTY in hard_flags and _is_valid_linestring(road_line):
         if bool(same_pair_multichain) and _is_valid_linestring(primary_shape_ref_metric):
             hard_flags.discard(HARD_CENTER_EMPTY)
@@ -10312,6 +10520,10 @@ def _build_topology_road_prior_fallback_support(
         debug_out["src_gap_m"] = None
         debug_out["dst_gap_m"] = None
         debug_out["reach_xsec_m"] = None
+        debug_out["src_entry_xsec_shift_m"] = None
+        debug_out["dst_entry_xsec_shift_m"] = None
+        debug_out["src_reach_allow_m"] = None
+        debug_out["dst_reach_allow_m"] = None
         debug_out["inside_ratio"] = None
         debug_out["inside_ratio_min"] = None
     if not isinstance(shape_ref_metric, LineString) or shape_ref_metric.is_empty or float(shape_ref_metric.length) <= 1e-6:
@@ -10358,11 +10570,24 @@ def _build_topology_road_prior_fallback_support(
         dst_gap_m = float(shape_ref_line.distance(dst_entry_xsec))
     except Exception:
         dst_gap_m = float("inf")
+    reach_diag = _fallback_reach_allowances(
+        base_reach_xsec_m=reach_xsec_m,
+        src_xsec_seed=src_xsec,
+        dst_xsec_seed=dst_xsec,
+        src_entry_xsec=src_entry_xsec,
+        dst_entry_xsec=dst_entry_xsec,
+    )
+    src_reach_allow_m = float(reach_diag.get("src_reach_allow_m") or reach_xsec_m)
+    dst_reach_allow_m = float(reach_diag.get("dst_reach_allow_m") or reach_xsec_m)
     if debug_out is not None:
         debug_out["reach_xsec_m"] = float(reach_xsec_m)
         debug_out["src_gap_m"] = float(src_gap_m) if np.isfinite(src_gap_m) else None
         debug_out["dst_gap_m"] = float(dst_gap_m) if np.isfinite(dst_gap_m) else None
-    if src_gap_m > reach_xsec_m + 1e-6 or dst_gap_m > reach_xsec_m + 1e-6:
+        debug_out["src_entry_xsec_shift_m"] = reach_diag.get("src_entry_xsec_shift_m")
+        debug_out["dst_entry_xsec_shift_m"] = reach_diag.get("dst_entry_xsec_shift_m")
+        debug_out["src_reach_allow_m"] = float(src_reach_allow_m)
+        debug_out["dst_reach_allow_m"] = float(dst_reach_allow_m)
+    if src_gap_m > src_reach_allow_m + 1e-6 or dst_gap_m > dst_reach_allow_m + 1e-6:
         if debug_out is not None:
             debug_out["failure_stage"] = "reach_xsec"
         return None
