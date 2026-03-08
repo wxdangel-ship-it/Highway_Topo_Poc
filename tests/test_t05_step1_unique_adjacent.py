@@ -355,6 +355,47 @@ def test_topology_unique_anchor_decisions_accept_shared_member_via_borrowed_edge
     assert int(topo_stats.get("accepted_src_count", 0)) >= 2
 
 
+def test_topology_unique_anchor_decisions_filter_shared_group_sibling_pair() -> None:
+    compressed = {
+        55353307: [
+            {
+                "to": 23287538,
+                "edge_ids": ["edge_shared_sibling"],
+                "path_nodes": [55353307, 23287538],
+            }
+        ]
+    }
+    xsec_map = {
+        55353307: _mk_xsec(55353307, 0.0),
+        23287538: _mk_xsec(23287538, 10.0),
+    }
+
+    (
+        allowed_dst,
+        allowed_pairs,
+        _node_decisions,
+        anchor_decisions,
+        topo_stats,
+        _straight,
+        _chain,
+    ) = pipeline._build_topology_unique_anchor_decisions(
+        compressed,
+        cross_nodes={55353307, 23287538},
+        xsec_map=xsec_map,
+        require_unique_chain=True,
+        max_expansions=1000,
+        shared_group_members_by_nodeid={
+            55353307: [55353307, 23287538],
+            23287538: [55353307, 23287538],
+        },
+    )
+
+    assert not allowed_pairs
+    assert allowed_dst == {}
+    assert int(topo_stats.get("shared_group_sibling_filtered_anchor_count", 0)) >= 1
+    assert any(str(v.get("status")) == "filtered_shared_group_sibling" for v in anchor_decisions.values())
+
+
 def test_crossing_absorbing_state_prevents_third_party_crossing_expansion() -> None:
     src_key = "t:cross:1"
     mid_key = "t:cross:2"
@@ -1753,6 +1794,30 @@ def test_build_same_pair_multichain_fallback_support_requires_branch_to_reach_bo
     )
 
     assert out is None
+
+
+def test_build_same_pair_multichain_fallback_support_uses_wider_same_pair_reach_threshold() -> None:
+    parent_support = PairSupport(src_nodeid=1, dst_nodeid=2, hard_anomalies={HARD_MULTI_ROAD})
+    src_xsec = LineString([(0.0, 0.0), (0.0, 8.0)])
+    dst_xsec = LineString([(100.0, 0.0), (100.0, 8.0)])
+    branch_def = {
+        "branch_id": "1_2__b1",
+        "shape_ref_metric": LineString([(0.0, 20.5), (100.0, 20.5)]),
+    }
+
+    out = pipeline._build_same_pair_multichain_fallback_support(
+        parent_support,
+        branch_def=branch_def,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=Polygon([(-10.0, -10.0), (120.0, -10.0), (120.0, 30.0), (-10.0, 30.0)]),
+        params=dict(pipeline.DEFAULT_PARAMS),
+    )
+
+    assert out is not None
+    assert int(out.src_nodeid) == 1
+    assert int(out.dst_nodeid) == 2
+    assert out.hints[-1] == "same_pair_branch_road_prior_fallback"
 
 
 def test_traj_surface_cache_key_ignores_xsec_bbox_variation(tmp_path: Path) -> None:

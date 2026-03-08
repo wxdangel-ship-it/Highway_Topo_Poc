@@ -217,6 +217,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_TRAJ_IN_DRIVEZONE_MIN": 0.85,
     "STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN": 0.60,
     "STEP1_CORRIDOR_REACH_XSEC_M": 12.0,
+    "SAME_PAIR_FALLBACK_REACH_XSEC_M": 25.0,
     "TRAJ_SURF_ENDPOINT_HOLE_TOL_M": 2.0,
     "TRAJ_SURF_ENDPOINT_HOLE_IN_RATIO_MIN": 0.99,
     "ENDPOINT_ON_XSEC_TOL_M": 1.0,
@@ -9052,6 +9053,20 @@ def _build_topology_unique_anchor_decisions(
     multi_dst_anchor_count = 0
     multi_chain_anchor_count = 0
     overflow_anchor_count = 0
+    shared_group_sibling_filtered_anchor_count = 0
+
+    def _is_shared_group_sibling_pair(src_nodeid: int, dst_nodeid: int) -> bool:
+        if not shared_group_members_by_nodeid:
+            return False
+        src_i = int(src_nodeid)
+        dst_i = int(dst_nodeid)
+        if src_i == dst_i:
+            return False
+        src_members = {int(v) for v in shared_group_members_by_nodeid.get(int(src_i), [])}
+        dst_members = {int(v) for v in shared_group_members_by_nodeid.get(int(dst_i), [])}
+        if not src_members or not dst_members:
+            return False
+        return bool(src_members.intersection(dst_members))
 
     node_agg: dict[int, dict[str, Any]] = {
         int(src): {
@@ -9115,16 +9130,20 @@ def _build_topology_unique_anchor_decisions(
                     reason = _HARD_MULTI_CHAIN_SAME_DST
                     multi_chain_anchor_count += 1
                 else:
-                    status = "accepted"
-                    reason = "accepted"
-                    accepted_anchor_count += 1
                     if bool(reverse_mode):
                         pair_src = int(chosen_dst)
                         pair_dst = int(src)
                     else:
                         pair_src = int(src)
                         pair_dst = int(chosen_dst)
-                    if pair_src is not None and pair_dst is not None:
+                    if pair_src is not None and pair_dst is not None and _is_shared_group_sibling_pair(pair_src, pair_dst):
+                        status = "filtered_shared_group_sibling"
+                        reason = "shared_group_sibling_filtered"
+                        shared_group_sibling_filtered_anchor_count += 1
+                    else:
+                        status = "accepted"
+                        reason = "accepted"
+                        accepted_anchor_count += 1
                         allowed_dst_by_src.setdefault(int(pair_src), set()).add(int(pair_dst))
                         allowed_pairs.add((int(pair_src), int(pair_dst)))
 
@@ -9368,6 +9387,7 @@ def _build_topology_unique_anchor_decisions(
         "multi_dst_anchor_count": int(multi_dst_anchor_count),
         "multi_chain_anchor_count": int(multi_chain_anchor_count),
         "search_overflow_anchor_count": int(overflow_anchor_count),
+        "shared_group_sibling_filtered_anchor_count": int(shared_group_sibling_filtered_anchor_count),
         "accepted_pair_count": int(len(allowed_pairs)),
     }
     return (
@@ -9727,7 +9747,15 @@ def _build_same_pair_multichain_fallback_support(
     if not isinstance(dst_contact, Point) or dst_contact.is_empty:
         return None
 
-    reach_xsec_m = float(max(1.0, params.get("STEP1_CORRIDOR_REACH_XSEC_M", 12.0)))
+    reach_xsec_m = float(
+        max(
+            1.0,
+            params.get(
+                "SAME_PAIR_FALLBACK_REACH_XSEC_M",
+                params.get("STEP1_CORRIDOR_REACH_XSEC_M", 12.0),
+            ),
+        )
+    )
     try:
         src_gap_m = float(branch_shape_ref.distance(src_xsec))
     except Exception:
