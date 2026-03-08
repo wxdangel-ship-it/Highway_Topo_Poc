@@ -652,6 +652,15 @@ def _run_patch_core(
                 "support_mode": None,
                 "support_event_count": 0,
                 "support_traj_count": 0,
+                "support_fallback_attempted": False,
+                "support_fallback_failure_stage": None,
+                "support_fallback_src_contact_found": None,
+                "support_fallback_dst_contact_found": None,
+                "support_fallback_src_gap_m": None,
+                "support_fallback_dst_gap_m": None,
+                "support_fallback_reach_xsec_m": None,
+                "support_fallback_inside_ratio": None,
+                "support_fallback_inside_ratio_min": None,
                 "step1_corridor_status": None,
                 "step1_corridor_reason": None,
                 "step1_corridor_hint": None,
@@ -1721,6 +1730,7 @@ def _run_patch_core(
             dst_cs = xsec_cross_lookup_map.get(int(dst_i))
             src_geom = getattr(src_cs, "geometry_metric", None)
             dst_geom = getattr(dst_cs, "geometry_metric", None)
+            fallback_diag: dict[str, Any] = {}
             fallback_support = _build_topology_road_prior_fallback_support(
                 pair=(int(src_i), int(dst_i)),
                 shape_ref_metric=road_prior_pair_shape_ref_map.get((int(src_i), int(dst_i))),
@@ -1731,7 +1741,17 @@ def _run_patch_core(
                 src_type=node_type_map.get(int(src_i)),
                 dst_type=node_type_map.get(int(dst_i)),
                 params=params,
+                debug_out=fallback_diag,
             )
+            pair_stage["support_fallback_attempted"] = bool(fallback_diag.get("attempted", False))
+            pair_stage["support_fallback_failure_stage"] = fallback_diag.get("failure_stage")
+            pair_stage["support_fallback_src_contact_found"] = fallback_diag.get("src_contact_found")
+            pair_stage["support_fallback_dst_contact_found"] = fallback_diag.get("dst_contact_found")
+            pair_stage["support_fallback_src_gap_m"] = fallback_diag.get("src_gap_m")
+            pair_stage["support_fallback_dst_gap_m"] = fallback_diag.get("dst_gap_m")
+            pair_stage["support_fallback_reach_xsec_m"] = fallback_diag.get("reach_xsec_m")
+            pair_stage["support_fallback_inside_ratio"] = fallback_diag.get("inside_ratio")
+            pair_stage["support_fallback_inside_ratio_min"] = fallback_diag.get("inside_ratio_min")
             if fallback_support is not None:
                 supports[(int(src_i), int(dst_i))] = fallback_support
                 topology_fallback_support_count += 1
@@ -10077,7 +10097,19 @@ def _build_topology_road_prior_fallback_support(
     src_type: str | None = None,
     dst_type: str | None = None,
     params: dict[str, Any],
+    debug_out: dict[str, Any] | None = None,
 ) -> PairSupport | None:
+    if debug_out is not None:
+        debug_out.clear()
+        debug_out["attempted"] = True
+        debug_out["failure_stage"] = "shape_ref_invalid"
+        debug_out["src_contact_found"] = False
+        debug_out["dst_contact_found"] = False
+        debug_out["src_gap_m"] = None
+        debug_out["dst_gap_m"] = None
+        debug_out["reach_xsec_m"] = None
+        debug_out["inside_ratio"] = None
+        debug_out["inside_ratio_min"] = None
     if not isinstance(shape_ref_metric, LineString) or shape_ref_metric.is_empty or float(shape_ref_metric.length) <= 1e-6:
         return None
     shape_ref_line, src_entry_xsec, dst_entry_xsec = _resolve_fallback_support_entry_xsecs(
@@ -10091,10 +10123,18 @@ def _build_topology_road_prior_fallback_support(
         params=params,
     )
     src_contact = _line_xsec_contact_point(line=shape_ref_line, xsec=src_entry_xsec)
+    if debug_out is not None:
+        debug_out["src_contact_found"] = bool(isinstance(src_contact, Point) and (not src_contact.is_empty))
     dst_contact = _line_xsec_contact_point(line=shape_ref_line, xsec=dst_entry_xsec)
+    if debug_out is not None:
+        debug_out["dst_contact_found"] = bool(isinstance(dst_contact, Point) and (not dst_contact.is_empty))
     if not isinstance(src_contact, Point) or src_contact.is_empty:
+        if debug_out is not None:
+            debug_out["failure_stage"] = "src_xsec_contact"
         return None
     if not isinstance(dst_contact, Point) or dst_contact.is_empty:
+        if debug_out is not None:
+            debug_out["failure_stage"] = "dst_xsec_contact"
         return None
 
     reach_xsec_m = float(
@@ -10114,7 +10154,13 @@ def _build_topology_road_prior_fallback_support(
         dst_gap_m = float(shape_ref_line.distance(dst_entry_xsec))
     except Exception:
         dst_gap_m = float("inf")
+    if debug_out is not None:
+        debug_out["reach_xsec_m"] = float(reach_xsec_m)
+        debug_out["src_gap_m"] = float(src_gap_m) if np.isfinite(src_gap_m) else None
+        debug_out["dst_gap_m"] = float(dst_gap_m) if np.isfinite(dst_gap_m) else None
     if src_gap_m > reach_xsec_m + 1e-6 or dst_gap_m > reach_xsec_m + 1e-6:
+        if debug_out is not None:
+            debug_out["failure_stage"] = "reach_xsec"
         return None
 
     if drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty):
@@ -10122,7 +10168,12 @@ def _build_topology_road_prior_fallback_support(
         inside_min = float(
             max(0.0, min(1.0, params.get("STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN", 0.60)))
         )
+        if debug_out is not None:
+            debug_out["inside_ratio"] = float(inside_ratio) if inside_ratio is not None else None
+            debug_out["inside_ratio_min"] = float(inside_min)
         if inside_ratio is None or float(inside_ratio) + 1e-9 < inside_min:
+            if debug_out is not None:
+                debug_out["failure_stage"] = "drivezone_inside_ratio"
             return None
 
     src_i, dst_i = int(pair[0]), int(pair[1])
@@ -10142,6 +10193,8 @@ def _build_topology_road_prior_fallback_support(
     out.cluster_sep_m_est = None
     out.cluster_sizes = []
     out.unresolved_neighbor_count = 0
+    if debug_out is not None:
+        debug_out["failure_stage"] = "accepted"
     return out
 
 

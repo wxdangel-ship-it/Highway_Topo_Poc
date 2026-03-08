@@ -2088,6 +2088,7 @@ def test_build_topology_road_prior_fallback_support_uses_pair_endpoint_xsecs() -
     shape_ref = LineString([(5.0, 0.0), (95.0, 0.0)])
     src_xsec = LineString([(0.0, -8.0), (0.0, 8.0)])
     dst_xsec = LineString([(100.0, -8.0), (100.0, 8.0)])
+    debug_out: dict[str, object] = {}
 
     out = pipeline._build_topology_road_prior_fallback_support(
         pair=(1, 2),
@@ -2099,6 +2100,7 @@ def test_build_topology_road_prior_fallback_support_uses_pair_endpoint_xsecs() -
         src_type="diverge",
         dst_type="merge",
         params=params,
+        debug_out=debug_out,
     )
 
     assert out is not None
@@ -2107,6 +2109,93 @@ def test_build_topology_road_prior_fallback_support_uses_pair_endpoint_xsecs() -
     assert abs(float(out.src_cross_points[0].x) - 5.0) <= 1e-6
     assert abs(float(out.dst_cross_points[0].x) - 95.0) <= 1e-6
     assert out.hints[-1] == "topology_road_prior_fallback"
+    assert debug_out["failure_stage"] == "accepted"
+    assert debug_out["src_contact_found"] is True
+    assert debug_out["dst_contact_found"] is True
+    assert abs(float(debug_out["src_gap_m"] or 0.0)) <= 1e-6
+    assert abs(float(debug_out["dst_gap_m"] or 0.0)) <= 1e-6
+
+
+def test_build_topology_road_prior_fallback_support_reports_xsec_contact_failure() -> None:
+    params = dict(pipeline.DEFAULT_PARAMS)
+    shape_ref = LineString([(5.0, 0.0), (95.0, 0.0)])
+    src_xsec = LineString([(0.0, -8.0), (0.0, 8.0)])
+    dst_xsec = LineString([(100.0, -8.0), (100.0, 8.0)])
+    debug_out: dict[str, object] = {}
+
+    out = pipeline._build_topology_road_prior_fallback_support(
+        pair=(1, 2),
+        shape_ref_metric=shape_ref,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+        gore_zone_metric=Polygon(),
+        src_type="merge",
+        dst_type="diverge",
+        params=params,
+        debug_out=debug_out,
+    )
+
+    assert out is None
+    assert debug_out["failure_stage"] == "src_xsec_contact"
+    assert debug_out["src_contact_found"] is False
+    assert debug_out["dst_contact_found"] is False
+    assert debug_out["reach_xsec_m"] is None
+
+
+def test_build_topology_road_prior_fallback_support_reports_reach_xsec_failure() -> None:
+    params = dict(pipeline.DEFAULT_PARAMS)
+    shape_ref = LineString([(40.0, 0.0), (60.0, 0.0)])
+    src_xsec = LineString([(0.0, -8.0), (0.0, 8.0)])
+    dst_xsec = LineString([(100.0, -8.0), (100.0, 8.0)])
+    debug_out: dict[str, object] = {}
+
+    out = pipeline._build_topology_road_prior_fallback_support(
+        pair=(1, 2),
+        shape_ref_metric=shape_ref,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+        gore_zone_metric=Polygon(),
+        src_type="merge",
+        dst_type="diverge",
+        params=params,
+        debug_out=debug_out,
+    )
+
+    assert out is None
+    assert debug_out["failure_stage"] == "reach_xsec"
+    assert debug_out["src_contact_found"] is True
+    assert debug_out["dst_contact_found"] is True
+    assert float(debug_out["src_gap_m"] or 0.0) > float(debug_out["reach_xsec_m"] or 0.0)
+    assert float(debug_out["dst_gap_m"] or 0.0) > float(debug_out["reach_xsec_m"] or 0.0)
+
+
+def test_build_topology_road_prior_fallback_support_reports_drivezone_failure() -> None:
+    params = dict(pipeline.DEFAULT_PARAMS)
+    shape_ref = LineString([(5.0, 0.0), (95.0, 0.0)])
+    src_xsec = LineString([(0.0, -8.0), (0.0, 8.0)])
+    dst_xsec = LineString([(100.0, -8.0), (100.0, 8.0)])
+    debug_out: dict[str, object] = {}
+
+    out = pipeline._build_topology_road_prior_fallback_support(
+        pair=(1, 2),
+        shape_ref_metric=shape_ref,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=Polygon([(-20.0, -20.0), (25.0, -20.0), (25.0, 20.0), (-20.0, 20.0)]),
+        gore_zone_metric=Polygon(),
+        src_type="diverge",
+        dst_type="merge",
+        params=params,
+        debug_out=debug_out,
+    )
+
+    assert out is None
+    assert debug_out["failure_stage"] == "drivezone_inside_ratio"
+    assert debug_out["src_contact_found"] is True
+    assert debug_out["dst_contact_found"] is True
+    assert float(debug_out["inside_ratio"] or 0.0) < float(debug_out["inside_ratio_min"] or 0.0)
 
 
 def test_same_pair_resolution_stats_mark_partial_unresolved_pair() -> None:
