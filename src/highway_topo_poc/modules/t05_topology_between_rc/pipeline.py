@@ -45,6 +45,7 @@ from .geometry import (
     SOFT_WIGGLY,
     PairSupport,
     _build_lb_graph_path,
+    build_pair_endpoint_xsec,
     build_pair_supports,
     compute_max_segment_m,
     estimate_centerline,
@@ -3675,6 +3676,86 @@ def _line_xsec_contact_point(
     return None
 
 
+def _apply_step1_xsec_metrics(
+    *,
+    items: Sequence[dict[str, Any]],
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    reach_xsec_m: float,
+) -> None:
+    for it in items:
+        seg = it.get("seg")
+        d_src = float("inf")
+        d_dst = float("inf")
+        if isinstance(seg, LineString) and (not seg.is_empty):
+            try:
+                d_src = float(seg.distance(src_xsec))
+            except Exception:
+                d_src = float("inf")
+            try:
+                d_dst = float(seg.distance(dst_xsec))
+            except Exception:
+                d_dst = float("inf")
+        it["dist_to_src_xsec_m"] = float(d_src)
+        it["dist_to_dst_xsec_m"] = float(d_dst)
+        it["reaches_other_end"] = bool(
+            np.isfinite(d_src) and np.isfinite(d_dst) and d_src <= reach_xsec_m and d_dst <= reach_xsec_m
+        )
+
+
+def _build_step1_pair_endpoint_xsec(
+    *,
+    xsec_seed: LineString,
+    endpoint_tag: str,
+    node_type: str,
+    shape_ref_line: LineString,
+    support: PairSupport,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    return build_pair_endpoint_xsec(
+        xsec_seed=xsec_seed,
+        shape_ref_line=shape_ref_line,
+        traj_segments=support.traj_segments,
+        drivezone_zone_metric=drivezone_zone_metric,
+        gore_zone_metric=gore_zone_metric,
+        ref_half_len_m=float(params.get("XSEC_REF_HALF_LEN_M", 80.0)),
+        sample_step_m=float(params.get("XSEC_ROAD_SAMPLE_STEP_M", 1.0)),
+        nonpass_k=int(params.get("XSEC_ROAD_NONPASS_K", 6)),
+        evidence_radius_m=float(params.get("XSEC_ROAD_EVIDENCE_RADIUS_M", 1.0)),
+        min_ground_pts=int(params.get("XSEC_ROAD_MIN_GROUND_PTS", 1)),
+        min_traj_pts=int(params.get("XSEC_ROAD_MIN_TRAJ_PTS", 1)),
+        core_band_m=float(params.get("XSEC_CORE_BAND_M", 20.0)),
+        shift_step_m=float(params.get("XSEC_SHIFT_STEP_M", 5.0)),
+        fallback_short_half_len_m=float(params.get("XSEC_FALLBACK_SHORT_HALF_LEN_M", 15.0)),
+        barrier_min_ng_count=int(params.get("XSEC_BARRIER_MIN_NG_COUNT", 2)),
+        barrier_min_len_m=float(params.get("XSEC_BARRIER_MIN_LEN_M", 4.0)),
+        barrier_along_len_m=float(params.get("XSEC_BARRIER_ALONG_LEN_M", 60.0)),
+        barrier_along_width_m=float(params.get("XSEC_BARRIER_ALONG_WIDTH_M", 2.5)),
+        barrier_bin_step_m=float(params.get("XSEC_BARRIER_BIN_STEP_M", 2.0)),
+        barrier_occ_ratio_min=float(params.get("XSEC_BARRIER_OCC_RATIO_MIN", 0.65)),
+        endcap_window_m=float(params.get("XSEC_ENDCAP_WINDOW_M", 60.0)),
+        caseb_pre_m=float(params.get("XSEC_CASEB_PRE_M", 3.0)),
+        endpoint_tag=endpoint_tag,
+        node_type=node_type,
+        ground_xy=np.empty((0, 2), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+    )
+
+
+def _resolve_step1_pair_cross_xsec(
+    *,
+    xsec_seed: LineString,
+    pair_xsec_meta: dict[str, Any] | None,
+) -> LineString:
+    if isinstance(pair_xsec_meta, dict):
+        cross_ref = pair_xsec_meta.get("xsec_cross_ref")
+        if isinstance(cross_ref, LineString) and (not cross_ref.is_empty) and len(cross_ref.coords) >= 2:
+            return cross_ref
+    return xsec_seed
+
+
 def _pick_step1_primary_item(items: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
     valid = [it for it in items if isinstance(it, dict) and isinstance(it.get("seg"), LineString)]
     if not valid:
@@ -4137,22 +4218,12 @@ def _build_step1_corridor_for_pair(
     gore_free = [it for it in ranked_end if not bool(it.get("gore_any", False))]
     ranked_used = gore_free if gore_free else ranked_end
     reach_xsec_m = float(max(1.0, params.get("STEP1_CORRIDOR_REACH_XSEC_M", 12.0)))
-    for it in ranked_all:
-        seg = it.get("seg")
-        d_src = float("inf")
-        d_dst = float("inf")
-        if isinstance(seg, LineString) and (not seg.is_empty):
-            try:
-                d_src = float(seg.distance(src_xsec))
-            except Exception:
-                d_src = float("inf")
-            try:
-                d_dst = float(seg.distance(dst_xsec))
-            except Exception:
-                d_dst = float("inf")
-        it["dist_to_src_xsec_m"] = float(d_src)
-        it["dist_to_dst_xsec_m"] = float(d_dst)
-        it["reaches_other_end"] = bool(np.isfinite(d_src) and np.isfinite(d_dst) and d_src <= reach_xsec_m and d_dst <= reach_xsec_m)
+    _apply_step1_xsec_metrics(
+        items=ranked_all,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        reach_xsec_m=reach_xsec_m,
+    )
     ranked_reach = [it for it in ranked_used if bool(it.get("reaches_other_end", False))]
     ranked_main = ranked_reach if ranked_reach else ranked_used
     topk_pick = int(max(1, int(params.get("STEP1_PRIMARY_PICK_TOPK", 8))))
@@ -4221,6 +4292,68 @@ def _build_step1_corridor_for_pair(
         ]
         return out
 
+    provisional_picked = _pick_step1_primary_item(topk_debug) or topk_debug[0]
+    provisional_shape_ref = _orient_axis_line(
+        provisional_picked["seg"],
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+    )
+    step1_pair_xsec_src: dict[str, Any] | None = None
+    step1_pair_xsec_dst: dict[str, Any] | None = None
+    src_xsec_cross = src_xsec
+    dst_xsec_cross = dst_xsec
+    if _is_valid_linestring(provisional_shape_ref):
+        step1_pair_xsec_src = _build_step1_pair_endpoint_xsec(
+            xsec_seed=src_xsec,
+            endpoint_tag="src",
+            node_type=str(src_type),
+            shape_ref_line=provisional_shape_ref,
+            support=support,
+            drivezone_zone_metric=drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            params=params,
+        )
+        step1_pair_xsec_dst = _build_step1_pair_endpoint_xsec(
+            xsec_seed=dst_xsec,
+            endpoint_tag="dst",
+            node_type=str(dst_type),
+            shape_ref_line=provisional_shape_ref,
+            support=support,
+            drivezone_zone_metric=drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            params=params,
+        )
+        src_xsec_cross = _resolve_step1_pair_cross_xsec(
+            xsec_seed=src_xsec,
+            pair_xsec_meta=step1_pair_xsec_src,
+        )
+        dst_xsec_cross = _resolve_step1_pair_cross_xsec(
+            xsec_seed=dst_xsec,
+            pair_xsec_meta=step1_pair_xsec_dst,
+        )
+        _apply_step1_xsec_metrics(
+            items=ranked_all,
+            src_xsec=src_xsec_cross,
+            dst_xsec=dst_xsec_cross,
+            reach_xsec_m=reach_xsec_m,
+        )
+        ranked_reach = [it for it in ranked_used if bool(it.get("reaches_other_end", False))]
+        ranked_main = ranked_reach if ranked_reach else ranked_used
+        ranked_main = sorted(
+            ranked_main,
+            key=lambda it: (
+                0.0 if bool(it.get("reaches_other_end", False)) else 1.0,
+                1.0 - _to_finite_float(it.get("inside_ratio"), 0.0),
+                1.0 if bool(it.get("constraint_violation", False)) else 0.0,
+                1.0 if bool(it.get("gore_any", False)) else 0.0,
+                _to_finite_float(it.get("dist_to_src_xsec_m"), 1e9) + _to_finite_float(it.get("dist_to_dst_xsec_m"), 1e9),
+                _to_finite_float(it.get("d_seed"), 1e9),
+                -_to_finite_float(it.get("length_m"), 0.0),
+                int(it.get("idx", -1)),
+            ),
+        )
+        topk_debug = ranked_main[:topk_pick] if ranked_main else topk_debug
+
     weights = np.asarray([max(1.0, float(it.get("length_m", 0.0))) for it in topk_debug], dtype=np.float64)
     if weights.size > 0 and float(np.sum(weights)) > 1e-6:
         out["main_corridor_ratio"] = float(np.max(weights) / float(np.sum(weights)))
@@ -4233,7 +4366,11 @@ def _build_step1_corridor_for_pair(
     out["corridor_candidates"] = []
     for cid, it in enumerate(topk_debug, start=1):
         seg = it.get("seg")
-        line = _orient_axis_line(seg, src_xsec=src_xsec, dst_xsec=dst_xsec) if isinstance(seg, LineString) else None
+        line = (
+            _orient_axis_line(seg, src_xsec=src_xsec_cross, dst_xsec=dst_xsec_cross)
+            if isinstance(seg, LineString)
+            else None
+        )
         if not isinstance(line, LineString) or line.is_empty:
             continue
         out["corridor_candidates"].append(
@@ -4328,7 +4465,47 @@ def _build_step1_corridor_for_pair(
         return out
     out["strategy"] = f"{strategy}|multi_corridor_soft"
     picked_seg = picked["seg"]
-    out["shape_ref_line"] = _orient_axis_line(picked_seg, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    out["shape_ref_line"] = _orient_axis_line(picked_seg, src_xsec=src_xsec_cross, dst_xsec=dst_xsec_cross)
+    if _is_valid_linestring(out["shape_ref_line"]):
+        step1_pair_xsec_src = _build_step1_pair_endpoint_xsec(
+            xsec_seed=src_xsec,
+            endpoint_tag="src",
+            node_type=str(src_type),
+            shape_ref_line=out["shape_ref_line"],
+            support=support,
+            drivezone_zone_metric=drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            params=params,
+        )
+        step1_pair_xsec_dst = _build_step1_pair_endpoint_xsec(
+            xsec_seed=dst_xsec,
+            endpoint_tag="dst",
+            node_type=str(dst_type),
+            shape_ref_line=out["shape_ref_line"],
+            support=support,
+            drivezone_zone_metric=drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            params=params,
+        )
+        src_xsec_cross = _resolve_step1_pair_cross_xsec(
+            xsec_seed=src_xsec,
+            pair_xsec_meta=step1_pair_xsec_src,
+        )
+        dst_xsec_cross = _resolve_step1_pair_cross_xsec(
+            xsec_seed=dst_xsec,
+            pair_xsec_meta=step1_pair_xsec_dst,
+        )
+        out["shape_ref_line"] = _orient_axis_line(
+            picked_seg,
+            src_xsec=src_xsec_cross,
+            dst_xsec=dst_xsec_cross,
+        )
+        out["pair_xsec_policy_src"] = step1_pair_xsec_src.get("policy_mode")
+        out["pair_xsec_policy_dst"] = step1_pair_xsec_dst.get("policy_mode")
+        out["_pair_xsec_cross_ref_src_metric"] = src_xsec_cross
+        out["_pair_xsec_cross_ref_dst_metric"] = dst_xsec_cross
+        out["_pair_xsec_target_src_metric"] = step1_pair_xsec_src.get("xsec_road_selected")
+        out["_pair_xsec_target_dst_metric"] = step1_pair_xsec_dst.get("xsec_road_selected")
     zone_half_w = float(max(1.0, params.get("CORRIDOR_HALF_WIDTH_M", 15.0)))
     zone_topk = int(max(1, int(params.get("STEP1_CORRIDOR_ZONE_TOPK", 3))))
     zone_lines: list[LineString] = []
@@ -4362,12 +4539,12 @@ def _build_step1_corridor_for_pair(
     dst_fallback = picked.get("dst_cp") if isinstance(picked.get("dst_cp"), Point) else out.get("cross_point_dst")
     out["cross_point_src"] = _line_xsec_contact_point(
         line=out.get("shape_ref_line"),
-        xsec=src_xsec,
+        xsec=src_xsec_cross,
         fallback=src_fallback if isinstance(src_fallback, Point) else None,
     )
     out["cross_point_dst"] = _line_xsec_contact_point(
         line=out.get("shape_ref_line"),
-        xsec=dst_xsec,
+        xsec=dst_xsec_cross,
         fallback=dst_fallback if isinstance(dst_fallback, Point) else None,
     )
     out["gore_fallback_used_src"] = bool(picked.get("gore_src_near", False) and not good)
@@ -6297,6 +6474,8 @@ def _evaluate_candidate_road(
     road["xsec_target_mode_dst"] = center.diagnostics.get("xsec_target_mode_dst")
     road["xsec_road_selected_by_src"] = center.diagnostics.get("xsec_road_selected_by_src")
     road["xsec_road_selected_by_dst"] = center.diagnostics.get("xsec_road_selected_by_dst")
+    road["xsec_policy_mode_src"] = center.diagnostics.get("xsec_policy_mode_src")
+    road["xsec_policy_mode_dst"] = center.diagnostics.get("xsec_policy_mode_dst")
     road["xsec_selected_by_src"] = road["xsec_road_selected_by_src"]
     road["xsec_selected_by_dst"] = road["xsec_road_selected_by_dst"]
     road["xsec_shift_used_m_src"] = center.diagnostics.get("xsec_shift_used_m_src")
@@ -10747,6 +10926,8 @@ def _make_base_road_record(
         "xsec_target_mode_dst": None,
         "xsec_road_selected_by_src": None,
         "xsec_road_selected_by_dst": None,
+        "xsec_policy_mode_src": None,
+        "xsec_policy_mode_dst": None,
         "xsec_gate_len_src_m": None,
         "xsec_gate_len_dst_m": None,
         "xsec_gate_geom_type_src": None,

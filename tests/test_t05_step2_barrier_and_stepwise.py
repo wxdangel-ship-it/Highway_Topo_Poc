@@ -79,6 +79,90 @@ def test_step2_barrier_filter_vehicle_noise() -> None:
     assert str(out.get("selected_by")) != "fallback_short"
 
 
+def test_role_full_seed_keeps_complete_xsec_for_merge_src() -> None:
+    shape_ref = LineString([(0.0, 0.0), (120.0, 0.0)])
+    xsec_seed = LineString([(0.0, -30.0), (0.0, 30.0)])
+    drivezone = Polygon([(4.0, -8.0), (6.0, -8.0), (6.0, 8.0), (4.0, 8.0)])
+
+    out = _build_xsec_road_for_endpoint(
+        xsec_seed=xsec_seed,
+        shape_ref_line=shape_ref,
+        traj_segments=[LineString([(5.0, 0.0), (100.0, 0.0)])],
+        drivezone_zone_metric=drivezone,
+        ground_xy=np.empty((0, 2), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        gore_zone_metric=None,
+        ref_half_len_m=80.0,
+        sample_step_m=1.0,
+        nonpass_k=6,
+        evidence_radius_m=1.0,
+        min_ground_pts=1,
+        min_traj_pts=1,
+        core_band_m=20.0,
+        shift_step_m=5.0,
+        fallback_short_half_len_m=15.0,
+        barrier_min_ng_count=2,
+        barrier_min_len_m=4.0,
+        barrier_along_len_m=60.0,
+        barrier_along_width_m=2.5,
+        barrier_bin_step_m=2.0,
+        barrier_occ_ratio_min=0.65,
+        endcap_window_m=60.0,
+        caseb_pre_m=3.0,
+        endpoint_tag="src",
+        node_type="merge",
+    )
+
+    cross_ref = out.get("xsec_cross_ref")
+    assert str(out.get("policy_mode")) == "role_full_seed"
+    assert str(out.get("selected_by")) == "role_full_seed"
+    assert isinstance(cross_ref, LineString)
+    assert float(cross_ref.distance(xsec_seed)) <= 1e-6
+    assert float(out.get("shift_used_m", -1.0)) == 0.0
+
+
+def test_role_outward_cut_shifts_xsec_for_diverge_src() -> None:
+    shape_ref = LineString([(0.0, 0.0), (120.0, 0.0)])
+    xsec_seed = LineString([(0.0, -30.0), (0.0, 30.0)])
+    drivezone = Polygon([(4.0, -8.0), (6.0, -8.0), (6.0, 8.0), (4.0, 8.0)])
+
+    out = _build_xsec_road_for_endpoint(
+        xsec_seed=xsec_seed,
+        shape_ref_line=shape_ref,
+        traj_segments=[LineString([(5.0, 0.0), (100.0, 0.0)])],
+        drivezone_zone_metric=drivezone,
+        ground_xy=np.empty((0, 2), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        gore_zone_metric=None,
+        ref_half_len_m=80.0,
+        sample_step_m=1.0,
+        nonpass_k=6,
+        evidence_radius_m=1.0,
+        min_ground_pts=1,
+        min_traj_pts=1,
+        core_band_m=20.0,
+        shift_step_m=5.0,
+        fallback_short_half_len_m=15.0,
+        barrier_min_ng_count=2,
+        barrier_min_len_m=4.0,
+        barrier_along_len_m=60.0,
+        barrier_along_width_m=2.5,
+        barrier_bin_step_m=2.0,
+        barrier_occ_ratio_min=0.65,
+        endcap_window_m=60.0,
+        caseb_pre_m=3.0,
+        endpoint_tag="src",
+        node_type="diverge",
+    )
+
+    cross_ref = out.get("xsec_cross_ref")
+    assert str(out.get("policy_mode")) == "role_outward_cut"
+    assert isinstance(cross_ref, LineString)
+    cross_mid = cross_ref.interpolate(0.5, normalized=True)
+    assert pytest.approx(float(cross_mid.x), abs=1e-6) == 5.0
+    assert str(out.get("selected_by")) != "fallback_short"
+
+
 def test_step1_prefers_non_gore_corridor_at_constrained_end() -> None:
     support = PairSupport(
         src_nodeid=100,
@@ -187,6 +271,53 @@ def test_step1_diverge_to_merge_uses_forward_trace() -> None:
     assert str(out.get("strategy", "")).startswith("diverge_to_merge_forward_trace")
     assert out.get("hard_reason") is None
     assert float(line.distance(support.traj_segments[0])) <= 1e-6
+
+
+def test_step1_cross_point_src_respects_pair_xsec_policy() -> None:
+    support = PairSupport(
+        src_nodeid=130,
+        dst_nodeid=230,
+        support_traj_ids={"main"},
+        support_event_count=1,
+        traj_segments=[LineString([(5.0, 0.0), (100.0, 0.0)])],
+        src_cross_points=[Point(0.0, 0.0)],
+        dst_cross_points=[Point(100.0, 0.0)],
+        evidence_traj_ids=["main"],
+        cluster_count=1,
+        main_cluster_ratio=1.0,
+    )
+    src_xsec = LineString([(0.0, -20.0), (0.0, 20.0)])
+    dst_xsec = LineString([(100.0, -20.0), (100.0, 20.0)])
+
+    out_diverge = pipeline._build_step1_corridor_for_pair(
+        support=support,
+        src_type="diverge",
+        dst_type="merge",
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=None,
+        gore_zone_metric=None,
+        params=dict(pipeline.DEFAULT_PARAMS),
+    )
+    out_merge = pipeline._build_step1_corridor_for_pair(
+        support=support,
+        src_type="merge",
+        dst_type="merge",
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=None,
+        gore_zone_metric=None,
+        params=dict(pipeline.DEFAULT_PARAMS),
+    )
+
+    cp_diverge = out_diverge.get("cross_point_src")
+    cp_merge = out_merge.get("cross_point_src")
+    assert isinstance(cp_diverge, Point)
+    assert isinstance(cp_merge, Point)
+    assert pytest.approx(float(cp_diverge.x), abs=1e-6) == 5.0
+    assert pytest.approx(float(cp_merge.x), abs=1e-6) == 0.0
+    assert str(out_diverge.get("pair_xsec_policy_src")) == "role_outward_cut"
+    assert str(out_merge.get("pair_xsec_policy_src")) == "role_full_seed"
 
 
 def test_shared_intersection_group_marks_internal_diverge_merge_pair() -> None:

@@ -1939,6 +1939,8 @@ def estimate_centerline(
         dst_decision=dst_decision,
         src_xsec=src_xsec,
         dst_xsec=dst_xsec,
+        src_type=src_type,
+        dst_type=dst_type,
         src_channel_points=support.src_cross_points,
         dst_channel_points=support.dst_cross_points,
         support_traj_segments=support.traj_segments,
@@ -2157,6 +2159,8 @@ def _apply_endpoint_trend_projection(
     dst_decision: _EndStableDecision,
     src_xsec: LineString,
     dst_xsec: LineString,
+    src_type: str = "unknown",
+    dst_type: str = "unknown",
     src_channel_points: Sequence[Point],
     dst_channel_points: Sequence[Point],
     support_traj_segments: Sequence[LineString],
@@ -2282,13 +2286,11 @@ def _apply_endpoint_trend_projection(
         ground_xy = ground_xy[finite_ground, :]
     else:
         ground_xy = np.empty((0, 2), dtype=np.float64)
-    src_xsec_road = _build_xsec_road_for_endpoint(
+    src_xsec_road = build_pair_endpoint_xsec(
         xsec_seed=src_xsec,
         shape_ref_line=shape_ref_line,
         traj_segments=support_traj_segments,
         drivezone_zone_metric=drivezone_zone_metric,
-        ground_xy=ground_xy,
-        non_ground_xy=non_ground_xy,
         gore_zone_metric=gore_zone_metric,
         ref_half_len_m=float(xsec_ref_half_len_m),
         sample_step_m=float(xsec_road_sample_step_m),
@@ -2308,14 +2310,15 @@ def _apply_endpoint_trend_projection(
         endcap_window_m=float(xsec_endcap_window_m),
         caseb_pre_m=float(xsec_caseb_pre_m),
         endpoint_tag="src",
+        node_type=src_type,
+        ground_xy=ground_xy,
+        non_ground_xy=non_ground_xy,
     )
-    dst_xsec_road = _build_xsec_road_for_endpoint(
+    dst_xsec_road = build_pair_endpoint_xsec(
         xsec_seed=dst_xsec,
         shape_ref_line=shape_ref_line,
         traj_segments=support_traj_segments,
         drivezone_zone_metric=drivezone_zone_metric,
-        ground_xy=ground_xy,
-        non_ground_xy=non_ground_xy,
         gore_zone_metric=gore_zone_metric,
         ref_half_len_m=float(xsec_ref_half_len_m),
         sample_step_m=float(xsec_road_sample_step_m),
@@ -2335,6 +2338,9 @@ def _apply_endpoint_trend_projection(
         endcap_window_m=float(xsec_endcap_window_m),
         caseb_pre_m=float(xsec_caseb_pre_m),
         endpoint_tag="dst",
+        node_type=dst_type,
+        ground_xy=ground_xy,
+        non_ground_xy=non_ground_xy,
     )
     src_xsec_sel = src_xsec_road.get("xsec_road_selected")
     dst_xsec_sel = dst_xsec_road.get("xsec_road_selected")
@@ -2350,6 +2356,8 @@ def _apply_endpoint_trend_projection(
     trend_meta["_xsec_road_selected_dst_metric"] = dst_xsec_sel
     trend_meta["xsec_road_selected_by_src"] = str(src_xsec_road.get("selected_by"))
     trend_meta["xsec_road_selected_by_dst"] = str(dst_xsec_road.get("selected_by"))
+    trend_meta["xsec_policy_mode_src"] = str(src_xsec_road.get("policy_mode"))
+    trend_meta["xsec_policy_mode_dst"] = str(dst_xsec_road.get("policy_mode"))
     trend_meta["xsec_shift_used_m_src"] = src_xsec_road.get("shift_used_m")
     trend_meta["xsec_shift_used_m_dst"] = dst_xsec_road.get("shift_used_m")
     trend_meta["xsec_mid_to_ref_m_src"] = src_xsec_road.get("mid_to_ref_m")
@@ -2822,6 +2830,108 @@ def _iter_linestring_parts(geom: BaseGeometry | None) -> list[LineString]:
     return []
 
 
+def resolve_pair_endpoint_xsec_policy(*, endpoint_tag: str, node_type: str | None) -> str:
+    tag = str(endpoint_tag or "").strip().lower()
+    ntype = str(node_type or "").strip().lower()
+    if tag == "src":
+        if ntype == "merge":
+            return "role_full_seed"
+        if ntype == "diverge":
+            return "role_outward_cut"
+    elif tag == "dst":
+        if ntype == "diverge":
+            return "role_full_seed"
+        if ntype == "merge":
+            return "role_outward_cut"
+    return "auto"
+
+
+def _choose_pair_endpoint_xsec_cross_ref(
+    *,
+    xsec_seed: LineString,
+    payload: dict[str, Any],
+) -> LineString:
+    policy_mode = str(payload.get("policy_mode") or "")
+    if policy_mode == "role_full_seed":
+        return xsec_seed
+    selected = payload.get("xsec_road_selected")
+    if isinstance(selected, LineString) and not selected.is_empty and len(selected.coords) >= 2:
+        return selected
+    ref = payload.get("xsec_ref")
+    if isinstance(ref, LineString) and not ref.is_empty and len(ref.coords) >= 2:
+        return ref
+    return xsec_seed
+
+
+def build_pair_endpoint_xsec(
+    *,
+    xsec_seed: LineString,
+    shape_ref_line: LineString,
+    traj_segments: Sequence[LineString],
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+    ref_half_len_m: float,
+    sample_step_m: float,
+    nonpass_k: int,
+    evidence_radius_m: float,
+    min_ground_pts: int,
+    min_traj_pts: int,
+    core_band_m: float,
+    shift_step_m: float,
+    fallback_short_half_len_m: float,
+    barrier_min_ng_count: int,
+    barrier_min_len_m: float,
+    barrier_along_len_m: float,
+    barrier_along_width_m: float,
+    barrier_bin_step_m: float,
+    barrier_occ_ratio_min: float,
+    endcap_window_m: float,
+    caseb_pre_m: float,
+    endpoint_tag: str,
+    node_type: str | None = None,
+    ground_xy: np.ndarray | None = None,
+    non_ground_xy: np.ndarray | None = None,
+) -> dict[str, Any]:
+    ground_xy_arr = (
+        np.asarray(ground_xy, dtype=np.float64)
+        if isinstance(ground_xy, np.ndarray)
+        else np.empty((0, 2), dtype=np.float64)
+    )
+    non_ground_xy_arr = (
+        np.asarray(non_ground_xy, dtype=np.float64)
+        if isinstance(non_ground_xy, np.ndarray)
+        else np.empty((0, 2), dtype=np.float64)
+    )
+    return _build_xsec_road_for_endpoint(
+        xsec_seed=xsec_seed,
+        shape_ref_line=shape_ref_line,
+        traj_segments=traj_segments,
+        drivezone_zone_metric=drivezone_zone_metric,
+        ground_xy=ground_xy_arr,
+        non_ground_xy=non_ground_xy_arr,
+        gore_zone_metric=gore_zone_metric,
+        ref_half_len_m=ref_half_len_m,
+        sample_step_m=sample_step_m,
+        nonpass_k=nonpass_k,
+        evidence_radius_m=evidence_radius_m,
+        min_ground_pts=min_ground_pts,
+        min_traj_pts=min_traj_pts,
+        core_band_m=core_band_m,
+        shift_step_m=shift_step_m,
+        fallback_short_half_len_m=fallback_short_half_len_m,
+        barrier_min_ng_count=barrier_min_ng_count,
+        barrier_min_len_m=barrier_min_len_m,
+        barrier_along_len_m=barrier_along_len_m,
+        barrier_along_width_m=barrier_along_width_m,
+        barrier_bin_step_m=barrier_bin_step_m,
+        barrier_occ_ratio_min=barrier_occ_ratio_min,
+        endcap_window_m=endcap_window_m,
+        caseb_pre_m=caseb_pre_m,
+        endpoint_tag=endpoint_tag,
+        node_type=node_type,
+    )
+
+
 def _project_endpoint_to_valid_xsec(
     *,
     endpoint_xy: tuple[float, float],
@@ -3078,9 +3188,11 @@ def _build_xsec_road_for_endpoint(
     endcap_window_m: float,
     caseb_pre_m: float,
     endpoint_tag: str,
+    node_type: str | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "xsec_ref": xsec_seed,
+        "xsec_cross_ref": xsec_seed,
         "xsec_ref_shifted_candidates": [],
         "xsec_road_all": xsec_seed,
         "xsec_road_selected": xsec_seed,
@@ -3098,32 +3210,50 @@ def _build_xsec_road_for_endpoint(
         "left_extent_m": 0.0,
         "right_extent_m": 0.0,
         "all_geom_type": "LineString",
+        "policy_mode": resolve_pair_endpoint_xsec_policy(endpoint_tag=endpoint_tag, node_type=node_type),
     }
+    policy_mode = str(out.get("policy_mode") or "auto")
+    def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
+        payload["xsec_cross_ref"] = _choose_pair_endpoint_xsec_cross_ref(
+            xsec_seed=xsec_seed,
+            payload=payload,
+        )
+        return payload
     if xsec_seed.is_empty or xsec_seed.length <= 1e-6:
-        return out
+        return _finalize(out)
     center = xsec_seed.interpolate(0.5, normalized=True)
     c_xy = point_xy_safe(center, context="xsec_road_anchor")
     if c_xy is None:
-        return out
+        return _finalize(out)
     s_anchor = _xsec_anchor_station(shape_ref_line, xsec_seed)
     if s_anchor is None:
-        return out
+        return _finalize(out)
     p_anchor_ref = shape_ref_line.interpolate(float(s_anchor))
     p_anchor_ref_xy = point_xy_safe(p_anchor_ref, context="xsec_anchor_ref")
     if p_anchor_ref_xy is None:
-        return out
+        return _finalize(out)
     anchor_ref = (float(p_anchor_ref_xy[0]), float(p_anchor_ref_xy[1]))
     tan = _shape_ref_tangent(shape_ref_line, station_m=float(s_anchor))
     if tan is None:
-        return out
+        return _finalize(out)
     tx, ty = float(tan[0]), float(tan[1])
     nx, ny = float(-ty), float(tx)
     n_norm = float(math.hypot(nx, ny))
     if n_norm <= 1e-9:
-        return out
+        return _finalize(out)
     nx /= n_norm
     ny /= n_norm
     L = float(max(10.0, ref_half_len_m))
+    if policy_mode == "role_full_seed":
+        out["selected_by"] = "role_full_seed"
+        out["mid_to_ref_m"] = 0.0
+        out["left_extent_m"] = float(max(0.0, 0.5 * float(xsec_seed.length)))
+        out["right_extent_m"] = float(max(0.0, 0.5 * float(xsec_seed.length)))
+        out["all_geom_type"] = str(getattr(xsec_seed, "geom_type", "")) or "LineString"
+        n_inter = _line_intersection_count(xsec_seed, shape_ref_line)
+        out["intersects_ref"] = bool(n_inter > 0)
+        out["ref_intersection_n"] = int(n_inter)
+        return _finalize(out)
     traj_xy = _collect_traj_xy(traj_segments)
     ng_xy = (
         np.asarray(non_ground_xy, dtype=np.float64)
@@ -3140,14 +3270,16 @@ def _build_xsec_road_for_endpoint(
         finite_ng = np.isfinite(ng_xy[:, 0]) & np.isfinite(ng_xy[:, 1])
         ng_xy = ng_xy[finite_ng, :]
     is_src = str(endpoint_tag).lower() == "src"
-    case_b_cut = _case_b_cut_anchor_station(
-        shape_ref_line=shape_ref_line,
-        anchor_s=float(s_anchor),
-        gore_zone_metric=gore_zone_metric,
-        is_src=is_src,
-        endcap_window_m=float(max(0.0, endcap_window_m)),
-        pre_m=float(max(0.0, caseb_pre_m)),
-    )
+    case_b_cut = None
+    if policy_mode != "role_full_seed":
+        case_b_cut = _case_b_cut_anchor_station(
+            shape_ref_line=shape_ref_line,
+            anchor_s=float(s_anchor),
+            gore_zone_metric=gore_zone_metric,
+            is_src=is_src,
+            endcap_window_m=float(max(0.0, endcap_window_m)),
+            pre_m=float(max(0.0, caseb_pre_m)),
+        )
     if case_b_cut is not None:
         p_cut = shape_ref_line.interpolate(float(case_b_cut))
         p_cut_xy = point_xy_safe(p_cut, context="xsec_case_b_cut")
@@ -3155,7 +3287,14 @@ def _build_xsec_road_for_endpoint(
             anchor_ref = (float(p_cut_xy[0]), float(p_cut_xy[1]))
             out["case_b_used"] = True
 
-    shifts = [0.0, float(max(0.0, shift_step_m)), -float(max(0.0, shift_step_m))]
+    shift_mag = float(max(0.0, shift_step_m))
+    if policy_mode == "role_outward_cut":
+        signed_shift = shift_mag if is_src else -shift_mag
+        shifts = [signed_shift]
+        if abs(signed_shift) > 1e-9:
+            shifts.append(0.0)
+    else:
+        shifts = [0.0, shift_mag, -shift_mag]
     best_any: tuple[float, dict[str, Any]] | None = None
     ref_candidates: list[tuple[LineString, float]] = []
     for shift in shifts:
@@ -3261,7 +3400,7 @@ def _build_xsec_road_for_endpoint(
         if bool(n_inter > 0):
             out.update(step_info)
             out["xsec_ref_shifted_candidates"] = ref_candidates
-            return out
+            return _finalize(out)
         score = float(mid_to_ref) if mid_to_ref is not None and math.isfinite(float(mid_to_ref)) else 1e9
         if best_any is None or score < best_any[0]:
             best_any = (score, step_info)
@@ -3291,7 +3430,7 @@ def _build_xsec_road_for_endpoint(
         out["right_extent_m"] = float(fallback_half)
         out["all_geom_type"] = "LineString"
     out["xsec_ref_shifted_candidates"] = ref_candidates
-    return out
+    return _finalize(out)
 
 
 def _split_xsec_by_barrier(
