@@ -317,6 +317,49 @@ def build_pair_supports(
     dst_dist_eps_m = float(max(0.0, unique_dst_dist_eps_m))
     allowed_pairs_dst_by_src: dict[int, set[int]] | None = None
     cross_points_by_nodeid: dict[int, list[Point]] = {}
+
+    def _canonical_dst_nodeid(nodeid: int) -> int:
+        raw_i = int(nodeid)
+        if dst_nodeid_alias_by_nodeid is None:
+            return raw_i
+        return int(dst_nodeid_alias_by_nodeid.get(raw_i, raw_i))
+
+    def _expand_dst_targets(nodeids: Iterable[int] | None) -> set[int] | None:
+        if nodeids is None:
+            return None
+        expanded = {int(v) for v in nodeids}
+        if dst_nodeid_alias_by_nodeid is None:
+            return expanded
+        for raw_dst, aliased_dst in dst_nodeid_alias_by_nodeid.items():
+            raw_i = int(raw_dst)
+            alias_i = int(aliased_dst)
+            if raw_i in expanded or alias_i in expanded:
+                expanded.add(raw_i)
+                expanded.add(alias_i)
+        return expanded
+
+    def _collect_intermediate_dst_ids(
+        search: _SearchResult,
+        *,
+        exclude_canonical: Iterable[int] | None = None,
+    ) -> tuple[list[int], list[int]]:
+        excluded = {int(v) for v in (exclude_canonical or [])}
+        canonical_ids: list[int] = []
+        raw_ids: list[int] = []
+        seen_canonical: set[int] = set()
+        seen_raw: set[int] = set()
+        for _hit_key, raw_dst, _hit_dist, _hit_hops in list(search.raw_hit_targets):
+            raw_i = int(raw_dst)
+            canonical_i = _canonical_dst_nodeid(raw_i)
+            if canonical_i in excluded:
+                continue
+            if canonical_i not in seen_canonical:
+                canonical_ids.append(canonical_i)
+                seen_canonical.add(canonical_i)
+            if raw_i not in seen_raw:
+                raw_ids.append(raw_i)
+                seen_raw.add(raw_i)
+        return canonical_ids, raw_ids
     if allowed_pairs is not None:
         allowed_pairs_dst_by_src = {}
         for pair in allowed_pairs:
@@ -336,6 +379,115 @@ def build_pair_supports(
             for nodeid_i in {raw_nodeid, aliased_nodeid}:
                 cross_points_by_nodeid.setdefault(int(nodeid_i), []).append(ev.cross_point)
 
+    def _record_resolved_support(
+        *,
+        traj_id: str,
+        ev: CrossingEvent,
+        source_key: str,
+        src_nodeid_i: int,
+        search: _SearchResult,
+        target_key: str,
+        raw_dst_nodeid: int,
+        dst_nodeid: int,
+        target_dist_m: float,
+        target_stitch_hops: int,
+        search_mode: str,
+        expected_dst_nodeid: int | None,
+        intermediate_dst_nodeids: list[int],
+        intermediate_raw_dst_nodeids: list[int],
+    ) -> None:
+        target_node = graph.nodes.get(target_key)
+        if target_node is None:
+            return
+        if int(dst_nodeid) == int(src_nodeid_i):
+            return
+
+        pair = (int(src_nodeid_i), int(dst_nodeid))
+        support = supports.get(pair)
+        if support is not None and bool(single_support_per_pair) and int(support.support_event_count) > 0:
+            return
+
+        path_keys = _reconstruct_path(source_key=source_key, target_key=target_key, prev=search.prev)
+        path_line = _build_path_linestring(
+            path_keys=path_keys,
+            nodes=graph.nodes,
+            prev_edge=search.prev_edge,
+            traj_line_map=graph.traj_line_map,
+        )
+        edge_kinds = _path_edge_kinds(path_keys=path_keys, prev_edge=search.prev_edge)
+        if path_line is None or path_line.length <= 0:
+            unresolved_events.append(
+                {
+                    "road_id": f"na_{ev.nodeid}_{traj_id}_{ev.seq_idx}",
+                    "src_nodeid": int(src_nodeid_i),
+                    "dst_nodeid": int(dst_nodeid),
+                    "traj_id": str(traj_id),
+                    "seq_range": [int(ev.seq_idx), int(ev.seq_idx)],
+                    "station_range_m": [float(ev.station_m), float(ev.station_m)],
+                    "reason": SOFT_UNRESOLVED_NEIGHBOR,
+                    "severity": "soft",
+                    "hint": (
+                        "path_geometry_empty_no_straight_fallback;"
+                        f"path_nodes={int(len(path_keys))};"
+                        f"edge_kinds={','.join(sorted(edge_kinds)) if edge_kinds else 'none'}"
+                    ),
+                    "max_explored_dist_m": float(search.max_explored_dist_m),
+                    "last_node_ref": str(search.last_key),
+                    "stitch_candidate_count": int(max(0, search.explored_stitch_candidates)),
+                    "stitch_candidate_count_last": int(_count_outgoing_stitch_edges(graph.edges.get(search.last_key, []))),
+                    "stitch_candidate_count_explored": int(max(0, search.explored_stitch_candidates)),
+                    "explored_node_count": int(max(0, search.explored_node_count)),
+                    "search_mode": str(search_mode),
+                    "expected_dst_nodeid": (int(expected_dst_nodeid) if expected_dst_nodeid is not None else None),
+                    "intermediate_dst_nodeids": [int(v) for v in intermediate_dst_nodeids],
+                    "intermediate_raw_dst_nodeids": [int(v) for v in intermediate_raw_dst_nodeids],
+                }
+            )
+            return
+
+        if support is None:
+            support = PairSupport(src_nodeid=pair[0], dst_nodeid=pair[1])
+            supports[pair] = support
+
+        path_traj_ids = _extract_path_traj_ids(path_keys=path_keys, nodes=graph.nodes)
+        if not path_traj_ids:
+            path_traj_ids = {traj_id}
+
+        support.support_traj_ids.update(path_traj_ids)
+        support.support_event_count += 1
+        support.src_cross_points.append(ev.cross_point)
+        dst_cross_points = list(cross_points_by_nodeid.get(int(dst_nodeid), [])) or list(
+            cross_points_by_nodeid.get(int(raw_dst_nodeid), [])
+        )
+        if dst_cross_points:
+            support.dst_cross_points.append(dst_cross_points[0])
+        else:
+            support.dst_cross_points.append(target_node.point)
+        support.traj_segments.append(path_line)
+        support.stitch_hops.append(int(target_stitch_hops))
+        support.evidence_traj_ids.append(str(traj_id))
+        support.evidence_cluster_ids.append(0)
+        support.evidence_lengths_m.append(float(target_dist_m))
+        src_vote = node_dst_votes.setdefault(int(src_nodeid_i), {})
+        src_vote[int(dst_nodeid)] = int(src_vote.get(int(dst_nodeid), 0) + 1)
+
+        is_open_end = ("start" in edge_kinds) or ("end" in edge_kinds)
+        support.open_end_flags.append(bool(is_open_end))
+        support.open_end = support.open_end or is_open_end
+
+        if traj_id not in support.repr_traj_ids and len(support.repr_traj_ids) < 16:
+            support.repr_traj_ids.append(str(traj_id))
+
+        non_rc_hit = _first_non_rc_in_path(
+            path_keys=path_keys,
+            nodes=graph.nodes,
+            node_type_map=node_type_map,
+            src_nodeid=int(src_nodeid_i),
+        )
+        dst_type = node_type_map.get(int(dst_nodeid), "unknown")
+        if non_rc_hit is not None or dst_type == "non_rc":
+            support.hard_anomalies.add(HARD_NON_RC)
+
     for traj_id, items in graph.event_keys_by_traj.items():
         for ev, source_key in items:
             src_nodeid_raw = int(ev.nodeid)
@@ -350,31 +502,183 @@ def build_pair_supports(
                 # Topology-first mode: only process events from accepted src nodes.
                 if not allowed_pair_dsts_for_src:
                     continue
-                if bool(skip_search_after_pair_resolved) and len(allowed_pair_dsts_for_src) == 1:
-                    only_dst = int(next(iter(allowed_pair_dsts_for_src)))
-                    hit_pair = supports.get((src_nodeid_i, only_dst))
-                    if hit_pair is not None and int(hit_pair.support_event_count) > 0:
-                        continue
-            allowed_dsts_for_src: set[int] | None = None
+            allowed_dsts_for_src_canonical: set[int] | None = None
             if allowed_dst_by_src is not None:
                 raw = allowed_dst_by_src.get(src_nodeid_i)
                 if raw is not None:
-                    allowed_dsts_for_src = {int(v) for v in raw}
+                    allowed_dsts_for_src_canonical = {int(v) for v in raw}
             if allowed_pair_dsts_for_src is not None:
-                if allowed_dsts_for_src is None:
-                    allowed_dsts_for_src = set(allowed_pair_dsts_for_src)
+                if allowed_dsts_for_src_canonical is None:
+                    allowed_dsts_for_src_canonical = set(allowed_pair_dsts_for_src)
                 else:
-                    allowed_dsts_for_src = {
-                        int(v) for v in allowed_dsts_for_src if int(v) in allowed_pair_dsts_for_src
+                    allowed_dsts_for_src_canonical = {
+                        int(v) for v in allowed_dsts_for_src_canonical if int(v) in allowed_pair_dsts_for_src
                     }
-            if allowed_dsts_for_src is not None and dst_nodeid_alias_by_nodeid is not None:
-                allowed_dsts_for_src = {
-                    int(v) for v in allowed_dsts_for_src
-                } | {
-                    int(raw_dst)
-                    for raw_dst, aliased_dst in dst_nodeid_alias_by_nodeid.items()
-                    if int(raw_dst) in allowed_dsts_for_src or int(aliased_dst) in allowed_dsts_for_src
-                }
+            if allowed_dsts_for_src_canonical is not None and not allowed_dsts_for_src_canonical:
+                continue
+            allowed_dsts_for_src = _expand_dst_targets(allowed_dsts_for_src_canonical)
+            pair_target_dsts: list[int] = []
+            if allowed_pair_dsts_for_src is not None and allowed_dsts_for_src_canonical is not None:
+                pair_target_dsts = sorted(int(v) for v in allowed_dsts_for_src_canonical)
+            elif allowed_dsts_for_src_canonical is not None and len(allowed_dsts_for_src_canonical) == 1:
+                pair_target_dsts = [int(next(iter(allowed_dsts_for_src_canonical)))]
+            if pair_target_dsts:
+                for expected_dst_nodeid in pair_target_dsts:
+                    if bool(skip_search_after_pair_resolved):
+                        hit_pair = supports.get((int(src_nodeid_i), int(expected_dst_nodeid)))
+                        if hit_pair is not None and int(hit_pair.support_event_count) > 0:
+                            continue
+                    expected_raw_dst_ids = _expand_dst_targets({int(expected_dst_nodeid)}) or {int(expected_dst_nodeid)}
+                    search = _search_next_crossing(
+                        source_key=source_key,
+                        source_nodeid=src_nodeid_raw,
+                        nodes=graph.nodes,
+                        edges=graph.edges,
+                        max_dist_m=float(neighbor_max_dist_m),
+                        unique_dst_early_stop=False,
+                        allowed_dst_nodeids=expected_raw_dst_ids,
+                        allowed_dst_points_by_nodeid=None,
+                        allowed_dst_close_hit_buffer_m=float(max(0.0, allowed_dst_close_hit_buffer_m)),
+                        stop_on_first_allowed_hit=True,
+                    )
+                    intermediate_dst_nodeids, intermediate_raw_dst_nodeids = _collect_intermediate_dst_ids(
+                        search,
+                        exclude_canonical={int(expected_dst_nodeid)},
+                    )
+                    next_crossing_candidates.append(
+                        {
+                            "src_nodeid": int(src_nodeid_i),
+                            "src_cross_id": str(source_key),
+                            "traj_id": str(traj_id),
+                            "seq_idx": int(ev.seq_idx),
+                            "station_m": float(ev.station_m),
+                            "src_point": ev.cross_point,
+                            "search_mode": "pair_target_first",
+                            "expected_dst_nodeid": int(expected_dst_nodeid),
+                            "expected_raw_dst_nodeids": sorted(int(v) for v in expected_raw_dst_ids),
+                            "dst_nodeids_found": ([int(expected_dst_nodeid)] if search.target_key is not None else []),
+                            "dst_nodeids_found_count": (1 if search.target_key is not None else 0),
+                            "dst_candidates": (
+                                [
+                                    {
+                                        "dst_nodeid": int(expected_dst_nodeid),
+                                        "raw_dst_nodeid": int(search.target_cross_nodeid or expected_dst_nodeid),
+                                        "dist_m": float(search.distance_m),
+                                        "stitch_hops": int(search.stitch_hops),
+                                        "target_key": str(search.target_key),
+                                    }
+                                ]
+                                if search.target_key is not None
+                                else []
+                            ),
+                            "chosen_dst_nodeid": (int(expected_dst_nodeid) if search.target_key is not None else None),
+                            "chosen_dist_m": (float(search.distance_m) if search.target_key is not None else None),
+                            "ambiguous": False,
+                            "unresolved": bool(search.target_key is None),
+                            "unique_dst_dist_eps_m": None,
+                            "resolved_by_dist_margin": False,
+                            "resolved_by_dist_margin_dst_nodeid": None,
+                            "road_prior_filter_applied": bool(allowed_dsts_for_src_canonical is not None),
+                            "road_prior_allowed_dst": (
+                                sorted(int(v) for v in allowed_dsts_for_src_canonical)
+                                if allowed_dsts_for_src_canonical is not None
+                                else None
+                            ),
+                            "road_prior_reject_count": int(search.filtered_hit_target_count),
+                            "topology_pair_filter_applied": bool(allowed_pair_dsts_for_src is not None),
+                            "topology_pair_allowed_dst": (
+                                sorted(int(v) for v in allowed_pair_dsts_for_src)
+                                if allowed_pair_dsts_for_src is not None
+                                else None
+                            ),
+                            "raw_hit_target_count": int(search.raw_hit_target_count),
+                            "allowed_hit_target_count": int(search.allowed_hit_target_count),
+                            "filtered_hit_target_count": int(search.filtered_hit_target_count),
+                            "used_proximity_closure": bool(search.used_proximity_closure),
+                            "proximity_closure_dist_m": search.proximity_closure_dist_m,
+                            "intermediate_dst_nodeids": [int(v) for v in intermediate_dst_nodeids],
+                            "intermediate_dst_nodeids_count": int(len(intermediate_dst_nodeids)),
+                            "intermediate_raw_dst_nodeids": [int(v) for v in intermediate_raw_dst_nodeids],
+                        }
+                    )
+                    if search.target_key is None:
+                        last_stitch_candidates = _count_outgoing_stitch_edges(graph.edges.get(search.last_key, []))
+                        explored_stitch_candidates = int(max(0, search.explored_stitch_candidates))
+                        stitch_candidate_count = int(max(last_stitch_candidates, explored_stitch_candidates))
+                        if int(search.raw_hit_target_count) > 0:
+                            closure_failure_mode = "target_not_reached_with_intermediate_crossings"
+                        elif stitch_candidate_count > 0 or int(search.explored_node_count) > 0:
+                            closure_failure_mode = "expanded_no_target_closure"
+                        else:
+                            closure_failure_mode = "no_candidate"
+                        raw_hit_topk = ",".join(
+                            f"{int(dst)}:{float(hit_dist):.1f}"
+                            for _key, dst, hit_dist, _hops in list(search.raw_hit_targets)[:5]
+                        )
+                        unresolved_events.append(
+                            {
+                                "road_id": f"na_{ev.nodeid}_{traj_id}_{ev.seq_idx}",
+                                "src_nodeid": int(src_nodeid_i),
+                                "dst_nodeid": int(expected_dst_nodeid),
+                                "traj_id": str(traj_id),
+                                "seq_range": [int(ev.seq_idx), int(ev.seq_idx)],
+                                "station_range_m": [float(ev.station_m), float(ev.station_m)],
+                                "reason": SOFT_UNRESOLVED_NEIGHBOR,
+                                "severity": "soft",
+                                "hint": (
+                                    f"target_dst={int(expected_dst_nodeid)};"
+                                    f"max_dist_m={search.max_explored_dist_m:.1f};"
+                                    f"last_node={search.last_key};"
+                                    f"stitch_candidates={stitch_candidate_count};"
+                                    f"stitch_candidates_last={last_stitch_candidates};"
+                                    f"stitch_candidates_explored={explored_stitch_candidates};"
+                                    f"explored_nodes={int(search.explored_node_count)};"
+                                    f"raw_hit_targets={int(search.raw_hit_target_count)};"
+                                    f"raw_hit_topk={raw_hit_topk if raw_hit_topk else 'na'};"
+                                    f"intermediate_dst_nodeids={','.join(str(v) for v in intermediate_dst_nodeids) if intermediate_dst_nodeids else 'na'};"
+                                    f"closure_failure_mode={closure_failure_mode}"
+                                ),
+                                "max_explored_dist_m": float(search.max_explored_dist_m),
+                                "last_node_ref": str(search.last_key),
+                                "stitch_candidate_count": int(stitch_candidate_count),
+                                "stitch_candidate_count_last": int(last_stitch_candidates),
+                                "stitch_candidate_count_explored": int(explored_stitch_candidates),
+                                "explored_node_count": int(search.explored_node_count),
+                                "raw_hit_target_count": int(search.raw_hit_target_count),
+                                "allowed_hit_target_count": int(search.allowed_hit_target_count),
+                                "filtered_hit_target_count": int(search.filtered_hit_target_count),
+                                "closure_failure_mode": str(closure_failure_mode),
+                                "search_mode": "pair_target_first",
+                                "expected_dst_nodeid": int(expected_dst_nodeid),
+                                "intermediate_dst_nodeids": [int(v) for v in intermediate_dst_nodeids],
+                                "intermediate_raw_dst_nodeids": [int(v) for v in intermediate_raw_dst_nodeids],
+                            }
+                        )
+                        continue
+                    raw_dst_nodeid_value = search.target_cross_nodeid
+                    if raw_dst_nodeid_value is None:
+                        target_node = graph.nodes.get(str(search.target_key))
+                        if target_node is not None and target_node.cross_nodeid is not None:
+                            raw_dst_nodeid_value = int(target_node.cross_nodeid)
+                    if raw_dst_nodeid_value is None:
+                        continue
+                    _record_resolved_support(
+                        traj_id=str(traj_id),
+                        ev=ev,
+                        source_key=str(source_key),
+                        src_nodeid_i=int(src_nodeid_i),
+                        search=search,
+                        target_key=str(search.target_key),
+                        raw_dst_nodeid=int(raw_dst_nodeid_value),
+                        dst_nodeid=int(expected_dst_nodeid),
+                        target_dist_m=float(search.distance_m),
+                        target_stitch_hops=int(search.stitch_hops),
+                        search_mode="pair_target_first",
+                        expected_dst_nodeid=int(expected_dst_nodeid),
+                        intermediate_dst_nodeids=intermediate_dst_nodeids,
+                        intermediate_raw_dst_nodeids=intermediate_raw_dst_nodeids,
+                    )
+                continue
             search = _search_next_crossing(
                 source_key=source_key,
                 source_nodeid=src_nodeid_raw,
@@ -397,14 +701,10 @@ def build_pair_supports(
             hit_targets_by_dst: dict[int, dict[str, Any]] = {}
             for item in hit_targets_raw:
                 raw_dst_nodeid = int(item[1])
-                dst_nodeid = int(
-                    dst_nodeid_alias_by_nodeid.get(raw_dst_nodeid, raw_dst_nodeid)
-                    if dst_nodeid_alias_by_nodeid is not None
-                    else raw_dst_nodeid
-                )
+                dst_nodeid = _canonical_dst_nodeid(raw_dst_nodeid)
                 if dst_nodeid == src_nodeid_i:
                     continue
-                if allowed_dsts_for_src is not None and int(dst_nodeid) not in allowed_dsts_for_src:
+                if allowed_dsts_for_src_canonical is not None and int(dst_nodeid) not in allowed_dsts_for_src_canonical:
                     continue
                 cand = {
                     "dst_nodeid": int(dst_nodeid),
@@ -466,6 +766,8 @@ def build_pair_supports(
                     "seq_idx": int(ev.seq_idx),
                     "station_m": float(ev.station_m),
                     "src_point": ev.cross_point,
+                    "search_mode": "legacy_next_crossing",
+                    "expected_dst_nodeid": None,
                     "dst_nodeids_found": list(dst_nodeids_found),
                     "dst_nodeids_found_count": int(len(dst_nodeids_found)),
                     "dst_candidates": list(dst_candidates),
@@ -480,7 +782,9 @@ def build_pair_supports(
                     ),
                     "road_prior_filter_applied": bool(allowed_dsts_for_src is not None),
                     "road_prior_allowed_dst": (
-                        sorted(int(v) for v in allowed_dsts_for_src) if allowed_dsts_for_src is not None else None
+                        sorted(int(v) for v in allowed_dsts_for_src_canonical)
+                        if allowed_dsts_for_src_canonical is not None
+                        else None
                     ),
                     "road_prior_reject_count": int(max(0, len(hit_targets_raw) - len(hit_targets))),
                     "topology_pair_filter_applied": bool(allowed_pair_dsts_for_src is not None),
@@ -577,109 +881,36 @@ def build_pair_supports(
                         "allowed_hit_target_count": int(search.allowed_hit_target_count),
                         "filtered_hit_target_count": int(search.filtered_hit_target_count),
                         "closure_failure_mode": str(closure_failure_mode),
+                        "search_mode": "legacy_next_crossing",
                     }
                 )
-                continue
-
-            target_node = graph.nodes.get(target_key)
-            if target_node is None:
                 continue
 
             raw_dst_nodeid_value = search.target_cross_nodeid
-            if raw_dst_nodeid_value is None and target_node.cross_nodeid is not None:
-                raw_dst_nodeid_value = int(target_node.cross_nodeid)
+            if raw_dst_nodeid_value is None:
+                target_node = graph.nodes.get(target_key)
+                if target_node is not None and target_node.cross_nodeid is not None:
+                    raw_dst_nodeid_value = int(target_node.cross_nodeid)
             if raw_dst_nodeid_value is None:
                 continue
             raw_dst_nodeid = int(raw_dst_nodeid_value)
-            dst_nodeid = int(
-                dst_nodeid_alias_by_nodeid.get(raw_dst_nodeid, raw_dst_nodeid)
-                if dst_nodeid_alias_by_nodeid is not None
-                else raw_dst_nodeid
+            dst_nodeid = _canonical_dst_nodeid(raw_dst_nodeid)
+            _record_resolved_support(
+                traj_id=str(traj_id),
+                ev=ev,
+                source_key=str(source_key),
+                src_nodeid_i=int(src_nodeid_i),
+                search=search,
+                target_key=str(target_key),
+                raw_dst_nodeid=int(raw_dst_nodeid),
+                dst_nodeid=int(dst_nodeid),
+                target_dist_m=float(target_dist_m),
+                target_stitch_hops=int(target_stitch_hops),
+                search_mode="legacy_next_crossing",
+                expected_dst_nodeid=None,
+                intermediate_dst_nodeids=[],
+                intermediate_raw_dst_nodeids=[],
             )
-            if dst_nodeid == src_nodeid_i:
-                continue
-
-            pair = (src_nodeid_i, int(dst_nodeid))
-            support = supports.get(pair)
-            if support is not None and bool(single_support_per_pair) and int(support.support_event_count) > 0:
-                continue
-
-            path_keys = _reconstruct_path(source_key=source_key, target_key=target_key, prev=search.prev)
-            path_line = _build_path_linestring(
-                path_keys=path_keys,
-                nodes=graph.nodes,
-                prev_edge=search.prev_edge,
-                traj_line_map=graph.traj_line_map,
-            )
-            edge_kinds = _path_edge_kinds(path_keys=path_keys, prev_edge=search.prev_edge)
-            if path_line is None or path_line.length <= 0:
-                unresolved_events.append(
-                    {
-                        "road_id": f"na_{ev.nodeid}_{traj_id}_{ev.seq_idx}",
-                        "src_nodeid": src_nodeid_i,
-                        "dst_nodeid": int(dst_nodeid),
-                        "traj_id": str(traj_id),
-                        "seq_range": [int(ev.seq_idx), int(ev.seq_idx)],
-                        "station_range_m": [float(ev.station_m), float(ev.station_m)],
-                        "reason": SOFT_UNRESOLVED_NEIGHBOR,
-                        "severity": "soft",
-                        "hint": (
-                            "path_geometry_empty_no_straight_fallback;"
-                            f"path_nodes={int(len(path_keys))};"
-                            f"edge_kinds={','.join(sorted(edge_kinds)) if edge_kinds else 'none'}"
-                        ),
-                        "max_explored_dist_m": float(search.max_explored_dist_m),
-                        "last_node_ref": str(search.last_key),
-                        "stitch_candidate_count": int(max(0, search.explored_stitch_candidates)),
-                        "stitch_candidate_count_last": int(_count_outgoing_stitch_edges(graph.edges.get(search.last_key, []))),
-                        "stitch_candidate_count_explored": int(max(0, search.explored_stitch_candidates)),
-                        "explored_node_count": int(max(0, search.explored_node_count)),
-                    }
-                )
-                continue
-
-            if support is None:
-                support = PairSupport(src_nodeid=pair[0], dst_nodeid=pair[1])
-                supports[pair] = support
-
-            path_traj_ids = _extract_path_traj_ids(path_keys=path_keys, nodes=graph.nodes)
-            if not path_traj_ids:
-                path_traj_ids = {traj_id}
-
-            support.support_traj_ids.update(path_traj_ids)
-            support.support_event_count += 1
-            support.src_cross_points.append(ev.cross_point)
-            dst_cross_points = list(cross_points_by_nodeid.get(int(dst_nodeid), [])) or list(
-                cross_points_by_nodeid.get(int(raw_dst_nodeid), [])
-            )
-            if dst_cross_points:
-                support.dst_cross_points.append(dst_cross_points[0])
-            else:
-                support.dst_cross_points.append(target_node.point)
-            support.traj_segments.append(path_line)
-            support.stitch_hops.append(int(target_stitch_hops))
-            support.evidence_traj_ids.append(str(traj_id))
-            support.evidence_cluster_ids.append(0)
-            support.evidence_lengths_m.append(float(target_dist_m))
-            src_vote = node_dst_votes.setdefault(src_nodeid_i, {})
-            src_vote[int(dst_nodeid)] = int(src_vote.get(int(dst_nodeid), 0) + 1)
-
-            is_open_end = ("start" in edge_kinds) or ("end" in edge_kinds)
-            support.open_end_flags.append(bool(is_open_end))
-            support.open_end = support.open_end or is_open_end
-
-            if traj_id not in support.repr_traj_ids and len(support.repr_traj_ids) < 16:
-                support.repr_traj_ids.append(str(traj_id))
-
-            non_rc_hit = _first_non_rc_in_path(
-                path_keys=path_keys,
-                nodes=graph.nodes,
-                node_type_map=node_type_map,
-                src_nodeid=src_nodeid_i,
-            )
-            dst_type = node_type_map.get(dst_nodeid, "unknown")
-            if non_rc_hit is not None or dst_type == "non_rc":
-                support.hard_anomalies.add(HARD_NON_RC)
 
     for pair, support in list(supports.items()):
         multi = _detect_multi_road_channels(
@@ -1143,6 +1374,7 @@ def _search_next_crossing(
     allowed_dst_nodeids: set[int] | None = None,
     allowed_dst_points_by_nodeid: dict[int, list[Point]] | None = None,
     allowed_dst_close_hit_buffer_m: float = 0.0,
+    stop_on_first_allowed_hit: bool = False,
 ) -> _SearchResult:
     best: dict[str, tuple[float, int]] = {source_key: (0.0, 0)}
     prev: dict[str, str] = {}
@@ -1170,6 +1402,8 @@ def _search_next_crossing(
         dist_m: float,
         stitch_hops: int,
     ) -> None:
+        if bool(stop_on_first_allowed_hit) and allowed_dst_filter is not None:
+            return
         if allowed_dst_filter is None or proximity_hit_buffer_m <= 0.0:
             return
         if not isinstance(node_point, Point) or node_point.is_empty:
@@ -1255,6 +1489,33 @@ def _search_next_crossing(
                         abs(float(dist) - float(old_dist)) <= 1e-9 and int(hops) < int(old_hops)
                     ):
                         hit_by_dst[dst_nodeid] = (str(key), float(dist), int(hops))
+                if bool(stop_on_first_allowed_hit) and allowed_dst_filter is not None:
+                    ordered_raw_hits = sorted(
+                        (
+                            (hit_key, int(raw_dst), float(hit_dist), int(hit_hops))
+                            for raw_dst, (hit_key, hit_dist, hit_hops) in raw_hit_by_dst.items()
+                        ),
+                        key=lambda it: (float(it[2]), int(it[3]), int(it[1]), str(it[0])),
+                    )
+                    return _SearchResult(
+                        target_key=str(key),
+                        target_cross_nodeid=int(dst_nodeid),
+                        distance_m=float(dist),
+                        stitch_hops=int(hops),
+                        prev=prev,
+                        prev_edge=prev_edge,
+                        max_explored_dist_m=float(max_explored),
+                        last_key=str(last_key),
+                        explored_node_count=int(len(explored_keys)),
+                        explored_stitch_candidates=int(explored_stitch_candidates),
+                        hit_targets=[(str(key), int(dst_nodeid), float(dist), int(hops))],
+                        raw_hit_targets=list(ordered_raw_hits),
+                        raw_hit_target_count=int(len(raw_hit_by_dst)),
+                        allowed_hit_target_count=1,
+                        filtered_hit_target_count=int(max(0, len(raw_hit_by_dst) - 1)),
+                        used_proximity_closure=False,
+                        proximity_closure_dist_m=0.0,
+                    )
                 if bool(unique_dst_early_stop) and len(hit_by_dst) >= 2:
                     break
                 # Crossing nodes remain absorbing only when they are viable downstream targets.

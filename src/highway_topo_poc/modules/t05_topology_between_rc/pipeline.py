@@ -2082,6 +2082,11 @@ def _run_patch_core(
                 road_k["same_pair_multi_road_signature"] = list(variant.get("signature") or [])
                 road_k["same_pair_multi_road_src_station_m"] = variant.get("src_station_m")
                 road_k["same_pair_multi_road_dst_station_m"] = variant.get("dst_station_m")
+                road_k["same_pair_multi_road_support_mode"] = str(variant.get("support_mode") or "traj_support")
+                road_k["same_pair_multi_road_fallback_reason"] = variant.get("support_fallback_reason")
+                road_k["same_pair_multi_road_support_traj_count"] = int(
+                    variant.get("support_traj_count", len(branch_support.support_traj_ids))
+                )
                 stage_timer.add("t_build_lane_graph", float(road_k.get("_timing_lb_graph_ms", 0.0)))
                 sp_ms = float(road_k.get("_timing_shortest_path_ms", 0.0))
                 shortest_timing_per_k[key_k] = sp_ms
@@ -9479,6 +9484,65 @@ def _build_same_pair_multichain_branch_supports(
     return out
 
 
+def _build_same_pair_multichain_fallback_support(
+    parent_support: PairSupport,
+    *,
+    branch_def: dict[str, Any],
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    drivezone_zone_metric: BaseGeometry | None,
+    params: dict[str, Any],
+) -> PairSupport | None:
+    branch_shape_ref = branch_def.get("shape_ref_metric")
+    if not isinstance(branch_shape_ref, LineString) or branch_shape_ref.is_empty or float(branch_shape_ref.length) <= 1e-6:
+        return None
+    src_contact = _line_xsec_contact_point(line=branch_shape_ref, xsec=src_xsec)
+    dst_contact = _line_xsec_contact_point(line=branch_shape_ref, xsec=dst_xsec)
+    if not isinstance(src_contact, Point) or src_contact.is_empty:
+        return None
+    if not isinstance(dst_contact, Point) or dst_contact.is_empty:
+        return None
+
+    reach_xsec_m = float(max(1.0, params.get("STEP1_CORRIDOR_REACH_XSEC_M", 12.0)))
+    try:
+        src_gap_m = float(branch_shape_ref.distance(src_xsec))
+    except Exception:
+        src_gap_m = float("inf")
+    try:
+        dst_gap_m = float(branch_shape_ref.distance(dst_xsec))
+    except Exception:
+        dst_gap_m = float("inf")
+    if src_gap_m > reach_xsec_m + 1e-6 or dst_gap_m > reach_xsec_m + 1e-6:
+        return None
+
+    if drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty):
+        inside_ratio = _line_inside_ratio(branch_shape_ref, drivezone_zone_metric)
+        inside_min = float(
+            max(0.0, min(1.0, params.get("STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN", 0.60)))
+        )
+        if inside_ratio is None or float(inside_ratio) + 1e-9 < inside_min:
+            return None
+
+    branch_hard_anomalies = {str(v) for v in parent_support.hard_anomalies if str(v) != HARD_MULTI_ROAD}
+    out = PairSupport(
+        src_nodeid=int(parent_support.src_nodeid),
+        dst_nodeid=int(parent_support.dst_nodeid),
+        open_end=False,
+        hard_anomalies=set(branch_hard_anomalies),
+    )
+    out.support_event_count = 0
+    out.src_cross_points = [src_contact]
+    out.dst_cross_points = [dst_contact]
+    out.hints = [str(v) for v in list(parent_support.hints)] + ["same_pair_branch_road_prior_fallback"]
+    out.cluster_count = 1
+    out.main_cluster_id = 0
+    out.main_cluster_ratio = 0.0
+    out.cluster_sep_m_est = None
+    out.cluster_sizes = []
+    out.unresolved_neighbor_count = int(parent_support.unresolved_neighbor_count)
+    return out
+
+
 def _build_same_pair_multichain_variants(
     *,
     pair: tuple[int, int],
@@ -9508,10 +9572,29 @@ def _build_same_pair_multichain_variants(
         src_xsec=src_xsec,
         dst_xsec=dst_xsec,
     )
-    if int(len(branch_supports)) <= 1:
-        return []
+    branch_support_by_id = {
+        str(branch.get("branch_id") or f"{int(pair[0])}_{int(pair[1])}__b{int(idx)}"): subset
+        for idx, (branch, subset) in enumerate(branch_supports)
+    }
     out: list[dict[str, Any]] = []
-    for branch_rank, (branch_def, branch_support) in enumerate(branch_supports):
+    for branch_rank, branch_def in enumerate(branch_defs):
+        branch_id = str(branch_def.get("branch_id") or f"{int(pair[0])}_{int(pair[1])}__b{int(branch_rank)}")
+        branch_support = branch_support_by_id.get(branch_id)
+        support_mode = "traj_support"
+        support_fallback_reason: str | None = None
+        if branch_support is None:
+            branch_support = _build_same_pair_multichain_fallback_support(
+                support,
+                branch_def=branch_def,
+                src_xsec=src_xsec,
+                dst_xsec=dst_xsec,
+                drivezone_zone_metric=drivezone_zone_metric,
+                params=params,
+            )
+            if branch_support is None:
+                continue
+            support_mode = "road_prior_fallback"
+            support_fallback_reason = "missing_branch_traj_support"
         branch_shape_ref = branch_def.get("shape_ref_metric")
         if not isinstance(branch_shape_ref, LineString) or branch_shape_ref.is_empty:
             continue
@@ -9528,17 +9611,22 @@ def _build_same_pair_multichain_variants(
         )
         out.append(
             {
-                "branch_id": str(branch_def.get("branch_id") or f"{int(pair[0])}_{int(pair[1])}__b{int(branch_rank)}"),
+                "branch_id": branch_id,
                 "cluster_id": int(branch_rank),
                 "branch_rank": int(branch_def.get("branch_rank", branch_rank + 1)),
                 "signature": [str(v) for v in (branch_def.get("signature") or [])],
                 "src_station_m": branch_def.get("src_station_m"),
                 "dst_station_m": branch_def.get("dst_station_m"),
                 "support": branch_support,
+                "support_mode": str(support_mode),
+                "support_fallback_reason": (str(support_fallback_reason) if support_fallback_reason else None),
+                "support_traj_count": int(len(branch_support.support_traj_ids)),
                 "road_prior_shape_ref_metric": branch_shape_ref,
                 "step1_corridor": step1_corridor,
             }
         )
+    if int(len(out)) <= 1:
+        return []
     return out
 
 

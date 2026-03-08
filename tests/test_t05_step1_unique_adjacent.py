@@ -4,7 +4,7 @@ from pathlib import Path
 
 import json
 import numpy as np
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, Polygon
 
 from highway_topo_poc.modules.t05_topology_between_rc import geometry as geom_mod
 from highway_topo_poc.modules.t05_topology_between_rc import pipeline
@@ -516,6 +516,54 @@ def test_allowed_dst_proximity_closure_can_recover_missing_crossing_event() -> N
     assert float(res.proximity_closure_dist_m or 0.0) <= 0.5
 
 
+def test_stop_on_first_allowed_hit_disables_proximity_closure() -> None:
+    src_key = "t:cross:1"
+    sample_key = "t:sample:1"
+    nodes = {
+        src_key: geom_mod._GraphNode(
+            key=src_key,
+            traj_id="t",
+            kind="cross",
+            station_m=0.0,
+            point=Point(0.0, 0.0),
+            heading_xy=(1.0, 0.0),
+            cross_nodeid=1,
+            seq_idx=0,
+        ),
+        sample_key: geom_mod._GraphNode(
+            key=sample_key,
+            traj_id="t",
+            kind="sample",
+            station_m=10.0,
+            point=Point(10.2, 0.0),
+            heading_xy=(1.0, 0.0),
+            cross_nodeid=None,
+            seq_idx=1,
+        ),
+    }
+    edges = {
+        src_key: [geom_mod._GraphEdge(to_key=sample_key, weight=1.0, kind="traj", traj_id="t", station_from=0.0, station_to=10.0)],
+        sample_key: [],
+    }
+
+    res = geom_mod._search_next_crossing(
+        source_key=src_key,
+        source_nodeid=1,
+        nodes=nodes,
+        edges=edges,
+        max_dist_m=100.0,
+        unique_dst_early_stop=False,
+        allowed_dst_nodeids={2},
+        allowed_dst_points_by_nodeid={2: [Point(10.0, 0.0)]},
+        allowed_dst_close_hit_buffer_m=0.5,
+        stop_on_first_allowed_hit=True,
+    )
+
+    assert res.target_key is None
+    assert int(res.target_cross_nodeid or -1) == -1
+    assert bool(res.used_proximity_closure) is False
+
+
 def test_ambiguous_next_crossing_marks_soft_event(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     src_key = "t:cross:1"
     dst_a_key = "t:cross:2"
@@ -705,6 +753,91 @@ def test_road_prior_adjacency_filter_converts_ambiguous_to_unique(monkeypatch) -
 
     assert (1, 2) in res.supports
     assert not res.ambiguous_events
+
+
+def test_pair_target_first_support_search_allows_intermediate_crossing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    src_key = "t:cross:1"
+    mid_key = "t:cross:2"
+    dst_key = "u:cross:3"
+    ev = CrossingEvent(
+        traj_id="t",
+        nodeid=1,
+        seq=10,
+        seg_idx=0,
+        seq_idx=0,
+        station_m=0.0,
+        cross_point=Point(0.0, 0.0),
+        heading_xy=(1.0, 0.0),
+        cross_dist_m=0.0,
+    )
+    fake_graph = geom_mod._GraphBuildResult(
+        nodes={
+            src_key: geom_mod._GraphNode(
+                key=src_key,
+                traj_id="t",
+                kind="cross",
+                station_m=0.0,
+                point=Point(0.0, 0.0),
+                heading_xy=(1.0, 0.0),
+                cross_nodeid=1,
+                seq_idx=0,
+            ),
+            mid_key: geom_mod._GraphNode(
+                key=mid_key,
+                traj_id="t",
+                kind="cross",
+                station_m=10.0,
+                point=Point(10.0, 0.0),
+                heading_xy=(1.0, 0.0),
+                cross_nodeid=2,
+                seq_idx=1,
+            ),
+            dst_key: geom_mod._GraphNode(
+                key=dst_key,
+                traj_id="u",
+                kind="cross",
+                station_m=20.0,
+                point=Point(20.0, 0.0),
+                heading_xy=(1.0, 0.0),
+                cross_nodeid=3,
+                seq_idx=2,
+            ),
+        },
+        edges={
+            src_key: [geom_mod._GraphEdge(to_key=mid_key, weight=1.0, kind="traj", traj_id="t", station_from=0.0, station_to=10.0)],
+            mid_key: [geom_mod._GraphEdge(to_key=dst_key, weight=1.0, kind="stitch", traj_id=None, station_from=None, station_to=None)],
+            dst_key: [],
+        },
+        event_keys_by_traj={"t": [(ev, src_key)]},
+        traj_line_map={"t": LineString([(0.0, 0.0), (20.0, 0.0)])},
+        stitch_candidate_count=0,
+        stitch_edge_count=0,
+        stitch_query_count=0,
+        stitch_candidates_total=0,
+        stitch_reject_dist_count=0,
+        stitch_reject_angle_count=0,
+        stitch_reject_forward_count=0,
+        stitch_accept_count=0,
+        stitch_levels_used_hist={},
+    )
+    monkeypatch.setattr(geom_mod, "_build_forward_graph", lambda **kwargs: fake_graph)
+
+    res = geom_mod.build_pair_supports(
+        trajectories=[],
+        events_by_traj={"t": [ev]},
+        node_type_map={1: "unknown", 2: "unknown", 3: "unknown"},
+        neighbor_max_dist_m=100.0,
+        allowed_pairs={(1, 3)},
+    )
+
+    assert (1, 3) in res.supports
+    assert (1, 2) not in res.supports
+    assert not res.ambiguous_events
+    assert res.next_crossing_candidates
+    cand = res.next_crossing_candidates[0]
+    assert str(cand.get("search_mode")) == "pair_target_first"
+    assert int(cand.get("expected_dst_nodeid") or -1) == 3
+    assert [int(v) for v in cand.get("intermediate_dst_nodeids") or []] == [2]
 
 
 def test_build_pair_supports_remaps_shared_intersection_roles(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -1216,6 +1349,199 @@ def test_topology_unique_mode_same_pair_multichain_outputs_multi_roads_with_chan
     assert not out["hard_breakpoints"]
 
 
+def test_topology_unique_mode_same_pair_multichain_uses_road_prior_fallback_for_missing_branch(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    road_path = tmp_path / "RCSDRoad.geojson"
+    road_payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": [[0.0, 0.0], [100.0, 0.0]]},
+                "properties": {"snodeid": 1, "enodeid": 2, "direction": 2, "road_id": "r_a"},
+            },
+            {
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": [[0.0, 10.0], [100.0, 10.0]]},
+                "properties": {"snodeid": 1, "enodeid": 2, "direction": 2, "road_id": "r_b"},
+            },
+        ],
+    }
+    road_path.write_text(json.dumps(road_payload, ensure_ascii=False), encoding="utf-8")
+
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
+        road_prior_path=road_path,
+    )
+    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 30.0), (-20.0, 30.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t0", "t1"},
+        support_event_count=2,
+        traj_segments=[
+            LineString([(0.0, 0.0), (100.0, 0.0)]),
+            LineString([(0.0, 0.5), (100.0, 0.5)]),
+        ],
+        src_cross_points=[Point(0.0, 0.0), Point(0.0, 0.5)],
+        dst_cross_points=[Point(100.0, 0.0), Point(100.0, 0.5)],
+        repr_traj_ids=["t0", "t1"],
+        hard_anomalies={HARD_MULTI_ROAD},
+        evidence_traj_ids=["t0", "t1"],
+        evidence_cluster_ids=[0, 0],
+        evidence_lengths_m=[100.0, 100.0],
+        open_end_flags=[False, False],
+    )
+    support.cluster_count = 1
+    support.main_cluster_id = 0
+    support.main_cluster_ratio = 1.0
+    support.cluster_sep_m_est = 10.0
+    support.cluster_sizes = [2]
+
+    monkeypatch.setattr(
+        pipeline,
+        "extract_crossing_events",
+        lambda *args, **kwargs: CrossingExtractResult(
+            events_by_traj={},
+            raw_hit_count=0,
+            dedup_drop_count=0,
+            n_cross_empty_skipped=0,
+            n_cross_geom_unexpected=0,
+            n_cross_distance_gate_reject=0,
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "build_pair_supports",
+        lambda *args, **kwargs: PairSupportBuildResult(
+            supports={(1, 2): support},
+            unresolved_events=[],
+            graph_node_count=0,
+            graph_edge_count=0,
+            stitch_candidate_count=0,
+            stitch_edge_count=0,
+            stitch_query_count=0,
+            stitch_candidates_total=0,
+            stitch_reject_dist_count=0,
+            stitch_reject_angle_count=0,
+            stitch_reject_forward_count=0,
+            stitch_accept_count=0,
+            stitch_levels_used_hist={},
+            ambiguous_events=[],
+            next_crossing_candidates=[],
+            node_dst_votes={1: {2: 2}},
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "infer_node_types",
+        lambda **kwargs: ({1: "merge", 2: "merge"}, {1: 0, 2: 1}, {1: 1, 2: 0}),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_load_surface_points",
+        lambda *args, **kwargs: (np.empty((0, 3), dtype=np.float64), np.empty((0, 2), dtype=np.float64), {}),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_build_step1_corridor_for_pair",
+        lambda **kwargs: {
+            "strategy": "general",
+            "hard_reason": None,
+            "hard_hint": None,
+            "corridor_count": 1,
+            "main_corridor_ratio": 1.0,
+            "shape_ref_line": kwargs.get("road_prior_shape_ref_metric"),
+            "corridor_zone_metric": None,
+            "corridor_zone_area_m2": None,
+            "corridor_zone_source_count": 0,
+            "corridor_zone_half_width_m": None,
+            "corridor_shape_ref_inside_ratio": 1.0,
+            "gore_fallback_used_src": False,
+            "gore_fallback_used_dst": False,
+            "traj_drop_count_by_drivezone": 0,
+            "drivezone_fallback_used": False,
+            "road_prior_shape_ref_used": len(kwargs["support"].support_traj_ids) == 0,
+            "road_prior_shape_ref_mode": ("step1_no_traj" if len(kwargs["support"].support_traj_ids) == 0 else None),
+        },
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_build_traj_surface_hint_for_cluster",
+        lambda **kwargs: {
+            "traj_surface_enforced": False,
+            "surface_metric": None,
+            "timing_ms": 0.0,
+            "slice_valid_ratio": 0.0,
+            "covered_length_ratio": 0.0,
+            "unique_traj_count": int(len(kwargs["support"].support_traj_ids)),
+        },
+    )
+
+    eval_calls: list[dict[str, object]] = []
+
+    def _fake_eval(**kwargs):  # type: ignore[no-untyped-def]
+        ref_line = kwargs.get("road_prior_shape_ref_metric")
+        assert isinstance(ref_line, LineString)
+        y = float(ref_line.coords[0][1])
+        eval_calls.append(
+            {
+                "cluster_id": int(kwargs["cluster_id"]),
+                "candidate_branch_id": kwargs.get("candidate_branch_id"),
+                "support_traj_count": int(len(kwargs["support"].support_traj_ids)),
+            }
+        )
+        road = pipeline._make_base_road_record(
+            src=int(kwargs["src"]),
+            dst=int(kwargs["dst"]),
+            support=kwargs["support"],
+            src_type=str(kwargs["src_type"]),
+            dst_type=str(kwargs["dst_type"]),
+            neighbor_search_pass=int(kwargs["neighbor_search_pass"]),
+        )
+        road["candidate_cluster_id"] = int(kwargs["cluster_id"])
+        road["chosen_cluster_id"] = int(kwargs["cluster_id"])
+        road["_geometry_metric"] = LineString([(0.0, y), (100.0, y)])
+        road["_candidate_has_geometry"] = True
+        road["_candidate_feasible"] = True
+        road["_candidate_score"] = 100.0 - float(abs(y))
+        road["_candidate_in_ratio"] = 1.0
+        road["hard_reasons"] = []
+        road["soft_issue_flags"] = []
+        road["length_m"] = 100.0
+        road["conf"] = 0.8
+        road["_candidate_hard_breakpoints"] = []
+        road["_candidate_soft_breakpoints"] = []
+        return road
+
+    monkeypatch.setattr(pipeline, "_evaluate_candidate_road", _fake_eval)
+
+    out = pipeline._run_patch_core(
+        patch_inputs,
+        params=dict(pipeline.DEFAULT_PARAMS),
+        run_id="unit_run",
+        repo_root=tmp_path,
+    )
+
+    assert len(eval_calls) == 2
+    assert {int(item["support_traj_count"]) for item in eval_calls} == {0, 2}
+    assert out["road_count"] == 2
+    assert len(out["road_properties"]) == 2
+    assert {str(props["road_id"]) for props in out["road_properties"]} == {"1_2__ch1", "1_2__ch2"}
+    assert {str(props.get("same_pair_multi_road_support_mode")) for props in out["road_properties"]} == {
+        "traj_support",
+        "road_prior_fallback",
+    }
+    assert {
+        str(props.get("same_pair_multi_road_fallback_reason") or "")
+        for props in out["road_properties"]
+    } == {"", "missing_branch_traj_support"}
+    assert int(out["metrics_payload"].get("same_pair_multi_road_output_count", 0)) == 2
+    assert int(out["metrics_payload"].get("same_pair_partial_unresolved_pair_count", 0)) == 0
+
+
 def test_same_pair_resolution_stats_mark_partial_unresolved_pair() -> None:
     valid = {
         "road_id": "1_2__ch1",
@@ -1364,6 +1690,27 @@ def test_same_pair_branch_supports_use_xsec_station_gap_to_split_close_parallel_
     assert int(out[1][1].support_event_count) == 1
     assert abs(float(out[0][1].src_cross_points[0].y) - 1.0) <= 1e-6
     assert abs(float(out[1][1].src_cross_points[0].y) - 4.0) <= 1e-6
+
+
+def test_build_same_pair_multichain_fallback_support_requires_branch_to_reach_both_xsecs() -> None:
+    parent_support = PairSupport(src_nodeid=1, dst_nodeid=2, hard_anomalies={HARD_MULTI_ROAD})
+    src_xsec = LineString([(0.0, 0.0), (0.0, 8.0)])
+    dst_xsec = LineString([(100.0, 0.0), (100.0, 8.0)])
+    branch_def = {
+        "branch_id": "1_2__b1",
+        "shape_ref_metric": LineString([(0.0, 10.0), (40.0, 10.0)]),
+    }
+
+    out = pipeline._build_same_pair_multichain_fallback_support(
+        parent_support,
+        branch_def=branch_def,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=Polygon([(-10.0, -10.0), (120.0, -10.0), (120.0, 20.0), (-10.0, 20.0)]),
+        params=dict(pipeline.DEFAULT_PARAMS),
+    )
+
+    assert out is None
 
 
 def test_allowed_pairs_skips_non_topology_src(monkeypatch) -> None:  # type: ignore[no-untyped-def]
