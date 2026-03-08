@@ -4829,6 +4829,23 @@ def _same_pair_should_use_direct_rescue(
     return bool(current_blocked and (not rescue_blocked))
 
 
+def _same_pair_branch_support_needs_fallback_variant(
+    support: PairSupport | None,
+    *,
+    params: dict[str, Any],
+) -> bool:
+    if not isinstance(support, PairSupport):
+        return False
+    min_support_traj = int(max(1, params.get("MIN_SUPPORT_TRAJ", 2)))
+    support_traj_count = int(len(support.support_traj_ids))
+    support_event_count = int(getattr(support, "support_event_count", 0))
+    return bool(
+        support.open_end
+        or support_traj_count < min_support_traj
+        or support_event_count < min_support_traj
+    )
+
+
 def _apply_step1_xsec_metrics(
     *,
     items: Sequence[dict[str, Any]],
@@ -7599,6 +7616,7 @@ def _evaluate_candidate_road(
     road["step1_same_pair_multichain"] = bool(same_pair_multichain)
     road["same_pair_multi_road_support_mode"] = (support_mode_norm if bool(same_pair_multichain) else None)
     road["same_pair_multi_road_geometry_mode"] = None
+    road["topology_fallback_geometry_mode"] = None
     road["cluster_count"] = int(parent_support.cluster_count)
     road["main_cluster_ratio"] = float(parent_support.main_cluster_ratio)
     road["cluster_sep_m_est"] = parent_support.cluster_sep_m_est
@@ -7743,18 +7761,18 @@ def _evaluate_candidate_road(
         max(0.0, min(1.0, float(params.get("STEP2_SEGMENT_CORRIDOR_MIN_INSIDE_RATIO", 0.999))))
     )
     primary_shape_ref_metric = center.shape_ref_metric if _is_valid_linestring(center.shape_ref_metric) else shape_ref_hint_for_center
-    same_pair_direct_fallback_line = None
-    if bool(same_pair_multichain) and road_prior_shape_ref_valid:
-        same_pair_direct_fallback_line = _fallback_geometry_from_shape_ref(
+    road_prior_direct_fallback_line = None
+    if road_prior_shape_ref_valid:
+        road_prior_direct_fallback_line = _fallback_geometry_from_shape_ref(
             shape_ref_line=road_prior_shape_ref_metric,
             src_xsec=src_xsec,
             dst_xsec=dst_xsec,
         )
         if (
-            not _is_valid_linestring(same_pair_direct_fallback_line)
+            not _is_valid_linestring(road_prior_direct_fallback_line)
             and _is_valid_linestring(road_prior_shape_ref_metric)
         ):
-            same_pair_direct_fallback_line = _orient_axis_line(
+            road_prior_direct_fallback_line = _orient_axis_line(
                 road_prior_shape_ref_metric,
                 src_xsec=src_xsec,
                 dst_xsec=dst_xsec,
@@ -7826,8 +7844,8 @@ def _evaluate_candidate_road(
     road_line = center.centerline_metric
     centerline_fallback_used = False
     center_empty_downgraded = False
-    if _is_valid_linestring(same_pair_direct_fallback_line) and support_mode_norm == "road_prior_fallback":
-        road_line = same_pair_direct_fallback_line
+    if _is_valid_linestring(road_prior_direct_fallback_line) and support_mode_norm == "road_prior_fallback":
+        road_line = road_prior_direct_fallback_line
         centerline_fallback_used = True
         road["same_pair_multi_road_geometry_mode"] = "road_prior_direct_fallback"
         road["endpoint_fallback_mode_src"] = str(
@@ -7896,13 +7914,13 @@ def _evaluate_candidate_road(
         bool(same_pair_multichain)
         and support_mode_norm != "road_prior_fallback"
         and _is_valid_linestring(road_line)
-        and _is_valid_linestring(same_pair_direct_fallback_line)
+        and _is_valid_linestring(road_prior_direct_fallback_line)
     ):
         src_sel_metric = road.get("_xsec_road_selected_src_metric")
         dst_sel_metric = road.get("_xsec_road_selected_dst_metric")
         src_sel = src_sel_metric if _is_valid_linestring(src_sel_metric) else src_xsec
         dst_sel = dst_sel_metric if _is_valid_linestring(dst_sel_metric) else dst_xsec
-        rescue_line = same_pair_direct_fallback_line
+        rescue_line = road_prior_direct_fallback_line
         rescue_snapped_line, rescue_src_after_pt, rescue_dst_after_pt, rescue_src_before_dist, rescue_dst_before_dist = _fallback_bind_endpoints_to_xsec(
             line=rescue_line,
             src_xsec=src_sel,
@@ -7931,6 +7949,60 @@ def _evaluate_candidate_road(
                 road["segment_corridor_enforced"] = True
                 road["segment_corridor_source"] = "road_prior_branch_rescue"
                 road["segment_corridor_rescue_mode"] = "road_prior_branch_corridor"
+            road["endpoint_fallback_mode_src"] = str(
+                road.get("endpoint_fallback_mode_src") or "road_prior_direct_rescue"
+            )
+            road["endpoint_fallback_mode_dst"] = str(
+                road.get("endpoint_fallback_mode_dst") or "road_prior_direct_rescue"
+            )
+            if isinstance(rescue_src_after_pt, Point) and not rescue_src_after_pt.is_empty:
+                road["_endpoint_after_src_metric"] = rescue_src_after_pt
+                road["endpoint_dist_to_xsec_src_m"] = float(rescue_src_after_pt.distance(src_sel))
+                if rescue_src_before_dist is not None:
+                    road["endpoint_snap_dist_src_before_m"] = float(rescue_src_before_dist)
+                road["endpoint_snap_dist_src_after_m"] = float(road["endpoint_dist_to_xsec_src_m"])
+                road["_endpoint_before_src_metric"] = Point(road_line.coords[0])
+            if isinstance(rescue_dst_after_pt, Point) and not rescue_dst_after_pt.is_empty:
+                road["_endpoint_after_dst_metric"] = rescue_dst_after_pt
+                road["endpoint_dist_to_xsec_dst_m"] = float(rescue_dst_after_pt.distance(dst_sel))
+                if rescue_dst_before_dist is not None:
+                    road["endpoint_snap_dist_dst_before_m"] = float(rescue_dst_before_dist)
+                road["endpoint_snap_dist_dst_after_m"] = float(road["endpoint_dist_to_xsec_dst_m"])
+                road["_endpoint_before_dst_metric"] = Point(road_line.coords[-1])
+    if (
+        support_mode_norm == "topology_road_prior_fallback"
+        and _is_valid_linestring(road_line)
+        and _is_valid_linestring(road_prior_direct_fallback_line)
+    ):
+        src_sel_metric = road.get("_xsec_road_selected_src_metric")
+        dst_sel_metric = road.get("_xsec_road_selected_dst_metric")
+        src_sel = src_sel_metric if _is_valid_linestring(src_sel_metric) else src_xsec
+        dst_sel = dst_sel_metric if _is_valid_linestring(dst_sel_metric) else dst_xsec
+        rescue_line = road_prior_direct_fallback_line
+        rescue_snapped_line, rescue_src_after_pt, rescue_dst_after_pt, rescue_src_before_dist, rescue_dst_before_dist = _fallback_bind_endpoints_to_xsec(
+            line=rescue_line,
+            src_xsec=src_sel,
+            dst_xsec=dst_sel,
+            gore_zone_metric=gore_zone_metric,
+            snap_max_m=_support_mode_endpoint_snap_cap_m(
+                params=params,
+                support_mode=support_mode_norm,
+            ),
+        )
+        if _is_valid_linestring(rescue_snapped_line):
+            rescue_line = rescue_snapped_line
+        if _same_pair_should_use_direct_rescue(
+            current_line=road_line,
+            rescue_line=rescue_line,
+            corridor_zone_raw=segment_corridor_for_gate,
+            corridor_tol_m=float(road.get("segment_corridor_inside_tol_m") or 0.0),
+            min_inside_ratio=float(road.get("segment_corridor_min_inside_ratio") or 0.0),
+            drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+        ):
+            road_line = rescue_line
+            centerline_fallback_used = True
+            road["topology_fallback_geometry_mode"] = "road_prior_direct_rescue"
             road["endpoint_fallback_mode_src"] = str(
                 road.get("endpoint_fallback_mode_src") or "road_prior_direct_rescue"
             )
@@ -11145,30 +11217,18 @@ def _build_same_pair_multichain_variants(
         for idx, (branch, subset) in enumerate(branch_supports)
     }
     out: list[dict[str, Any]] = []
-    for branch_rank, branch_def in enumerate(branch_defs):
-        branch_id = str(branch_def.get("branch_id") or f"{int(pair[0])}_{int(pair[1])}__b{int(branch_rank)}")
-        branch_support = branch_support_by_id.get(branch_id)
-        support_mode = "traj_support"
-        support_fallback_reason: str | None = None
-        if branch_support is None:
-            branch_support = _build_same_pair_multichain_fallback_support(
-                support,
-                branch_def=branch_def,
-                src_xsec=src_xsec,
-                dst_xsec=dst_xsec,
-                drivezone_zone_metric=drivezone_zone_metric,
-                gore_zone_metric=gore_zone_metric,
-                src_type=src_type,
-                dst_type=dst_type,
-                params=params,
-            )
-            if branch_support is None:
-                continue
-            support_mode = "road_prior_fallback"
-            support_fallback_reason = "missing_branch_traj_support"
+
+    def _append_variant(
+        *,
+        branch_id: str,
+        branch_def: dict[str, Any],
+        branch_support: PairSupport,
+        support_mode: str,
+        support_fallback_reason: str | None,
+    ) -> None:
         branch_shape_ref = branch_def.get("shape_ref_metric")
         if not isinstance(branch_shape_ref, LineString) or branch_shape_ref.is_empty:
-            continue
+            return
         step1_corridor = _build_step1_corridor_for_pair(
             support=branch_support,
             src_type=src_type,
@@ -11183,8 +11243,8 @@ def _build_same_pair_multichain_variants(
         out.append(
             {
                 "branch_id": branch_id,
-                "cluster_id": int(branch_rank),
-                "branch_rank": int(branch_def.get("branch_rank", branch_rank + 1)),
+                "cluster_id": int(len(out)),
+                "branch_rank": int(branch_def.get("branch_rank", len(out) + 1)),
                 "signature": [str(v) for v in (branch_def.get("signature") or [])],
                 "src_station_m": branch_def.get("src_station_m"),
                 "dst_station_m": branch_def.get("dst_station_m"),
@@ -11196,6 +11256,60 @@ def _build_same_pair_multichain_variants(
                 "step1_corridor": step1_corridor,
             }
         )
+
+    for branch_rank, branch_def in enumerate(branch_defs):
+        branch_id = str(branch_def.get("branch_id") or f"{int(pair[0])}_{int(pair[1])}__b{int(branch_rank)}")
+        branch_support = branch_support_by_id.get(branch_id)
+        if branch_support is None:
+            branch_fallback_support = _build_same_pair_multichain_fallback_support(
+                support,
+                branch_def=branch_def,
+                src_xsec=src_xsec,
+                dst_xsec=dst_xsec,
+                drivezone_zone_metric=drivezone_zone_metric,
+                gore_zone_metric=gore_zone_metric,
+                src_type=src_type,
+                dst_type=dst_type,
+                params=params,
+            )
+            if branch_fallback_support is None:
+                continue
+            _append_variant(
+                branch_id=branch_id,
+                branch_def=branch_def,
+                branch_support=branch_fallback_support,
+                support_mode="road_prior_fallback",
+                support_fallback_reason="missing_branch_traj_support",
+            )
+            continue
+
+        _append_variant(
+            branch_id=branch_id,
+            branch_def=branch_def,
+            branch_support=branch_support,
+            support_mode="traj_support",
+            support_fallback_reason=None,
+        )
+        if _same_pair_branch_support_needs_fallback_variant(branch_support, params=params):
+            branch_fallback_support = _build_same_pair_multichain_fallback_support(
+                branch_support,
+                branch_def=branch_def,
+                src_xsec=src_xsec,
+                dst_xsec=dst_xsec,
+                drivezone_zone_metric=drivezone_zone_metric,
+                gore_zone_metric=gore_zone_metric,
+                src_type=src_type,
+                dst_type=dst_type,
+                params=params,
+            )
+            if branch_fallback_support is not None:
+                _append_variant(
+                    branch_id=branch_id,
+                    branch_def=branch_def,
+                    branch_support=branch_fallback_support,
+                    support_mode="road_prior_fallback",
+                    support_fallback_reason="weak_branch_traj_support",
+                )
     if int(len(out)) <= 1:
         return []
     return out

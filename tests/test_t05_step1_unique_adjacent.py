@@ -2767,6 +2767,225 @@ def test_evaluate_candidate_road_topology_fallback_uses_road_prior_corridor(
     assert bool(road.get("_candidate_feasible", False)) is True
 
 
+def test_evaluate_candidate_road_topology_fallback_rescues_with_direct_road_prior_geometry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
+    )
+    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    params = dict(pipeline.DEFAULT_PARAMS)
+    src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
+    dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
+    road_prior_line = LineString([(0.0, 0.0), (100.0, 0.0)])
+    bad_centerline = LineString([(0.0, 0.0), (30.0, 0.0), (50.0, 25.0), (70.0, 0.0), (100.0, 0.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids=set(),
+        support_event_count=0,
+        traj_segments=[],
+        src_cross_points=[],
+        dst_cross_points=[],
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: geom_mod.CenterEstimate(
+            centerline_metric=bad_centerline,
+            shape_ref_metric=bad_centerline,
+            lb_path_found=False,
+            lb_path_edge_count=0,
+            lb_path_length_m=None,
+            stable_offset_m_src=None,
+            stable_offset_m_dst=None,
+            center_sample_coverage=1.0,
+            width_med_m=None,
+            width_p90_m=None,
+            max_turn_deg_per_10m=None,
+            used_lane_boundary=False,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="none",
+            dst_cut_mode="none",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
+            soft_flags=set(),
+            hard_flags=set(),
+            diagnostics={},
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: ({}, set(), set(), []),
+    )
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="merge",
+        dst_type="merge",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": False, "surface_metric": None, "timing_ms": 0.0},
+        shape_ref_hint_metric=bad_centerline,
+        segment_corridor_metric=bad_centerline.buffer(1.0, cap_style=2),
+        road_prior_shape_ref_metric=road_prior_line,
+        step1_used_road_prior=False,
+        step1_road_prior_mode=None,
+        same_pair_multichain=False,
+        candidate_branch_id=None,
+        support_mode="topology_road_prior_fallback",
+    )
+
+    geom = road.get("_geometry_metric")
+    assert isinstance(geom, LineString)
+    assert float(geom.distance(road_prior_line)) <= 1e-6
+    assert str(road.get("topology_fallback_geometry_mode")) == "road_prior_direct_rescue"
+    assert pipeline._HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR not in set(road.get("hard_reasons") or [])
+    assert pipeline.HARD_ROAD_OUTSIDE_DRIVEZONE not in set(road.get("hard_reasons") or [])
+    assert bool(road.get("_candidate_feasible", False)) is True
+
+
+def test_build_same_pair_multichain_variants_adds_fallback_for_weak_branch_support(
+    monkeypatch,
+) -> None:
+    weak_ref = LineString([(0.0, 0.0), (100.0, 0.0)])
+    strong_ref = LineString([(0.0, 10.0), (100.0, 10.0)])
+    branch_defs = [
+        {
+            "branch_id": "1_2__b0",
+            "branch_rank": 1,
+            "signature": ["e0"],
+            "shape_ref_metric": weak_ref,
+            "src_station_m": 1.0,
+            "dst_station_m": 1.0,
+        },
+        {
+            "branch_id": "1_2__b1",
+            "branch_rank": 2,
+            "signature": ["e1"],
+            "shape_ref_metric": strong_ref,
+            "src_station_m": 2.0,
+            "dst_station_m": 2.0,
+        },
+    ]
+    weak_support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t0"},
+        support_event_count=1,
+        traj_segments=[weak_ref],
+        src_cross_points=[Point(0.0, 0.0)],
+        dst_cross_points=[Point(100.0, 0.0)],
+        open_end=True,
+    )
+    strong_support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t1", "t2"},
+        support_event_count=2,
+        traj_segments=[strong_ref, strong_ref],
+        src_cross_points=[Point(0.0, 10.0), Point(0.0, 10.0)],
+        dst_cross_points=[Point(100.0, 10.0), Point(100.0, 10.0)],
+    )
+    weak_fallback_support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids=set(),
+        support_event_count=0,
+        traj_segments=[],
+        src_cross_points=[Point(0.0, 0.0)],
+        dst_cross_points=[Point(100.0, 0.0)],
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "_build_same_pair_multichain_branch_defs",
+        lambda **kwargs: branch_defs,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_build_same_pair_multichain_branch_supports",
+        lambda *args, **kwargs: [
+            (dict(branch_defs[0]), weak_support),
+            (dict(branch_defs[1]), strong_support),
+        ],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_build_same_pair_multichain_fallback_support",
+        lambda parent_support, **kwargs: weak_fallback_support,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_build_step1_corridor_for_pair",
+        lambda **kwargs: {
+            "hard_reason": None,
+            "shape_ref_line": kwargs.get("road_prior_shape_ref_metric"),
+            "corridor_zone_metric": kwargs.get("road_prior_shape_ref_metric").buffer(2.0, cap_style=2),
+            "road_prior_shape_ref_used": False,
+            "road_prior_shape_ref_mode": None,
+        },
+    )
+
+    variants = pipeline._build_same_pair_multichain_variants(
+        pair=(1, 2),
+        support=strong_support,
+        src_type="merge",
+        dst_type="merge",
+        src_xsec=LineString([(0.0, -5.0), (0.0, 15.0)]),
+        dst_xsec=LineString([(100.0, -5.0), (100.0, 15.0)]),
+        drivezone_zone_metric=Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 30.0), (-20.0, 30.0)]),
+        gore_zone_metric=None,
+        params=dict(pipeline.DEFAULT_PARAMS),
+        anchor_decisions={},
+        edge_geometry_by_id={},
+    )
+
+    weak_branch_variants = [v for v in variants if str(v.get("branch_id")) == "1_2__b0"]
+    strong_branch_variants = [v for v in variants if str(v.get("branch_id")) == "1_2__b1"]
+
+    assert len(weak_branch_variants) == 2
+    assert {str(v.get("support_mode")) for v in weak_branch_variants} == {"traj_support", "road_prior_fallback"}
+    assert {
+        str(v.get("support_fallback_reason"))
+        for v in weak_branch_variants
+        if str(v.get("support_mode")) == "road_prior_fallback"
+    } == {"weak_branch_traj_support"}
+    assert len(strong_branch_variants) == 1
+    assert str(strong_branch_variants[0].get("support_mode")) == "traj_support"
+
+
 def test_same_pair_multi_road_selection_keeps_close_parallel_branches() -> None:
     cand1 = {
         "src_nodeid": 1,
