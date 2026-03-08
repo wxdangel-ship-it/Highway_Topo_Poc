@@ -2946,6 +2946,8 @@ def _run_patch_core(
                     support_mode=str(variant.get("support_mode") or "traj_support"),
                     src_xsec=src_xsec_gate.geometry_metric,
                     dst_xsec=dst_xsec_gate.geometry_metric,
+                    pair_xsec_target_src_metric=branch_corridor.get("_pair_xsec_target_src_metric"),
+                    pair_xsec_target_dst_metric=branch_corridor.get("_pair_xsec_target_dst_metric"),
                 )
                 _apply_xsec_gate_meta_to_road(road=road_k, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
                 road_k["step1_strategy"] = branch_corridor.get("strategy")
@@ -3026,6 +3028,8 @@ def _run_patch_core(
                     support_mode="topology_road_prior_fallback",
                     src_xsec=src_xsec_gate.geometry_metric,
                     dst_xsec=dst_xsec_gate.geometry_metric,
+                    pair_xsec_target_src_metric=step1_corridor.get("_pair_xsec_target_src_metric"),
+                    pair_xsec_target_dst_metric=step1_corridor.get("_pair_xsec_target_dst_metric"),
                 )
                 _apply_xsec_gate_meta_to_road(road=road_k, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
                 road_k["step1_strategy"] = step1_corridor.get("strategy")
@@ -3137,6 +3141,8 @@ def _run_patch_core(
                     candidate_branch_id=None,
                     src_xsec=src_xsec_gate.geometry_metric,
                     dst_xsec=dst_xsec_gate.geometry_metric,
+                    pair_xsec_target_src_metric=step1_corridor.get("_pair_xsec_target_src_metric"),
+                    pair_xsec_target_dst_metric=step1_corridor.get("_pair_xsec_target_dst_metric"),
                 )
                 _apply_xsec_gate_meta_to_road(road=road_k, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
                 road_k["step1_strategy"] = step1_corridor.get("strategy")
@@ -4843,7 +4849,8 @@ def _same_pair_branch_support_needs_fallback_variant(
     support_traj_count = int(len(support.support_traj_ids))
     support_event_count = int(getattr(support, "support_event_count", 0))
     return bool(
-        support_traj_count < min_support_traj
+        bool(support.open_end)
+        or support_traj_count < min_support_traj
         or support_event_count < min_support_traj
     )
 
@@ -7496,12 +7503,22 @@ def _evaluate_candidate_road(
     same_pair_multichain: bool = False,
     candidate_branch_id: str | None = None,
     support_mode: str | None = None,
+    pair_xsec_target_src_metric: LineString | None = None,
+    pair_xsec_target_dst_metric: LineString | None = None,
 ) -> dict[str, Any]:
     t0_center = perf_counter()
     traj_surface_enforced = bool(traj_surface_hint.get("traj_surface_enforced", False))
     step1_shape_ref_valid = _is_valid_linestring(shape_ref_hint_metric)
     road_prior_shape_ref_valid = _is_valid_linestring(road_prior_shape_ref_metric)
     support_mode_norm = str(support_mode or "").strip().lower()
+    pair_target_src_valid = bool(
+        support_mode_norm == "topology_road_prior_fallback" and _is_valid_linestring(pair_xsec_target_src_metric)
+    )
+    pair_target_dst_valid = bool(
+        support_mode_norm == "topology_road_prior_fallback" and _is_valid_linestring(pair_xsec_target_dst_metric)
+    )
+    topology_bind_src_xsec = pair_xsec_target_src_metric if pair_target_src_valid else src_xsec
+    topology_bind_dst_xsec = pair_xsec_target_dst_metric if pair_target_dst_valid else dst_xsec
     road_prior_gap_fill_mode = _should_enable_road_prior_gap_fill(
         road_prior_shape_ref_valid=bool(road_prior_shape_ref_valid),
         traj_surface_enforced=bool(traj_surface_enforced),
@@ -7747,6 +7764,23 @@ def _evaluate_candidate_road(
         float(road_prior_shape_ref_metric.length) if road_prior_shape_ref_valid else None
     )
     road["_road_prior_shape_ref_metric"] = road_prior_shape_ref_metric if road_prior_shape_ref_valid else None
+    road["_pair_xsec_target_src_metric"] = pair_xsec_target_src_metric if pair_target_src_valid else None
+    road["_pair_xsec_target_dst_metric"] = pair_xsec_target_dst_metric if pair_target_dst_valid else None
+    for tag, target_valid, target_xsec in (
+        ("src", pair_target_src_valid, topology_bind_src_xsec),
+        ("dst", pair_target_dst_valid, topology_bind_dst_xsec),
+    ):
+        if not target_valid:
+            continue
+        road[f"_xsec_road_selected_{tag}_metric"] = target_xsec
+        road[f"_xsec_target_selected_{tag}_metric"] = target_xsec
+        road[f"xsec_road_selected_by_{tag}"] = "pair_target_topology_fallback"
+        road[f"xsec_selected_by_{tag}"] = "pair_target_topology_fallback"
+        road[f"xsec_target_mode_{tag}"] = "pair_target_topology_fallback"
+        road[f"xsec_road_selected_len_{tag}_m"] = float(target_xsec.length)
+        road[f"xsec_road_all_geom_type_{tag}"] = str(target_xsec.geom_type)
+        road[f"xsec_road_left_extent_{tag}_m"] = float(0.5 * target_xsec.length)
+        road[f"xsec_road_right_extent_{tag}_m"] = float(0.5 * target_xsec.length)
     road["_segment_corridor_metric"] = segment_corridor_for_gate
     road["segment_corridor_enforced"] = bool(
         segment_corridor_for_gate is not None and (not segment_corridor_for_gate.is_empty)
@@ -7767,8 +7801,8 @@ def _evaluate_candidate_road(
     if road_prior_shape_ref_valid:
         road_prior_direct_fallback_line = _fallback_geometry_from_shape_ref(
             shape_ref_line=road_prior_shape_ref_metric,
-            src_xsec=src_xsec,
-            dst_xsec=dst_xsec,
+            src_xsec=topology_bind_src_xsec,
+            dst_xsec=topology_bind_dst_xsec,
         )
         if (
             not _is_valid_linestring(road_prior_direct_fallback_line)
@@ -7776,13 +7810,13 @@ def _evaluate_candidate_road(
         ):
             road_prior_direct_fallback_line = _orient_axis_line(
                 road_prior_shape_ref_metric,
-                src_xsec=src_xsec,
-                dst_xsec=dst_xsec,
+                src_xsec=topology_bind_src_xsec,
+                dst_xsec=topology_bind_dst_xsec,
             )
 
     center_empty_like = bool(HARD_CENTER_EMPTY in set(center.hard_flags)) or (not _is_valid_linestring(center.centerline_metric))
     if center_empty_like:
-        for tag, xsec in (("src", src_xsec), ("dst", dst_xsec)):
+        for tag, xsec in (("src", topology_bind_src_xsec), ("dst", topology_bind_dst_xsec)):
             sel_key = f"_xsec_road_selected_{tag}_metric"
             all_key = f"_xsec_road_all_{tag}_metric"
             ref_key = f"_xsec_ref_{tag}_metric"
@@ -7799,9 +7833,13 @@ def _evaluate_candidate_road(
             if not _is_valid_linestring(road.get(ref_key)):
                 road[ref_key] = xsec
             if not road.get(by_key):
-                road[by_key] = "fallback_seed_due_center_empty"
+                road[by_key] = (
+                    "pair_target_topology_fallback"
+                    if ((tag == "src" and pair_target_src_valid) or (tag == "dst" and pair_target_dst_valid))
+                    else "fallback_seed_due_center_empty"
+                )
             if not road.get(mode_key):
-                road[mode_key] = "fallback_seed_due_center_empty"
+                road[mode_key] = str(road.get(by_key))
             sel_geom = road.get(sel_key)
             if _is_valid_linestring(sel_geom):
                 road[len_key] = float(sel_geom.length)
@@ -7869,8 +7907,8 @@ def _evaluate_candidate_road(
     if not (isinstance(road_line, LineString) and (not road_line.is_empty)):
         fallback_line = _fallback_geometry_from_shape_ref(
             shape_ref_line=primary_shape_ref_metric,
-            src_xsec=src_xsec,
-            dst_xsec=dst_xsec,
+            src_xsec=topology_bind_src_xsec,
+            dst_xsec=topology_bind_dst_xsec,
         )
         if (
             not _is_valid_linestring(fallback_line)
@@ -7879,8 +7917,8 @@ def _evaluate_candidate_road(
         ):
             fallback_line = _orient_axis_line(
                 primary_shape_ref_metric,
-                src_xsec=src_xsec,
-                dst_xsec=dst_xsec,
+                src_xsec=topology_bind_src_xsec,
+                dst_xsec=topology_bind_dst_xsec,
             )
         if isinstance(fallback_line, LineString) and (not fallback_line.is_empty):
             road_line = fallback_line
@@ -7888,8 +7926,16 @@ def _evaluate_candidate_road(
             road["endpoint_fallback_mode_src"] = str(road.get("endpoint_fallback_mode_src") or "shape_ref_substring_fallback")
             road["endpoint_fallback_mode_dst"] = str(road.get("endpoint_fallback_mode_dst") or "shape_ref_substring_fallback")
     if _is_valid_linestring(road_line):
-        src_sel_metric = road.get("_xsec_road_selected_src_metric")
-        dst_sel_metric = road.get("_xsec_road_selected_dst_metric")
+        src_sel_metric = (
+            topology_bind_src_xsec
+            if pair_target_src_valid
+            else road.get("_xsec_road_selected_src_metric")
+        )
+        dst_sel_metric = (
+            topology_bind_dst_xsec
+            if pair_target_dst_valid
+            else road.get("_xsec_road_selected_dst_metric")
+        )
         src_sel = src_sel_metric if _is_valid_linestring(src_sel_metric) else src_xsec
         dst_sel = dst_sel_metric if _is_valid_linestring(dst_sel_metric) else dst_xsec
         if centerline_fallback_used or road.get("_endpoint_after_src_metric") is None or road.get("_endpoint_after_dst_metric") is None:
@@ -8382,6 +8428,7 @@ def _same_pair_branch_display_candidates(
 ) -> list[dict[str, Any]]:
     best_any_by_branch: dict[str, dict[str, Any]] = {}
     best_selectable_by_branch: dict[str, dict[str, Any]] = {}
+    best_primary_selectable_by_branch: dict[str, dict[str, Any]] = {}
     branch_order: list[str] = []
     for idx, cand in enumerate(ranked_candidates):
         branch_id = _same_pair_branch_id(cand)
@@ -8392,7 +8439,19 @@ def _same_pair_branch_display_candidates(
             branch_order.append(branch_id)
         if branch_id not in best_selectable_by_branch and _same_pair_candidate_is_selectable(cand):
             best_selectable_by_branch[branch_id] = cand
-    return [best_selectable_by_branch.get(branch_id, best_any_by_branch[branch_id]) for branch_id in branch_order]
+        if (
+            branch_id not in best_primary_selectable_by_branch
+            and _same_pair_candidate_is_selectable(cand)
+            and str(cand.get("same_pair_multi_road_support_mode") or "").strip().lower() != "road_prior_fallback"
+        ):
+            best_primary_selectable_by_branch[branch_id] = cand
+    return [
+        best_primary_selectable_by_branch.get(
+            branch_id,
+            best_selectable_by_branch.get(branch_id, best_any_by_branch[branch_id]),
+        )
+        for branch_id in branch_order
+    ]
 
 
 def _select_same_pair_multichain_candidates(
