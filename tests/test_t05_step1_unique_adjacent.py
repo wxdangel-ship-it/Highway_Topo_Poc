@@ -73,6 +73,102 @@ def _mk_traj(traj_id: str, coords: list[tuple[float, float]]) -> TrajectoryData:
     )
 
 
+def test_build_pair_endpoint_xsec_role_full_seed_merge_uses_valid_mid_anchor() -> None:
+    xsec_seed = LineString([(0.0, -10.0), (0.0, 10.0)])
+    shape_ref_line = LineString([(-20.0, 4.0), (20.0, 4.0)])
+    drivezone = Polygon([(-5.0, 2.0), (5.0, 2.0), (5.0, 6.0), (-5.0, 6.0)])
+
+    payload = geom_mod.build_pair_endpoint_xsec(
+        xsec_seed=xsec_seed,
+        shape_ref_line=shape_ref_line,
+        traj_segments=(),
+        drivezone_zone_metric=drivezone,
+        gore_zone_metric=None,
+        ref_half_len_m=80.0,
+        sample_step_m=1.0,
+        nonpass_k=6,
+        evidence_radius_m=1.0,
+        min_ground_pts=1,
+        min_traj_pts=1,
+        core_band_m=20.0,
+        shift_step_m=5.0,
+        fallback_short_half_len_m=15.0,
+        barrier_min_ng_count=2,
+        barrier_min_len_m=4.0,
+        barrier_along_len_m=60.0,
+        barrier_along_width_m=2.5,
+        barrier_bin_step_m=2.0,
+        barrier_occ_ratio_min=0.65,
+        endcap_window_m=60.0,
+        caseb_pre_m=3.0,
+        endpoint_tag="src",
+        node_type="merge",
+        ground_xy=np.empty((0, 2), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+    )
+
+    selected = payload.get("xsec_road_selected")
+    assert isinstance(selected, LineString)
+    assert str(payload.get("policy_mode")) == "role_full_seed"
+    assert str(payload.get("selected_by")) == "role_full_seed_mid_anchor"
+    mid = selected.interpolate(0.5, normalized=True)
+    mid_xy = geom_mod.point_xy_safe(mid, context="test_role_full_seed_merge_mid")
+    assert mid_xy is not None
+    assert abs(float(mid_xy[0])) <= 1e-6
+    assert abs(float(mid_xy[1]) - 4.0) <= 1e-6
+    cross_ref = payload.get("xsec_cross_ref")
+    assert isinstance(cross_ref, LineString)
+    assert cross_ref.equals(xsec_seed)
+
+
+def test_build_pair_endpoint_xsec_role_full_seed_diverge_uses_valid_mid_anchor() -> None:
+    xsec_seed = LineString([(100.0, -10.0), (100.0, 10.0)])
+    shape_ref_line = LineString([(80.0, -3.0), (120.0, -3.0)])
+    drivezone = Polygon([(95.0, -6.0), (105.0, -6.0), (105.0, 0.0), (95.0, 0.0)])
+
+    payload = geom_mod.build_pair_endpoint_xsec(
+        xsec_seed=xsec_seed,
+        shape_ref_line=shape_ref_line,
+        traj_segments=(),
+        drivezone_zone_metric=drivezone,
+        gore_zone_metric=None,
+        ref_half_len_m=80.0,
+        sample_step_m=1.0,
+        nonpass_k=6,
+        evidence_radius_m=1.0,
+        min_ground_pts=1,
+        min_traj_pts=1,
+        core_band_m=20.0,
+        shift_step_m=5.0,
+        fallback_short_half_len_m=15.0,
+        barrier_min_ng_count=2,
+        barrier_min_len_m=4.0,
+        barrier_along_len_m=60.0,
+        barrier_along_width_m=2.5,
+        barrier_bin_step_m=2.0,
+        barrier_occ_ratio_min=0.65,
+        endcap_window_m=60.0,
+        caseb_pre_m=3.0,
+        endpoint_tag="dst",
+        node_type="diverge",
+        ground_xy=np.empty((0, 2), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+    )
+
+    selected = payload.get("xsec_road_selected")
+    assert isinstance(selected, LineString)
+    assert str(payload.get("policy_mode")) == "role_full_seed"
+    assert str(payload.get("selected_by")) == "role_full_seed_mid_anchor"
+    mid = selected.interpolate(0.5, normalized=True)
+    mid_xy = geom_mod.point_xy_safe(mid, context="test_role_full_seed_diverge_mid")
+    assert mid_xy is not None
+    assert abs(float(mid_xy[0]) - 100.0) <= 1e-6
+    assert abs(float(mid_xy[1]) + 3.0) <= 1e-6
+    cross_ref = payload.get("xsec_cross_ref")
+    assert isinstance(cross_ref, LineString)
+    assert cross_ref.equals(xsec_seed)
+
+
 def test_load_road_prior_adjacency_parses_direction_and_fields(tmp_path: Path) -> None:
     road_path = tmp_path / "RCSDRoad.geojson"
     payload = {
