@@ -3237,21 +3237,24 @@ def _run_patch_core(
             for c in ranked_candidates[:3]
         ]
         if same_pair_multi_chain_info is not None:
-            branch_total = int(max(1, len(same_pair_variants)))
             min_sep_base = _to_finite_float(
                 support.cluster_sep_m_est,
                 float(params["MULTI_ROAD_SEP_M"]),
             )
             min_sep_m = max(1.0, min(4.0, float(min_sep_base) * 0.25))
             same_pair_station_gap_min_m = float(max(0.1, float(params.get("SAME_PAIR_MULTI_STATION_GAP_MIN_M", 0.5))))
+            ranked_branch_candidates = _same_pair_branch_display_candidates(
+                sorted(ranked_candidates, key=_candidate_sort_key, reverse=True)
+            )
+            branch_total = int(max(1, len(ranked_branch_candidates)))
             selected_multi_pick = _select_same_pair_multichain_candidates(
-                sorted(ranked_candidates, key=_candidate_sort_key, reverse=True),
+                ranked_branch_candidates,
                 min_sep_m=float(min_sep_m),
                 same_pair_station_gap_min_m=float(same_pair_station_gap_min_m),
             )
             selected_ids = {id(c) for c in selected_multi_pick}
             ordered_candidates = sorted(
-                ranked_candidates,
+                ranked_branch_candidates,
                 key=lambda c: (
                     int(c.get("same_pair_multi_road_branch_rank", c.get("candidate_cluster_id", 0) + 1) or 0),
                     int(c.get("candidate_cluster_id", 0)),
@@ -4840,8 +4843,7 @@ def _same_pair_branch_support_needs_fallback_variant(
     support_traj_count = int(len(support.support_traj_ids))
     support_event_count = int(getattr(support, "support_event_count", 0))
     return bool(
-        support.open_end
-        or support_traj_count < min_support_traj
+        support_traj_count < min_support_traj
         or support_event_count < min_support_traj
     )
 
@@ -7854,6 +7856,16 @@ def _evaluate_candidate_road(
         road["endpoint_fallback_mode_dst"] = str(
             road.get("endpoint_fallback_mode_dst") or "road_prior_direct_fallback"
         )
+    elif _is_valid_linestring(road_prior_direct_fallback_line) and support_mode_norm == "topology_road_prior_fallback":
+        road_line = road_prior_direct_fallback_line
+        centerline_fallback_used = True
+        road["topology_fallback_geometry_mode"] = "road_prior_direct_fallback"
+        road["endpoint_fallback_mode_src"] = str(
+            road.get("endpoint_fallback_mode_src") or "road_prior_direct_fallback"
+        )
+        road["endpoint_fallback_mode_dst"] = str(
+            road.get("endpoint_fallback_mode_dst") or "road_prior_direct_fallback"
+        )
     if not (isinstance(road_line, LineString) and (not road_line.is_empty)):
         fallback_line = _fallback_geometry_from_shape_ref(
             shape_ref_line=primary_shape_ref_metric,
@@ -7969,62 +7981,11 @@ def _evaluate_candidate_road(
                     road["endpoint_snap_dist_dst_before_m"] = float(rescue_dst_before_dist)
                 road["endpoint_snap_dist_dst_after_m"] = float(road["endpoint_dist_to_xsec_dst_m"])
                 road["_endpoint_before_dst_metric"] = Point(road_line.coords[-1])
-    if (
-        support_mode_norm == "topology_road_prior_fallback"
-        and _is_valid_linestring(road_line)
-        and _is_valid_linestring(road_prior_direct_fallback_line)
-    ):
-        src_sel_metric = road.get("_xsec_road_selected_src_metric")
-        dst_sel_metric = road.get("_xsec_road_selected_dst_metric")
-        src_sel = src_sel_metric if _is_valid_linestring(src_sel_metric) else src_xsec
-        dst_sel = dst_sel_metric if _is_valid_linestring(dst_sel_metric) else dst_xsec
-        rescue_line = road_prior_direct_fallback_line
-        rescue_snapped_line, rescue_src_after_pt, rescue_dst_after_pt, rescue_src_before_dist, rescue_dst_before_dist = _fallback_bind_endpoints_to_xsec(
-            line=rescue_line,
-            src_xsec=src_sel,
-            dst_xsec=dst_sel,
-            gore_zone_metric=gore_zone_metric,
-            snap_max_m=_support_mode_endpoint_snap_cap_m(
-                params=params,
-                support_mode=support_mode_norm,
-            ),
-        )
-        if _is_valid_linestring(rescue_snapped_line):
-            rescue_line = rescue_snapped_line
-        if _same_pair_should_use_direct_rescue(
-            current_line=road_line,
-            rescue_line=rescue_line,
-            corridor_zone_raw=segment_corridor_for_gate,
-            corridor_tol_m=float(road.get("segment_corridor_inside_tol_m") or 0.0),
-            min_inside_ratio=float(road.get("segment_corridor_min_inside_ratio") or 0.0),
-            drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
-            gore_zone_metric=gore_zone_metric,
-        ):
-            road_line = rescue_line
-            centerline_fallback_used = True
-            road["topology_fallback_geometry_mode"] = "road_prior_direct_rescue"
-            road["endpoint_fallback_mode_src"] = str(
-                road.get("endpoint_fallback_mode_src") or "road_prior_direct_rescue"
-            )
-            road["endpoint_fallback_mode_dst"] = str(
-                road.get("endpoint_fallback_mode_dst") or "road_prior_direct_rescue"
-            )
-            if isinstance(rescue_src_after_pt, Point) and not rescue_src_after_pt.is_empty:
-                road["_endpoint_after_src_metric"] = rescue_src_after_pt
-                road["endpoint_dist_to_xsec_src_m"] = float(rescue_src_after_pt.distance(src_sel))
-                if rescue_src_before_dist is not None:
-                    road["endpoint_snap_dist_src_before_m"] = float(rescue_src_before_dist)
-                road["endpoint_snap_dist_src_after_m"] = float(road["endpoint_dist_to_xsec_src_m"])
-                road["_endpoint_before_src_metric"] = Point(road_line.coords[0])
-            if isinstance(rescue_dst_after_pt, Point) and not rescue_dst_after_pt.is_empty:
-                road["_endpoint_after_dst_metric"] = rescue_dst_after_pt
-                road["endpoint_dist_to_xsec_dst_m"] = float(rescue_dst_after_pt.distance(dst_sel))
-                if rescue_dst_before_dist is not None:
-                    road["endpoint_snap_dist_dst_before_m"] = float(rescue_dst_before_dist)
-                road["endpoint_snap_dist_dst_after_m"] = float(road["endpoint_dist_to_xsec_dst_m"])
-                road["_endpoint_before_dst_metric"] = Point(road_line.coords[-1])
     if centerline_fallback_used and HARD_CENTER_EMPTY in hard_flags and _is_valid_linestring(road_line):
-        if bool(same_pair_multichain) and _is_valid_linestring(primary_shape_ref_metric):
+        if support_mode_norm == "topology_road_prior_fallback" and _is_valid_linestring(road_prior_direct_fallback_line):
+            hard_flags.discard(HARD_CENTER_EMPTY)
+            center_empty_downgraded = True
+        elif bool(same_pair_multichain) and _is_valid_linestring(primary_shape_ref_metric):
             hard_flags.discard(HARD_CENTER_EMPTY)
             center_empty_downgraded = True
         else:
@@ -8412,23 +8373,39 @@ def _same_pair_candidate_is_selectable(road: dict[str, Any]) -> bool:
     return bool(road.get("step1_same_pair_multichain", False)) and support_mode == "road_prior_fallback"
 
 
+def _same_pair_branch_id(road: dict[str, Any]) -> str:
+    return str(road.get("same_pair_multi_road_branch_id") or road.get("candidate_branch_id") or "")
+
+
+def _same_pair_branch_display_candidates(
+    ranked_candidates: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    best_any_by_branch: dict[str, dict[str, Any]] = {}
+    best_selectable_by_branch: dict[str, dict[str, Any]] = {}
+    branch_order: list[str] = []
+    for idx, cand in enumerate(ranked_candidates):
+        branch_id = _same_pair_branch_id(cand)
+        if not branch_id:
+            branch_id = f"__branchless_{int(idx)}"
+        if branch_id not in best_any_by_branch:
+            best_any_by_branch[branch_id] = cand
+            branch_order.append(branch_id)
+        if branch_id not in best_selectable_by_branch and _same_pair_candidate_is_selectable(cand):
+            best_selectable_by_branch[branch_id] = cand
+    return [best_selectable_by_branch.get(branch_id, best_any_by_branch[branch_id]) for branch_id in branch_order]
+
+
 def _select_same_pair_multichain_candidates(
     ranked_candidates: Sequence[dict[str, Any]],
     *,
     min_sep_m: float,
     same_pair_station_gap_min_m: float,
 ) -> list[dict[str, Any]]:
-    branch_best: list[dict[str, Any]] = []
-    seen_branch_ids: set[str] = set()
-    for cand in ranked_candidates:
-        if not _same_pair_candidate_is_selectable(cand):
-            continue
-        branch_id = str(cand.get("same_pair_multi_road_branch_id") or cand.get("candidate_branch_id") or "")
-        if branch_id:
-            if branch_id in seen_branch_ids:
-                continue
-            seen_branch_ids.add(branch_id)
-        branch_best.append(cand)
+    branch_best = [
+        cand
+        for cand in _same_pair_branch_display_candidates(ranked_candidates)
+        if _same_pair_candidate_is_selectable(cand)
+    ]
     if not branch_best:
         return []
     return _select_non_conflicting_multi_road_candidates(

@@ -2870,7 +2870,7 @@ def test_evaluate_candidate_road_topology_fallback_rescues_with_direct_road_prio
     geom = road.get("_geometry_metric")
     assert isinstance(geom, LineString)
     assert float(geom.distance(road_prior_line)) <= 1e-6
-    assert str(road.get("topology_fallback_geometry_mode")) == "road_prior_direct_rescue"
+    assert str(road.get("topology_fallback_geometry_mode")) == "road_prior_direct_fallback"
     assert pipeline._HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR not in set(road.get("hard_reasons") or [])
     assert pipeline.HARD_ROAD_OUTSIDE_DRIVEZONE not in set(road.get("hard_reasons") or [])
     assert bool(road.get("_candidate_feasible", False)) is True
@@ -2984,6 +2984,53 @@ def test_build_same_pair_multichain_variants_adds_fallback_for_weak_branch_suppo
     } == {"weak_branch_traj_support"}
     assert len(strong_branch_variants) == 1
     assert str(strong_branch_variants[0].get("support_mode")) == "traj_support"
+
+
+def test_same_pair_branch_display_candidates_prefers_selectable_fallback() -> None:
+    fallback = {
+        "same_pair_multi_road_branch_id": "1_2__b0",
+        "candidate_branch_id": "1_2__b0",
+        "step1_same_pair_multichain": True,
+        "same_pair_multi_road_support_mode": "road_prior_fallback",
+        "_geometry_metric": LineString([(0.0, 0.0), (100.0, 0.0)]),
+        "_candidate_has_geometry": True,
+        "_candidate_feasible": False,
+        "hard_reasons": [],
+        "_candidate_score": 5.0,
+    }
+    blocked = {
+        "same_pair_multi_road_branch_id": "1_2__b0",
+        "candidate_branch_id": "1_2__b0",
+        "step1_same_pair_multichain": True,
+        "same_pair_multi_road_support_mode": "traj_support",
+        "_geometry_metric": LineString([(0.0, 0.0), (100.0, 0.0)]),
+        "_candidate_has_geometry": True,
+        "_candidate_feasible": False,
+        "hard_reasons": [pipeline.HARD_ROAD_OUTSIDE_DRIVEZONE],
+        "_candidate_score": 10.0,
+    }
+    clean = {
+        "same_pair_multi_road_branch_id": "1_2__b1",
+        "candidate_branch_id": "1_2__b1",
+        "step1_same_pair_multichain": True,
+        "same_pair_multi_road_support_mode": "traj_support",
+        "_geometry_metric": LineString([(0.0, 10.0), (100.0, 10.0)]),
+        "_candidate_has_geometry": True,
+        "_candidate_feasible": True,
+        "hard_reasons": [],
+        "_candidate_score": 9.0,
+    }
+
+    ranked = [blocked, clean, fallback]
+    display = pipeline._same_pair_branch_display_candidates(ranked)
+
+    assert len(display) == 2
+    by_branch = {
+        str(item.get("same_pair_multi_road_branch_id")): item
+        for item in display
+    }
+    assert by_branch["1_2__b0"] is fallback
+    assert by_branch["1_2__b1"] is clean
 
 
 def test_same_pair_multi_road_selection_keeps_close_parallel_branches() -> None:
