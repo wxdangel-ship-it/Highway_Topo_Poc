@@ -3426,6 +3426,452 @@ def test_evaluate_candidate_road_same_pair_fallback_uses_entry_xsec(
     assert abs(float(road.get("endpoint_dist_to_xsec_dst_m") or 0.0)) <= 1e-6
 
 
+def test_evaluate_candidate_road_road_prior_gap_fill_uses_entry_xsec(
+    tmp_path: Path, monkeypatch
+) -> None:
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
+    )
+    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    params = dict(pipeline.DEFAULT_PARAMS)
+    src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
+    dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
+    src_entry_xsec = LineString([(15.0, -5.0), (15.0, 5.0)])
+    dst_entry_xsec = LineString([(85.0, -5.0), (85.0, 5.0)])
+    road_prior_line = LineString([(15.0, 0.0), (85.0, 0.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids=set(),
+        support_event_count=0,
+        traj_segments=[],
+        src_cross_points=[],
+        dst_cross_points=[],
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "_resolve_fallback_support_entry_xsecs",
+        lambda **kwargs: (kwargs["shape_ref_metric"], src_entry_xsec, dst_entry_xsec),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: geom_mod.CenterEstimate(
+            centerline_metric=LineString([(40.0, 0.0), (60.0, 0.0)]),
+            shape_ref_metric=LineString([(40.0, 0.0), (60.0, 0.0)]),
+            lb_path_found=False,
+            lb_path_edge_count=0,
+            lb_path_length_m=None,
+            stable_offset_m_src=None,
+            stable_offset_m_dst=None,
+            center_sample_coverage=1.0,
+            width_med_m=None,
+            width_p90_m=None,
+            max_turn_deg_per_10m=None,
+            used_lane_boundary=False,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="none",
+            dst_cut_mode="none",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
+            soft_flags=set(),
+            hard_flags=set(),
+            diagnostics={},
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: ({}, set(), set(), []),
+    )
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="merge",
+        dst_type="merge",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": False, "surface_metric": None, "timing_ms": 0.0},
+        shape_ref_hint_metric=road_prior_line,
+        segment_corridor_metric=road_prior_line.buffer(20.0, cap_style=2),
+        road_prior_shape_ref_metric=road_prior_line,
+        step1_used_road_prior=True,
+        step1_road_prior_mode="step1_no_traj",
+        same_pair_multichain=False,
+        candidate_branch_id=None,
+        support_mode=None,
+    )
+
+    geom = road.get("_geometry_metric")
+    assert isinstance(geom, LineString)
+    assert abs(float(geom.coords[0][0]) - 15.0) <= 1e-6
+    assert abs(float(geom.coords[-1][0]) - 85.0) <= 1e-6
+    assert str(road.get("xsec_road_selected_by_src")) == "road_prior_gap_fill_entry_xsec"
+    assert str(road.get("xsec_road_selected_by_dst")) == "road_prior_gap_fill_entry_xsec"
+    assert abs(float(road.get("endpoint_dist_to_xsec_src_m") or 0.0)) <= 1e-6
+    assert abs(float(road.get("endpoint_dist_to_xsec_dst_m") or 0.0)) <= 1e-6
+
+
+def test_evaluate_candidate_road_rescues_near_threshold_traj_surface_in_ratio_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
+    )
+    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    params = dict(pipeline.DEFAULT_PARAMS)
+    src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
+    dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
+    road_line = LineString([(0.0, 0.0), (100.0, 0.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t0", "t1"},
+        support_event_count=2,
+        traj_segments=[road_line, road_line],
+        src_cross_points=[Point(0.0, 0.0), Point(0.0, 0.0)],
+        dst_cross_points=[Point(100.0, 0.0), Point(100.0, 0.0)],
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: geom_mod.CenterEstimate(
+            centerline_metric=road_line,
+            shape_ref_metric=road_line,
+            lb_path_found=False,
+            lb_path_edge_count=0,
+            lb_path_length_m=None,
+            stable_offset_m_src=None,
+            stable_offset_m_dst=None,
+            center_sample_coverage=1.0,
+            width_med_m=None,
+            width_p90_m=None,
+            max_turn_deg_per_10m=None,
+            used_lane_boundary=False,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="none",
+            dst_cut_mode="none",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
+            soft_flags=set(),
+            hard_flags=set(),
+            diagnostics={},
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: (
+            {
+                "traj_surface_enforced": True,
+                "traj_in_ratio": 0.943,
+                "traj_in_ratio_est": 0.943,
+                "endpoint_in_traj_surface_src": True,
+                "endpoint_in_traj_surface_dst": True,
+                "endpoint_in_traj_surface_src_raw": True,
+                "endpoint_in_traj_surface_dst_raw": True,
+                "endpoint_dist_to_traj_surface_src_m": 0.0,
+                "endpoint_dist_to_traj_surface_dst_m": 0.0,
+                "endpoint_traj_surface_tolerance_used_src": False,
+                "endpoint_traj_surface_tolerance_used_dst": False,
+                "traj_surface_gate_failure_mode": "in_ratio_only",
+            },
+            set(),
+            {pipeline.SOFT_ROAD_OUTSIDE_TRAJ_SURFACE},
+            [],
+        ),
+    )
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="merge",
+        dst_type="merge",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": True, "surface_metric": Polygon(), "timing_ms": 0.0},
+        shape_ref_hint_metric=road_line,
+        segment_corridor_metric=road_line.buffer(20.0, cap_style=2),
+        road_prior_shape_ref_metric=None,
+        step1_used_road_prior=False,
+        step1_road_prior_mode=None,
+        same_pair_multichain=False,
+        candidate_branch_id=None,
+    )
+
+    assert pipeline.SOFT_ROAD_OUTSIDE_TRAJ_SURFACE not in set(road.get("hard_reasons") or [])
+    assert str(road.get("traj_surface_rescue_mode")) == "near_threshold_in_ratio_only"
+    assert bool(road.get("_candidate_feasible", False)) is True
+
+
+def test_evaluate_candidate_road_rescues_near_threshold_corridor_and_drivezone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
+    )
+    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -1.0), (120.0, -1.0), (120.0, 1.0), (-20.0, 1.0)])
+    params = dict(pipeline.DEFAULT_PARAMS)
+    src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
+    dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
+    near_fail_line = LineString([(0.0, 0.0), (49.9, 0.0), (50.0, 1.2), (50.1, 0.0), (100.0, 0.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t0"},
+        support_event_count=1,
+        traj_segments=[near_fail_line],
+        src_cross_points=[Point(0.0, 0.0)],
+        dst_cross_points=[Point(100.0, 0.0)],
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: geom_mod.CenterEstimate(
+            centerline_metric=near_fail_line,
+            shape_ref_metric=near_fail_line,
+            lb_path_found=False,
+            lb_path_edge_count=0,
+            lb_path_length_m=None,
+            stable_offset_m_src=None,
+            stable_offset_m_dst=None,
+            center_sample_coverage=1.0,
+            width_med_m=None,
+            width_p90_m=None,
+            max_turn_deg_per_10m=None,
+            used_lane_boundary=False,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="none",
+            dst_cut_mode="none",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
+            soft_flags=set(),
+            hard_flags=set(),
+            diagnostics={},
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: ({}, set(), set(), []),
+    )
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="merge",
+        dst_type="merge",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": False, "surface_metric": None, "timing_ms": 0.0},
+        shape_ref_hint_metric=near_fail_line,
+        segment_corridor_metric=LineString([(0.0, 0.0), (100.0, 0.0)]).buffer(0.5, cap_style=2),
+        road_prior_shape_ref_metric=None,
+        step1_used_road_prior=False,
+        step1_road_prior_mode=None,
+        same_pair_multichain=False,
+        candidate_branch_id=None,
+    )
+
+    assert pipeline._HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR not in set(road.get("hard_reasons") or [])
+    assert pipeline.HARD_ROAD_OUTSIDE_DRIVEZONE not in set(road.get("hard_reasons") or [])
+    assert str(road.get("segment_corridor_rescue_mode")) == "near_threshold_inside_ratio"
+    assert str(road.get("drivezone_rescue_mode")) == "near_threshold_inside_ratio"
+    assert bool(road.get("_candidate_feasible", False)) is True
+
+
+def test_evaluate_candidate_road_does_not_rescue_large_corridor_drivezone_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
+    )
+    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -2.0), (120.0, -2.0), (120.0, 2.0), (-20.0, 2.0)])
+    params = dict(pipeline.DEFAULT_PARAMS)
+    src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
+    dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
+    bad_line = LineString([(0.0, 10.0), (100.0, 10.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t0"},
+        support_event_count=1,
+        traj_segments=[bad_line],
+        src_cross_points=[Point(0.0, 10.0)],
+        dst_cross_points=[Point(100.0, 10.0)],
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: geom_mod.CenterEstimate(
+            centerline_metric=bad_line,
+            shape_ref_metric=bad_line,
+            lb_path_found=False,
+            lb_path_edge_count=0,
+            lb_path_length_m=None,
+            stable_offset_m_src=None,
+            stable_offset_m_dst=None,
+            center_sample_coverage=1.0,
+            width_med_m=None,
+            width_p90_m=None,
+            max_turn_deg_per_10m=None,
+            used_lane_boundary=False,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="none",
+            dst_cut_mode="none",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
+            soft_flags=set(),
+            hard_flags=set(),
+            diagnostics={},
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: ({}, set(), set(), []),
+    )
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="merge",
+        dst_type="merge",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": False, "surface_metric": None, "timing_ms": 0.0},
+        shape_ref_hint_metric=bad_line,
+        segment_corridor_metric=LineString([(0.0, 0.0), (100.0, 0.0)]).buffer(0.5, cap_style=2),
+        road_prior_shape_ref_metric=None,
+        step1_used_road_prior=False,
+        step1_road_prior_mode=None,
+        same_pair_multichain=False,
+        candidate_branch_id=None,
+    )
+
+    hard_reasons = set(road.get("hard_reasons") or [])
+    assert pipeline._HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR in hard_reasons
+    assert pipeline.HARD_ROAD_OUTSIDE_DRIVEZONE in hard_reasons
+    assert bool(road.get("_candidate_feasible", False)) is False
+
+
 def test_same_pair_multi_road_selection_keeps_close_parallel_branches() -> None:
     cand1 = {
         "src_nodeid": 1,

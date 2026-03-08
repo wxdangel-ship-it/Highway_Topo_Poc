@@ -243,6 +243,15 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP2_SEGMENT_CORRIDOR_MIN_INSIDE_RATIO": 0.999,
     "STEP2_SEGMENT_CORRIDOR_RESCUE_ENABLE": 1,
     "STEP2_SEGMENT_CORRIDOR_RESCUE_OUTSIDE_MAX_M": 5.0,
+    "STEP2_SEGMENT_CORRIDOR_NEAR_RESCUE_ENABLE": 1,
+    "STEP2_SEGMENT_CORRIDOR_NEAR_RESCUE_OUTSIDE_MAX_M": 0.75,
+    "STEP2_SEGMENT_CORRIDOR_NEAR_RESCUE_RATIO_EPS": 0.005,
+    "STEP2_DRIVEZONE_NEAR_RESCUE_ENABLE": 1,
+    "STEP2_DRIVEZONE_NEAR_RESCUE_OUTSIDE_MAX_M": 2.0,
+    "STEP2_DRIVEZONE_NEAR_RESCUE_MIN_IN_RATIO": 0.992,
+    "STEP2_TRAJ_SURFACE_NEAR_RESCUE_ENABLE": 1,
+    "STEP2_TRAJ_SURFACE_NEAR_RESCUE_IN_RATIO_EPS": 0.02,
+    "STEP2_TRAJ_SURFACE_NEAR_RESCUE_ENDPOINT_DIST_M": 3.0,
     "STEP3_WIDENING_SUPPRESS_ENABLE": 1,
     "STEP3_WIDENING_RATIO_TRIGGER": 1.25,
     "STEP3_WIDENING_REQUIRE_EXPANDED_FLAG": 1,
@@ -7474,6 +7483,116 @@ def _drivezone_gate_diagnostics(
     return out
 
 
+def _remove_candidate_breakpoints_by_reason(
+    breakpoints: Sequence[dict[str, Any]],
+    *,
+    reason: str,
+) -> list[dict[str, Any]]:
+    return [
+        dict(bp)
+        for bp in breakpoints
+        if isinstance(bp, dict) and str(bp.get("reason") or "") != str(reason)
+    ]
+
+
+def _candidate_append_soft_rescue_breakpoint(
+    *,
+    road: dict[str, Any],
+    breakpoints: list[dict[str, Any]],
+    reason: str,
+    mode: str,
+    hint: str,
+) -> None:
+    breakpoints.append(
+        build_breakpoint(
+            road=road,
+            reason=reason,
+            severity="soft",
+            hint=f"rescued_mode={mode};{hint}",
+        )
+    )
+
+
+def _candidate_near_threshold_corridor_rescue_mode(
+    *,
+    road: dict[str, Any],
+    params: dict[str, Any],
+) -> str | None:
+    if not bool(int(params.get("STEP2_SEGMENT_CORRIDOR_NEAR_RESCUE_ENABLE", 1))):
+        return None
+    outside_len = _to_finite_float(road.get("segment_corridor_outside_len_m"), float("inf"))
+    inside_ratio = _to_finite_float(road.get("segment_corridor_inside_ratio"), float("nan"))
+    shape_ref_ratio = _to_finite_float(road.get("segment_corridor_shape_ref_inside_ratio"), float("nan"))
+    min_ratio = _to_finite_float(road.get("segment_corridor_min_inside_ratio"), 0.999)
+    ratio_eps = float(max(0.0, params.get("STEP2_SEGMENT_CORRIDOR_NEAR_RESCUE_RATIO_EPS", 0.005)))
+    outside_max_m = float(max(0.0, params.get("STEP2_SEGMENT_CORRIDOR_NEAR_RESCUE_OUTSIDE_MAX_M", 0.75)))
+    if not np.isfinite(outside_len) or outside_len > outside_max_m + 1e-6:
+        return None
+    if not np.isfinite(inside_ratio) or inside_ratio + 1e-9 < min_ratio - ratio_eps:
+        return None
+    if np.isfinite(shape_ref_ratio) and shape_ref_ratio + 1e-9 < min_ratio - ratio_eps:
+        return None
+    return "near_threshold_inside_ratio"
+
+
+def _candidate_near_threshold_drivezone_rescue_mode(
+    *,
+    road: dict[str, Any],
+    params: dict[str, Any],
+) -> str | None:
+    if not bool(int(params.get("STEP2_DRIVEZONE_NEAR_RESCUE_ENABLE", 1))):
+        return None
+    outside_len = _to_finite_float(road.get("road_outside_drivezone_len_m"), float("inf"))
+    in_ratio = _to_finite_float(road.get("road_in_drivezone_ratio"), float("nan"))
+    outside_max_m = float(max(0.0, params.get("STEP2_DRIVEZONE_NEAR_RESCUE_OUTSIDE_MAX_M", 2.0)))
+    min_in_ratio = float(max(0.0, min(1.0, params.get("STEP2_DRIVEZONE_NEAR_RESCUE_MIN_IN_RATIO", 0.992))))
+    if not np.isfinite(outside_len) or outside_len > outside_max_m + 1e-6:
+        return None
+    if not np.isfinite(in_ratio) or in_ratio + 1e-9 < min_in_ratio:
+        return None
+    if road.get("endpoint_in_drivezone_src") is False or road.get("endpoint_in_drivezone_dst") is False:
+        return None
+    return "near_threshold_inside_ratio"
+
+
+def _candidate_near_threshold_traj_surface_rescue_mode(
+    *,
+    road: dict[str, Any],
+    params: dict[str, Any],
+) -> str | None:
+    if not bool(int(params.get("STEP2_TRAJ_SURFACE_NEAR_RESCUE_ENABLE", 1))):
+        return None
+    failure_mode = str(road.get("traj_surface_gate_failure_mode") or "").strip().lower()
+    if not failure_mode:
+        return None
+    in_ratio = _to_finite_float(road.get("traj_in_ratio"), float("nan"))
+    if not np.isfinite(in_ratio):
+        in_ratio = _to_finite_float(road.get("traj_in_ratio_est"), float("nan"))
+    if not np.isfinite(in_ratio):
+        return None
+    in_ratio_min = float(max(0.0, min(1.0, params.get("IN_RATIO_MIN", 0.95))))
+    in_ratio_eps = float(max(0.0, params.get("STEP2_TRAJ_SURFACE_NEAR_RESCUE_IN_RATIO_EPS", 0.02)))
+    endpoint_dist_max = float(max(0.0, params.get("STEP2_TRAJ_SURFACE_NEAR_RESCUE_ENDPOINT_DIST_M", 3.0)))
+    if failure_mode == "in_ratio_only":
+        if in_ratio + 1e-9 >= in_ratio_min - in_ratio_eps:
+            return "near_threshold_in_ratio_only"
+        return None
+    if failure_mode not in {"endpoint_single", "endpoint_both"}:
+        return None
+    if in_ratio + 1e-9 < in_ratio_min - in_ratio_eps:
+        return None
+    fail_dists: list[float] = []
+    if road.get("endpoint_in_traj_surface_src") is False:
+        fail_dists.append(_to_finite_float(road.get("endpoint_dist_to_traj_surface_src_m"), float("inf")))
+    if road.get("endpoint_in_traj_surface_dst") is False:
+        fail_dists.append(_to_finite_float(road.get("endpoint_dist_to_traj_surface_dst_m"), float("inf")))
+    if not fail_dists:
+        return None
+    if all(np.isfinite(v) and v <= endpoint_dist_max + 1e-6 for v in fail_dists):
+        return f"near_threshold_{failure_mode}"
+    return None
+
+
 def _evaluate_candidate_road(
     *,
     src: int,
@@ -7512,6 +7631,17 @@ def _evaluate_candidate_road(
     road_prior_shape_ref_valid = _is_valid_linestring(road_prior_shape_ref_metric)
     support_mode_norm = str(support_mode or "").strip().lower()
     fallback_bind_modes = {"topology_road_prior_fallback", "road_prior_fallback"}
+    road_prior_gap_fill_mode = _should_enable_road_prior_gap_fill(
+        road_prior_shape_ref_valid=bool(road_prior_shape_ref_valid),
+        traj_surface_enforced=bool(traj_surface_enforced),
+        step1_used_road_prior=bool(step1_used_road_prior),
+        step1_road_prior_mode=step1_road_prior_mode,
+        same_pair_multichain=bool(same_pair_multichain),
+        support_mode=support_mode_norm,
+    )
+    entry_bind_allowed = bool(
+        road_prior_shape_ref_valid and (support_mode_norm in fallback_bind_modes or road_prior_gap_fill_mode)
+    )
     pair_target_src_valid = bool(
         support_mode_norm in fallback_bind_modes and _is_valid_linestring(pair_xsec_target_src_metric)
     )
@@ -7530,7 +7660,7 @@ def _evaluate_candidate_road(
         if support_mode_norm == "topology_road_prior_fallback" and pair_target_dst_valid
         else ("pair_target_road_prior_fallback" if support_mode_norm == "road_prior_fallback" and pair_target_dst_valid else None)
     )
-    if road_prior_shape_ref_valid and support_mode_norm in fallback_bind_modes:
+    if entry_bind_allowed:
         try:
             _shape_ref_line_unused, src_entry_xsec, dst_entry_xsec = _resolve_fallback_support_entry_xsecs(
                 shape_ref_metric=road_prior_shape_ref_metric,
@@ -7549,23 +7679,15 @@ def _evaluate_candidate_road(
             bind_src_reason = (
                 "topology_fallback_entry_xsec"
                 if support_mode_norm == "topology_road_prior_fallback"
-                else "road_prior_fallback_entry_xsec"
+                else ("road_prior_fallback_entry_xsec" if support_mode_norm == "road_prior_fallback" else "road_prior_gap_fill_entry_xsec")
             )
         if (not pair_target_dst_valid) and _is_valid_linestring(dst_entry_xsec):
             bind_dst_xsec = dst_entry_xsec
             bind_dst_reason = (
                 "topology_fallback_entry_xsec"
                 if support_mode_norm == "topology_road_prior_fallback"
-                else "road_prior_fallback_entry_xsec"
+                else ("road_prior_fallback_entry_xsec" if support_mode_norm == "road_prior_fallback" else "road_prior_gap_fill_entry_xsec")
             )
-    road_prior_gap_fill_mode = _should_enable_road_prior_gap_fill(
-        road_prior_shape_ref_valid=bool(road_prior_shape_ref_valid),
-        traj_surface_enforced=bool(traj_surface_enforced),
-        step1_used_road_prior=bool(step1_used_road_prior),
-        step1_road_prior_mode=step1_road_prior_mode,
-        same_pair_multichain=bool(same_pair_multichain),
-        support_mode=support_mode_norm,
-    )
     use_road_prior_shape_ref = bool(road_prior_shape_ref_valid and (road_prior_gap_fill_mode or (not step1_shape_ref_valid)))
     shape_ref_hint_for_center = road_prior_shape_ref_metric if use_road_prior_shape_ref else shape_ref_hint_metric
     traj_surface_metric_for_center = None if road_prior_gap_fill_mode else traj_surface_hint.get("surface_metric")
@@ -7809,7 +7931,7 @@ def _evaluate_candidate_road(
         ("src", bind_src_xsec, bind_src_reason),
         ("dst", bind_dst_xsec, bind_dst_reason),
     ):
-        if support_mode_norm not in fallback_bind_modes or not _is_valid_linestring(bind_xsec):
+        if (not entry_bind_allowed) or (not bind_reason) or (not _is_valid_linestring(bind_xsec)):
             continue
         road[f"_xsec_road_selected_{tag}_metric"] = bind_xsec
         road[f"_xsec_target_selected_{tag}_metric"] = bind_xsec
@@ -7829,6 +7951,8 @@ def _evaluate_candidate_road(
     road["segment_corridor_shape_ref_inside_ratio"] = None
     road["segment_corridor_outside_len_m"] = None
     road["segment_corridor_rescue_mode"] = None
+    road["drivezone_rescue_mode"] = None
+    road["traj_surface_rescue_mode"] = None
     road["segment_corridor_inside_tol_m"] = float(
         max(0.0, float(params.get("STEP2_SEGMENT_CORRIDOR_INSIDE_TOL_M", 0.5)))
     )
@@ -7896,7 +8020,7 @@ def _evaluate_candidate_road(
                 if road.get(f"xsec_barrier_final_count_{tag}") is None:
                     road[f"xsec_barrier_final_count_{tag}"] = 0
                 road[f"_xsec_target_selected_{tag}_metric"] = sel_geom
-                road[f"xsec_selected_by_{tag}"] = road.get(by_key)
+            road[f"xsec_selected_by_{tag}"] = road.get(by_key)
 
     soft_flags = set(center.soft_flags)
     hard_flags = set(center.hard_flags)
@@ -7966,12 +8090,12 @@ def _evaluate_candidate_road(
     if _is_valid_linestring(road_line):
         src_sel_metric = (
             bind_src_xsec
-            if support_mode_norm in fallback_bind_modes and _is_valid_linestring(bind_src_xsec)
+            if entry_bind_allowed and _is_valid_linestring(bind_src_xsec)
             else road.get("_xsec_road_selected_src_metric")
         )
         dst_sel_metric = (
             bind_dst_xsec
-            if support_mode_norm in fallback_bind_modes and _is_valid_linestring(bind_dst_xsec)
+            if entry_bind_allowed and _is_valid_linestring(bind_dst_xsec)
             else road.get("_xsec_road_selected_dst_metric")
         )
         src_sel = src_sel_metric if _is_valid_linestring(src_sel_metric) else src_xsec
@@ -8359,6 +8483,79 @@ def _evaluate_candidate_road(
 
     if road.get("_traj_surface_geom_metric") is None and traj_surface_hint.get("surface_metric") is not None:
         road["_traj_surface_geom_metric"] = traj_surface_hint.get("surface_metric")
+
+    if _HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR in hard_flags:
+        corridor_rescue_mode = _candidate_near_threshold_corridor_rescue_mode(road=road, params=params)
+        if corridor_rescue_mode:
+            hard_flags.discard(_HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR)
+            if not road.get("segment_corridor_rescue_mode"):
+                road["segment_corridor_rescue_mode"] = str(corridor_rescue_mode)
+            _candidate_append_soft_rescue_breakpoint(
+                road=road,
+                breakpoints=candidate_soft_breakpoints,
+                reason=_HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR,
+                mode=str(corridor_rescue_mode),
+                hint=(
+                    f"outside_len_m={road.get('segment_corridor_outside_len_m')};"
+                    f"in_ratio={road.get('segment_corridor_inside_ratio')};"
+                    f"shape_ref_in_ratio={road.get('segment_corridor_shape_ref_inside_ratio')};"
+                    f"threshold={road.get('segment_corridor_min_inside_ratio')}"
+                ),
+            )
+
+    if HARD_ROAD_OUTSIDE_DRIVEZONE in hard_flags:
+        drivezone_rescue_mode = _candidate_near_threshold_drivezone_rescue_mode(road=road, params=params)
+        if drivezone_rescue_mode:
+            hard_flags.discard(HARD_ROAD_OUTSIDE_DRIVEZONE)
+            road["drivezone_rescue_mode"] = str(drivezone_rescue_mode)
+            _candidate_append_soft_rescue_breakpoint(
+                road=road,
+                breakpoints=candidate_soft_breakpoints,
+                reason=HARD_ROAD_OUTSIDE_DRIVEZONE,
+                mode=str(drivezone_rescue_mode),
+                hint=(
+                    f"outside_len_m={road.get('road_outside_drivezone_len_m')};"
+                    f"in_ratio={road.get('road_in_drivezone_ratio')};"
+                    f"endpoint_src={road.get('endpoint_in_drivezone_src')};"
+                    f"endpoint_dst={road.get('endpoint_in_drivezone_dst')}"
+                ),
+            )
+
+    if SOFT_ROAD_OUTSIDE_TRAJ_SURFACE in hard_flags:
+        remaining_blocking = {
+            str(v)
+            for v in hard_flags
+            if str(v)
+            not in {
+                str(SOFT_ROAD_OUTSIDE_TRAJ_SURFACE),
+                str(HARD_ROAD_OUTSIDE_DRIVEZONE),
+                str(_HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR),
+            }
+        }
+        traj_surface_rescue_mode = _candidate_near_threshold_traj_surface_rescue_mode(road=road, params=params)
+        if traj_surface_rescue_mode and not remaining_blocking:
+            hard_flags.discard(SOFT_ROAD_OUTSIDE_TRAJ_SURFACE)
+            soft_flags.add(SOFT_ROAD_OUTSIDE_TRAJ_SURFACE)
+            road["traj_surface_rescue_mode"] = str(traj_surface_rescue_mode)
+            candidate_hard_breakpoints = _remove_candidate_breakpoints_by_reason(
+                candidate_hard_breakpoints,
+                reason=SOFT_ROAD_OUTSIDE_TRAJ_SURFACE,
+            )
+            _candidate_append_soft_rescue_breakpoint(
+                road=road,
+                breakpoints=candidate_soft_breakpoints,
+                reason=SOFT_ROAD_OUTSIDE_TRAJ_SURFACE,
+                mode=str(traj_surface_rescue_mode),
+                hint=(
+                    f"in_ratio={road.get('traj_in_ratio')};"
+                    f"endpoint_src={road.get('endpoint_in_traj_surface_src')};"
+                    f"endpoint_dst={road.get('endpoint_in_traj_surface_dst')};"
+                    f"endpoint_src_dist_m={road.get('endpoint_dist_to_traj_surface_src_m')};"
+                    f"endpoint_dst_dist_m={road.get('endpoint_dist_to_traj_surface_dst_m')};"
+                    f"gate_failure_mode={road.get('traj_surface_gate_failure_mode')};"
+                    f"threshold={float(params.get('IN_RATIO_MIN', 0.95)):.2f}"
+                ),
+            )
 
     road["_timing_centerline_ms"] = float(max(0.0, t_center_ms))
     road["_timing_gate_ms"] = float(max(0.0, t_gate_ms if road_line is not None else 0.0))
@@ -12870,6 +13067,9 @@ def _make_base_road_record(
         "segment_corridor_outside_len_m": None,
         "segment_corridor_inside_tol_m": None,
         "segment_corridor_min_inside_ratio": None,
+        "segment_corridor_rescue_mode": None,
+        "drivezone_rescue_mode": None,
+        "traj_surface_rescue_mode": None,
         "step3_width_ratio_src": None,
         "step3_width_ratio_dst": None,
         "step3_widening_suppressed": False,
