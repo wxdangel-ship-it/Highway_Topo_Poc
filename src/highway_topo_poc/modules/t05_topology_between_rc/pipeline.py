@@ -4682,20 +4682,55 @@ def _fallback_reach_allowances(
     dst_xsec_seed: LineString,
     src_entry_xsec: LineString,
     dst_entry_xsec: LineString,
+    endpoint_snap_max_m: float | None = None,
 ) -> dict[str, float | None]:
     base = float(max(1.0, base_reach_xsec_m))
     bonus_cap_m = float(base)
+    endpoint_snap_bonus_m = 0.0
+    if endpoint_snap_max_m is not None:
+        try:
+            endpoint_snap_bonus_m = float(min(bonus_cap_m, max(0.0, float(endpoint_snap_max_m))))
+        except Exception:
+            endpoint_snap_bonus_m = 0.0
     src_shift_m = _fallback_entry_xsec_shift_m(seed_xsec=src_xsec_seed, entry_xsec=src_entry_xsec)
     dst_shift_m = _fallback_entry_xsec_shift_m(seed_xsec=dst_xsec_seed, entry_xsec=dst_entry_xsec)
-    src_allow_m = float(base + min(bonus_cap_m, src_shift_m)) if src_shift_m is not None else float(base)
-    dst_allow_m = float(base + min(bonus_cap_m, dst_shift_m)) if dst_shift_m is not None else float(base)
+    src_shift_bonus_m = float(min(bonus_cap_m, src_shift_m)) if src_shift_m is not None else 0.0
+    dst_shift_bonus_m = float(min(bonus_cap_m, dst_shift_m)) if dst_shift_m is not None else 0.0
+    src_bonus_m = float(max(endpoint_snap_bonus_m, src_shift_bonus_m))
+    dst_bonus_m = float(max(endpoint_snap_bonus_m, dst_shift_bonus_m))
+    src_allow_m = float(base + src_bonus_m)
+    dst_allow_m = float(base + dst_bonus_m)
     return {
         "base_reach_xsec_m": float(base),
+        "endpoint_snap_max_m": float(endpoint_snap_bonus_m),
         "src_entry_xsec_shift_m": (float(src_shift_m) if src_shift_m is not None else None),
         "dst_entry_xsec_shift_m": (float(dst_shift_m) if dst_shift_m is not None else None),
+        "src_reach_bonus_m": float(src_bonus_m),
+        "dst_reach_bonus_m": float(dst_bonus_m),
         "src_reach_allow_m": float(src_allow_m),
         "dst_reach_allow_m": float(dst_allow_m),
     }
+
+
+def _support_mode_endpoint_snap_cap_m(
+    *,
+    params: dict[str, Any],
+    support_mode: str | None,
+) -> float:
+    snap_cap_m = float(max(1.0, params.get("XSEC_ENDPOINT_MAX_DIST_M", 20.0)))
+    support_mode_norm = str(support_mode or "").strip().lower()
+    if support_mode_norm == "topology_road_prior_fallback":
+        reach_xsec_m = float(
+            max(
+                1.0,
+                params.get(
+                    "TOPOLOGY_FALLBACK_REACH_XSEC_M",
+                    params.get("SAME_PAIR_FALLBACK_REACH_XSEC_M", params.get("STEP1_CORRIDOR_REACH_XSEC_M", 12.0)),
+                ),
+            )
+        )
+        snap_cap_m = float(max(snap_cap_m, snap_cap_m + reach_xsec_m))
+    return float(snap_cap_m)
 
 
 def _line_corridor_gate_diag(
@@ -4756,6 +4791,7 @@ def _same_pair_should_use_direct_rescue(
     current_line: LineString | None,
     rescue_line: LineString | None,
     corridor_zone_raw: BaseGeometry | None,
+    rescue_corridor_zone_raw: BaseGeometry | None = None,
     corridor_tol_m: float,
     min_inside_ratio: float,
     drivezone_zone_metric: BaseGeometry | None,
@@ -4769,9 +4805,12 @@ def _same_pair_should_use_direct_rescue(
         tol_m=float(corridor_tol_m),
         min_inside_ratio=float(min_inside_ratio),
     )
+    rescue_corridor_zone = rescue_corridor_zone_raw
+    if rescue_corridor_zone is None or rescue_corridor_zone.is_empty:
+        rescue_corridor_zone = corridor_zone_raw
     rescue_corr = _line_corridor_gate_diag(
         line=rescue_line,
-        corridor_zone_raw=corridor_zone_raw,
+        corridor_zone_raw=rescue_corridor_zone,
         tol_m=float(corridor_tol_m),
         min_inside_ratio=float(min_inside_ratio),
     )
@@ -7464,6 +7503,15 @@ def _evaluate_candidate_road(
         )
         if prior_corridor_zone is not None and (not prior_corridor_zone.is_empty):
             segment_corridor_for_gate = prior_corridor_zone
+    same_pair_rescue_corridor_zone = None
+    if bool(same_pair_multichain) and road_prior_shape_ref_valid:
+        rescue_corridor_zone, _rescue_zone_source_count, _rescue_corridor_area = _build_buffered_corridor_zone(
+            lines=[road_prior_shape_ref_metric],
+            half_width_m=float(max(1.0, params.get("CORRIDOR_HALF_WIDTH_M", 15.0))),
+            clip_zone=None,
+        )
+        if rescue_corridor_zone is not None and (not rescue_corridor_zone.is_empty):
+            same_pair_rescue_corridor_zone = rescue_corridor_zone
     center = estimate_centerline(
         support=support,
         src_xsec=src_xsec,
@@ -7815,7 +7863,10 @@ def _evaluate_candidate_road(
         src_sel = src_sel_metric if _is_valid_linestring(src_sel_metric) else src_xsec
         dst_sel = dst_sel_metric if _is_valid_linestring(dst_sel_metric) else dst_xsec
         if centerline_fallback_used or road.get("_endpoint_after_src_metric") is None or road.get("_endpoint_after_dst_metric") is None:
-            snap_cap_m = float(max(1.0, params.get("XSEC_ENDPOINT_MAX_DIST_M", 20.0)))
+            snap_cap_m = _support_mode_endpoint_snap_cap_m(
+                params=params,
+                support_mode=support_mode_norm,
+            )
             snapped_line, src_after_pt, dst_after_pt, src_before_dist, dst_before_dist = _fallback_bind_endpoints_to_xsec(
                 line=road_line,
                 src_xsec=src_sel,
@@ -7865,6 +7916,7 @@ def _evaluate_candidate_road(
             current_line=road_line,
             rescue_line=rescue_line,
             corridor_zone_raw=segment_corridor_for_gate,
+            rescue_corridor_zone_raw=same_pair_rescue_corridor_zone,
             corridor_tol_m=float(road.get("segment_corridor_inside_tol_m") or 0.0),
             min_inside_ratio=float(road.get("segment_corridor_min_inside_ratio") or 0.0),
             drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
@@ -7873,6 +7925,12 @@ def _evaluate_candidate_road(
             road_line = rescue_line
             centerline_fallback_used = True
             road["same_pair_multi_road_geometry_mode"] = "road_prior_direct_rescue"
+            if same_pair_rescue_corridor_zone is not None and (not same_pair_rescue_corridor_zone.is_empty):
+                segment_corridor_for_gate = same_pair_rescue_corridor_zone
+                road["_segment_corridor_metric"] = segment_corridor_for_gate
+                road["segment_corridor_enforced"] = True
+                road["segment_corridor_source"] = "road_prior_branch_rescue"
+                road["segment_corridor_rescue_mode"] = "road_prior_branch_corridor"
             road["endpoint_fallback_mode_src"] = str(
                 road.get("endpoint_fallback_mode_src") or "road_prior_direct_rescue"
             )
@@ -10949,6 +11007,7 @@ def _build_topology_road_prior_fallback_support(
         dst_xsec_seed=dst_xsec,
         src_entry_xsec=src_entry_xsec,
         dst_entry_xsec=dst_entry_xsec,
+        endpoint_snap_max_m=float(max(0.0, params.get("XSEC_ENDPOINT_MAX_DIST_M", 20.0))),
     )
     src_reach_allow_m = float(reach_diag.get("src_reach_allow_m") or reach_xsec_m)
     dst_reach_allow_m = float(reach_diag.get("dst_reach_allow_m") or reach_xsec_m)
