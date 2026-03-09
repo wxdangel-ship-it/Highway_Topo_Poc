@@ -46,6 +46,7 @@ from .geometry import (
     PairSupport,
     PairSupportBuildResult,
     _build_lb_graph_path,
+    _endpoint_snap_to_target,
     build_pair_endpoint_xsec,
     build_pair_supports,
     compute_max_segment_m,
@@ -252,6 +253,10 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP2_TRAJ_SURFACE_NEAR_RESCUE_ENABLE": 1,
     "STEP2_TRAJ_SURFACE_NEAR_RESCUE_IN_RATIO_EPS": 0.02,
     "STEP2_TRAJ_SURFACE_NEAR_RESCUE_ENDPOINT_DIST_M": 3.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_ENABLE": 1,
+    "STEP2_ENDPOINT_POST_ANCHOR_WINDOW_M": 18.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_BUFFER_M": 8.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_MAX_DIST_M": 40.0,
     "STEP3_WIDENING_SUPPRESS_ENABLE": 1,
     "STEP3_WIDENING_RATIO_TRIGGER": 1.25,
     "STEP3_WIDENING_REQUIRE_EXPANDED_FLAG": 1,
@@ -5871,6 +5876,223 @@ def _fallback_bind_endpoints_to_xsec(
     return out_line, src_after_pt, dst_after_pt, src_before, dst_before
 
 
+def _line_endpoint_window(
+    *,
+    line: LineString,
+    endpoint_tag: str,
+    window_m: float,
+) -> LineString | None:
+    if not _is_valid_linestring(line):
+        return None
+    total_len = float(line.length)
+    if total_len <= 1e-6:
+        return None
+    use_win = float(max(1.0, min(total_len, window_m)))
+    if str(endpoint_tag).lower() == "src":
+        s0, s1 = 0.0, use_win
+    else:
+        s0, s1 = max(0.0, total_len - use_win), total_len
+    try:
+        part = substring(line, s0, s1)
+    except Exception:
+        return None
+    return part if _is_valid_linestring(part) else None
+
+
+def _line_endpoint_trend(
+    *,
+    line: LineString,
+    endpoint_tag: str,
+) -> tuple[float, float]:
+    coords = list(line.coords)
+    if len(coords) < 2:
+        return (1.0, 0.0)
+    if str(endpoint_tag).lower() == "src":
+        p0, p1 = coords[0], coords[min(1, len(coords) - 1)]
+    else:
+        p0, p1 = coords[max(0, len(coords) - 2)], coords[-1]
+    vx = float(p1[0]) - float(p0[0])
+    vy = float(p1[1]) - float(p0[1])
+    norm = float(math.hypot(vx, vy))
+    if norm <= 1e-9:
+        return (1.0, 0.0)
+    return (vx / norm, vy / norm)
+
+
+def _select_endpoint_post_anchor_target(
+    *,
+    road_line: LineString,
+    endpoint_tag: str,
+    xsec_geom: BaseGeometry | None,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+    window_m: float,
+    buffer_m: float,
+) -> Point | None:
+    if not _is_valid_linestring(road_line):
+        return None
+    if xsec_geom is None or xsec_geom.is_empty:
+        return None
+    endpoint_tag_norm = str(endpoint_tag).lower()
+    if endpoint_tag_norm not in {"src", "dst"}:
+        return None
+    endpoint_pt = Point(road_line.coords[0] if endpoint_tag_norm == "src" else road_line.coords[-1])
+    target_geom: BaseGeometry | None = xsec_geom
+    if gore_zone_metric is not None and (not gore_zone_metric.is_empty):
+        try:
+            diff = target_geom.difference(gore_zone_metric)
+            if diff is not None and not diff.is_empty:
+                target_geom = diff
+        except Exception:
+            pass
+    if drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty):
+        try:
+            inter = target_geom.intersection(drivezone_zone_metric)
+            if inter is not None and not inter.is_empty:
+                target_geom = inter
+        except Exception:
+            pass
+    if target_geom is None or target_geom.is_empty:
+        return None
+
+    candidate_parts: list[LineString] = []
+    endpoint_window = _line_endpoint_window(line=road_line, endpoint_tag=endpoint_tag_norm, window_m=window_m)
+    if endpoint_window is not None:
+        try:
+            local_inter = target_geom.intersection(endpoint_window.buffer(float(max(1.0, buffer_m)), cap_style=2))
+        except Exception:
+            local_inter = None
+        candidate_parts = _iter_line_parts(local_inter)
+    if not candidate_parts:
+        try:
+            point_inter = target_geom.intersection(endpoint_pt.buffer(float(max(1.0, buffer_m * 1.5))))
+        except Exception:
+            point_inter = None
+        candidate_parts = _iter_line_parts(point_inter)
+    if not candidate_parts:
+        candidate_parts = _iter_line_parts(target_geom)
+    if not candidate_parts:
+        return None
+
+    best_part: LineString | None = None
+    best_dist = float("inf")
+    for part in candidate_parts:
+        try:
+            mid = part.interpolate(0.5, normalized=True)
+        except Exception:
+            continue
+        mid_xy = point_xy_safe(mid, context="endpoint_post_anchor_mid")
+        if mid_xy is None:
+            continue
+        try:
+            dist = float(endpoint_pt.distance(Point(float(mid_xy[0]), float(mid_xy[1]))))
+        except Exception:
+            continue
+        if dist < best_dist:
+            best_dist = dist
+            best_part = part
+    if best_part is None:
+        return None
+    try:
+        target_mid = best_part.interpolate(0.5, normalized=True)
+    except Exception:
+        return None
+    return target_mid if isinstance(target_mid, Point) and (not target_mid.is_empty) else None
+
+
+def _post_anchor_merge_diverge_endpoints(
+    *,
+    road: dict[str, Any],
+    road_line: LineString,
+    src_type: str,
+    dst_type: str,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+    params: dict[str, Any],
+) -> tuple[LineString, dict[str, Any]]:
+    meta: dict[str, Any] = {}
+    if not bool(int(params.get("STEP2_ENDPOINT_POST_ANCHOR_ENABLE", 1))):
+        return road_line, meta
+    if not _is_valid_linestring(road_line):
+        return road_line, meta
+
+    window_m = float(max(1.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_WINDOW_M", 18.0)))
+    buffer_m = float(max(1.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_BUFFER_M", 8.0)))
+    max_dist_m = float(max(1.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_MAX_DIST_M", 40.0)))
+
+    src_target_geom = (
+        road.get("_xsec_road_all_src_metric")
+        or road.get("_xsec_target_selected_src_metric")
+        or road.get("_xsec_road_selected_src_metric")
+        or src_xsec
+    )
+    dst_target_geom = (
+        road.get("_xsec_road_all_dst_metric")
+        or road.get("_xsec_target_selected_dst_metric")
+        or road.get("_xsec_road_selected_dst_metric")
+        or dst_xsec
+    )
+
+    src_point_target = None
+    dst_point_target = None
+    if str(src_type).strip().lower() == "merge":
+        src_point_target = _select_endpoint_post_anchor_target(
+            road_line=road_line,
+            endpoint_tag="src",
+            xsec_geom=src_target_geom,
+            drivezone_zone_metric=drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            window_m=window_m,
+            buffer_m=buffer_m,
+        )
+    if str(dst_type).strip().lower() == "diverge":
+        dst_point_target = _select_endpoint_post_anchor_target(
+            road_line=road_line,
+            endpoint_tag="dst",
+            xsec_geom=dst_target_geom,
+            drivezone_zone_metric=drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            window_m=window_m,
+            buffer_m=buffer_m,
+        )
+    if src_point_target is None and dst_point_target is None:
+        return road_line, meta
+
+    src_before = Point(road_line.coords[0])
+    dst_before = Point(road_line.coords[-1])
+    if src_point_target is not None and float(src_before.distance(src_point_target)) > max_dist_m:
+        src_point_target = None
+    if dst_point_target is not None and float(dst_before.distance(dst_point_target)) > max_dist_m:
+        dst_point_target = None
+    if src_point_target is None and dst_point_target is None:
+        return road_line, meta
+
+    snapped_line, snap_meta = _endpoint_snap_to_target(
+        line=road_line,
+        src_target=src_point_target,
+        dst_target=dst_point_target,
+        trend_src=_line_endpoint_trend(line=road_line, endpoint_tag="src"),
+        trend_dst=_line_endpoint_trend(line=road_line, endpoint_tag="dst"),
+        road_max_vertices=int(max(2, params.get("ROAD_MAX_VERTICES", 2000))),
+    )
+    if _is_valid_linestring(snapped_line):
+        road_line = snapped_line
+    if src_point_target is not None:
+        meta["endpoint_post_anchor_mode_src"] = "merge_xsec_region_midpoint"
+        meta["xsec_target_mode_src"] = "merge_xsec_region_midpoint"
+        meta["xsec_selected_by_src"] = "merge_xsec_region_midpoint"
+        meta["xsec_road_selected_by_src"] = "merge_xsec_region_midpoint"
+    if dst_point_target is not None:
+        meta["endpoint_post_anchor_mode_dst"] = "diverge_xsec_region_midpoint"
+        meta["xsec_target_mode_dst"] = "diverge_xsec_region_midpoint"
+        meta["xsec_selected_by_dst"] = "diverge_xsec_region_midpoint"
+        meta["xsec_road_selected_by_dst"] = "diverge_xsec_region_midpoint"
+    meta.update(snap_meta)
+    return road_line, meta
+
+
 def _count_line_intersections_simple(line_a: BaseGeometry | None, line_b: BaseGeometry | None) -> int:
     if not _is_valid_linestring(line_a) or not _is_valid_linestring(line_b):
         return 0
@@ -8269,6 +8491,36 @@ def _evaluate_candidate_road(
         dst_xsec=dst_xsec,
     )
     road["divstrip_constructor_retry_mode"] = divstrip_retry_mode
+    if isinstance(road_line, LineString) and not road_line.is_empty:
+        road_line, endpoint_post_anchor_meta = _post_anchor_merge_diverge_endpoints(
+            road=road,
+            road_line=road_line,
+            src_type=src_type,
+            dst_type=dst_type,
+            src_xsec=src_xsec,
+            dst_xsec=dst_xsec,
+            drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            params=params,
+        )
+        if endpoint_post_anchor_meta:
+            road.update(endpoint_post_anchor_meta)
+            if isinstance(road.get("_endpoint_after_src_metric"), Point) and not road["_endpoint_after_src_metric"].is_empty:
+                src_anchor_geom = road.get("_xsec_target_selected_src_metric") or road.get("_xsec_road_selected_src_metric") or src_xsec
+                try:
+                    road["endpoint_dist_to_xsec_src_m"] = float(road["_endpoint_after_src_metric"].distance(src_anchor_geom))
+                except Exception:
+                    pass
+                if road.get("endpoint_snap_dist_src_after_m") is None:
+                    road["endpoint_snap_dist_src_after_m"] = road.get("endpoint_dist_to_xsec_src_m")
+            if isinstance(road.get("_endpoint_after_dst_metric"), Point) and not road["_endpoint_after_dst_metric"].is_empty:
+                dst_anchor_geom = road.get("_xsec_target_selected_dst_metric") or road.get("_xsec_road_selected_dst_metric") or dst_xsec
+                try:
+                    road["endpoint_dist_to_xsec_dst_m"] = float(road["_endpoint_after_dst_metric"].distance(dst_anchor_geom))
+                except Exception:
+                    pass
+                if road.get("endpoint_snap_dist_dst_after_m") is None:
+                    road["endpoint_snap_dist_dst_after_m"] = road.get("endpoint_dist_to_xsec_dst_m")
     if isinstance(road_line, LineString) and not road_line.is_empty:
         road["_geometry_metric"] = road_line
         road["length_m"] = float(road_line.length)
@@ -12926,6 +13178,8 @@ def _make_base_road_record(
         "endpoint_snap_dist_dst_after_m": None,
         "endpoint_dist_to_xsec_src_m": None,
         "endpoint_dist_to_xsec_dst_m": None,
+        "endpoint_post_anchor_mode_src": None,
+        "endpoint_post_anchor_mode_dst": None,
         "width_med_m": None,
         "width_p90_m": None,
         "max_turn_deg_per_10m": None,
