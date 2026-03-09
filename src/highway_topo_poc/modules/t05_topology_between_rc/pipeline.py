@@ -258,6 +258,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP2_ENDPOINT_POST_ANCHOR_BUFFER_M": 8.0,
     "STEP2_ENDPOINT_POST_ANCHOR_MAX_DIST_M": 40.0,
     "STEP2_ENDPOINT_POST_ANCHOR_TRIM_M": 12.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_SMOOTH_SPAN_M": 28.0,
     "STEP2_ENDPOINT_POST_ANCHOR_CURVE_STEP_M": 2.0,
     "STEP2_ENDPOINT_POST_ANCHOR_MAX_RATIO_DROP": 0.01,
     "STEP3_WIDENING_SUPPRESS_ENABLE": 1,
@@ -6067,6 +6068,8 @@ def _select_endpoint_post_anchor_target(
     road_line: LineString,
     endpoint_tag: str,
     xsec_geom: BaseGeometry | None,
+    support: PairSupport | None,
+    shape_ref_line: LineString | None,
     drivezone_zone_metric: BaseGeometry | None,
     gore_zone_metric: BaseGeometry | None,
     window_m: float,
@@ -6118,7 +6121,7 @@ def _select_endpoint_post_anchor_target(
         return None
 
     best_part: LineString | None = None
-    best_dist = float("inf")
+    best_score: tuple[float, float, float] | None = None
     for part in candidate_parts:
         try:
             mid = part.interpolate(0.5, normalized=True)
@@ -6131,8 +6134,25 @@ def _select_endpoint_post_anchor_target(
             dist = float(endpoint_pt.distance(Point(float(mid_xy[0]), float(mid_xy[1]))))
         except Exception:
             continue
-        if dist < best_dist:
-            best_dist = dist
+        ref_dist = float("inf")
+        if support is not None:
+            for seg in support.traj_segments:
+                if not _is_valid_linestring(seg):
+                    continue
+                try:
+                    ref_dist = min(ref_dist, float(part.distance(seg)))
+                except Exception:
+                    continue
+        if _is_valid_linestring(shape_ref_line):
+            try:
+                ref_dist = min(ref_dist, float(part.distance(shape_ref_line)))
+            except Exception:
+                pass
+        if not math.isfinite(ref_dist):
+            ref_dist = dist
+        score = (ref_dist, dist, -float(part.length))
+        if best_score is None or score < best_score:
+            best_score = score
             best_part = part
     if best_part is None:
         return None
@@ -6154,6 +6174,7 @@ def _rebuild_endpoint_local_segment(
     corridor_zone_metric: BaseGeometry | None,
     drivezone_zone_metric: BaseGeometry | None,
     trim_m: float,
+    smooth_span_m: float,
     curve_step_m: float,
     max_ratio_drop: float,
 ) -> tuple[LineString, dict[str, Any]]:
@@ -6181,14 +6202,15 @@ def _rebuild_endpoint_local_segment(
     meta[f"_endpoint_before_{endpoint_tag_norm}_metric"] = before_pt
 
     use_trim = float(min(max(4.0, trim_m), max(4.0, 0.45 * total_len)))
+    use_span = float(min(max(use_trim, smooth_span_m), max(use_trim, 0.65 * total_len)))
     if endpoint_tag_norm == "src":
-        anchor_s = float(min(total_len, use_trim))
+        anchor_s = float(min(total_len, use_span))
         try:
             core = substring(line, anchor_s, total_len)
         except Exception:
             return line, {}
     else:
-        anchor_s = float(max(0.0, total_len - use_trim))
+        anchor_s = float(max(0.0, total_len - use_span))
         try:
             core = substring(line, 0.0, anchor_s)
         except Exception:
@@ -6272,6 +6294,7 @@ def _rebuild_endpoint_local_segment(
     )
     meta[f"endpoint_post_anchor_ref_mode_{endpoint_tag_norm}"] = ref_mode or "road"
     meta[f"endpoint_post_anchor_trim_len_{endpoint_tag_norm}_m"] = use_trim
+    meta[f"endpoint_post_anchor_span_len_{endpoint_tag_norm}_m"] = use_span
     meta[f"endpoint_post_anchor_connector_len_{endpoint_tag_norm}_m"] = float(
         LineString(connector_coords).length if len(connector_coords) >= 2 else 0.0
     )
@@ -6303,6 +6326,7 @@ def _post_anchor_merge_diverge_endpoints(
     buffer_m = float(max(1.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_BUFFER_M", 8.0)))
     max_dist_m = float(max(1.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_MAX_DIST_M", 40.0)))
     trim_m = float(max(4.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_TRIM_M", 12.0)))
+    smooth_span_m = float(max(trim_m, params.get("STEP2_ENDPOINT_POST_ANCHOR_SMOOTH_SPAN_M", 28.0)))
     curve_step_m = float(max(0.5, params.get("STEP2_ENDPOINT_POST_ANCHOR_CURVE_STEP_M", 2.0)))
     max_ratio_drop = float(max(0.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_MAX_RATIO_DROP", 0.01)))
 
@@ -6326,6 +6350,8 @@ def _post_anchor_merge_diverge_endpoints(
             road_line=road_line,
             endpoint_tag="src",
             xsec_geom=src_target_geom,
+            support=support,
+            shape_ref_line=shape_ref_line,
             drivezone_zone_metric=drivezone_zone_metric,
             gore_zone_metric=gore_zone_metric,
             window_m=window_m,
@@ -6336,6 +6362,8 @@ def _post_anchor_merge_diverge_endpoints(
             road_line=road_line,
             endpoint_tag="dst",
             xsec_geom=dst_target_geom,
+            support=support,
+            shape_ref_line=shape_ref_line,
             drivezone_zone_metric=drivezone_zone_metric,
             gore_zone_metric=gore_zone_metric,
             window_m=window_m,
@@ -6364,6 +6392,7 @@ def _post_anchor_merge_diverge_endpoints(
             corridor_zone_metric=segment_corridor_metric,
             drivezone_zone_metric=drivezone_zone_metric,
             trim_m=trim_m,
+            smooth_span_m=smooth_span_m,
             curve_step_m=curve_step_m,
             max_ratio_drop=max_ratio_drop,
         )
@@ -6371,10 +6400,10 @@ def _post_anchor_merge_diverge_endpoints(
             road_line = rebuilt_src
             meta.update(src_meta)
     if src_point_target is not None:
-        meta["endpoint_post_anchor_mode_src"] = "merge_xsec_region_local_rebuild"
-        meta["xsec_target_mode_src"] = "merge_xsec_region_local_rebuild"
-        meta["xsec_selected_by_src"] = "merge_xsec_region_local_rebuild"
-        meta["xsec_road_selected_by_src"] = "merge_xsec_region_local_rebuild"
+        meta["endpoint_post_anchor_mode_src"] = "merge_xsec_region_smooth_rebuild"
+        meta["xsec_target_mode_src"] = "merge_xsec_region_smooth_rebuild"
+        meta["xsec_selected_by_src"] = "merge_xsec_region_smooth_rebuild"
+        meta["xsec_road_selected_by_src"] = "merge_xsec_region_smooth_rebuild"
     if dst_point_target is not None:
         rebuilt_dst, dst_meta = _rebuild_endpoint_local_segment(
             line=road_line,
@@ -6386,6 +6415,7 @@ def _post_anchor_merge_diverge_endpoints(
             corridor_zone_metric=segment_corridor_metric,
             drivezone_zone_metric=drivezone_zone_metric,
             trim_m=trim_m,
+            smooth_span_m=smooth_span_m,
             curve_step_m=curve_step_m,
             max_ratio_drop=max_ratio_drop,
         )
@@ -6393,10 +6423,10 @@ def _post_anchor_merge_diverge_endpoints(
             road_line = rebuilt_dst
             meta.update(dst_meta)
     if dst_point_target is not None:
-        meta["endpoint_post_anchor_mode_dst"] = "diverge_xsec_region_local_rebuild"
-        meta["xsec_target_mode_dst"] = "diverge_xsec_region_local_rebuild"
-        meta["xsec_selected_by_dst"] = "diverge_xsec_region_local_rebuild"
-        meta["xsec_road_selected_by_dst"] = "diverge_xsec_region_local_rebuild"
+        meta["endpoint_post_anchor_mode_dst"] = "diverge_xsec_region_smooth_rebuild"
+        meta["xsec_target_mode_dst"] = "diverge_xsec_region_smooth_rebuild"
+        meta["xsec_selected_by_dst"] = "diverge_xsec_region_smooth_rebuild"
+        meta["xsec_road_selected_by_dst"] = "diverge_xsec_region_smooth_rebuild"
     return road_line, meta
 
 
