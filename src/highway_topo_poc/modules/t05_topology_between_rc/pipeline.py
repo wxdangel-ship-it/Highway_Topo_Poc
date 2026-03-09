@@ -2879,6 +2879,10 @@ def _run_patch_core(
             road["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
             road["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
             road["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
+            road["step1_pair_target_ref_source"] = step1_corridor.get("pair_target_ref_source")
+            road["step1_road_prior_rerank_used"] = bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False))
+            road["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
+            road["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
             road["hard_anomaly"] = True
             road["hard_reasons"] = [str(step1_corridor.get("hard_reason"))]
             road["soft_issue_flags"] = []
@@ -2980,6 +2984,10 @@ def _run_patch_core(
                 road_k["step1_corridor_zone_source_count"] = branch_corridor.get("corridor_zone_source_count")
                 road_k["step1_corridor_zone_half_width_m"] = branch_corridor.get("corridor_zone_half_width_m")
                 road_k["step1_corridor_shape_ref_inside_ratio"] = branch_corridor.get("corridor_shape_ref_inside_ratio")
+                road_k["step1_pair_target_ref_source"] = branch_corridor.get("pair_target_ref_source")
+                road_k["step1_road_prior_rerank_used"] = bool(branch_corridor.get("road_prior_shape_ref_rerank_used", False))
+                road_k["step1_pair_xsec_policy_src"] = branch_corridor.get("pair_xsec_policy_src")
+                road_k["step1_pair_xsec_policy_dst"] = branch_corridor.get("pair_xsec_policy_dst")
                 road_k["step1_same_pair_multichain"] = True
                 road_k["step1_same_pair_multichain_count"] = int(same_pair_multi_chain_info.get("chain_count", 0))
                 road_k["same_pair_multi_road_branch_id"] = branch_id
@@ -3062,6 +3070,10 @@ def _run_patch_core(
                 road_k["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
                 road_k["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
                 road_k["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
+                road_k["step1_pair_target_ref_source"] = step1_corridor.get("pair_target_ref_source")
+                road_k["step1_road_prior_rerank_used"] = bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False))
+                road_k["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
+                road_k["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
                 road_k["pair_support_mode"] = "topology_road_prior_fallback"
                 stage_timer.add("t_build_lane_graph", float(road_k.get("_timing_lb_graph_ms", 0.0)))
                 sp_ms = float(road_k.get("_timing_shortest_path_ms", 0.0))
@@ -3175,6 +3187,10 @@ def _run_patch_core(
                 road_k["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
                 road_k["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
                 road_k["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
+                road_k["step1_pair_target_ref_source"] = step1_corridor.get("pair_target_ref_source")
+                road_k["step1_road_prior_rerank_used"] = bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False))
+                road_k["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
+                road_k["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
                 key_k = f"{src}_{dst}_k{int(cluster_id)}"
                 stage_timer.add("t_build_lane_graph", float(road_k.get("_timing_lb_graph_ms", 0.0)))
                 sp_ms = float(road_k.get("_timing_shortest_path_ms", 0.0))
@@ -3210,6 +3226,10 @@ def _run_patch_core(
             road["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
             road["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
             road["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
+            road["step1_pair_target_ref_source"] = step1_corridor.get("pair_target_ref_source")
+            road["step1_road_prior_rerank_used"] = bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False))
+            road["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
+            road["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
             road["hard_anomaly"] = True
             road["hard_reasons"] = [HARD_CENTER_EMPTY]
             road["soft_issue_flags"] = [SOFT_TRAJ_SURFACE_INSUFFICIENT]
@@ -4953,6 +4973,123 @@ def _resolve_step1_pair_cross_xsec(
     return xsec_seed
 
 
+def _resolve_step1_pair_target_metric(
+    *,
+    xsec_seed: LineString,
+    pair_xsec_meta: dict[str, Any] | None,
+) -> LineString:
+    if isinstance(pair_xsec_meta, dict):
+        for key in ("xsec_road_selected", "xsec_cross_ref", "xsec_ref"):
+            cand = pair_xsec_meta.get(key)
+            if isinstance(cand, LineString) and (not cand.is_empty) and len(cand.coords) >= 2:
+                return cand
+    return xsec_seed
+
+
+def _annotate_step1_road_prior_metrics(
+    *,
+    items: Sequence[dict[str, Any]],
+    prior_line: LineString | None,
+    prior_zone_metric: BaseGeometry | None,
+) -> None:
+    if not _is_valid_linestring(prior_line):
+        return
+    for it in items:
+        seg = it.get("seg")
+        if not isinstance(seg, LineString) or seg.is_empty:
+            continue
+        try:
+            it["road_prior_gap_m"] = float(seg.distance(prior_line))
+        except Exception:
+            it["road_prior_gap_m"] = float("inf")
+        inside_ratio = _line_inside_ratio(seg, prior_zone_metric)
+        it["road_prior_inside_ratio"] = float(inside_ratio) if inside_ratio is not None else None
+
+
+def _annotate_step1_pair_target_metrics(
+    *,
+    items: Sequence[dict[str, Any]],
+    src_target_metric: LineString | None,
+    dst_target_metric: LineString | None,
+    src_policy: str | None,
+    dst_policy: str | None,
+    reach_xsec_m: float,
+) -> None:
+    src_relevant = _is_valid_linestring(src_target_metric) and str(src_policy or "").strip().lower() != "auto"
+    dst_relevant = _is_valid_linestring(dst_target_metric) and str(dst_policy or "").strip().lower() != "auto"
+    for it in items:
+        seg = it.get("seg")
+        if not isinstance(seg, LineString) or seg.is_empty:
+            continue
+        relevant_count = 0
+        hit_count = 0
+        role_dist_sum = 0.0
+        if src_relevant:
+            relevant_count += 1
+            try:
+                src_dist = float(seg.distance(src_target_metric))
+            except Exception:
+                src_dist = float("inf")
+            it["dist_to_pair_target_src_m"] = src_dist
+            if np.isfinite(src_dist):
+                role_dist_sum += float(src_dist)
+                if src_dist <= float(reach_xsec_m):
+                    hit_count += 1
+        else:
+            it["dist_to_pair_target_src_m"] = None
+        if dst_relevant:
+            relevant_count += 1
+            try:
+                dst_dist = float(seg.distance(dst_target_metric))
+            except Exception:
+                dst_dist = float("inf")
+            it["dist_to_pair_target_dst_m"] = dst_dist
+            if np.isfinite(dst_dist):
+                role_dist_sum += float(dst_dist)
+                if dst_dist <= float(reach_xsec_m):
+                    hit_count += 1
+        else:
+            it["dist_to_pair_target_dst_m"] = None
+        it["pair_target_relevant_count"] = int(relevant_count)
+        it["pair_target_hit_count"] = int(hit_count)
+        it["pair_target_role_dist_sum"] = float(role_dist_sum) if relevant_count > 0 else None
+
+
+def _step1_primary_item_sort_key(it: dict[str, Any]) -> tuple[float, ...]:
+    inside_ratio = _to_finite_float(it.get("inside_ratio"), 0.0)
+    reaches = bool(it.get("reaches_other_end", False))
+    violation = bool(it.get("constraint_violation", False))
+    gore_any = bool(it.get("gore_any", False))
+    prior_inside = it.get("road_prior_inside_ratio")
+    prior_gap = it.get("road_prior_gap_m")
+    pair_relevant_count = int(max(0.0, _to_finite_float(it.get("pair_target_relevant_count"), 0.0)))
+    pair_hit_count = int(max(0.0, _to_finite_float(it.get("pair_target_hit_count"), 0.0)))
+    pair_miss_count = float(max(0, pair_relevant_count - pair_hit_count))
+    pair_role_dist = (
+        _to_finite_float(it.get("pair_target_role_dist_sum"), 1e9)
+        if pair_relevant_count > 0
+        else 0.0
+    )
+    d_src = _to_finite_float(it.get("dist_to_src_xsec_m"), 1e9)
+    d_dst = _to_finite_float(it.get("dist_to_dst_xsec_m"), 1e9)
+    d_seed = _to_finite_float(it.get("d_seed"), 1e9)
+    seg_len = _to_finite_float(it.get("length_m"), 0.0)
+    return (
+        0.0 if reaches else 1.0,
+        1.0 - inside_ratio,
+        1.0 if violation else 0.0,
+        1.0 if gore_any else 0.0,
+        (1.0 - _to_finite_float(prior_inside, 0.0)) if prior_inside is not None else 0.0,
+        _to_finite_float(prior_gap, 1e9) if prior_gap is not None else 0.0,
+        pair_miss_count,
+        pair_role_dist,
+        d_src + d_dst,
+        d_seed,
+        -seg_len,
+        float(int(it.get("idx", -1))),
+    )
+
+
 def _pick_step1_primary_item(items: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
     valid = [it for it in items if isinstance(it, dict) and isinstance(it.get("seg"), LineString)]
     if not valid:
@@ -4979,7 +5116,7 @@ def _pick_step1_primary_item(items: Sequence[dict[str, Any]]) -> dict[str, Any] 
             -seg_len,
         )
 
-    ranked = sorted(valid, key=_k)
+    ranked = sorted(valid, key=_step1_primary_item_sort_key)
     return ranked[0]
 
 
@@ -5254,6 +5391,8 @@ def _build_step1_corridor_for_pair(
         "corridor_shape_ref_inside_ratio": None,
         "road_prior_shape_ref_used": False,
         "road_prior_shape_ref_mode": None,
+        "road_prior_shape_ref_rerank_used": False,
+        "pair_target_ref_source": None,
     }
 
     if str(dst_type) == "diverge":
@@ -5332,6 +5471,14 @@ def _build_step1_corridor_for_pair(
             except Exception:
                 pass
 
+    road_prior_zone_metric: BaseGeometry | None = None
+    if isinstance(prior_line, LineString) and not prior_line.is_empty:
+        road_prior_zone_metric, _road_prior_zone_source_count, _road_prior_zone_area = _build_buffered_corridor_zone(
+            lines=[prior_line],
+            half_width_m=float(out["corridor_zone_half_width_m"]),
+            clip_zone=passable_zone,
+        )
+
     inside_min = float(max(0.0, min(1.0, params.get("STEP1_TRAJ_IN_DRIVEZONE_MIN", 0.85))))
     inside_fallback_min = float(
         max(0.0, min(1.0, params.get("STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN", 0.60)))
@@ -5383,6 +5530,11 @@ def _build_step1_corridor_for_pair(
         )
 
     ranked_all.sort(key=lambda it: (float(it["d_seed"]), -float(it["length_m"]), int(it["idx"])))
+    _annotate_step1_road_prior_metrics(
+        items=ranked_all,
+        prior_line=prior_line,
+        prior_zone_metric=road_prior_zone_metric,
+    )
     ranked = list(ranked_all)
     if passable_zone is not None and (not passable_zone.is_empty):
         strict = [it for it in ranked if float(it.get("inside_ratio", 0.0)) >= inside_min]
@@ -5424,19 +5576,7 @@ def _build_step1_corridor_for_pair(
     ranked_reach = [it for it in ranked_used if bool(it.get("reaches_other_end", False))]
     ranked_main = ranked_reach if ranked_reach else ranked_used
     topk_pick = int(max(1, int(params.get("STEP1_PRIMARY_PICK_TOPK", 8))))
-    ranked_main = sorted(
-        ranked_main,
-        key=lambda it: (
-            0.0 if bool(it.get("reaches_other_end", False)) else 1.0,
-            1.0 - _to_finite_float(it.get("inside_ratio"), 0.0),
-            1.0 if bool(it.get("constraint_violation", False)) else 0.0,
-            1.0 if bool(it.get("gore_any", False)) else 0.0,
-            _to_finite_float(it.get("dist_to_src_xsec_m"), 1e9) + _to_finite_float(it.get("dist_to_dst_xsec_m"), 1e9),
-            _to_finite_float(it.get("d_seed"), 1e9),
-            -_to_finite_float(it.get("length_m"), 0.0),
-            int(it.get("idx", -1)),
-        ),
-    )
+    ranked_main = sorted(ranked_main, key=_step1_primary_item_sort_key)
     topk_debug = ranked_main[:topk_pick]
     if not topk_debug:
         if isinstance(prior_line, LineString) and not prior_line.is_empty:
@@ -5499,12 +5639,14 @@ def _build_step1_corridor_for_pair(
     step1_pair_xsec_dst: dict[str, Any] | None = None
     src_xsec_cross = src_xsec
     dst_xsec_cross = dst_xsec
-    if _is_valid_linestring(provisional_shape_ref):
+    pair_target_ref_line = prior_line if _is_valid_linestring(prior_line) else provisional_shape_ref
+    pair_target_ref_source = "road_prior_shape_ref" if _is_valid_linestring(prior_line) else "provisional_shape_ref"
+    if _is_valid_linestring(pair_target_ref_line):
         step1_pair_xsec_src = _build_step1_pair_endpoint_xsec(
             xsec_seed=src_xsec,
             endpoint_tag="src",
             node_type=str(src_type),
-            shape_ref_line=provisional_shape_ref,
+            shape_ref_line=pair_target_ref_line,
             support=support,
             drivezone_zone_metric=drivezone_zone_metric,
             gore_zone_metric=gore_zone_metric,
@@ -5514,7 +5656,7 @@ def _build_step1_corridor_for_pair(
             xsec_seed=dst_xsec,
             endpoint_tag="dst",
             node_type=str(dst_type),
-            shape_ref_line=provisional_shape_ref,
+            shape_ref_line=pair_target_ref_line,
             support=support,
             drivezone_zone_metric=drivezone_zone_metric,
             gore_zone_metric=gore_zone_metric,
@@ -5528,6 +5670,20 @@ def _build_step1_corridor_for_pair(
             xsec_seed=dst_xsec,
             pair_xsec_meta=step1_pair_xsec_dst,
         )
+        _annotate_step1_pair_target_metrics(
+            items=ranked_all,
+            src_target_metric=_resolve_step1_pair_target_metric(
+                xsec_seed=src_xsec_cross,
+                pair_xsec_meta=step1_pair_xsec_src,
+            ),
+            dst_target_metric=_resolve_step1_pair_target_metric(
+                xsec_seed=dst_xsec_cross,
+                pair_xsec_meta=step1_pair_xsec_dst,
+            ),
+            src_policy=step1_pair_xsec_src.get("policy_mode") if isinstance(step1_pair_xsec_src, dict) else None,
+            dst_policy=step1_pair_xsec_dst.get("policy_mode") if isinstance(step1_pair_xsec_dst, dict) else None,
+            reach_xsec_m=reach_xsec_m,
+        )
         _apply_step1_xsec_metrics(
             items=ranked_all,
             src_xsec=src_xsec_cross,
@@ -5536,20 +5692,10 @@ def _build_step1_corridor_for_pair(
         )
         ranked_reach = [it for it in ranked_used if bool(it.get("reaches_other_end", False))]
         ranked_main = ranked_reach if ranked_reach else ranked_used
-        ranked_main = sorted(
-            ranked_main,
-            key=lambda it: (
-                0.0 if bool(it.get("reaches_other_end", False)) else 1.0,
-                1.0 - _to_finite_float(it.get("inside_ratio"), 0.0),
-                1.0 if bool(it.get("constraint_violation", False)) else 0.0,
-                1.0 if bool(it.get("gore_any", False)) else 0.0,
-                _to_finite_float(it.get("dist_to_src_xsec_m"), 1e9) + _to_finite_float(it.get("dist_to_dst_xsec_m"), 1e9),
-                _to_finite_float(it.get("d_seed"), 1e9),
-                -_to_finite_float(it.get("length_m"), 0.0),
-                int(it.get("idx", -1)),
-            ),
-        )
+        ranked_main = sorted(ranked_main, key=_step1_primary_item_sort_key)
         topk_debug = ranked_main[:topk_pick] if ranked_main else topk_debug
+        out["pair_target_ref_source"] = str(pair_target_ref_source)
+        out["road_prior_shape_ref_rerank_used"] = bool(pair_target_ref_source == "road_prior_shape_ref")
 
     weights = np.asarray([max(1.0, float(it.get("length_m", 0.0))) for it in topk_debug], dtype=np.float64)
     if weights.size > 0 and float(np.sum(weights)) > 1e-6:
@@ -5580,6 +5726,13 @@ def _build_step1_corridor_for_pair(
                 "drivezone_fallback_used": bool(out.get("drivezone_fallback_used", False)),
                 "dist_to_src_xsec_m": float(it.get("dist_to_src_xsec_m", float("inf"))),
                 "dist_to_dst_xsec_m": float(it.get("dist_to_dst_xsec_m", float("inf"))),
+                "road_prior_inside_ratio": it.get("road_prior_inside_ratio"),
+                "road_prior_gap_m": it.get("road_prior_gap_m"),
+                "dist_to_pair_target_src_m": it.get("dist_to_pair_target_src_m"),
+                "dist_to_pair_target_dst_m": it.get("dist_to_pair_target_dst_m"),
+                "pair_target_relevant_count": int(it.get("pair_target_relevant_count", 0)),
+                "pair_target_hit_count": int(it.get("pair_target_hit_count", 0)),
+                "pair_target_role_dist_sum": it.get("pair_target_role_dist_sum"),
                 "selected": bool(int(it.get("idx", -1)) == int(picked.get("idx", -2))),
                 "geometry": line,
             }
@@ -5598,6 +5751,13 @@ def _build_step1_corridor_for_pair(
             "inside_ratio": float(it.get("inside_ratio", 0.0)),
             "dist_to_src_xsec_m": float(it.get("dist_to_src_xsec_m", float("inf"))),
             "dist_to_dst_xsec_m": float(it.get("dist_to_dst_xsec_m", float("inf"))),
+            "road_prior_inside_ratio": it.get("road_prior_inside_ratio"),
+            "road_prior_gap_m": it.get("road_prior_gap_m"),
+            "dist_to_pair_target_src_m": it.get("dist_to_pair_target_src_m"),
+            "dist_to_pair_target_dst_m": it.get("dist_to_pair_target_dst_m"),
+            "pair_target_relevant_count": int(it.get("pair_target_relevant_count", 0)),
+            "pair_target_hit_count": int(it.get("pair_target_hit_count", 0)),
+            "pair_target_role_dist_sum": it.get("pair_target_role_dist_sum"),
             "reaches_other_end": bool(it.get("reaches_other_end", False)),
             "selected": bool(int(it.get("idx", -1)) == int(picked.get("idx", -2))),
         }
@@ -5617,6 +5777,13 @@ def _build_step1_corridor_for_pair(
             "corridor_id": corridor_id_by_idx.get(int(it["idx"])),
             "dist_to_src_xsec_m": float(it.get("dist_to_src_xsec_m", float("inf"))),
             "dist_to_dst_xsec_m": float(it.get("dist_to_dst_xsec_m", float("inf"))),
+            "road_prior_inside_ratio": it.get("road_prior_inside_ratio"),
+            "road_prior_gap_m": it.get("road_prior_gap_m"),
+            "dist_to_pair_target_src_m": it.get("dist_to_pair_target_src_m"),
+            "dist_to_pair_target_dst_m": it.get("dist_to_pair_target_dst_m"),
+            "pair_target_relevant_count": int(it.get("pair_target_relevant_count", 0)),
+            "pair_target_hit_count": int(it.get("pair_target_hit_count", 0)),
+            "pair_target_role_dist_sum": it.get("pair_target_role_dist_sum"),
             "reaches_other_end": bool(it.get("reaches_other_end", False)),
             "selected": False,
         }
@@ -13977,6 +14144,10 @@ def _make_base_road_record(
         "step1_corridor_zone_source_count": None,
         "step1_corridor_zone_half_width_m": None,
         "step1_corridor_shape_ref_inside_ratio": None,
+        "step1_pair_target_ref_source": None,
+        "step1_road_prior_rerank_used": False,
+        "step1_pair_xsec_policy_src": None,
+        "step1_pair_xsec_policy_dst": None,
         "gore_fallback_used_src": False,
         "gore_fallback_used_dst": False,
         "traj_drop_count_by_drivezone": 0,
