@@ -4088,7 +4088,10 @@ def test_evaluate_candidate_road_post_anchors_merge_src_to_xsec_region_midpoint(
     assert xy is not None
     assert abs(float(xy[0])) <= 1e-6
     assert abs(float(xy[1]) - 4.0) <= 1e-6
-    assert str(road.get("endpoint_post_anchor_mode_src")) == "merge_xsec_region_midpoint"
+    assert str(road.get("endpoint_post_anchor_mode_src")) == "merge_xsec_region_local_rebuild"
+    geom = road.get("_geometry_metric")
+    assert isinstance(geom, LineString)
+    assert len(geom.coords) >= 6
 
 
 def test_evaluate_candidate_road_post_anchors_diverge_dst_to_xsec_region_midpoint(
@@ -4211,7 +4214,10 @@ def test_evaluate_candidate_road_post_anchors_diverge_dst_to_xsec_region_midpoin
     assert xy is not None
     assert abs(float(xy[0]) - 100.0) <= 1e-6
     assert abs(float(xy[1]) + 3.0) <= 1e-6
-    assert str(road.get("endpoint_post_anchor_mode_dst")) == "diverge_xsec_region_midpoint"
+    assert str(road.get("endpoint_post_anchor_mode_dst")) == "diverge_xsec_region_local_rebuild"
+    geom = road.get("_geometry_metric")
+    assert isinstance(geom, LineString)
+    assert len(geom.coords) >= 6
 
 
 def test_same_pair_multi_road_selection_keeps_close_parallel_branches() -> None:

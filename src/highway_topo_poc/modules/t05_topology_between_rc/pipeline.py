@@ -46,7 +46,7 @@ from .geometry import (
     PairSupport,
     PairSupportBuildResult,
     _build_lb_graph_path,
-    _endpoint_snap_to_target,
+    _dedup_coords,
     build_pair_endpoint_xsec,
     build_pair_supports,
     compute_max_segment_m,
@@ -257,6 +257,9 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP2_ENDPOINT_POST_ANCHOR_WINDOW_M": 18.0,
     "STEP2_ENDPOINT_POST_ANCHOR_BUFFER_M": 8.0,
     "STEP2_ENDPOINT_POST_ANCHOR_MAX_DIST_M": 40.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_TRIM_M": 12.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_CURVE_STEP_M": 2.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_MAX_RATIO_DROP": 0.01,
     "STEP3_WIDENING_SUPPRESS_ENABLE": 1,
     "STEP3_WIDENING_RATIO_TRIGGER": 1.25,
     "STEP3_WIDENING_REQUIRE_EXPANDED_FLAG": 1,
@@ -5919,6 +5922,146 @@ def _line_endpoint_trend(
     return (vx / norm, vy / norm)
 
 
+def _line_tangent_at_station(
+    *,
+    line: LineString,
+    station_m: float,
+    endpoint_tag: str,
+) -> tuple[float, float] | None:
+    if not _is_valid_linestring(line):
+        return None
+    total_len = float(line.length)
+    if total_len <= 1e-6:
+        return None
+    s = float(max(0.0, min(total_len, station_m)))
+    ds = float(min(8.0, max(1.0, 0.1 * total_len)))
+    if str(endpoint_tag).lower() == "src":
+        s0, s1 = s, min(total_len, s + ds)
+        if s1 - s0 <= 1e-6:
+            s0 = max(0.0, s - ds)
+    else:
+        s0, s1 = max(0.0, s - ds), s
+        if s1 - s0 <= 1e-6:
+            s1 = min(total_len, s + ds)
+    try:
+        p0 = line.interpolate(float(s0))
+        p1 = line.interpolate(float(s1))
+    except Exception:
+        return None
+    p0_xy = point_xy_safe(p0, context="endpoint_rebuild_tan_p0")
+    p1_xy = point_xy_safe(p1, context="endpoint_rebuild_tan_p1")
+    if p0_xy is None or p1_xy is None:
+        return None
+    vx = float(p1_xy[0]) - float(p0_xy[0])
+    vy = float(p1_xy[1]) - float(p0_xy[1])
+    norm = float(math.hypot(vx, vy))
+    if norm <= 1e-9:
+        return None
+    return (vx / norm, vy / norm)
+
+
+def _align_tangent_to_reference(
+    tangent_xy: tuple[float, float] | None,
+    ref_xy: tuple[float, float],
+) -> tuple[float, float] | None:
+    if tangent_xy is None:
+        return None
+    dot = float(tangent_xy[0] * ref_xy[0] + tangent_xy[1] * ref_xy[1])
+    if dot < 0.0:
+        return (-float(tangent_xy[0]), -float(tangent_xy[1]))
+    return (float(tangent_xy[0]), float(tangent_xy[1]))
+
+
+def _blend_tangents(
+    primary_xy: tuple[float, float],
+    secondary_xy: tuple[float, float] | None,
+) -> tuple[float, float]:
+    if secondary_xy is None:
+        return (float(primary_xy[0]), float(primary_xy[1]))
+    vx = 0.7 * float(primary_xy[0]) + 0.3 * float(secondary_xy[0])
+    vy = 0.7 * float(primary_xy[1]) + 0.3 * float(secondary_xy[1])
+    norm = float(math.hypot(vx, vy))
+    if norm <= 1e-9:
+        return (float(primary_xy[0]), float(primary_xy[1]))
+    return (vx / norm, vy / norm)
+
+
+def _sample_reference_tangent_near_point(
+    *,
+    target_pt: Point,
+    endpoint_tag: str,
+    support: PairSupport | None,
+    shape_ref_line: LineString | None,
+    ref_xy: tuple[float, float],
+) -> tuple[tuple[float, float] | None, str | None]:
+    best_tan: tuple[float, float] | None = None
+    best_mode: str | None = None
+    best_dist = float("inf")
+    if support is not None:
+        for seg in support.traj_segments:
+            if not _is_valid_linestring(seg):
+                continue
+            try:
+                dist = float(seg.distance(target_pt))
+                s = float(seg.project(target_pt))
+            except Exception:
+                continue
+            tan = _line_tangent_at_station(line=seg, station_m=s, endpoint_tag=endpoint_tag)
+            tan = _align_tangent_to_reference(tan, ref_xy)
+            if tan is None:
+                continue
+            if dist < best_dist:
+                best_dist = dist
+                best_tan = tan
+                best_mode = "traj"
+    if best_tan is not None and best_dist <= 25.0:
+        return best_tan, best_mode
+    if _is_valid_linestring(shape_ref_line):
+        try:
+            s = float(shape_ref_line.project(target_pt))
+        except Exception:
+            s = 0.0
+        tan = _line_tangent_at_station(line=shape_ref_line, station_m=s, endpoint_tag=endpoint_tag)
+        tan = _align_tangent_to_reference(tan, ref_xy)
+        if tan is not None:
+            return tan, "shape_ref"
+    return None, None
+
+
+def _build_cubic_connector(
+    *,
+    start_xy: tuple[float, float],
+    end_xy: tuple[float, float],
+    start_tangent_xy: tuple[float, float],
+    end_tangent_xy: tuple[float, float],
+    trim_m: float,
+    step_m: float,
+) -> list[tuple[float, float]]:
+    p0 = np.asarray([float(start_xy[0]), float(start_xy[1])], dtype=np.float64)
+    p3 = np.asarray([float(end_xy[0]), float(end_xy[1])], dtype=np.float64)
+    dist = float(np.linalg.norm(p3 - p0))
+    if dist <= 1e-6:
+        return [(float(p0[0]), float(p0[1])), (float(p3[0]), float(p3[1]))]
+    h = float(min(max(2.0, 0.35 * dist), max(4.0, trim_m)))
+    t0 = np.asarray([float(start_tangent_xy[0]), float(start_tangent_xy[1])], dtype=np.float64)
+    t1 = np.asarray([float(end_tangent_xy[0]), float(end_tangent_xy[1])], dtype=np.float64)
+    p1 = p0 + h * t0
+    p2 = p3 - h * t1
+    n_seg = int(max(6, min(24, math.ceil(dist / max(0.5, step_m)))))
+    coords: list[tuple[float, float]] = []
+    for i in range(n_seg + 1):
+        t = float(i) / float(max(1, n_seg))
+        omt = 1.0 - t
+        pt = (
+            (omt**3) * p0
+            + 3.0 * (omt**2) * t * p1
+            + 3.0 * omt * (t**2) * p2
+            + (t**3) * p3
+        )
+        coords.append((float(pt[0]), float(pt[1])))
+    return coords
+
+
 def _select_endpoint_post_anchor_target(
     *,
     road_line: LineString,
@@ -6000,14 +6143,152 @@ def _select_endpoint_post_anchor_target(
     return target_mid if isinstance(target_mid, Point) and (not target_mid.is_empty) else None
 
 
+def _rebuild_endpoint_local_segment(
+    *,
+    line: LineString,
+    endpoint_tag: str,
+    target_point: Point,
+    target_geom: BaseGeometry | None,
+    support: PairSupport | None,
+    shape_ref_line: LineString | None,
+    corridor_zone_metric: BaseGeometry | None,
+    drivezone_zone_metric: BaseGeometry | None,
+    trim_m: float,
+    curve_step_m: float,
+    max_ratio_drop: float,
+) -> tuple[LineString, dict[str, Any]]:
+    meta: dict[str, Any] = {}
+    if not _is_valid_linestring(line):
+        return line, meta
+    target_xy = point_xy_safe(target_point, context="endpoint_rebuild_target")
+    if target_xy is None:
+        return line, meta
+    endpoint_tag_norm = str(endpoint_tag).lower()
+    if endpoint_tag_norm not in {"src", "dst"}:
+        return line, meta
+    total_len = float(line.length)
+    if total_len <= 1e-6:
+        return line, meta
+
+    before_pt = Point(line.coords[0] if endpoint_tag_norm == "src" else line.coords[-1])
+    if target_geom is not None and not target_geom.is_empty:
+        try:
+            meta[f"endpoint_snap_dist_{endpoint_tag_norm}_before_m"] = float(before_pt.distance(target_geom))
+        except Exception:
+            meta[f"endpoint_snap_dist_{endpoint_tag_norm}_before_m"] = None
+    else:
+        meta[f"endpoint_snap_dist_{endpoint_tag_norm}_before_m"] = None
+    meta[f"_endpoint_before_{endpoint_tag_norm}_metric"] = before_pt
+
+    use_trim = float(min(max(4.0, trim_m), max(4.0, 0.45 * total_len)))
+    if endpoint_tag_norm == "src":
+        anchor_s = float(min(total_len, use_trim))
+        try:
+            core = substring(line, anchor_s, total_len)
+        except Exception:
+            return line, {}
+    else:
+        anchor_s = float(max(0.0, total_len - use_trim))
+        try:
+            core = substring(line, 0.0, anchor_s)
+        except Exception:
+            return line, {}
+    if not _is_valid_linestring(core):
+        return line, {}
+    try:
+        anchor_pt = line.interpolate(anchor_s)
+    except Exception:
+        return line, {}
+    anchor_xy = point_xy_safe(anchor_pt, context="endpoint_rebuild_anchor")
+    if anchor_xy is None:
+        return line, {}
+
+    anchor_tangent = _line_tangent_at_station(line=line, station_m=anchor_s, endpoint_tag=endpoint_tag_norm)
+    if anchor_tangent is None:
+        anchor_tangent = _line_endpoint_trend(line=line, endpoint_tag=endpoint_tag_norm)
+    ref_tangent, ref_mode = _sample_reference_tangent_near_point(
+        target_pt=target_point,
+        endpoint_tag=endpoint_tag_norm,
+        support=support,
+        shape_ref_line=shape_ref_line,
+        ref_xy=anchor_tangent,
+    )
+    target_tangent = _blend_tangents(anchor_tangent, ref_tangent)
+    if endpoint_tag_norm == "src":
+        connector_coords = _build_cubic_connector(
+            start_xy=target_xy,
+            end_xy=anchor_xy,
+            start_tangent_xy=target_tangent,
+            end_tangent_xy=anchor_tangent,
+            trim_m=use_trim,
+            step_m=curve_step_m,
+        )
+        combined = connector_coords + list(core.coords)[1:]
+    else:
+        connector_coords = _build_cubic_connector(
+            start_xy=anchor_xy,
+            end_xy=target_xy,
+            start_tangent_xy=anchor_tangent,
+            end_tangent_xy=target_tangent,
+            trim_m=use_trim,
+            step_m=curve_step_m,
+        )
+        combined = list(core.coords)[:-1] + connector_coords
+    combined = _dedup_coords(combined, eps=1e-4)
+    if len(combined) < 2:
+        return line, {}
+    try:
+        rebuilt = LineString(combined)
+    except Exception:
+        return line, {}
+    if not _is_valid_linestring(rebuilt):
+        return line, {}
+
+    ratio_drop_allow = float(max(0.0, max_ratio_drop))
+    for zone_name, zone in (("corridor", corridor_zone_metric), ("drivezone", drivezone_zone_metric)):
+        before_ratio = _line_inside_ratio(line, zone)
+        after_ratio = _line_inside_ratio(rebuilt, zone)
+        if (
+            before_ratio is not None
+            and after_ratio is not None
+            and float(after_ratio) + 1e-9 < float(before_ratio) - ratio_drop_allow
+        ):
+            return line, {}
+        meta[f"endpoint_post_anchor_{zone_name}_ratio_{endpoint_tag_norm}_before"] = before_ratio
+        meta[f"endpoint_post_anchor_{zone_name}_ratio_{endpoint_tag_norm}_after"] = after_ratio
+
+    after_pt = Point(rebuilt.coords[0] if endpoint_tag_norm == "src" else rebuilt.coords[-1])
+    meta[f"_endpoint_after_{endpoint_tag_norm}_metric"] = after_pt
+    if target_geom is not None and not target_geom.is_empty:
+        try:
+            meta[f"endpoint_snap_dist_{endpoint_tag_norm}_after_m"] = float(after_pt.distance(target_geom))
+        except Exception:
+            meta[f"endpoint_snap_dist_{endpoint_tag_norm}_after_m"] = None
+    else:
+        meta[f"endpoint_snap_dist_{endpoint_tag_norm}_after_m"] = None
+    meta[f"endpoint_off_anchor_{endpoint_tag_norm}"] = bool(
+        meta.get(f"endpoint_snap_dist_{endpoint_tag_norm}_after_m") is not None
+        and float(meta.get(f"endpoint_snap_dist_{endpoint_tag_norm}_after_m")) > 1.0
+    )
+    meta[f"endpoint_post_anchor_ref_mode_{endpoint_tag_norm}"] = ref_mode or "road"
+    meta[f"endpoint_post_anchor_trim_len_{endpoint_tag_norm}_m"] = use_trim
+    meta[f"endpoint_post_anchor_connector_len_{endpoint_tag_norm}_m"] = float(
+        LineString(connector_coords).length if len(connector_coords) >= 2 else 0.0
+    )
+    return rebuilt, meta
+
+
 def _post_anchor_merge_diverge_endpoints(
     *,
     road: dict[str, Any],
     road_line: LineString,
     src_type: str,
     dst_type: str,
+    support: PairSupport | None,
+    shape_ref_line: LineString | None,
     src_xsec: LineString,
     dst_xsec: LineString,
+    segment_corridor_metric: BaseGeometry | None,
     drivezone_zone_metric: BaseGeometry | None,
     gore_zone_metric: BaseGeometry | None,
     params: dict[str, Any],
@@ -6021,6 +6302,9 @@ def _post_anchor_merge_diverge_endpoints(
     window_m = float(max(1.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_WINDOW_M", 18.0)))
     buffer_m = float(max(1.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_BUFFER_M", 8.0)))
     max_dist_m = float(max(1.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_MAX_DIST_M", 40.0)))
+    trim_m = float(max(4.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_TRIM_M", 12.0)))
+    curve_step_m = float(max(0.5, params.get("STEP2_ENDPOINT_POST_ANCHOR_CURVE_STEP_M", 2.0)))
+    max_ratio_drop = float(max(0.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_MAX_RATIO_DROP", 0.01)))
 
     src_target_geom = (
         road.get("_xsec_road_all_src_metric")
@@ -6069,27 +6353,50 @@ def _post_anchor_merge_diverge_endpoints(
     if src_point_target is None and dst_point_target is None:
         return road_line, meta
 
-    snapped_line, snap_meta = _endpoint_snap_to_target(
-        line=road_line,
-        src_target=src_point_target,
-        dst_target=dst_point_target,
-        trend_src=_line_endpoint_trend(line=road_line, endpoint_tag="src"),
-        trend_dst=_line_endpoint_trend(line=road_line, endpoint_tag="dst"),
-        road_max_vertices=int(max(2, params.get("ROAD_MAX_VERTICES", 2000))),
-    )
-    if _is_valid_linestring(snapped_line):
-        road_line = snapped_line
     if src_point_target is not None:
-        meta["endpoint_post_anchor_mode_src"] = "merge_xsec_region_midpoint"
-        meta["xsec_target_mode_src"] = "merge_xsec_region_midpoint"
-        meta["xsec_selected_by_src"] = "merge_xsec_region_midpoint"
-        meta["xsec_road_selected_by_src"] = "merge_xsec_region_midpoint"
+        rebuilt_src, src_meta = _rebuild_endpoint_local_segment(
+            line=road_line,
+            endpoint_tag="src",
+            target_point=src_point_target,
+            target_geom=src_target_geom,
+            support=support,
+            shape_ref_line=shape_ref_line,
+            corridor_zone_metric=segment_corridor_metric,
+            drivezone_zone_metric=drivezone_zone_metric,
+            trim_m=trim_m,
+            curve_step_m=curve_step_m,
+            max_ratio_drop=max_ratio_drop,
+        )
+        if _is_valid_linestring(rebuilt_src) and rebuilt_src is not road_line:
+            road_line = rebuilt_src
+            meta.update(src_meta)
+    if src_point_target is not None:
+        meta["endpoint_post_anchor_mode_src"] = "merge_xsec_region_local_rebuild"
+        meta["xsec_target_mode_src"] = "merge_xsec_region_local_rebuild"
+        meta["xsec_selected_by_src"] = "merge_xsec_region_local_rebuild"
+        meta["xsec_road_selected_by_src"] = "merge_xsec_region_local_rebuild"
     if dst_point_target is not None:
-        meta["endpoint_post_anchor_mode_dst"] = "diverge_xsec_region_midpoint"
-        meta["xsec_target_mode_dst"] = "diverge_xsec_region_midpoint"
-        meta["xsec_selected_by_dst"] = "diverge_xsec_region_midpoint"
-        meta["xsec_road_selected_by_dst"] = "diverge_xsec_region_midpoint"
-    meta.update(snap_meta)
+        rebuilt_dst, dst_meta = _rebuild_endpoint_local_segment(
+            line=road_line,
+            endpoint_tag="dst",
+            target_point=dst_point_target,
+            target_geom=dst_target_geom,
+            support=support,
+            shape_ref_line=shape_ref_line,
+            corridor_zone_metric=segment_corridor_metric,
+            drivezone_zone_metric=drivezone_zone_metric,
+            trim_m=trim_m,
+            curve_step_m=curve_step_m,
+            max_ratio_drop=max_ratio_drop,
+        )
+        if _is_valid_linestring(rebuilt_dst) and rebuilt_dst is not road_line:
+            road_line = rebuilt_dst
+            meta.update(dst_meta)
+    if dst_point_target is not None:
+        meta["endpoint_post_anchor_mode_dst"] = "diverge_xsec_region_local_rebuild"
+        meta["xsec_target_mode_dst"] = "diverge_xsec_region_local_rebuild"
+        meta["xsec_selected_by_dst"] = "diverge_xsec_region_local_rebuild"
+        meta["xsec_road_selected_by_dst"] = "diverge_xsec_region_local_rebuild"
     return road_line, meta
 
 
@@ -8497,8 +8804,11 @@ def _evaluate_candidate_road(
             road_line=road_line,
             src_type=src_type,
             dst_type=dst_type,
+            support=support,
+            shape_ref_line=primary_shape_ref_metric,
             src_xsec=src_xsec,
             dst_xsec=dst_xsec,
+            segment_corridor_metric=segment_corridor_metric,
             drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
             gore_zone_metric=gore_zone_metric,
             params=params,
