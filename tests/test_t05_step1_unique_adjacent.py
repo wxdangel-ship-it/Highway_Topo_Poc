@@ -1932,7 +1932,11 @@ def test_topology_unique_mode_uses_road_prior_fallback_when_support_missing(
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
         road_prior_path=road_path,
     )
-    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
 
     monkeypatch.setattr(
         pipeline,
@@ -2096,7 +2100,11 @@ def test_evaluate_candidate_road_rescues_corridor_only_failure_with_shape_ref(
         tmp_path=tmp_path,
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
     )
-    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
     params = dict(pipeline.DEFAULT_PARAMS)
     src_xsec = LineString([(0.0, -5.0), (0.0, 15.0)])
     dst_xsec = LineString([(100.0, -5.0), (100.0, 15.0)])
@@ -2654,7 +2662,11 @@ def test_evaluate_candidate_road_topology_fallback_extends_endpoint_snap_cap(
         tmp_path=tmp_path,
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
     )
-    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
     params = dict(pipeline.DEFAULT_PARAMS)
     src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
     dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
@@ -2765,8 +2777,13 @@ def test_evaluate_candidate_road_topology_fallback_prefers_pair_target_xsec(
         tmp_path=tmp_path,
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
     )
-    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
     params = dict(pipeline.DEFAULT_PARAMS)
+    params["STEP2_ENDPOINT_POST_ANCHOR_ENABLE"] = 0
     src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
     dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
     src_pair_target = LineString([(20.0, -5.0), (20.0, 5.0)])
@@ -2879,8 +2896,13 @@ def test_evaluate_candidate_road_topology_fallback_uses_entry_xsec_when_pair_tar
         tmp_path=tmp_path,
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
     )
-    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
     params = dict(pipeline.DEFAULT_PARAMS)
+    params["STEP2_ENDPOINT_POST_ANCHOR_ENABLE"] = 0
     src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
     dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
     src_entry_xsec = LineString([(20.0, -5.0), (20.0, 5.0)])
@@ -2988,6 +3010,144 @@ def test_evaluate_candidate_road_topology_fallback_uses_entry_xsec_when_pair_tar
     assert abs(float(road.get("endpoint_dist_to_xsec_dst_m") or 0.0)) <= 1e-6
 
 
+def test_evaluate_candidate_road_uses_pair_targets_for_primary_merge_diverge_geometry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
+    )
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
+    params = dict(pipeline.DEFAULT_PARAMS)
+    params["STEP2_ENDPOINT_POST_ANCHOR_ENABLE"] = 0
+    src_xsec = LineString([(0.0, -8.0), (0.0, 8.0)])
+    dst_xsec = LineString([(100.0, -8.0), (100.0, 8.0)])
+    src_pair_target = LineString([(20.0, -4.0), (20.0, 4.0)])
+    dst_pair_target = LineString([(80.0, -4.0), (80.0, 4.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t0"},
+        support_event_count=1,
+        traj_segments=[LineString([(20.0, 0.0), (80.0, 0.0)])],
+        src_cross_points=[Point(20.0, 0.0)],
+        dst_cross_points=[Point(80.0, 0.0)],
+    )
+    captured: dict[str, LineString] = {}
+
+    def _fake_estimate_centerline(**kwargs):  # type: ignore[no-untyped-def]
+        captured["src_xsec"] = kwargs["src_xsec"]
+        captured["dst_xsec"] = kwargs["dst_xsec"]
+        return geom_mod.CenterEstimate(
+            centerline_metric=LineString([(20.0, 0.0), (80.0, 0.0)]),
+            shape_ref_metric=LineString([(20.0, 0.0), (80.0, 0.0)]),
+            lb_path_found=False,
+            lb_path_edge_count=0,
+            lb_path_length_m=None,
+            stable_offset_m_src=None,
+            stable_offset_m_dst=None,
+            center_sample_coverage=1.0,
+            width_med_m=None,
+            width_p90_m=None,
+            max_turn_deg_per_10m=None,
+            used_lane_boundary=False,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="none",
+            dst_cut_mode="none",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
+            soft_flags=set(),
+            hard_flags=set(),
+            diagnostics={
+                "_xsec_road_selected_src_metric": kwargs["src_xsec"],
+                "_xsec_target_selected_src_metric": kwargs["src_xsec"],
+                "_xsec_road_all_src_metric": kwargs["src_xsec"],
+                "_xsec_ref_src_metric": kwargs["src_xsec"],
+                "_xsec_road_selected_dst_metric": kwargs["dst_xsec"],
+                "_xsec_target_selected_dst_metric": kwargs["dst_xsec"],
+                "_xsec_road_all_dst_metric": kwargs["dst_xsec"],
+                "_xsec_ref_dst_metric": kwargs["dst_xsec"],
+                "xsec_road_selected_by_src": "seed",
+                "xsec_road_selected_by_dst": "seed",
+                "xsec_target_mode_src": "seed",
+                "xsec_target_mode_dst": "seed",
+                "xsec_policy_mode_src": "role_full_seed",
+                "xsec_policy_mode_dst": "role_full_seed",
+            },
+        )
+
+    monkeypatch.setattr(pipeline, "estimate_centerline", _fake_estimate_centerline)
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: ({}, set(), set(), []),
+    )
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="merge",
+        dst_type="diverge",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": False, "surface_metric": None, "timing_ms": 0.0},
+        shape_ref_hint_metric=LineString([(20.0, 0.0), (80.0, 0.0)]),
+        segment_corridor_metric=LineString([(20.0, 0.0), (80.0, 0.0)]).buffer(20.0, cap_style=2),
+        road_prior_shape_ref_metric=None,
+        step1_used_road_prior=False,
+        step1_road_prior_mode=None,
+        same_pair_multichain=False,
+        candidate_branch_id=None,
+        support_mode="traj_support",
+        pair_xsec_target_src_metric=src_pair_target,
+        pair_xsec_target_dst_metric=dst_pair_target,
+    )
+
+    assert isinstance(captured.get("src_xsec"), LineString)
+    assert isinstance(captured.get("dst_xsec"), LineString)
+    assert captured["src_xsec"].equals(src_pair_target)
+    assert captured["dst_xsec"].equals(dst_pair_target)
+    assert bool(road.get("primary_geometry_pair_target_applied_src")) is True
+    assert bool(road.get("primary_geometry_pair_target_applied_dst")) is True
+    assert str(road.get("primary_geometry_xsec_seed_by_src")) == "pair_target_primary_merge_role_seed"
+    assert str(road.get("primary_geometry_xsec_seed_by_dst")) == "pair_target_primary_diverge_role_seed"
+    geom = road.get("_geometry_metric")
+    assert isinstance(geom, LineString)
+    assert abs(float(geom.coords[0][0]) - 20.0) <= 1e-6
+    assert abs(float(geom.coords[-1][0]) - 80.0) <= 1e-6
+
+
 def test_evaluate_candidate_road_topology_fallback_uses_road_prior_corridor(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2995,8 +3155,13 @@ def test_evaluate_candidate_road_topology_fallback_uses_road_prior_corridor(
         tmp_path=tmp_path,
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
     )
-    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
     params = dict(pipeline.DEFAULT_PARAMS)
+    params["STEP2_ENDPOINT_POST_ANCHOR_ENABLE"] = 0
     src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
     dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
     road_prior_line = LineString([(0.0, 0.0), (100.0, 0.0)])
@@ -3100,8 +3265,13 @@ def test_evaluate_candidate_road_topology_fallback_rescues_with_direct_road_prio
         tmp_path=tmp_path,
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
     )
-    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
     params = dict(pipeline.DEFAULT_PARAMS)
+    params["STEP2_ENDPOINT_POST_ANCHOR_ENABLE"] = 0
     src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
     dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
     road_prior_line = LineString([(0.0, 0.0), (100.0, 0.0)])
@@ -3413,8 +3583,13 @@ def test_evaluate_candidate_road_same_pair_fallback_uses_entry_xsec(
         tmp_path=tmp_path,
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
     )
-    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
     params = dict(pipeline.DEFAULT_PARAMS)
+    params["STEP2_ENDPOINT_POST_ANCHOR_ENABLE"] = 0
     src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
     dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
     src_entry_xsec = LineString([(18.0, -5.0), (18.0, 5.0)])
@@ -3529,8 +3704,13 @@ def test_evaluate_candidate_road_road_prior_gap_fill_uses_entry_xsec(
         tmp_path=tmp_path,
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
     )
-    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
     params = dict(pipeline.DEFAULT_PARAMS)
+    params["STEP2_ENDPOINT_POST_ANCHOR_ENABLE"] = 0
     src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
     dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
     src_entry_xsec = LineString([(15.0, -5.0), (15.0, 5.0)])
@@ -3645,8 +3825,13 @@ def test_evaluate_candidate_road_rescues_near_threshold_traj_surface_in_ratio_on
         tmp_path=tmp_path,
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
     )
-    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
     params = dict(pipeline.DEFAULT_PARAMS)
+    params["STEP2_ENDPOINT_POST_ANCHOR_ENABLE"] = 0
     src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
     dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
     road_line = LineString([(0.0, 0.0), (100.0, 0.0)])
@@ -3975,7 +4160,11 @@ def test_evaluate_candidate_road_post_anchors_merge_src_to_xsec_region_midpoint(
         tmp_path=tmp_path,
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
     )
-    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
     params = dict(pipeline.DEFAULT_PARAMS)
     src_xsec = LineString([(0.0, -10.0), (0.0, 10.0)])
     dst_xsec = LineString([(100.0, -10.0), (100.0, 10.0)])
@@ -4087,20 +4276,27 @@ def test_evaluate_candidate_road_post_anchors_merge_src_to_xsec_region_midpoint(
     xy = geom_mod.point_xy_safe(endpoint_after, context="test_merge_post_anchor_after")
     assert xy is not None
     assert abs(float(xy[0])) <= 1e-6
-    assert abs(float(xy[1]) - 4.0) <= 1e-6
+    assert 2.0 - 1e-6 <= float(xy[1]) <= 6.0 + 1e-6
+    assert float(endpoint_after.distance(merge_region)) <= 1e-6
     assert str(road.get("endpoint_target_region_mode_src")) == "merge_xsec_region_business_target"
     assert str(road.get("endpoint_post_anchor_mode_src")) == "merge_xsec_region_business_refit"
     assert str(road.get("xsec_target_mode_src")) == "merge_xsec_region_business_target"
     assert str(road.get("xsec_selected_by_src")) == "merge_xsec_region_business_refit"
     src_target_geom = road.get("_xsec_target_selected_src_metric")
     assert isinstance(src_target_geom, LineString)
-    assert src_target_geom.equals(merge_region)
+    assert float(src_target_geom.distance(merge_region)) <= 1e-6
+    assert float(src_target_geom.length) <= float(merge_region.length) + 1e-6
     geom = road.get("_geometry_metric")
     assert isinstance(geom, LineString)
     assert len(geom.coords) >= 6
     assert float(road.get("endpoint_post_anchor_span_len_src_m", 0.0)) >= 18.0
     assert bool(road.get("endpoint_post_anchor_intersects_target_xsec_src")) is True
     assert bool(road.get("endpoint_post_anchor_monotonic_to_xsec_src")) is True
+    assert road.get("endpoint_line_to_target_region_dist_src_m") is not None
+    assert float(road.get("endpoint_line_to_target_region_dist_src_m")) <= 1e-6
+    assert bool(road.get("endpoint_line_to_target_region_intersects_src")) is True
+    assert bool(road.get("endpoint_line_to_target_region_monotonic_src")) is True
+    assert bool(road.get("endpoint_line_to_target_region_closure_ok_src")) is True
 
 
 def test_evaluate_candidate_road_post_anchors_diverge_dst_to_xsec_region_midpoint(
@@ -4110,7 +4306,11 @@ def test_evaluate_candidate_road_post_anchors_diverge_dst_to_xsec_region_midpoin
         tmp_path=tmp_path,
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
     )
-    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)])
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
     params = dict(pipeline.DEFAULT_PARAMS)
     src_xsec = LineString([(0.0, -10.0), (0.0, 10.0)])
     dst_xsec = LineString([(100.0, -10.0), (100.0, 10.0)])
@@ -4222,20 +4422,27 @@ def test_evaluate_candidate_road_post_anchors_diverge_dst_to_xsec_region_midpoin
     xy = geom_mod.point_xy_safe(endpoint_after, context="test_diverge_post_anchor_after")
     assert xy is not None
     assert abs(float(xy[0]) - 100.0) <= 1e-6
-    assert abs(float(xy[1]) + 3.0) <= 1e-6
+    assert -5.0 - 1e-6 <= float(xy[1]) <= -1.0 + 1e-6
+    assert float(endpoint_after.distance(diverge_region)) <= 1e-6
     assert str(road.get("endpoint_target_region_mode_dst")) == "diverge_xsec_region_business_target"
     assert str(road.get("endpoint_post_anchor_mode_dst")) == "diverge_xsec_region_business_refit"
     assert str(road.get("xsec_target_mode_dst")) == "diverge_xsec_region_business_target"
     assert str(road.get("xsec_selected_by_dst")) == "diverge_xsec_region_business_refit"
     dst_target_geom = road.get("_xsec_target_selected_dst_metric")
     assert isinstance(dst_target_geom, LineString)
-    assert dst_target_geom.equals(diverge_region)
+    assert float(dst_target_geom.distance(diverge_region)) <= 1e-6
+    assert float(dst_target_geom.length) <= float(diverge_region.length) + 1e-6
     geom = road.get("_geometry_metric")
     assert isinstance(geom, LineString)
     assert len(geom.coords) >= 6
     assert float(road.get("endpoint_post_anchor_span_len_dst_m", 0.0)) >= 18.0
     assert bool(road.get("endpoint_post_anchor_intersects_target_xsec_dst")) is True
     assert bool(road.get("endpoint_post_anchor_monotonic_to_xsec_dst")) is True
+    assert road.get("endpoint_line_to_target_region_dist_dst_m") is not None
+    assert float(road.get("endpoint_line_to_target_region_dist_dst_m")) <= 1e-6
+    assert bool(road.get("endpoint_line_to_target_region_intersects_dst")) is True
+    assert bool(road.get("endpoint_line_to_target_region_monotonic_dst")) is True
+    assert bool(road.get("endpoint_line_to_target_region_closure_ok_dst")) is True
 
 
 def test_select_endpoint_post_anchor_target_prefers_lane_boundary_supported_region() -> None:

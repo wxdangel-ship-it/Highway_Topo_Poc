@@ -5903,6 +5903,102 @@ def _line_endpoint_window(
     return part if _is_valid_linestring(part) else None
 
 
+def _resolve_primary_geometry_pair_target_xsec(
+    *,
+    endpoint_tag: str,
+    node_type: str,
+    xsec_seed: LineString,
+    pair_target_metric: LineString | None,
+) -> tuple[LineString, str | None]:
+    if not _is_valid_linestring(xsec_seed) or not _is_valid_linestring(pair_target_metric):
+        return xsec_seed, None
+    try:
+        same_len = abs(float(pair_target_metric.length) - float(xsec_seed.length)) <= 1e-6
+        same_dist = float(pair_target_metric.distance(xsec_seed)) <= 1e-6
+        if same_len and same_dist:
+            return xsec_seed, None
+    except Exception:
+        pass
+    tag = str(endpoint_tag or "").strip().lower()
+    ntype = str(node_type or "").strip().lower()
+    if tag == "src" and ntype == "merge":
+        return pair_target_metric, "pair_target_primary_merge_role_seed"
+    if tag == "dst" and ntype == "diverge":
+        return pair_target_metric, "pair_target_primary_diverge_role_seed"
+    return xsec_seed, None
+
+
+def _build_endpoint_line_to_target_region_meta(
+    *,
+    road: dict[str, Any],
+    road_line: LineString,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    window_m: float,
+) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
+    if not _is_valid_linestring(road_line):
+        return meta
+    use_window_m = float(max(4.0, window_m))
+    for endpoint_tag, seed_xsec in (("src", src_xsec), ("dst", dst_xsec)):
+        target_geom = None
+        target_source = None
+        for suffix, source in (
+            ("_xsec_target_selected_", "xsec_target_selected"),
+            ("_xsec_road_selected_", "xsec_road_selected"),
+            ("_xsec_road_all_", "xsec_road_all"),
+        ):
+            cand = road.get(f"{suffix}{endpoint_tag}_metric")
+            if isinstance(cand, BaseGeometry) and not cand.is_empty:
+                target_geom = cand
+                target_source = source
+                break
+        if target_geom is None and _is_valid_linestring(seed_xsec):
+            target_geom = seed_xsec
+            target_source = "seed_xsec"
+        meta[f"endpoint_line_to_target_region_source_{endpoint_tag}"] = target_source
+        if target_geom is None or target_geom.is_empty:
+            continue
+        endpoint_window = _line_endpoint_window(
+            line=road_line,
+            endpoint_tag=endpoint_tag,
+            window_m=use_window_m,
+        )
+        if not _is_valid_linestring(endpoint_window):
+            continue
+        meta[f"endpoint_line_to_target_region_window_{endpoint_tag}_m"] = float(endpoint_window.length)
+        try:
+            meta[f"endpoint_line_to_target_region_target_len_{endpoint_tag}_m"] = float(target_geom.length)
+        except Exception:
+            meta[f"endpoint_line_to_target_region_target_len_{endpoint_tag}_m"] = None
+        try:
+            meta[f"endpoint_line_to_target_region_dist_{endpoint_tag}_m"] = float(endpoint_window.distance(target_geom))
+        except Exception:
+            meta[f"endpoint_line_to_target_region_dist_{endpoint_tag}_m"] = None
+        try:
+            meta[f"endpoint_line_to_target_region_intersects_{endpoint_tag}"] = bool(
+                endpoint_window.intersects(target_geom.buffer(1e-3))
+            )
+        except Exception:
+            meta[f"endpoint_line_to_target_region_intersects_{endpoint_tag}"] = None
+        monotonic = None
+        coords = list(endpoint_window.coords)
+        if endpoint_tag == "src":
+            coords = list(reversed(coords))
+        if len(coords) >= 2:
+            try:
+                dists = [float(Point(float(x), float(y)).distance(target_geom)) for x, y in coords]
+                monotonic = all(float(dists[i + 1]) <= float(dists[i]) + 0.25 for i in range(len(dists) - 1))
+            except Exception:
+                monotonic = None
+        meta[f"endpoint_line_to_target_region_monotonic_{endpoint_tag}"] = monotonic
+        if meta.get(f"endpoint_line_to_target_region_intersects_{endpoint_tag}") is not None and monotonic is not None:
+            meta[f"endpoint_line_to_target_region_closure_ok_{endpoint_tag}"] = bool(
+                meta[f"endpoint_line_to_target_region_intersects_{endpoint_tag}"] and monotonic
+            )
+    return meta
+
+
 def _line_endpoint_trend(
     *,
     line: LineString,
@@ -8371,6 +8467,8 @@ def _evaluate_candidate_road(
     road_prior_shape_ref_valid = _is_valid_linestring(road_prior_shape_ref_metric)
     support_mode_norm = str(support_mode or "").strip().lower()
     fallback_bind_modes = {"topology_road_prior_fallback", "road_prior_fallback"}
+    pair_target_src_available = bool(_is_valid_linestring(pair_xsec_target_src_metric))
+    pair_target_dst_available = bool(_is_valid_linestring(pair_xsec_target_dst_metric))
     road_prior_gap_fill_mode = _should_enable_road_prior_gap_fill(
         road_prior_shape_ref_valid=bool(road_prior_shape_ref_valid),
         traj_surface_enforced=bool(traj_surface_enforced),
@@ -8382,12 +8480,8 @@ def _evaluate_candidate_road(
     entry_bind_allowed = bool(
         road_prior_shape_ref_valid and (support_mode_norm in fallback_bind_modes or road_prior_gap_fill_mode)
     )
-    pair_target_src_valid = bool(
-        support_mode_norm in fallback_bind_modes and _is_valid_linestring(pair_xsec_target_src_metric)
-    )
-    pair_target_dst_valid = bool(
-        support_mode_norm in fallback_bind_modes and _is_valid_linestring(pair_xsec_target_dst_metric)
-    )
+    pair_target_src_valid = bool(support_mode_norm in fallback_bind_modes and pair_target_src_available)
+    pair_target_dst_valid = bool(support_mode_norm in fallback_bind_modes and pair_target_dst_available)
     bind_src_xsec = pair_xsec_target_src_metric if pair_target_src_valid else src_xsec
     bind_dst_xsec = pair_xsec_target_dst_metric if pair_target_dst_valid else dst_xsec
     bind_src_reason = (
@@ -8399,6 +8493,18 @@ def _evaluate_candidate_road(
         "pair_target_topology_fallback"
         if support_mode_norm == "topology_road_prior_fallback" and pair_target_dst_valid
         else ("pair_target_road_prior_fallback" if support_mode_norm == "road_prior_fallback" and pair_target_dst_valid else None)
+    )
+    primary_src_xsec, primary_src_reason = _resolve_primary_geometry_pair_target_xsec(
+        endpoint_tag="src",
+        node_type=src_type,
+        xsec_seed=src_xsec,
+        pair_target_metric=(pair_xsec_target_src_metric if pair_target_src_available else None),
+    )
+    primary_dst_xsec, primary_dst_reason = _resolve_primary_geometry_pair_target_xsec(
+        endpoint_tag="dst",
+        node_type=dst_type,
+        xsec_seed=dst_xsec,
+        pair_target_metric=(pair_xsec_target_dst_metric if pair_target_dst_available else None),
     )
     if entry_bind_allowed:
         try:
@@ -8451,8 +8557,8 @@ def _evaluate_candidate_road(
             same_pair_rescue_corridor_zone = rescue_corridor_zone
     center = estimate_centerline(
         support=support,
-        src_xsec=src_xsec,
-        dst_xsec=dst_xsec,
+        src_xsec=primary_src_xsec,
+        dst_xsec=primary_dst_xsec,
         src_type=src_type,
         dst_type=dst_type,
         src_out_degree=int(src_out_degree),
@@ -8537,6 +8643,10 @@ def _evaluate_candidate_road(
     road["same_pair_multi_road_support_mode"] = (support_mode_norm if bool(same_pair_multichain) else None)
     road["same_pair_multi_road_geometry_mode"] = None
     road["topology_fallback_geometry_mode"] = None
+    road["primary_geometry_pair_target_applied_src"] = bool(primary_src_reason)
+    road["primary_geometry_pair_target_applied_dst"] = bool(primary_dst_reason)
+    road["primary_geometry_xsec_seed_by_src"] = str(primary_src_reason or "seed_xsec")
+    road["primary_geometry_xsec_seed_by_dst"] = str(primary_dst_reason or "seed_xsec")
     road["cluster_count"] = int(parent_support.cluster_count)
     road["main_cluster_ratio"] = float(parent_support.main_cluster_ratio)
     road["cluster_sep_m_est"] = parent_support.cluster_sep_m_est
@@ -8665,8 +8775,8 @@ def _evaluate_candidate_road(
         float(road_prior_shape_ref_metric.length) if road_prior_shape_ref_valid else None
     )
     road["_road_prior_shape_ref_metric"] = road_prior_shape_ref_metric if road_prior_shape_ref_valid else None
-    road["_pair_xsec_target_src_metric"] = pair_xsec_target_src_metric if pair_target_src_valid else None
-    road["_pair_xsec_target_dst_metric"] = pair_xsec_target_dst_metric if pair_target_dst_valid else None
+    road["_pair_xsec_target_src_metric"] = pair_xsec_target_src_metric if pair_target_src_available else None
+    road["_pair_xsec_target_dst_metric"] = pair_xsec_target_dst_metric if pair_target_dst_available else None
     for tag, bind_xsec, bind_reason in (
         ("src", bind_src_xsec, bind_src_reason),
         ("dst", bind_dst_xsec, bind_dst_reason),
@@ -9055,6 +9165,20 @@ def _evaluate_candidate_road(
             road["seg_index0_len_m"] = float(np.linalg.norm(c1 - c0))
         else:
             road["seg_index0_len_m"] = None
+        road.update(
+            _build_endpoint_line_to_target_region_meta(
+                road=road,
+                road_line=road_line,
+                src_xsec=src_xsec,
+                dst_xsec=dst_xsec,
+                window_m=float(
+                    max(
+                        params.get("STEP2_ENDPOINT_POST_ANCHOR_WINDOW_M", 18.0),
+                        params.get("STEP2_ENDPOINT_POST_ANCHOR_SMOOTH_SPAN_M", 28.0),
+                    )
+                ),
+            )
+        )
     else:
         road_line = None
         road["length_m"] = 0.0
@@ -13704,10 +13828,28 @@ def _make_base_road_record(
         "endpoint_target_region_mode_dst": None,
         "endpoint_post_anchor_mode_src": None,
         "endpoint_post_anchor_mode_dst": None,
+        "endpoint_line_to_target_region_source_src": None,
+        "endpoint_line_to_target_region_source_dst": None,
+        "endpoint_line_to_target_region_window_src_m": None,
+        "endpoint_line_to_target_region_window_dst_m": None,
+        "endpoint_line_to_target_region_target_len_src_m": None,
+        "endpoint_line_to_target_region_target_len_dst_m": None,
+        "endpoint_line_to_target_region_dist_src_m": None,
+        "endpoint_line_to_target_region_dist_dst_m": None,
+        "endpoint_line_to_target_region_intersects_src": None,
+        "endpoint_line_to_target_region_intersects_dst": None,
+        "endpoint_line_to_target_region_monotonic_src": None,
+        "endpoint_line_to_target_region_monotonic_dst": None,
+        "endpoint_line_to_target_region_closure_ok_src": None,
+        "endpoint_line_to_target_region_closure_ok_dst": None,
         "width_med_m": None,
         "width_p90_m": None,
         "max_turn_deg_per_10m": None,
         "seg_index0_len_m": None,
+        "primary_geometry_pair_target_applied_src": False,
+        "primary_geometry_pair_target_applied_dst": False,
+        "primary_geometry_xsec_seed_by_src": None,
+        "primary_geometry_xsec_seed_by_dst": None,
         "src_is_gore_tip": False,
         "dst_is_gore_tip": False,
         "src_is_expanded": False,
