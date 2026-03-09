@@ -4,7 +4,7 @@ from pathlib import Path
 
 import json
 import numpy as np
-from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry import LineString, MultiLineString, Point, Polygon
 
 from highway_topo_poc.modules.t05_topology_between_rc import geometry as geom_mod
 from highway_topo_poc.modules.t05_topology_between_rc import pipeline
@@ -4088,11 +4088,19 @@ def test_evaluate_candidate_road_post_anchors_merge_src_to_xsec_region_midpoint(
     assert xy is not None
     assert abs(float(xy[0])) <= 1e-6
     assert abs(float(xy[1]) - 4.0) <= 1e-6
-    assert str(road.get("endpoint_post_anchor_mode_src")) == "merge_xsec_region_smooth_rebuild"
+    assert str(road.get("endpoint_target_region_mode_src")) == "merge_xsec_region_business_target"
+    assert str(road.get("endpoint_post_anchor_mode_src")) == "merge_xsec_region_business_refit"
+    assert str(road.get("xsec_target_mode_src")) == "merge_xsec_region_business_target"
+    assert str(road.get("xsec_selected_by_src")) == "merge_xsec_region_business_refit"
+    src_target_geom = road.get("_xsec_target_selected_src_metric")
+    assert isinstance(src_target_geom, LineString)
+    assert src_target_geom.equals(merge_region)
     geom = road.get("_geometry_metric")
     assert isinstance(geom, LineString)
     assert len(geom.coords) >= 6
     assert float(road.get("endpoint_post_anchor_span_len_src_m", 0.0)) >= 18.0
+    assert bool(road.get("endpoint_post_anchor_intersects_target_xsec_src")) is True
+    assert bool(road.get("endpoint_post_anchor_monotonic_to_xsec_src")) is True
 
 
 def test_evaluate_candidate_road_post_anchors_diverge_dst_to_xsec_region_midpoint(
@@ -4215,11 +4223,51 @@ def test_evaluate_candidate_road_post_anchors_diverge_dst_to_xsec_region_midpoin
     assert xy is not None
     assert abs(float(xy[0]) - 100.0) <= 1e-6
     assert abs(float(xy[1]) + 3.0) <= 1e-6
-    assert str(road.get("endpoint_post_anchor_mode_dst")) == "diverge_xsec_region_smooth_rebuild"
+    assert str(road.get("endpoint_target_region_mode_dst")) == "diverge_xsec_region_business_target"
+    assert str(road.get("endpoint_post_anchor_mode_dst")) == "diverge_xsec_region_business_refit"
+    assert str(road.get("xsec_target_mode_dst")) == "diverge_xsec_region_business_target"
+    assert str(road.get("xsec_selected_by_dst")) == "diverge_xsec_region_business_refit"
+    dst_target_geom = road.get("_xsec_target_selected_dst_metric")
+    assert isinstance(dst_target_geom, LineString)
+    assert dst_target_geom.equals(diverge_region)
     geom = road.get("_geometry_metric")
     assert isinstance(geom, LineString)
     assert len(geom.coords) >= 6
     assert float(road.get("endpoint_post_anchor_span_len_dst_m", 0.0)) >= 18.0
+    assert bool(road.get("endpoint_post_anchor_intersects_target_xsec_dst")) is True
+    assert bool(road.get("endpoint_post_anchor_monotonic_to_xsec_dst")) is True
+
+
+def test_select_endpoint_post_anchor_target_prefers_lane_boundary_supported_region() -> None:
+    road_line = LineString([(0.0, 0.0), (100.0, 0.0)])
+    xsec_geom = MultiLineString(
+        [
+            [(0.0, -8.0), (0.0, -4.0)],
+            [(0.0, 4.0), (0.0, 8.0)],
+        ]
+    )
+    lane_boundaries = [LineString([(-8.0, 6.0), (8.0, 6.0)])]
+    target_pt, target_region, meta = pipeline._select_endpoint_post_anchor_target(
+        road_line=road_line,
+        endpoint_tag="src",
+        xsec_geom=xsec_geom,
+        support=None,
+        shape_ref_line=None,
+        lane_boundaries_metric=lane_boundaries,
+        drivezone_zone_metric=Polygon([(-20.0, -20.0), (20.0, -20.0), (20.0, 20.0), (-20.0, 20.0)]),
+        gore_zone_metric=None,
+        window_m=18.0,
+        buffer_m=8.0,
+    )
+
+    assert isinstance(target_pt, Point)
+    xy = geom_mod.point_xy_safe(target_pt, context="test_lane_boundary_target_pt")
+    assert xy is not None
+    assert abs(float(xy[0])) <= 1e-6
+    assert abs(float(xy[1]) - 6.0) <= 1e-6
+    assert isinstance(target_region, LineString)
+    assert float(target_region.length) > 0.0
+    assert "lane_boundary" in str(meta.get("endpoint_target_region_ref_modes_src", meta.get("endpoint_target_region_ref_modes", "")))
 
 
 def test_same_pair_multi_road_selection_keeps_close_parallel_branches() -> None:
