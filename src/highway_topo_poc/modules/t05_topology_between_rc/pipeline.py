@@ -2962,6 +2962,7 @@ def _run_patch_core(
                     segment_corridor_metric=branch_corridor.get("corridor_zone_metric"),
                     road_prior_shape_ref_metric=variant.get("road_prior_shape_ref_metric"),
                     step1_used_road_prior=bool(branch_corridor.get("road_prior_shape_ref_used", False)),
+                    step1_road_prior_rerank_used=bool(branch_corridor.get("road_prior_shape_ref_rerank_used", False)),
                     step1_road_prior_mode=branch_corridor.get("road_prior_shape_ref_mode"),
                     same_pair_multichain=True,
                     candidate_branch_id=branch_id,
@@ -3048,6 +3049,7 @@ def _run_patch_core(
                     segment_corridor_metric=step1_corridor.get("corridor_zone_metric"),
                     road_prior_shape_ref_metric=road_prior_pair_shape_ref_map.get((int(src), int(dst))),
                     step1_used_road_prior=bool(step1_corridor.get("road_prior_shape_ref_used", False)),
+                    step1_road_prior_rerank_used=bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False)),
                     step1_road_prior_mode=step1_corridor.get("road_prior_shape_ref_mode"),
                     same_pair_multichain=False,
                     candidate_branch_id=None,
@@ -3166,6 +3168,7 @@ def _run_patch_core(
                     segment_corridor_metric=step1_corridor.get("corridor_zone_metric"),
                     road_prior_shape_ref_metric=road_prior_pair_shape_ref_map.get((int(src), int(dst))),
                     step1_used_road_prior=bool(step1_corridor.get("road_prior_shape_ref_used", False)),
+                    step1_road_prior_rerank_used=bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False)),
                     step1_road_prior_mode=step1_corridor.get("road_prior_shape_ref_mode"),
                     same_pair_multichain=False,
                     candidate_branch_id=None,
@@ -6076,6 +6079,7 @@ def _resolve_primary_geometry_pair_target_xsec(
     node_type: str,
     xsec_seed: LineString,
     pair_target_metric: LineString | None,
+    allow_outward_role_seed: bool = False,
 ) -> tuple[LineString, str | None]:
     if not _is_valid_linestring(xsec_seed) or not _is_valid_linestring(pair_target_metric):
         return xsec_seed, None
@@ -6092,6 +6096,11 @@ def _resolve_primary_geometry_pair_target_xsec(
         return pair_target_metric, "pair_target_primary_merge_role_seed"
     if tag == "dst" and ntype == "diverge":
         return pair_target_metric, "pair_target_primary_diverge_role_seed"
+    if bool(allow_outward_role_seed):
+        if tag == "src" and ntype == "diverge":
+            return pair_target_metric, "pair_target_primary_diverge_outward_role_seed"
+        if tag == "dst" and ntype == "merge":
+            return pair_target_metric, "pair_target_primary_merge_outward_role_seed"
     return xsec_seed, None
 
 
@@ -8621,6 +8630,7 @@ def _evaluate_candidate_road(
     segment_corridor_metric: BaseGeometry | None = None,
     road_prior_shape_ref_metric: LineString | None = None,
     step1_used_road_prior: bool = False,
+    step1_road_prior_rerank_used: bool = False,
     step1_road_prior_mode: str | None = None,
     same_pair_multichain: bool = False,
     candidate_branch_id: str | None = None,
@@ -8634,6 +8644,7 @@ def _evaluate_candidate_road(
     road_prior_shape_ref_valid = _is_valid_linestring(road_prior_shape_ref_metric)
     support_mode_norm = str(support_mode or "").strip().lower()
     fallback_bind_modes = {"topology_road_prior_fallback", "road_prior_fallback"}
+    step1_pair_target_bind_allowed = bool(step1_road_prior_rerank_used)
     pair_target_src_available = bool(_is_valid_linestring(pair_xsec_target_src_metric))
     pair_target_dst_available = bool(_is_valid_linestring(pair_xsec_target_dst_metric))
     road_prior_gap_fill_mode = _should_enable_road_prior_gap_fill(
@@ -8647,31 +8658,41 @@ def _evaluate_candidate_road(
     entry_bind_allowed = bool(
         road_prior_shape_ref_valid and (support_mode_norm in fallback_bind_modes or road_prior_gap_fill_mode)
     )
-    pair_target_src_valid = bool(support_mode_norm in fallback_bind_modes and pair_target_src_available)
-    pair_target_dst_valid = bool(support_mode_norm in fallback_bind_modes and pair_target_dst_available)
+    pair_target_src_valid = bool((support_mode_norm in fallback_bind_modes or step1_pair_target_bind_allowed) and pair_target_src_available)
+    pair_target_dst_valid = bool((support_mode_norm in fallback_bind_modes or step1_pair_target_bind_allowed) and pair_target_dst_available)
     bind_src_xsec = pair_xsec_target_src_metric if pair_target_src_valid else src_xsec
     bind_dst_xsec = pair_xsec_target_dst_metric if pair_target_dst_valid else dst_xsec
     bind_src_reason = (
         "pair_target_topology_fallback"
         if support_mode_norm == "topology_road_prior_fallback" and pair_target_src_valid
-        else ("pair_target_road_prior_fallback" if support_mode_norm == "road_prior_fallback" and pair_target_src_valid else None)
+        else (
+            "pair_target_road_prior_fallback"
+            if support_mode_norm == "road_prior_fallback" and pair_target_src_valid
+            else ("pair_target_step1_road_prior_rerank" if step1_pair_target_bind_allowed and pair_target_src_valid else None)
+        )
     )
     bind_dst_reason = (
         "pair_target_topology_fallback"
         if support_mode_norm == "topology_road_prior_fallback" and pair_target_dst_valid
-        else ("pair_target_road_prior_fallback" if support_mode_norm == "road_prior_fallback" and pair_target_dst_valid else None)
+        else (
+            "pair_target_road_prior_fallback"
+            if support_mode_norm == "road_prior_fallback" and pair_target_dst_valid
+            else ("pair_target_step1_road_prior_rerank" if step1_pair_target_bind_allowed and pair_target_dst_valid else None)
+        )
     )
     primary_src_xsec, primary_src_reason = _resolve_primary_geometry_pair_target_xsec(
         endpoint_tag="src",
         node_type=src_type,
         xsec_seed=src_xsec,
         pair_target_metric=(pair_xsec_target_src_metric if pair_target_src_available else None),
+        allow_outward_role_seed=bool(step1_road_prior_rerank_used),
     )
     primary_dst_xsec, primary_dst_reason = _resolve_primary_geometry_pair_target_xsec(
         endpoint_tag="dst",
         node_type=dst_type,
         xsec_seed=dst_xsec,
         pair_target_metric=(pair_xsec_target_dst_metric if pair_target_dst_available else None),
+        allow_outward_role_seed=bool(step1_road_prior_rerank_used),
     )
     if entry_bind_allowed:
         try:
