@@ -395,6 +395,9 @@ def test_step1_corridor_reranks_to_road_prior_branch_when_seed_branch_is_wrong()
     assert isinstance(line, LineString)
     assert float(line.distance(prior_line)) <= 1e-6
     assert bool(out.get("road_prior_shape_ref_rerank_used")) is True
+    assert bool(out.get("branch_override_used")) is True
+    assert str(out.get("branch_override_from_traj_id")) == "seed_branch"
+    assert str(out.get("branch_override_to_traj_id")) == "prior_branch"
     assert str(out.get("pair_target_ref_source")) == "road_prior_shape_ref"
     topk = out.get("candidate_topk")
     assert isinstance(topk, list) and len(topk) >= 2

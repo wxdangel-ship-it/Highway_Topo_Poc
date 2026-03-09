@@ -2881,6 +2881,9 @@ def _run_patch_core(
             road["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
             road["step1_pair_target_ref_source"] = step1_corridor.get("pair_target_ref_source")
             road["step1_road_prior_rerank_used"] = bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False))
+            road["step1_branch_override_used"] = bool(step1_corridor.get("branch_override_used", False))
+            road["step1_branch_override_from_traj_id"] = step1_corridor.get("branch_override_from_traj_id")
+            road["step1_branch_override_to_traj_id"] = step1_corridor.get("branch_override_to_traj_id")
             road["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
             road["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
             road["hard_anomaly"] = True
@@ -2970,6 +2973,11 @@ def _run_patch_core(
                     dst_xsec=dst_xsec_gate.geometry_metric,
                     pair_xsec_target_src_metric=branch_corridor.get("_pair_xsec_target_src_metric"),
                     pair_xsec_target_dst_metric=branch_corridor.get("_pair_xsec_target_dst_metric"),
+                    pair_xsec_primary_seed_src_metric=branch_corridor.get("_pair_xsec_primary_seed_src_metric"),
+                    pair_xsec_primary_seed_dst_metric=branch_corridor.get("_pair_xsec_primary_seed_dst_metric"),
+                    pair_xsec_policy_src=branch_corridor.get("pair_xsec_policy_src"),
+                    pair_xsec_policy_dst=branch_corridor.get("pair_xsec_policy_dst"),
+                    step1_branch_override_used=bool(branch_corridor.get("branch_override_used", False)),
                 )
                 _apply_xsec_gate_meta_to_road(road=road_k, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
                 road_k["step1_strategy"] = branch_corridor.get("strategy")
@@ -2986,6 +2994,9 @@ def _run_patch_core(
                 road_k["step1_corridor_shape_ref_inside_ratio"] = branch_corridor.get("corridor_shape_ref_inside_ratio")
                 road_k["step1_pair_target_ref_source"] = branch_corridor.get("pair_target_ref_source")
                 road_k["step1_road_prior_rerank_used"] = bool(branch_corridor.get("road_prior_shape_ref_rerank_used", False))
+                road_k["step1_branch_override_used"] = bool(branch_corridor.get("branch_override_used", False))
+                road_k["step1_branch_override_from_traj_id"] = branch_corridor.get("branch_override_from_traj_id")
+                road_k["step1_branch_override_to_traj_id"] = branch_corridor.get("branch_override_to_traj_id")
                 road_k["step1_pair_xsec_policy_src"] = branch_corridor.get("pair_xsec_policy_src")
                 road_k["step1_pair_xsec_policy_dst"] = branch_corridor.get("pair_xsec_policy_dst")
                 road_k["step1_same_pair_multichain"] = True
@@ -3056,6 +3067,11 @@ def _run_patch_core(
                     dst_xsec=dst_xsec_gate.geometry_metric,
                     pair_xsec_target_src_metric=step1_corridor.get("_pair_xsec_target_src_metric"),
                     pair_xsec_target_dst_metric=step1_corridor.get("_pair_xsec_target_dst_metric"),
+                    pair_xsec_primary_seed_src_metric=step1_corridor.get("_pair_xsec_primary_seed_src_metric"),
+                    pair_xsec_primary_seed_dst_metric=step1_corridor.get("_pair_xsec_primary_seed_dst_metric"),
+                    pair_xsec_policy_src=step1_corridor.get("pair_xsec_policy_src"),
+                    pair_xsec_policy_dst=step1_corridor.get("pair_xsec_policy_dst"),
+                    step1_branch_override_used=bool(step1_corridor.get("branch_override_used", False)),
                 )
                 _apply_xsec_gate_meta_to_road(road=road_k, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
                 road_k["step1_strategy"] = step1_corridor.get("strategy")
@@ -3072,6 +3088,9 @@ def _run_patch_core(
                 road_k["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
                 road_k["step1_pair_target_ref_source"] = step1_corridor.get("pair_target_ref_source")
                 road_k["step1_road_prior_rerank_used"] = bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False))
+                road_k["step1_branch_override_used"] = bool(step1_corridor.get("branch_override_used", False))
+                road_k["step1_branch_override_from_traj_id"] = step1_corridor.get("branch_override_from_traj_id")
+                road_k["step1_branch_override_to_traj_id"] = step1_corridor.get("branch_override_to_traj_id")
                 road_k["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
                 road_k["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
                 road_k["pair_support_mode"] = "topology_road_prior_fallback"
@@ -3173,6 +3192,11 @@ def _run_patch_core(
                     dst_xsec=dst_xsec_gate.geometry_metric,
                     pair_xsec_target_src_metric=step1_corridor.get("_pair_xsec_target_src_metric"),
                     pair_xsec_target_dst_metric=step1_corridor.get("_pair_xsec_target_dst_metric"),
+                    pair_xsec_primary_seed_src_metric=step1_corridor.get("_pair_xsec_primary_seed_src_metric"),
+                    pair_xsec_primary_seed_dst_metric=step1_corridor.get("_pair_xsec_primary_seed_dst_metric"),
+                    pair_xsec_policy_src=step1_corridor.get("pair_xsec_policy_src"),
+                    pair_xsec_policy_dst=step1_corridor.get("pair_xsec_policy_dst"),
+                    step1_branch_override_used=bool(step1_corridor.get("branch_override_used", False)),
                 )
                 _apply_xsec_gate_meta_to_road(road=road_k, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
                 road_k["step1_strategy"] = step1_corridor.get("strategy")
@@ -3189,6 +3213,9 @@ def _run_patch_core(
                 road_k["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
                 road_k["step1_pair_target_ref_source"] = step1_corridor.get("pair_target_ref_source")
                 road_k["step1_road_prior_rerank_used"] = bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False))
+                road_k["step1_branch_override_used"] = bool(step1_corridor.get("branch_override_used", False))
+                road_k["step1_branch_override_from_traj_id"] = step1_corridor.get("branch_override_from_traj_id")
+                road_k["step1_branch_override_to_traj_id"] = step1_corridor.get("branch_override_to_traj_id")
                 road_k["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
                 road_k["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
                 key_k = f"{src}_{dst}_k{int(cluster_id)}"
@@ -3228,6 +3255,9 @@ def _run_patch_core(
             road["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
             road["step1_pair_target_ref_source"] = step1_corridor.get("pair_target_ref_source")
             road["step1_road_prior_rerank_used"] = bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False))
+            road["step1_branch_override_used"] = bool(step1_corridor.get("branch_override_used", False))
+            road["step1_branch_override_from_traj_id"] = step1_corridor.get("branch_override_from_traj_id")
+            road["step1_branch_override_to_traj_id"] = step1_corridor.get("branch_override_to_traj_id")
             road["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
             road["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
             road["hard_anomaly"] = True
@@ -4986,6 +5016,23 @@ def _resolve_step1_pair_target_metric(
     return xsec_seed
 
 
+def _resolve_step1_pair_primary_seed_metric(
+    *,
+    xsec_seed: LineString,
+    pair_xsec_meta: dict[str, Any] | None,
+) -> LineString:
+    if not isinstance(pair_xsec_meta, dict):
+        return xsec_seed
+    policy_mode = str(pair_xsec_meta.get("policy_mode") or "").strip().lower()
+    if policy_mode == "role_outward_cut":
+        for key in ("xsec_ref", "xsec_cross_ref", "xsec_road_selected"):
+            cand = pair_xsec_meta.get(key)
+            if isinstance(cand, LineString) and (not cand.is_empty) and len(cand.coords) >= 2:
+                return cand
+        return xsec_seed
+    return xsec_seed
+
+
 def _annotate_step1_road_prior_metrics(
     *,
     items: Sequence[dict[str, Any]],
@@ -5088,6 +5135,38 @@ def _step1_primary_item_sort_key(it: dict[str, Any]) -> tuple[float, ...]:
         -seg_len,
         float(int(it.get("idx", -1))),
     )
+
+
+def _step1_seed_baseline_sort_key(it: dict[str, Any]) -> tuple[float, ...]:
+    d_seed = _to_finite_float(it.get("d_seed"), 1e9)
+    d_src = _to_finite_float(it.get("dist_to_src_xsec_m"), 1e9)
+    d_dst = _to_finite_float(it.get("dist_to_dst_xsec_m"), 1e9)
+    seg_len = _to_finite_float(it.get("length_m"), 0.0)
+    return (
+        d_seed,
+        d_src + d_dst,
+        -seg_len,
+        float(int(it.get("idx", -1))),
+    )
+
+
+def _step1_branch_override_used(
+    *,
+    baseline_pick: dict[str, Any] | None,
+    picked: dict[str, Any] | None,
+    prior_line: LineString | None,
+) -> bool:
+    if not _is_valid_linestring(prior_line):
+        return False
+    if not isinstance(baseline_pick, dict) or not isinstance(picked, dict):
+        return False
+    if int(baseline_pick.get("idx", -1)) == int(picked.get("idx", -1)):
+        return False
+    base_gap = _to_finite_float(baseline_pick.get("road_prior_gap_m"), 1e9)
+    pick_gap = _to_finite_float(picked.get("road_prior_gap_m"), 1e9)
+    base_inside = _to_finite_float(baseline_pick.get("road_prior_inside_ratio"), 0.0)
+    pick_inside = _to_finite_float(picked.get("road_prior_inside_ratio"), 0.0)
+    return bool((pick_gap + 0.5 < base_gap) or (pick_inside > base_inside + 0.05))
 
 
 def _pick_step1_primary_item(items: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
@@ -5393,6 +5472,9 @@ def _build_step1_corridor_for_pair(
         "road_prior_shape_ref_mode": None,
         "road_prior_shape_ref_rerank_used": False,
         "pair_target_ref_source": None,
+        "branch_override_used": False,
+        "branch_override_from_traj_id": None,
+        "branch_override_to_traj_id": None,
     }
 
     if str(dst_type) == "diverge":
@@ -5576,6 +5658,7 @@ def _build_step1_corridor_for_pair(
     ranked_reach = [it for it in ranked_used if bool(it.get("reaches_other_end", False))]
     ranked_main = ranked_reach if ranked_reach else ranked_used
     topk_pick = int(max(1, int(params.get("STEP1_PRIMARY_PICK_TOPK", 8))))
+    baseline_pick = min(ranked_main[:topk_pick], key=_step1_seed_baseline_sort_key) if ranked_main else None
     ranked_main = sorted(ranked_main, key=_step1_primary_item_sort_key)
     topk_debug = ranked_main[:topk_pick]
     if not topk_debug:
@@ -5870,6 +5953,14 @@ def _build_step1_corridor_for_pair(
         out["_pair_xsec_cross_ref_dst_metric"] = dst_xsec_cross
         out["_pair_xsec_target_src_metric"] = step1_pair_xsec_src.get("xsec_road_selected")
         out["_pair_xsec_target_dst_metric"] = step1_pair_xsec_dst.get("xsec_road_selected")
+        out["_pair_xsec_primary_seed_src_metric"] = _resolve_step1_pair_primary_seed_metric(
+            xsec_seed=src_xsec,
+            pair_xsec_meta=step1_pair_xsec_src,
+        )
+        out["_pair_xsec_primary_seed_dst_metric"] = _resolve_step1_pair_primary_seed_metric(
+            xsec_seed=dst_xsec,
+            pair_xsec_meta=step1_pair_xsec_dst,
+        )
     zone_half_w = float(max(1.0, params.get("CORRIDOR_HALF_WIDTH_M", 15.0)))
     zone_topk = int(max(1, int(params.get("STEP1_CORRIDOR_ZONE_TOPK", 3))))
     zone_lines: list[LineString] = []
@@ -5899,6 +5990,14 @@ def _build_step1_corridor_for_pair(
     for item in out["traj_gore_flags"]:
         if int(item.get("idx", -1)) == int(picked.get("idx", -2)):
             item["selected"] = True
+    branch_override_used = _step1_branch_override_used(
+        baseline_pick=baseline_pick,
+        picked=picked,
+        prior_line=prior_line,
+    )
+    out["branch_override_used"] = bool(branch_override_used)
+    out["branch_override_from_traj_id"] = baseline_pick.get("traj_id") if isinstance(baseline_pick, dict) else None
+    out["branch_override_to_traj_id"] = picked.get("traj_id")
     src_fallback = picked.get("src_cp") if isinstance(picked.get("src_cp"), Point) else out.get("cross_point_src")
     dst_fallback = picked.get("dst_cp") if isinstance(picked.get("dst_cp"), Point) else out.get("cross_point_dst")
     out["cross_point_src"] = _line_xsec_contact_point(
@@ -6076,22 +6175,51 @@ def _resolve_primary_geometry_pair_target_xsec(
     node_type: str,
     xsec_seed: LineString,
     pair_target_metric: LineString | None,
+    pair_primary_seed_metric: LineString | None = None,
+    pair_policy_mode: str | None = None,
+    step1_branch_override_used: bool = False,
+    support_mode: str | None = None,
+    same_pair_multichain: bool = False,
 ) -> tuple[LineString, str | None]:
     if not _is_valid_linestring(xsec_seed) or not _is_valid_linestring(pair_target_metric):
+        pair_target_metric = None
+    primary_seed_metric = pair_primary_seed_metric if _is_valid_linestring(pair_primary_seed_metric) else None
+    if pair_target_metric is None and primary_seed_metric is None:
         return xsec_seed, None
     try:
-        same_len = abs(float(pair_target_metric.length) - float(xsec_seed.length)) <= 1e-6
-        same_dist = float(pair_target_metric.distance(xsec_seed)) <= 1e-6
+        compare_metric = pair_target_metric if pair_target_metric is not None else primary_seed_metric
+        same_len = abs(float(compare_metric.length) - float(xsec_seed.length)) <= 1e-6
+        same_dist = float(compare_metric.distance(xsec_seed)) <= 1e-6
         if same_len and same_dist:
             return xsec_seed, None
     except Exception:
         pass
     tag = str(endpoint_tag or "").strip().lower()
     ntype = str(node_type or "").strip().lower()
-    if tag == "src" and ntype == "merge":
+    support_mode_norm = str(support_mode or "").strip().lower()
+    policy_mode_norm = str(pair_policy_mode or "").strip().lower()
+    primary_seed_distinct = False
+    if primary_seed_metric is not None:
+        try:
+            primary_seed_distinct = not (
+                abs(float(primary_seed_metric.length) - float(xsec_seed.length)) <= 1e-6
+                and float(primary_seed_metric.distance(xsec_seed)) <= 1e-6
+            )
+        except Exception:
+            primary_seed_distinct = True
+    if tag == "src" and ntype == "merge" and pair_target_metric is not None:
         return pair_target_metric, "pair_target_primary_merge_role_seed"
-    if tag == "dst" and ntype == "diverge":
+    if tag == "dst" and ntype == "diverge" and pair_target_metric is not None:
         return pair_target_metric, "pair_target_primary_diverge_role_seed"
+    if (
+        primary_seed_metric is not None
+        and primary_seed_distinct
+        and policy_mode_norm == "role_outward_cut"
+        and bool(step1_branch_override_used)
+        and support_mode_norm == "traj_support"
+        and not bool(same_pair_multichain)
+    ):
+        return primary_seed_metric, "pair_target_primary_outward_anchor_seed"
     return xsec_seed, None
 
 
@@ -8627,6 +8755,11 @@ def _evaluate_candidate_road(
     support_mode: str | None = None,
     pair_xsec_target_src_metric: LineString | None = None,
     pair_xsec_target_dst_metric: LineString | None = None,
+    pair_xsec_primary_seed_src_metric: LineString | None = None,
+    pair_xsec_primary_seed_dst_metric: LineString | None = None,
+    pair_xsec_policy_src: str | None = None,
+    pair_xsec_policy_dst: str | None = None,
+    step1_branch_override_used: bool = False,
 ) -> dict[str, Any]:
     t0_center = perf_counter()
     traj_surface_enforced = bool(traj_surface_hint.get("traj_surface_enforced", False))
@@ -8666,12 +8799,22 @@ def _evaluate_candidate_road(
         node_type=src_type,
         xsec_seed=src_xsec,
         pair_target_metric=(pair_xsec_target_src_metric if pair_target_src_available else None),
+        pair_primary_seed_metric=pair_xsec_primary_seed_src_metric,
+        pair_policy_mode=pair_xsec_policy_src,
+        step1_branch_override_used=step1_branch_override_used,
+        support_mode=support_mode_norm,
+        same_pair_multichain=same_pair_multichain,
     )
     primary_dst_xsec, primary_dst_reason = _resolve_primary_geometry_pair_target_xsec(
         endpoint_tag="dst",
         node_type=dst_type,
         xsec_seed=dst_xsec,
         pair_target_metric=(pair_xsec_target_dst_metric if pair_target_dst_available else None),
+        pair_primary_seed_metric=pair_xsec_primary_seed_dst_metric,
+        pair_policy_mode=pair_xsec_policy_dst,
+        step1_branch_override_used=step1_branch_override_used,
+        support_mode=support_mode_norm,
+        same_pair_multichain=same_pair_multichain,
     )
     if entry_bind_allowed:
         try:
@@ -8938,6 +9081,7 @@ def _evaluate_candidate_road(
     road["road_prior_shape_ref_used"] = bool(use_road_prior_shape_ref)
     road["road_prior_gap_fill_mode"] = bool(road_prior_gap_fill_mode)
     road["step1_road_prior_mode"] = str(step1_road_prior_mode or "") or None
+    road["step1_branch_override_used"] = bool(step1_branch_override_used)
     road["road_prior_shape_ref_length_m"] = (
         float(road_prior_shape_ref_metric.length) if road_prior_shape_ref_valid else None
     )
@@ -14146,6 +14290,9 @@ def _make_base_road_record(
         "step1_corridor_shape_ref_inside_ratio": None,
         "step1_pair_target_ref_source": None,
         "step1_road_prior_rerank_used": False,
+        "step1_branch_override_used": False,
+        "step1_branch_override_from_traj_id": None,
+        "step1_branch_override_to_traj_id": None,
         "step1_pair_xsec_policy_src": None,
         "step1_pair_xsec_policy_dst": None,
         "gore_fallback_used_src": False,
