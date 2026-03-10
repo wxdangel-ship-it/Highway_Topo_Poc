@@ -3426,6 +3426,7 @@ def _run_patch_core(
                         dst_xsec=dst_xsec.geometry_metric,
                         gore_zone_metric=gore_zone_metric,
                         params=params,
+                        node_xsec_frame_by_nodeid=node_xsec_frame_by_nodeid,
                     )
                     continue
                 cand["_geometry_metric"] = None
@@ -3448,6 +3449,7 @@ def _run_patch_core(
                     dst_xsec=dst_xsec.geometry_metric,
                     gore_zone_metric=gore_zone_metric,
                     params=params,
+                    node_xsec_frame_by_nodeid=node_xsec_frame_by_nodeid,
                 )
             continue
         if len(viable_candidates) > 1:
@@ -3487,6 +3489,7 @@ def _run_patch_core(
                         dst_xsec=dst_xsec.geometry_metric,
                         gore_zone_metric=gore_zone_metric,
                         params=params,
+                        node_xsec_frame_by_nodeid=node_xsec_frame_by_nodeid,
                     )
                 continue
         selected = ranked_candidates[0]
@@ -3512,6 +3515,7 @@ def _run_patch_core(
             dst_xsec=dst_xsec.geometry_metric,
             gore_zone_metric=gore_zone_metric,
             params=params,
+            node_xsec_frame_by_nodeid=node_xsec_frame_by_nodeid,
         )
 
     overall_pass = True
@@ -11621,6 +11625,7 @@ def _append_selected_candidate_road(
     dst_xsec: LineString,
     gore_zone_metric: BaseGeometry | None,
     params: dict[str, Any],
+    node_xsec_frame_by_nodeid: dict[int, dict[str, Any]] | None = None,
 ) -> None:
     road_line = selected.get("_geometry_metric")
     if not (isinstance(road_line, LineString) and (not road_line.is_empty)):
