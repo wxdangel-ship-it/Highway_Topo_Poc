@@ -4824,7 +4824,6 @@ def test_select_endpoint_post_anchor_target_prefers_lane_boundary_supported_regi
         road_line=road_line,
         endpoint_tag="src",
         xsec_geom=xsec_geom,
-        traj_surface_metric=None,
         support=None,
         shape_ref_line=None,
         lane_boundaries_metric=lane_boundaries,
@@ -4842,40 +4841,6 @@ def test_select_endpoint_post_anchor_target_prefers_lane_boundary_supported_regi
     assert isinstance(target_region, LineString)
     assert float(target_region.length) > 0.0
     assert "lane_boundary" in str(meta.get("endpoint_target_region_ref_modes_src", meta.get("endpoint_target_region_ref_modes", "")))
-
-
-def test_select_endpoint_post_anchor_target_prefers_surface_overlap_region() -> None:
-    road_line = LineString([(0.0, 0.0), (100.0, 0.0)])
-    xsec_geom = MultiLineString(
-        [
-            [(0.0, 4.0), (0.0, 8.0)],
-            [(0.0, -8.0), (0.0, -4.0)],
-        ]
-    )
-    surface = Polygon([(-5.0, -9.0), (5.0, -9.0), (5.0, -3.0), (-5.0, -3.0)])
-
-    target_pt, target_region, meta = pipeline._select_endpoint_post_anchor_target(
-        road_line=road_line,
-        endpoint_tag="src",
-        xsec_geom=xsec_geom,
-        traj_surface_metric=surface,
-        support=None,
-        shape_ref_line=None,
-        lane_boundaries_metric=[],
-        drivezone_zone_metric=Polygon([(-20.0, -20.0), (20.0, -20.0), (20.0, 20.0), (-20.0, 20.0)]),
-        gore_zone_metric=None,
-        window_m=18.0,
-        buffer_m=8.0,
-    )
-
-    assert isinstance(target_pt, Point)
-    xy = geom_mod.point_xy_safe(target_pt, context="test_surface_overlap_target_pt")
-    assert xy is not None
-    assert abs(float(xy[0])) <= 1e-6
-    assert float(xy[1]) < 0.0
-    assert isinstance(target_region, LineString)
-    assert float(target_region.distance(surface)) <= 1e-6
-    assert bool(meta.get("endpoint_target_surface_overlap_used")) is True
 
 
 def test_evaluate_candidate_road_post_anchors_diverge_dst_uses_step1_branch_override_pair_target(
