@@ -7291,6 +7291,17 @@ def _orient_axis_line(line: LineString, *, src_xsec: LineString, dst_xsec: LineS
     return line
 
 
+def _translate_axis_line(line: LineString, *, dx: float, dy: float) -> LineString | None:
+    if not _is_valid_linestring(line):
+        return None
+    try:
+        coords = [(float(x) + float(dx), float(y) + float(dy)) for x, y in line.coords]
+        shifted = LineString(coords)
+    except Exception:
+        return None
+    return shifted if _is_valid_linestring(shifted) else None
+
+
 def _pick_medoid_support_axis(
     *,
     support: PairSupport,
@@ -7313,6 +7324,59 @@ def _pick_medoid_support_axis(
     return _orient_axis_line(segs[medoid_idx], src_xsec=src_xsec, dst_xsec=dst_xsec)
 
 
+def _recenter_preferred_axis_to_support(
+    *,
+    preferred_axis: LineString,
+    medoid_axis: LineString | None,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    params: dict[str, Any],
+) -> tuple[LineString, str | None]:
+    oriented = _orient_axis_line(preferred_axis, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    if medoid_axis is None or not _is_valid_linestring(medoid_axis):
+        return oriented, None
+    corridor = float(max(3.0, params.get("CORRIDOR_HALF_WIDTH_M", 15.0)))
+    max_shift_m = float(max(3.0, min(1.25 * corridor, 20.0)))
+    deltas: list[tuple[float, float]] = []
+    for t in (0.25, 0.5, 0.75):
+        try:
+            pref_pt = oriented.interpolate(float(t), normalized=True)
+            _same_pt, medoid_pt = nearest_points(pref_pt, medoid_axis)
+        except Exception:
+            return oriented, None
+        pref_xy = point_xy_safe(pref_pt, context="preferred_axis_pt")
+        medoid_xy = point_xy_safe(medoid_pt, context="medoid_axis_pt")
+        if pref_xy is None or medoid_xy is None:
+            return oriented, None
+        dx = float(medoid_xy[0]) - float(pref_xy[0])
+        dy = float(medoid_xy[1]) - float(pref_xy[1])
+        dist = float(math.hypot(dx, dy))
+        if not np.isfinite(dist) or dist > max_shift_m + 1e-6:
+            return oriented, None
+        deltas.append((dx, dy))
+    if not deltas:
+        return oriented, None
+    avg_dx = float(sum(dx for dx, _ in deltas) / len(deltas))
+    avg_dy = float(sum(dy for _, dy in deltas) / len(deltas))
+    avg_norm = float(math.hypot(avg_dx, avg_dy))
+    if avg_norm <= 1e-6:
+        return oriented, None
+    spread = max(float(math.hypot(dx - avg_dx, dy - avg_dy)) for dx, dy in deltas)
+    if spread > float(max(1.0, 0.25 * max_shift_m)):
+        return oriented, None
+    shifted = _translate_axis_line(oriented, dx=avg_dx, dy=avg_dy)
+    if shifted is None:
+        return oriented, None
+    try:
+        before_dist = float(oriented.distance(medoid_axis))
+        after_dist = float(shifted.distance(medoid_axis))
+    except Exception:
+        return oriented, None
+    if not np.isfinite(after_dist) or after_dist > before_dist + 1e-6:
+        return oriented, None
+    return shifted, "centered_by_traj_medoid"
+
+
 def _choose_traj_surface_ref_axis(
     *,
     support: PairSupport,
@@ -7324,12 +7388,19 @@ def _choose_traj_surface_ref_axis(
     preferred_axis_metric: LineString | None = None,
     preferred_axis_source: str | None = None,
 ) -> tuple[LineString | None, str]:
-    if preferred_axis_metric is not None and not preferred_axis_metric.is_empty and preferred_axis_metric.length > 1.0:
-        return (
-            _orient_axis_line(preferred_axis_metric, src_xsec=src_xsec, dst_xsec=dst_xsec),
-            str(preferred_axis_source or "preferred_axis"),
-        )
     medoid_axis = _pick_medoid_support_axis(support=support, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    if preferred_axis_metric is not None and not preferred_axis_metric.is_empty and preferred_axis_metric.length > 1.0:
+        preferred_axis, recenter_mode = _recenter_preferred_axis_to_support(
+            preferred_axis=preferred_axis_metric,
+            medoid_axis=medoid_axis,
+            src_xsec=src_xsec,
+            dst_xsec=dst_xsec,
+            params=params,
+        )
+        source = str(preferred_axis_source or "preferred_axis")
+        if recenter_mode:
+            source = f"{source}_{recenter_mode}"
+        return preferred_axis, source
     lb_axis_line: LineString | None = None
     try:
         lb_axis = _build_lb_graph_path(
