@@ -236,6 +236,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "DRIVEZONE_SAMPLE_STEP_M": 2.0,
     "DEBUG_DUMP": 0,
     "DEBUG_LAYER_MAX_ITEMS": 2000,
+    "DEBUG_NODE_XSEC_FRAME_ENABLE": 1,
+    "DEBUG_ENDPOINT_SLOT_ASSIGNMENT_ENABLE": 1,
     "XSEC_GATE_TRAJ_EVIDENCE_ENABLE": 1,
     "XSEC_GATE_TRAJ_EVIDENCE_MAX_POINTS": 300000,
     "XSEC_GATE_TRAJ_EVIDENCE_SAMPLE_STEP": 4,
@@ -2617,6 +2619,17 @@ def _run_patch_core(
         "traj_surface_best_boundary": _mk_debug_layer(),
         "lb_path_best": _mk_debug_layer(),
         "ref_axis_best": _mk_debug_layer(),
+        "node_xsec_frame_full": _mk_debug_layer(),
+        "node_xsec_frame_gated": _mk_debug_layer(),
+        "node_xsec_frame_active": _mk_debug_layer(),
+        "node_xsec_slot_parts": _mk_debug_layer(),
+        "node_xsec_slot_centers": _mk_debug_layer(),
+        "endpoint_slot_src": _mk_debug_layer(),
+        "endpoint_slot_dst": _mk_debug_layer(),
+        "endpoint_slot_src_region": _mk_debug_layer(),
+        "endpoint_slot_dst_region": _mk_debug_layer(),
+        "endpoint_slot_connector_src": _mk_debug_layer(),
+        "endpoint_slot_connector_dst": _mk_debug_layer(),
         "step1_corridor_centerline": _mk_debug_layer(),
         "step1_corridor_candidates": _mk_debug_layer(),
         "step1_corridor_zone": _mk_debug_layer(),
@@ -2676,6 +2689,29 @@ def _run_patch_core(
                     },
                 }
             )
+    node_xsec_frame_by_nodeid: dict[int, dict[str, Any]] = {}
+    if debug_enabled and bool(int(params.get("DEBUG_NODE_XSEC_FRAME_ENABLE", 1))):
+        node_xsec_frame_records: list[dict[str, Any]] = []
+        for nodeid in sorted(int(k) for k in xsec_cross_lookup_map.keys()):
+            raw_cs = xsec_map.get(int(nodeid))
+            gated_cs = xsec_cross_lookup_map.get(int(nodeid))
+            frame = _build_node_xsec_frame_for_debug(
+                nodeid=int(nodeid),
+                node_type=str(node_type_map.get(int(nodeid), "unknown")),
+                raw_xsec_geom=getattr(raw_cs, "geometry_metric", raw_cs),
+                gated_xsec_geom=getattr(gated_cs, "geometry_metric", gated_cs),
+                gate_all_xsec_geom=xsec_gate_all_lookup_map.get(int(nodeid)),
+                drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
+                gore_zone_metric=gore_zone_metric,
+            )
+            if not isinstance(frame, dict):
+                continue
+            node_xsec_frame_by_nodeid[int(nodeid)] = frame
+            _append_node_xsec_frame_debug_layers(debug_layers=debug_layers, frame=frame)
+            node_xsec_frame_records.append(_serialize_node_xsec_frame_for_debug(frame))
+        debug_json_payloads["debug/node_xsec_frames.json"] = {
+            "nodes": list(node_xsec_frame_records),
+        }
 
     total_pairs = int(len(supports))
     if progress is not None:
@@ -10459,6 +10495,424 @@ def _iter_polygon_parts(geom: BaseGeometry | None) -> list[BaseGeometry]:
     return []
 
 
+def _pick_debug_primary_line(geom: BaseGeometry | None) -> LineString | None:
+    parts = [ls for ls in _iter_line_parts(geom) if isinstance(ls, LineString) and not ls.is_empty and ls.length > 1e-6]
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    try:
+        merged = linemerge(MultiLineString(parts))
+    except Exception:
+        merged = None
+    merged_parts = [ls for ls in _iter_line_parts(merged) if isinstance(ls, LineString) and not ls.is_empty and ls.length > 1e-6]
+    if merged_parts:
+        return max(merged_parts, key=lambda ls: float(ls.length))
+    return max(parts, key=lambda ls: float(ls.length))
+
+
+def _node_xsec_frame_roles(node_type: str) -> tuple[str, str]:
+    node_type_norm = str(node_type or "").strip().lower()
+    if node_type_norm == "merge":
+        return "merge_post_full", "merge_pre_branch"
+    if node_type_norm == "diverge":
+        return "diverge_pre_full", "diverge_post_branch"
+    return "default_full", "default_branch"
+
+
+def _endpoint_slot_family(node_type: str, endpoint_tag: str) -> tuple[str, str]:
+    node_type_norm = str(node_type or "").strip().lower()
+    endpoint_tag_norm = str(endpoint_tag or "").strip().lower()
+    if endpoint_tag_norm == "src":
+        if node_type_norm == "merge":
+            return "full", "merge_start_full_xsec"
+        if node_type_norm == "diverge":
+            return "split", "diverge_start_split_xsec"
+    if endpoint_tag_norm == "dst":
+        if node_type_norm == "merge":
+            return "split", "merge_end_split_xsec"
+        if node_type_norm == "diverge":
+            return "full", "diverge_end_full_xsec"
+    return "full", f"{endpoint_tag_norm or 'unknown'}_default_full_xsec"
+
+
+def _build_node_xsec_frame_for_debug(
+    *,
+    nodeid: int,
+    node_type: str,
+    raw_xsec_geom: BaseGeometry | None,
+    gated_xsec_geom: BaseGeometry | None,
+    gate_all_xsec_geom: BaseGeometry | None,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+) -> dict[str, Any] | None:
+    raw_line = _pick_debug_primary_line(raw_xsec_geom)
+    gated_line = _pick_debug_primary_line(gated_xsec_geom)
+    gate_all_line = _pick_debug_primary_line(gate_all_xsec_geom)
+    frame_line = raw_line or gated_line or gate_all_line
+    if frame_line is None or frame_line.is_empty or frame_line.length <= 1e-6:
+        return None
+    full_role, split_role = _node_xsec_frame_roles(node_type)
+    road_surface = drivezone_zone_metric
+    slot_parts: list[LineString] = []
+    slot_source = "frame_fallback"
+    if road_surface is not None and not road_surface.is_empty:
+        surface_for_slots = road_surface
+        if gore_zone_metric is not None and not gore_zone_metric.is_empty:
+            try:
+                diff = road_surface.difference(gore_zone_metric)
+                if diff is not None and not diff.is_empty:
+                    surface_for_slots = diff
+                    slot_source = "drivezone_minus_gore"
+                else:
+                    slot_source = "drivezone_only"
+            except Exception:
+                slot_source = "drivezone_only"
+        else:
+            slot_source = "drivezone_only"
+        try:
+            slot_inter = frame_line.intersection(surface_for_slots)
+        except Exception:
+            slot_inter = None
+        slot_parts = [
+            ls
+            for ls in _iter_line_parts(slot_inter)
+            if isinstance(ls, LineString) and not ls.is_empty and float(ls.length) > 0.5
+        ]
+    if not slot_parts:
+        slot_parts = [frame_line]
+        slot_source = "frame_fallback"
+    slot_records: list[dict[str, Any]] = []
+    frame_mid_station = 0.5 * float(frame_line.length)
+    sortable: list[tuple[float, dict[str, Any]]] = []
+    for part in slot_parts:
+        try:
+            mid = part.interpolate(0.5, normalized=True)
+        except Exception:
+            mid = None
+        if not isinstance(mid, Point) or mid.is_empty:
+            continue
+        try:
+            station = float(frame_line.project(mid))
+        except Exception:
+            station = float("inf")
+        if not math.isfinite(station):
+            station = float("inf")
+        if station < frame_mid_station - 1e-6:
+            side = "negative"
+        elif station > frame_mid_station + 1e-6:
+            side = "positive"
+        else:
+            side = "center"
+        sortable.append(
+            (
+                station,
+                {
+                    "geometry_metric": part,
+                    "midpoint_metric": mid,
+                    "mid_station_m": station,
+                    "side": side,
+                    "length_m": float(part.length),
+                },
+            )
+        )
+    for slot_order, (_station, payload) in enumerate(sorted(sortable, key=lambda it: (it[0], -float(it[1]["length_m"])))):
+        payload["slot_order"] = int(slot_order)
+        slot_records.append(payload)
+    return {
+        "nodeid": int(nodeid),
+        "node_type": str(node_type or "unknown"),
+        "raw_xsec_metric": raw_line,
+        "gated_xsec_metric": gated_line,
+        "gate_all_xsec_metric": gate_all_line,
+        "frame_xsec_metric": frame_line,
+        "full_role": full_role,
+        "split_role": split_role,
+        "slot_source": slot_source,
+        "slot_count": int(len(slot_records)),
+        "slots": slot_records,
+    }
+
+
+def _serialize_node_xsec_frame_for_debug(frame: dict[str, Any]) -> dict[str, Any]:
+    slots = []
+    for slot in frame.get("slots", []):
+        if not isinstance(slot, dict):
+            continue
+        slots.append(
+            {
+                "slot_order": int(slot.get("slot_order", -1)),
+                "side": str(slot.get("side") or ""),
+                "mid_station_m": _to_finite_float(slot.get("mid_station_m"), float("nan")),
+                "length_m": _to_finite_float(slot.get("length_m"), float("nan")),
+            }
+        )
+    return {
+        "nodeid": int(frame.get("nodeid", -1)),
+        "node_type": str(frame.get("node_type") or "unknown"),
+        "full_role": str(frame.get("full_role") or ""),
+        "split_role": str(frame.get("split_role") or ""),
+        "slot_source": str(frame.get("slot_source") or ""),
+        "slot_count": int(frame.get("slot_count", 0)),
+        "slots": slots,
+    }
+
+
+def _append_node_xsec_frame_debug_layers(
+    *,
+    debug_layers: dict[str, list[dict[str, Any]]],
+    frame: dict[str, Any],
+) -> None:
+    nodeid = int(frame.get("nodeid", -1))
+    node_type = str(frame.get("node_type") or "unknown")
+    full_role = str(frame.get("full_role") or "")
+    split_role = str(frame.get("split_role") or "")
+    slot_source = str(frame.get("slot_source") or "")
+    slot_count = int(frame.get("slot_count", 0))
+    for layer_name, geom, source in (
+        ("node_xsec_frame_full", frame.get("raw_xsec_metric"), "raw_xsec"),
+        ("node_xsec_frame_gated", frame.get("gated_xsec_metric"), "gated_xsec"),
+        ("node_xsec_frame_active", frame.get("frame_xsec_metric"), "frame_xsec"),
+    ):
+        for ls in _iter_line_parts(geom):
+            debug_layers[layer_name].append(
+                {
+                    "geometry": ls,
+                    "properties": {
+                        "nodeid": nodeid,
+                        "node_type": node_type,
+                        "frame_source": source,
+                        "full_role": full_role,
+                        "split_role": split_role,
+                        "slot_source": slot_source,
+                        "slot_count": slot_count,
+                    },
+                }
+            )
+    for slot in frame.get("slots", []):
+        if not isinstance(slot, dict):
+            continue
+        slot_order = int(slot.get("slot_order", -1))
+        side = str(slot.get("side") or "")
+        length_m = _to_finite_float(slot.get("length_m"), float("nan"))
+        geom = slot.get("geometry_metric")
+        mid = slot.get("midpoint_metric")
+        for ls in _iter_line_parts(geom):
+            debug_layers["node_xsec_slot_parts"].append(
+                {
+                    "geometry": ls,
+                    "properties": {
+                        "nodeid": nodeid,
+                        "node_type": node_type,
+                        "slot_order": slot_order,
+                        "slot_side": side,
+                        "slot_length_m": length_m,
+                        "slot_role": split_role,
+                        "slot_source": slot_source,
+                    },
+                }
+            )
+        if isinstance(mid, Point) and not mid.is_empty:
+            debug_layers["node_xsec_slot_centers"].append(
+                {
+                    "geometry": mid,
+                    "properties": {
+                        "nodeid": nodeid,
+                        "node_type": node_type,
+                        "slot_order": slot_order,
+                        "slot_side": side,
+                        "slot_role": split_role,
+                        "slot_source": slot_source,
+                    },
+                }
+            )
+
+
+def _endpoint_slot_anchor_candidates_for_debug(endpoint_tag: str, *, prefer_split: bool) -> list[str]:
+    endpoint_tag_norm = str(endpoint_tag or "").strip().lower()
+    if endpoint_tag_norm not in {"src", "dst"}:
+        return []
+    if prefer_split:
+        return [
+            f"_pair_xsec_target_{endpoint_tag_norm}_metric",
+            f"_xsec_target_selected_{endpoint_tag_norm}_metric",
+            f"_xsec_road_selected_{endpoint_tag_norm}_metric",
+            f"_pair_xsec_primary_seed_{endpoint_tag_norm}_metric",
+            f"_xsec_ref_{endpoint_tag_norm}_metric",
+        ]
+    return [
+        f"_xsec_ref_{endpoint_tag_norm}_metric",
+        f"_xsec_road_selected_{endpoint_tag_norm}_metric",
+        f"_xsec_target_selected_{endpoint_tag_norm}_metric",
+        f"_pair_xsec_primary_seed_{endpoint_tag_norm}_metric",
+        f"_pair_xsec_target_{endpoint_tag_norm}_metric",
+    ]
+
+
+def _first_valid_line_from_road(road: dict[str, Any], keys: Sequence[str]) -> tuple[LineString | None, str | None]:
+    for key in keys:
+        geom = road.get(key)
+        line = _pick_debug_primary_line(geom)
+        if line is not None and not line.is_empty and line.length > 1e-6:
+            return line, str(key)
+    return None, None
+
+
+def _project_point_to_line(line: LineString | None, point: Point | None) -> Point | None:
+    if not isinstance(line, LineString) or line.is_empty:
+        return None
+    if not isinstance(point, Point) or point.is_empty:
+        try:
+            mid = line.interpolate(0.5, normalized=True)
+        except Exception:
+            mid = None
+        return mid if isinstance(mid, Point) and not mid.is_empty else None
+    try:
+        line_pt, _ = nearest_points(line, point)
+    except Exception:
+        return None
+    return line_pt if isinstance(line_pt, Point) and not line_pt.is_empty else None
+
+
+def _resolve_endpoint_slot_assignment_for_debug(
+    *,
+    road: dict[str, Any],
+    endpoint_tag: str,
+    nodeid: int,
+    node_type: str,
+    frame: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(frame, dict):
+        return None
+    endpoint_tag_norm = str(endpoint_tag or "").strip().lower()
+    if endpoint_tag_norm not in {"src", "dst"}:
+        return None
+    road_line = road.get("_geometry_metric")
+    if isinstance(road_line, LineString) and not road_line.is_empty:
+        endpoint_pt = Point(road_line.coords[0] if endpoint_tag_norm == "src" else road_line.coords[-1])
+    else:
+        endpoint_pt = None
+    requested_family, business_role = _endpoint_slot_family(node_type, endpoint_tag_norm)
+    slot_records = [slot for slot in frame.get("slots", []) if isinstance(slot, dict)]
+    use_split = requested_family == "split" and len(slot_records) >= 2
+    anchor_geom, anchor_source = _first_valid_line_from_road(
+        road,
+        _endpoint_slot_anchor_candidates_for_debug(endpoint_tag_norm, prefer_split=use_split),
+    )
+    anchor_point = _project_point_to_line(anchor_geom, endpoint_pt)
+    frame_line = frame.get("frame_xsec_metric")
+    chosen_slot: dict[str, Any] | None = None
+    fallback_reason = None
+    if use_split:
+        best_score = None
+        anchor_station = float("inf")
+        if isinstance(frame_line, LineString) and isinstance(anchor_point, Point) and not anchor_point.is_empty:
+            try:
+                anchor_station = float(frame_line.project(anchor_point))
+            except Exception:
+                anchor_station = float("inf")
+        for slot in slot_records:
+            slot_geom = slot.get("geometry_metric")
+            slot_mid = slot.get("midpoint_metric")
+            if not isinstance(slot_geom, LineString) or slot_geom.is_empty:
+                continue
+            overlap_len = 0.0
+            if isinstance(anchor_geom, LineString) and not anchor_geom.is_empty:
+                try:
+                    overlap_len = float(sum(part.length for part in _iter_line_parts(slot_geom.intersection(anchor_geom))))
+                except Exception:
+                    overlap_len = 0.0
+            station_gap = float("inf")
+            if math.isfinite(anchor_station):
+                station_gap = abs(_to_finite_float(slot.get("mid_station_m"), float("inf")) - anchor_station)
+            dist_to_anchor = float(slot_geom.distance(anchor_point)) if isinstance(anchor_point, Point) else float("inf")
+            dist_mid = float(slot_mid.distance(anchor_point)) if isinstance(slot_mid, Point) and isinstance(anchor_point, Point) else dist_to_anchor
+            score = (
+                0 if overlap_len > 1e-6 else 1,
+                -overlap_len,
+                station_gap,
+                dist_mid,
+                dist_to_anchor,
+            )
+            if best_score is None or score < best_score:
+                best_score = score
+                chosen_slot = slot
+        if chosen_slot is None:
+            fallback_reason = "split_slot_pick_failed"
+            use_split = False
+    else:
+        if requested_family == "split":
+            fallback_reason = "split_slots_unavailable"
+    if use_split and isinstance(chosen_slot, dict):
+        slot_geom = chosen_slot.get("geometry_metric")
+        slot_order = chosen_slot.get("slot_order")
+        resolved_family = "split"
+        slot_role = str(frame.get("split_role") or "")
+    else:
+        slot_geom = frame_line
+        slot_order = None
+        resolved_family = "full"
+        slot_role = str(frame.get("full_role") or "")
+    slot_point = _project_point_to_line(slot_geom, anchor_point or endpoint_pt)
+    connector_geom = None
+    if isinstance(endpoint_pt, Point) and isinstance(slot_point, Point) and (not endpoint_pt.is_empty) and (not slot_point.is_empty):
+        if float(endpoint_pt.distance(slot_point)) > 1e-6:
+            connector_geom = LineString([endpoint_pt, slot_point])
+    return {
+        "nodeid": int(nodeid),
+        "node_type": str(node_type or "unknown"),
+        "endpoint_tag": endpoint_tag_norm,
+        "requested_family": requested_family,
+        "resolved_family": resolved_family,
+        "business_role": business_role,
+        "slot_role": slot_role,
+        "slot_order": int(slot_order) if slot_order is not None else None,
+        "slot_count": int(len(slot_records)),
+        "assignment_source": anchor_source,
+        "family_fallback_reason": fallback_reason,
+        "slot_geom_metric": slot_geom,
+        "slot_point_metric": slot_point,
+        "endpoint_metric": endpoint_pt,
+        "connector_metric": connector_geom,
+    }
+
+
+def _append_endpoint_slot_assignment_debug_layers(
+    *,
+    debug_layers: dict[str, list[dict[str, Any]]],
+    road_id: str,
+    assignment: dict[str, Any] | None,
+) -> None:
+    if not isinstance(assignment, dict):
+        return
+    endpoint_tag = str(assignment.get("endpoint_tag") or "")
+    point_layer = f"endpoint_slot_{endpoint_tag}"
+    connector_layer = f"endpoint_slot_connector_{endpoint_tag}"
+    slot_geom = assignment.get("slot_geom_metric")
+    slot_point = assignment.get("slot_point_metric")
+    connector_geom = assignment.get("connector_metric")
+    props = {
+        "road_id": road_id,
+        "nodeid": int(assignment.get("nodeid", -1)),
+        "node_type": str(assignment.get("node_type") or "unknown"),
+        "endpoint_tag": endpoint_tag,
+        "requested_family": str(assignment.get("requested_family") or ""),
+        "resolved_family": str(assignment.get("resolved_family") or ""),
+        "business_role": str(assignment.get("business_role") or ""),
+        "slot_role": str(assignment.get("slot_role") or ""),
+        "slot_order": assignment.get("slot_order"),
+        "slot_count": int(assignment.get("slot_count", 0)),
+        "assignment_source": assignment.get("assignment_source"),
+        "family_fallback_reason": assignment.get("family_fallback_reason"),
+    }
+    for ls in _iter_line_parts(slot_geom):
+        debug_layers[f"{point_layer}_region"].append({"geometry": ls, "properties": dict(props)})
+    if isinstance(slot_point, Point) and not slot_point.is_empty:
+        debug_layers[point_layer].append({"geometry": slot_point, "properties": dict(props)})
+    if isinstance(connector_geom, LineString) and not connector_geom.is_empty:
+        debug_layers[connector_layer].append({"geometry": connector_geom, "properties": dict(props)})
+
+
 def _xsec_has_surface_support(
     *,
     xsec: LineString,
@@ -10502,6 +10956,8 @@ def _collect_debug_layers_for_selected(
     dst_xsec: LineString,
     gore_zone_metric: BaseGeometry | None,
     bridge_max_seg_m: float,
+    node_xsec_frame_by_nodeid: dict[int, dict[str, Any]] | None = None,
+    endpoint_slot_debug_enabled: bool = False,
 ) -> None:
     road_id = str(road.get("road_id"))
     surface = road.get("_traj_surface_geom_metric")
@@ -10525,6 +10981,41 @@ def _collect_debug_layers_for_selected(
                 "properties": {"road_id": road_id, "axis_source": road.get("traj_surface_hint_axis_source")},
             }
         )
+    if endpoint_slot_debug_enabled and node_xsec_frame_by_nodeid:
+        try:
+            src_nodeid = int(road.get("src_nodeid", road.get("src")))
+        except Exception:
+            src_nodeid = None
+        try:
+            dst_nodeid = int(road.get("dst_nodeid", road.get("dst")))
+        except Exception:
+            dst_nodeid = None
+        if src_nodeid is not None:
+            src_assignment = _resolve_endpoint_slot_assignment_for_debug(
+                road=road,
+                endpoint_tag="src",
+                nodeid=int(src_nodeid),
+                node_type=str(road.get("src_type") or "unknown"),
+                frame=node_xsec_frame_by_nodeid.get(int(src_nodeid)),
+            )
+            _append_endpoint_slot_assignment_debug_layers(
+                debug_layers=debug_layers,
+                road_id=road_id,
+                assignment=src_assignment,
+            )
+        if dst_nodeid is not None:
+            dst_assignment = _resolve_endpoint_slot_assignment_for_debug(
+                road=road,
+                endpoint_tag="dst",
+                nodeid=int(dst_nodeid),
+                node_type=str(road.get("dst_type") or "unknown"),
+                frame=node_xsec_frame_by_nodeid.get(int(dst_nodeid)),
+            )
+            _append_endpoint_slot_assignment_debug_layers(
+                debug_layers=debug_layers,
+                road_id=road_id,
+                assignment=dst_assignment,
+            )
 
     src_valid = src_xsec
     dst_valid = dst_xsec
@@ -11244,6 +11735,8 @@ def _append_selected_candidate_road(
                 dst_xsec=dst_xsec,
                 gore_zone_metric=gore_zone_metric,
                 bridge_max_seg_m=float(params["BRIDGE_MAX_SEG_M"]),
+                node_xsec_frame_by_nodeid=node_xsec_frame_by_nodeid,
+                endpoint_slot_debug_enabled=bool(int(params.get("DEBUG_ENDPOINT_SLOT_ASSIGNMENT_ENABLE", 1))),
             )
 
 

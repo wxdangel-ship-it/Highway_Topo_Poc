@@ -5059,6 +5059,102 @@ def test_select_endpoint_post_anchor_target_recenters_between_bracketing_lane_bo
     assert str(meta.get("endpoint_target_region_slot_mode")) == "lane_boundary_bracket_center"
 
 
+def test_build_node_xsec_frame_for_debug_splits_drivezone_minus_gore() -> None:
+    frame = pipeline._build_node_xsec_frame_for_debug(
+        nodeid=1001,
+        node_type="diverge",
+        raw_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gated_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gate_all_xsec_geom=None,
+        drivezone_zone_metric=Polygon([(-20.0, -8.0), (20.0, -8.0), (20.0, 8.0), (-20.0, 8.0)]),
+        gore_zone_metric=Polygon([(-20.0, -1.0), (20.0, -1.0), (20.0, 1.0), (-20.0, 1.0)]),
+    )
+
+    assert isinstance(frame, dict)
+    assert str(frame.get("full_role")) == "diverge_pre_full"
+    assert str(frame.get("split_role")) == "diverge_post_branch"
+    assert str(frame.get("slot_source")) == "drivezone_minus_gore"
+    assert int(frame.get("slot_count", 0)) == 2
+    slots = list(frame.get("slots") or [])
+    assert [int(slot.get("slot_order", -1)) for slot in slots] == [0, 1]
+    assert [str(slot.get("side")) for slot in slots] == ["negative", "positive"]
+    assert all(float(slot.get("length_m", 0.0)) >= 6.9 for slot in slots)
+
+
+def test_resolve_endpoint_slot_assignment_for_debug_prefers_split_slot_for_diverge_src() -> None:
+    frame = pipeline._build_node_xsec_frame_for_debug(
+        nodeid=1002,
+        node_type="diverge",
+        raw_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gated_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gate_all_xsec_geom=None,
+        drivezone_zone_metric=Polygon([(-20.0, -8.0), (20.0, -8.0), (20.0, 8.0), (-20.0, 8.0)]),
+        gore_zone_metric=Polygon([(-20.0, -1.0), (20.0, -1.0), (20.0, 1.0), (-20.0, 1.0)]),
+    )
+    road = {
+        "src": 1002,
+        "dst": 1003,
+        "src_type": "diverge",
+        "_geometry_metric": LineString([(0.0, -6.0), (100.0, -6.0)]),
+        "_pair_xsec_target_src_metric": LineString([(0.0, -8.0), (0.0, -4.0)]),
+        "_xsec_ref_src_metric": LineString([(0.0, -10.0), (0.0, 10.0)]),
+    }
+
+    assignment = pipeline._resolve_endpoint_slot_assignment_for_debug(
+        road=road,
+        endpoint_tag="src",
+        nodeid=1002,
+        node_type="diverge",
+        frame=frame,
+    )
+
+    assert isinstance(assignment, dict)
+    assert str(assignment.get("requested_family")) == "split"
+    assert str(assignment.get("resolved_family")) == "split"
+    assert int(assignment.get("slot_order", -1)) == 0
+    assert str(assignment.get("assignment_source")) == "_pair_xsec_target_src_metric"
+    slot_point = assignment.get("slot_point_metric")
+    assert isinstance(slot_point, Point)
+    xy = geom_mod.point_xy_safe(slot_point, context="test_diverge_src_slot_point")
+    assert xy is not None
+    assert abs(float(xy[0])) <= 1e-6
+    assert -8.0 - 1e-6 <= float(xy[1]) <= -4.0 + 1e-6
+
+
+def test_resolve_endpoint_slot_assignment_for_debug_prefers_full_family_for_merge_src() -> None:
+    frame = pipeline._build_node_xsec_frame_for_debug(
+        nodeid=1004,
+        node_type="merge",
+        raw_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gated_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gate_all_xsec_geom=None,
+        drivezone_zone_metric=Polygon([(-20.0, -8.0), (20.0, -8.0), (20.0, 8.0), (-20.0, 8.0)]),
+        gore_zone_metric=Polygon([(-20.0, -1.0), (20.0, -1.0), (20.0, 1.0), (-20.0, 1.0)]),
+    )
+    road = {
+        "src": 1004,
+        "dst": 1005,
+        "src_type": "merge",
+        "_geometry_metric": LineString([(0.0, 5.0), (100.0, 5.0)]),
+        "_pair_xsec_target_src_metric": LineString([(0.0, 4.0), (0.0, 8.0)]),
+        "_xsec_ref_src_metric": LineString([(0.0, -10.0), (0.0, 10.0)]),
+    }
+
+    assignment = pipeline._resolve_endpoint_slot_assignment_for_debug(
+        road=road,
+        endpoint_tag="src",
+        nodeid=1004,
+        node_type="merge",
+        frame=frame,
+    )
+
+    assert isinstance(assignment, dict)
+    assert str(assignment.get("requested_family")) == "full"
+    assert str(assignment.get("resolved_family")) == "full"
+    assert assignment.get("slot_order") is None
+    assert str(assignment.get("slot_role")) == "merge_post_full"
+
+
 def test_evaluate_candidate_road_post_anchors_diverge_dst_uses_step1_branch_override_pair_target(
     tmp_path: Path, monkeypatch
 ) -> None:
