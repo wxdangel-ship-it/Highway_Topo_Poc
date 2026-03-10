@@ -11,6 +11,7 @@ from .models import (
     MovementDecision,
     NormalizedGeometryRef,
 )
+from .normalize import coord_xy
 
 
 def serialize_geometry_ref(geometry_ref: NormalizedGeometryRef) -> dict[str, Any]:
@@ -19,7 +20,7 @@ def serialize_geometry_ref(geometry_ref: NormalizedGeometryRef) -> dict[str, Any
         point = [float(geometry_ref.point.x), float(geometry_ref.point.y)]
     line = None
     if geometry_ref.line is not None:
-        line = [[float(x), float(y)] for x, y in geometry_ref.line.coords]
+        line = [[x, y] for x, y in (coord_xy(coord) for coord in geometry_ref.line.coords)]
     return {
         "point": point,
         "line": line,

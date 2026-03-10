@@ -157,20 +157,26 @@ def normalize_vec(dx: float, dy: float) -> tuple[float, float]:
     return (float(dx / length), float(dy / length))
 
 
+def coord_xy(coord: Any) -> tuple[float, float]:
+    if not isinstance(coord, (list, tuple)) or len(coord) < 2:
+        raise ValueError("invalid_coordinate_tuple")
+    return (float(coord[0]), float(coord[1]))
+
+
 def road_away_vector(road: NormalizedRoad, *, node_id: Any) -> tuple[float, float]:
     coords = list(road.line.coords)
     if len(coords) < 2:
         return (1.0, 0.0)
     if road.snodeid == node_id:
-        x0, y0 = coords[0]
-        x1, y1 = coords[1]
+        x0, y0 = coord_xy(coords[0])
+        x1, y1 = coord_xy(coords[1])
         return normalize_vec(x1 - x0, y1 - y0)
     if road.enodeid == node_id:
-        x0, y0 = coords[-1]
-        x1, y1 = coords[-2]
+        x0, y0 = coord_xy(coords[-1])
+        x1, y1 = coord_xy(coords[-2])
         return normalize_vec(x1 - x0, y1 - y0)
-    x0, y0 = coords[0]
-    x1, y1 = coords[1]
+    x0, y0 = coord_xy(coords[0])
+    x1, y1 = coord_xy(coords[1])
     return normalize_vec(x1 - x0, y1 - y0)
 
 
@@ -180,12 +186,12 @@ def road_trend_vector(road: NormalizedRoad, *, node_id: Any) -> tuple[float, flo
         return (1.0, 0.0)
     if road.snodeid == node_id:
         ref_idx = min(len(coords) - 1, max(1, len(coords) // 2))
-        x0, y0 = coords[0]
-        x1, y1 = coords[ref_idx]
+        x0, y0 = coord_xy(coords[0])
+        x1, y1 = coord_xy(coords[ref_idx])
         return normalize_vec(x1 - x0, y1 - y0)
     if road.enodeid == node_id:
         ref_idx = max(0, min(len(coords) - 2, len(coords) // 2 - 1))
-        x0, y0 = coords[-1]
-        x1, y1 = coords[ref_idx]
+        x0, y0 = coord_xy(coords[-1])
+        x1, y1 = coord_xy(coords[ref_idx])
         return normalize_vec(x1 - x0, y1 - y0)
     return road_away_vector(road, node_id=node_id)

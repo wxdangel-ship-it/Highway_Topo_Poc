@@ -24,7 +24,7 @@ def _node(node_id: int, x: float, y: float, *, mainid: int, kind: int = 4) -> di
 
 def _road(
     road_id: str,
-    coords: list[tuple[float, float]],
+    coords: list[tuple[float, ...]],
     *,
     snodeid: int,
     enodeid: int,
@@ -192,7 +192,7 @@ def test_phase12_cli_dataset_dir_mode_accepts_multiple_mainnodeids_and_compute_b
     proc = _run_cli(
         "--dataset-dir",
         str(dataset_dir),
-        "--mainnodeids",
+        "--mainnodeid",
         str(mainid_a),
         str(mainid_b),
         "--output-dir",
@@ -242,6 +242,8 @@ def test_phase12_wsl_script_smoke_runs_against_temp_dataset(tmp_path: Path) -> N
             + shlex.quote(script_path_wsl)
             + " --dataset-dir "
             + shlex.quote(dataset_dir_wsl)
+            + " --mainnodeid "
+            + shlex.quote(str(mainid))
             + " --output-root "
             + shlex.quote(output_root_wsl),
         ],
@@ -253,3 +255,37 @@ def test_phase12_wsl_script_smoke_runs_against_temp_dataset(tmp_path: Path) -> N
     assert run_proc.returncode == 0, run_proc.stderr
     assert (output_root / f"mainnodeid_{mainid}" / "base" / "serialized_bundle.json").exists()
     assert (output_root / "manifest.json").exists()
+
+
+def test_phase12_dataset_runner_accepts_3d_linestring_coordinates(tmp_path: Path) -> None:
+    mainid = 12113465
+    node_features = [
+        _node(1, 0.0, -1.0, mainid=mainid),
+        _node(2, 0.0, 1.0, mainid=mainid),
+    ]
+    road_features = [
+        {
+            "type": "Feature",
+            "geometry": {"type": "LineString", "coordinates": [[0.0, -1.0, 5.0], [0.0, -10.0, 5.0]]},
+            "properties": {"road_id": "south", "snodeid": 1, "enodeid": 101, "direction": 1},
+        },
+        {
+            "type": "Feature",
+            "geometry": {"type": "LineString", "coordinates": [[0.0, 1.0, 5.0], [0.0, 10.0, 5.0]]},
+            "properties": {"road_id": "north", "snodeid": 2, "enodeid": 102, "direction": 1},
+        },
+    ]
+    dataset_dir = _write_dataset_dir(tmp_path / "SH_3D", node_features=node_features, road_features=road_features)
+    output_root = tmp_path / "dataset_out_3d"
+
+    result = run_t10_mainnodeids_from_geojson_dataset(
+        dataset_dir=dataset_dir,
+        mainnodeids=[mainid],
+        output_root=output_root,
+    )
+
+    assert result.items[0].status == "success"
+    serialized_bundle = json.loads((output_root / f"mainnodeid_{mainid}" / "base" / "serialized_bundle.json").read_text(encoding="utf-8"))
+    first_line = serialized_bundle["approaches"][0]["geometry_ref"]["line"]
+    assert isinstance(first_line, list)
+    assert len(first_line[0]) == 2

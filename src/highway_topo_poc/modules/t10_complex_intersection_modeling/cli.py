@@ -41,7 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patch-root", help="Root directory containing multiple patch dirs")
     parser.add_argument("--patch-name", action="append", help="Optional patch name filter for --patch-root")
     parser.add_argument("--mainid", help="Optional mainid for single-intersection mode")
-    parser.add_argument("--mainnodeids", nargs="+", help="One or more mainnodeid values")
+    parser.add_argument("--mainnodeid", action="append", help="Repeatable mainnodeid value")
+    parser.add_argument("--mainnodeids", nargs="+", help="Legacy plural alias for one or more mainnodeid values")
     parser.add_argument("--all-mainids", action="store_true", help="Run all mainids inside one patch_dir")
     parser.add_argument("--manual-override", help="JSON override file path")
     parser.add_argument("--override-root", help="Directory containing per-patch override JSON files")
@@ -88,7 +89,7 @@ def _run_from_args(args: argparse.Namespace) -> dict[str, Any]:
     node_file = args.node_file
     road_file = args.road_file
     mainid = _coerce_mainid(args.mainid)
-    mainnodeids = parse_mainid_values(args.mainnodeids)
+    mainnodeids = parse_mainid_values((args.mainnodeid or []) + (args.mainnodeids or []))
     manual_override = args.manual_override
     override_root = args.override_root
     output_dir = args.output_dir

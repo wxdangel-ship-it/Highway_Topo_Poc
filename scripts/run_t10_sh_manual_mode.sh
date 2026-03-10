@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # T10 manual-mode WSL runner
-# dataset dir and mainnodeids must be provided explicitly by caller.
+# dataset dir and mainnodeid(s) must be provided explicitly by caller.
 # Main outputs: <repo>/outputs/_work/T10/sh_manual_mode/
 # Optional --manual-override may be a single JSON file or a directory containing <mainnodeid>.json files.
 # --compute-buffer-m is reserved for future geometry compute acceleration only; it does not change truth selection.
@@ -23,7 +23,8 @@ Usage:
 
 Options:
   --dataset-dir <path>            Required. WSL dataset dir containing RCSDNode / RCSDRoad
-  --mainnodeids <id...>           Required. One or more mainnodeid values; also accepts comma-separated items
+  --mainnodeid <id...>            Required. One or more mainnodeid values; also accepts comma-separated items
+  --mainnodeids <id...>           Legacy plural alias, kept for compatibility
   --manual-override <path>        Optional override JSON file or per-mainnodeid override directory
   --output-root <path>            Output root under repo outputs
   --compute-buffer-m <meters>     Reserved compute buffer for future optimization only
@@ -31,9 +32,9 @@ Options:
   --help                          Show this help
 
 Examples:
-  bash scripts/run_t10_sh_manual_mode.sh --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH --mainnodeids 12113465
-  bash scripts/run_t10_sh_manual_mode.sh --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH --mainnodeids 12113465 12113466
-  bash scripts/run_t10_sh_manual_mode.sh --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH --mainnodeids 12113465 --manual-override /mnt/d/override/12113465.json
+  bash scripts/run_t10_sh_manual_mode.sh --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH --mainnodeid 12113465
+  bash scripts/run_t10_sh_manual_mode.sh --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH --mainnodeid 12113465 12113466
+  bash scripts/run_t10_sh_manual_mode.sh --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH --mainnodeid 12113465 --manual-override /mnt/d/override/12113465.json
 EOF
 }
 
@@ -43,7 +44,7 @@ while [[ $# -gt 0 ]]; do
       DATASET_DIR="$2"
       shift 2
       ;;
-    --mainnodeids)
+    --mainnodeid|--mainnodeids)
       shift
       MAINNODEIDS=()
       while [[ $# -gt 0 && "${1}" != --* ]]; do
@@ -86,7 +87,7 @@ if [[ -z "${DATASET_DIR}" ]]; then
 fi
 
 if [[ ${#MAINNODEIDS[@]} -eq 0 ]]; then
-  echo "missing_required_argument:--mainnodeids" >&2
+  echo "missing_required_argument:--mainnodeid" >&2
   print_help >&2
   exit 1
 fi
@@ -106,7 +107,7 @@ CMD=(
   --dataset-dir "${DATASET_DIR}"
   --output-dir "${OUTPUT_ROOT}"
   --compute-buffer-m "${COMPUTE_BUFFER_M}"
-  --mainnodeids
+  --mainnodeid
 )
 CMD+=("${MAINNODEIDS[@]}")
 
@@ -119,7 +120,7 @@ fi
 
 printf 'Running T10 SH manual mode:\n'
 printf '  dataset_dir=%s\n' "${DATASET_DIR}"
-printf '  mainnodeids=%s\n' "${MAINNODEIDS[*]}"
+printf '  mainnodeid=%s\n' "${MAINNODEIDS[*]}"
 printf '  output_root=%s\n' "${OUTPUT_ROOT}"
 printf '  compute_buffer_m=%s\n' "${COMPUTE_BUFFER_M}"
 if [[ -n "${MANUAL_OVERRIDE}" ]]; then

@@ -1,14 +1,24 @@
 # T10 Internal WSL Usage
 
-内网 WSL 下，T10 手工模式请显式传入数据目录和 `mainnodeids`，不要依赖默认值。
+内网 WSL 运行时，请显式传入：
+- `--dataset-dir`
+- `--mainnodeid`
 
 推荐脚本：
 - [scripts/run_t10_sh_manual_mode.sh](E:/Work/Highway_Topo_Poc/scripts/run_t10_sh_manual_mode.sh)
-- [scripts/pull_and_run_t10_sh_manual_mode.sh](E:/Work/Highway_Topo_Poc/scripts/pull_and_run_t10_sh_manual_mode.sh)
 
 已知内网数据目录示例：
 - Windows: `D:\TestData\highway_topo_poc_data\Intersection\SH`
 - WSL: `/mnt/d/TestData/highway_topo_poc_data/Intersection/SH`
+
+先更新主干，再运行：
+
+```bash
+cd /mnt/e/Work/Highway_Topo_Poc
+git fetch origin --prune
+git switch main
+git pull --ff-only origin main
+```
 
 最小执行：
 
@@ -16,16 +26,7 @@
 cd /mnt/e/Work/Highway_Topo_Poc
 bash scripts/run_t10_sh_manual_mode.sh \
   --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH \
-  --mainnodeids 12113465
-```
-
-先下拉 GitHub 再执行：
-
-```bash
-cd /mnt/e/Work/Highway_Topo_Poc
-bash scripts/pull_and_run_t10_sh_manual_mode.sh -- \
-  --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH \
-  --mainnodeids 12113465
+  --mainnodeid 12113465
 ```
 
 多个 `mainnodeid`：
@@ -34,7 +35,7 @@ bash scripts/pull_and_run_t10_sh_manual_mode.sh -- \
 cd /mnt/e/Work/Highway_Topo_Poc
 bash scripts/run_t10_sh_manual_mode.sh \
   --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH \
-  --mainnodeids 12113465 12113466
+  --mainnodeid 12113465 12113466
 ```
 
 带 override：
@@ -43,7 +44,7 @@ bash scripts/run_t10_sh_manual_mode.sh \
 cd /mnt/e/Work/Highway_Topo_Poc
 bash scripts/run_t10_sh_manual_mode.sh \
   --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH \
-  --mainnodeids 12113465 \
+  --mainnodeid 12113465 \
   --manual-override /mnt/d/path/to/12113465.json \
   --output-root /mnt/e/Work/Highway_Topo_Poc/outputs/_work/T10/sh_manual_mode_real
 ```
