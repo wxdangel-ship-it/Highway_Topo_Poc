@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Pull latest main branch from GitHub, then run the SH WSL script.
+# Pull latest main branch from GitHub, then run the T10 SH WSL script.
 # Default branch: main
-# Default dataset dir: /mnt/d/TestData/highway_topo_poc_data/Intersection/SH
-# Default mainnodeid: 12113465
+# dataset dir and mainnodeids are forwarded explicitly to the runner script.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -28,9 +27,9 @@ Everything after `--` is forwarded to:
   bash scripts/run_t10_sh_manual_mode.sh
 
 Examples:
-  bash scripts/pull_and_run_t10_sh_manual_mode.sh
-  bash scripts/pull_and_run_t10_sh_manual_mode.sh -- --mainnodeids 12113465
-  bash scripts/pull_and_run_t10_sh_manual_mode.sh -- --mainnodeids 12113465 12113466 --manual-override /mnt/d/override/12113465.json
+  bash scripts/pull_and_run_t10_sh_manual_mode.sh -- --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH --mainnodeids 12113465
+  bash scripts/pull_and_run_t10_sh_manual_mode.sh -- --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH --mainnodeids 12113465 12113466
+  bash scripts/pull_and_run_t10_sh_manual_mode.sh -- --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH --mainnodeids 12113465 --manual-override /mnt/d/override/12113465.json
 EOF
 }
 

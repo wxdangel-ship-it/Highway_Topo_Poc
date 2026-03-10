@@ -1,30 +1,59 @@
 # T10 Internal WSL Usage
 
-内网 WSL 默认输入目录：
+内网 WSL 下，T10 手工模式请显式传入数据目录和 `mainnodeids`，不要依赖默认值。
+
+推荐脚本：
+- [scripts/run_t10_sh_manual_mode.sh](E:/Work/Highway_Topo_Poc/scripts/run_t10_sh_manual_mode.sh)
+- [scripts/pull_and_run_t10_sh_manual_mode.sh](E:/Work/Highway_Topo_Poc/scripts/pull_and_run_t10_sh_manual_mode.sh)
+
+已知内网数据目录示例：
 - Windows: `D:\TestData\highway_topo_poc_data\Intersection\SH`
 - WSL: `/mnt/d/TestData/highway_topo_poc_data/Intersection/SH`
 
-默认脚本：
-- [scripts/run_t10_sh_manual_mode.sh](E:/Work/Highway_Topo_Poc/scripts/run_t10_sh_manual_mode.sh)
+最小执行：
 
-默认参数：
-- 默认 `mainnodeid = 12113465`
-- 默认输出目录：`outputs/_work/T10/sh_manual_mode`
-- 默认跑 base review bundle；若传 `--manual-override`，会继续做 rerun + diff
-
-最短用法：
 ```bash
-bash scripts/run_t10_sh_manual_mode.sh
-bash scripts/run_t10_sh_manual_mode.sh --mainnodeids 12113465 12113466
-bash scripts/run_t10_sh_manual_mode.sh --manual-override /mnt/d/path/to/override.json
+cd /mnt/e/Work/Highway_Topo_Poc
+bash scripts/run_t10_sh_manual_mode.sh \
+  --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH \
+  --mainnodeids 12113465
+```
+
+先下拉 GitHub 再执行：
+
+```bash
+cd /mnt/e/Work/Highway_Topo_Poc
+bash scripts/pull_and_run_t10_sh_manual_mode.sh -- \
+  --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH \
+  --mainnodeids 12113465
+```
+
+多个 `mainnodeid`：
+
+```bash
+cd /mnt/e/Work/Highway_Topo_Poc
+bash scripts/run_t10_sh_manual_mode.sh \
+  --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH \
+  --mainnodeids 12113465 12113466
+```
+
+带 override：
+
+```bash
+cd /mnt/e/Work/Highway_Topo_Poc
+bash scripts/run_t10_sh_manual_mode.sh \
+  --dataset-dir /mnt/d/TestData/highway_topo_poc_data/Intersection/SH \
+  --mainnodeids 12113465 \
+  --manual-override /mnt/d/path/to/12113465.json \
+  --output-root /mnt/e/Work/Highway_Topo_Poc/outputs/_work/T10/sh_manual_mode_real
 ```
 
 override 约定：
-- 可传单个 JSON 文件：对所有给定 `mainnodeid` 共用
-- 也可传目录：按 `<mainnodeid>.json` 取文件；缺失则该 `mainnodeid` 只跑 base
+- 可传单个 JSON 文件，对所有给定 `mainnodeid` 共用
+- 也可传目录，按 `<mainnodeid>.json` 取文件；缺失则该 `mainnodeid` 只跑 base
 
-重点看这些输出：
-- 每个 `mainnodeid` 子目录下的 `base/`
+重点查看这些输出：
+- 每个 `mainnodeid_*` 子目录下的 `base/`
 - 若有 override，再看 `rerun/` 和 `diff/`
 - 根目录或子目录下的 `manifest.json`、`summary.txt`
 - 人工复核优先看：
