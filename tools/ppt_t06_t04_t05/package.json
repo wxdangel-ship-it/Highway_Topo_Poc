@@ -1,0 +1,11 @@
+{
+  "name": "ppt-t06-t04-t05",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "node generate_decks.mjs"
+  },
+  "dependencies": {
+    "pptxgenjs": "^4.0.1"
+  }
+}

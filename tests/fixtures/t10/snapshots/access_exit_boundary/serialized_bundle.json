@@ -1,0 +1,289 @@
+{
+  "intersection": {
+    "intersection_id": "intersection:100",
+    "node_group_id": 100,
+    "member_node_ids": [
+      1,
+      2
+    ],
+    "control_type": "signalized",
+    "signalized_control_zone_id": 100,
+    "source_type": "real",
+    "remarks": []
+  },
+  "arms": [
+    {
+      "arm_id": "intersection:100|arm:0",
+      "intersection_id": "intersection:100",
+      "member_approach_ids": [
+        "intersection:100|east_access:entry",
+        "intersection:100|east_access:exit"
+      ],
+      "arm_heading_group": "group_0",
+      "representative_angle_deg": 0.0,
+      "remarks": [
+        "TODO: arm_heading_group remains abstract; no absolute NSEW binding in MVP"
+      ]
+    },
+    {
+      "arm_id": "intersection:100|arm:1",
+      "intersection_id": "intersection:100",
+      "member_approach_ids": [
+        "intersection:100|south:entry",
+        "intersection:100|south:exit"
+      ],
+      "arm_heading_group": "group_1",
+      "representative_angle_deg": 270.0,
+      "remarks": [
+        "TODO: arm_heading_group remains abstract; no absolute NSEW binding in MVP"
+      ]
+    }
+  ],
+  "approaches": [
+    {
+      "approach_id": "intersection:100|east_access:entry",
+      "road_id": "east_access",
+      "intersection_id": "intersection:100",
+      "node_id": 2,
+      "arm_id": "intersection:100|arm:0",
+      "movement_side": "entry",
+      "direction_type": "bidirectional",
+      "is_core_signalized_approach": true,
+      "approach_profile": "default_signalized",
+      "approach_profile_source": "default_derived",
+      "paired_mainline_approach_id": null,
+      "paired_mainline_source": "not_applicable",
+      "exit_leg_role": "unknown",
+      "is_standard_exit_leg": "unknown",
+      "signalized_control_zone_id": 100,
+      "side_angle_deg": 0.0,
+      "travel_angle_deg": 180.0,
+      "lateral_rank": 0,
+      "geometry_ref": {
+        "point": [
+          1.0,
+          0.0
+        ],
+        "line": [
+          [
+            1.0,
+            0.0
+          ],
+          [
+            10.0,
+            0.0
+          ]
+        ]
+      },
+      "evidence_refs": [
+        "road:east_access",
+        "node:2"
+      ],
+      "remarks": []
+    },
+    {
+      "approach_id": "intersection:100|east_access:exit",
+      "road_id": "east_access",
+      "intersection_id": "intersection:100",
+      "node_id": 2,
+      "arm_id": "intersection:100|arm:0",
+      "movement_side": "exit",
+      "direction_type": "bidirectional",
+      "is_core_signalized_approach": "unknown",
+      "approach_profile": "default_signalized",
+      "approach_profile_source": "default_derived",
+      "paired_mainline_approach_id": null,
+      "paired_mainline_source": "not_applicable",
+      "exit_leg_role": "access_exit",
+      "is_standard_exit_leg": false,
+      "signalized_control_zone_id": 100,
+      "side_angle_deg": 0.0,
+      "travel_angle_deg": 0.0,
+      "lateral_rank": 0,
+      "geometry_ref": {
+        "point": [
+          1.0,
+          0.0
+        ],
+        "line": [
+          [
+            1.0,
+            0.0
+          ],
+          [
+            10.0,
+            0.0
+          ]
+        ]
+      },
+      "evidence_refs": [
+        "road:east_access",
+        "node:2"
+      ],
+      "remarks": [
+        "manual_override:exit_leg_role"
+      ]
+    },
+    {
+      "approach_id": "intersection:100|south:entry",
+      "road_id": "south",
+      "intersection_id": "intersection:100",
+      "node_id": 1,
+      "arm_id": "intersection:100|arm:1",
+      "movement_side": "entry",
+      "direction_type": "bidirectional",
+      "is_core_signalized_approach": true,
+      "approach_profile": "default_signalized",
+      "approach_profile_source": "default_derived",
+      "paired_mainline_approach_id": null,
+      "paired_mainline_source": "not_applicable",
+      "exit_leg_role": "unknown",
+      "is_standard_exit_leg": "unknown",
+      "signalized_control_zone_id": 100,
+      "side_angle_deg": 270.0,
+      "travel_angle_deg": 90.0,
+      "lateral_rank": 0,
+      "geometry_ref": {
+        "point": [
+          0.0,
+          -1.0
+        ],
+        "line": [
+          [
+            0.0,
+            -1.0
+          ],
+          [
+            0.0,
+            -10.0
+          ]
+        ]
+      },
+      "evidence_refs": [
+        "road:south",
+        "node:1"
+      ],
+      "remarks": []
+    },
+    {
+      "approach_id": "intersection:100|south:exit",
+      "road_id": "south",
+      "intersection_id": "intersection:100",
+      "node_id": 1,
+      "arm_id": "intersection:100|arm:1",
+      "movement_side": "exit",
+      "direction_type": "bidirectional",
+      "is_core_signalized_approach": "unknown",
+      "approach_profile": "default_signalized",
+      "approach_profile_source": "default_derived",
+      "paired_mainline_approach_id": null,
+      "paired_mainline_source": "not_applicable",
+      "exit_leg_role": "core_standard_exit",
+      "is_standard_exit_leg": true,
+      "signalized_control_zone_id": 100,
+      "side_angle_deg": 270.0,
+      "travel_angle_deg": 270.0,
+      "lateral_rank": 0,
+      "geometry_ref": {
+        "point": [
+          0.0,
+          -1.0
+        ],
+        "line": [
+          [
+            0.0,
+            -1.0
+          ],
+          [
+            0.0,
+            -10.0
+          ]
+        ]
+      },
+      "evidence_refs": [
+        "road:south",
+        "node:1"
+      ],
+      "remarks": []
+    }
+  ],
+  "movements": [
+    {
+      "movement_id": "intersection:100|east_access:entry->east_access:exit",
+      "source_approach_id": "intersection:100|east_access:entry",
+      "target_approach_id": "intersection:100|east_access:exit",
+      "source_arm_id": "intersection:100|arm:0",
+      "target_arm_id": "intersection:100|arm:0",
+      "arm_relation": "same",
+      "turn_sense": "uturn",
+      "parallel_cross_count": 0,
+      "same_signalized_control_zone": true,
+      "evidence_refs": [
+        "road:east_access",
+        "node:2",
+        "road:east_access",
+        "node:2"
+      ],
+      "remarks": [
+        "same-arm target kept in uturn family; lateral shift remains in parallel_cross_count"
+      ]
+    },
+    {
+      "movement_id": "intersection:100|east_access:entry->south:exit",
+      "source_approach_id": "intersection:100|east_access:entry",
+      "target_approach_id": "intersection:100|south:exit",
+      "source_arm_id": "intersection:100|arm:0",
+      "target_arm_id": "intersection:100|arm:1",
+      "arm_relation": "adjacent",
+      "turn_sense": "left",
+      "parallel_cross_count": 0,
+      "same_signalized_control_zone": true,
+      "evidence_refs": [
+        "road:east_access",
+        "node:2",
+        "road:south",
+        "node:1"
+      ],
+      "remarks": []
+    },
+    {
+      "movement_id": "intersection:100|south:entry->east_access:exit",
+      "source_approach_id": "intersection:100|south:entry",
+      "target_approach_id": "intersection:100|east_access:exit",
+      "source_arm_id": "intersection:100|arm:1",
+      "target_arm_id": "intersection:100|arm:0",
+      "arm_relation": "adjacent",
+      "turn_sense": "right",
+      "parallel_cross_count": 0,
+      "same_signalized_control_zone": true,
+      "evidence_refs": [
+        "road:south",
+        "node:1",
+        "road:east_access",
+        "node:2"
+      ],
+      "remarks": []
+    },
+    {
+      "movement_id": "intersection:100|south:entry->south:exit",
+      "source_approach_id": "intersection:100|south:entry",
+      "target_approach_id": "intersection:100|south:exit",
+      "source_arm_id": "intersection:100|arm:1",
+      "target_arm_id": "intersection:100|arm:1",
+      "arm_relation": "same",
+      "turn_sense": "uturn",
+      "parallel_cross_count": 0,
+      "same_signalized_control_zone": true,
+      "evidence_refs": [
+        "road:south",
+        "node:1",
+        "road:south",
+        "node:1"
+      ],
+      "remarks": [
+        "same-arm target kept in uturn family; lateral shift remains in parallel_cross_count"
+      ]
+    }
+  ],
+  "warnings": []
+}

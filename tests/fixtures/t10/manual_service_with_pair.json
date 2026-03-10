@@ -1,0 +1,8 @@
+{
+  "service_profile_map": {
+    "south_service": "left_uturn_service"
+  },
+  "paired_mainline_map": {
+    "intersection:100|south_service:entry": "intersection:100|south_main:entry"
+  }
+}

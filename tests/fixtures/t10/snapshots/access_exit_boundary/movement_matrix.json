@@ -1,0 +1,109 @@
+{
+  "intersection_id": "intersection:100",
+  "entry_approach_ids": [
+    "intersection:100|east_access:entry",
+    "intersection:100|south:entry"
+  ],
+  "exit_approach_ids": [
+    "intersection:100|east_access:exit",
+    "intersection:100|south:exit"
+  ],
+  "cells": {
+    "intersection:100|east_access:entry": {
+      "intersection:100|east_access:exit": {
+        "movement_id": "intersection:100|east_access:entry->east_access:exit",
+        "source_approach_id": "intersection:100|east_access:entry",
+        "target_approach_id": "intersection:100|east_access:exit",
+        "status": "forbidden",
+        "confidence": "high",
+        "reason_codes": [
+          "NON_STANDARD_EXIT_LEG"
+        ],
+        "reason_text": "target is a known non-standard exit leg",
+        "breakpoints": [
+          "target.exit_leg_role"
+        ],
+        "turn_sense": "uturn",
+        "parallel_cross_count": 0,
+        "arm_relation": "same",
+        "same_signalized_control_zone": true,
+        "source_approach_profile": "default_signalized",
+        "source_approach_profile_source": "default_derived",
+        "source_is_core_signalized_approach": true,
+        "source_paired_mainline_source": "not_applicable",
+        "target_exit_leg_role": "access_exit",
+        "target_is_standard_exit_leg": false
+      },
+      "intersection:100|south:exit": {
+        "movement_id": "intersection:100|east_access:entry->south:exit",
+        "source_approach_id": "intersection:100|east_access:entry",
+        "target_approach_id": "intersection:100|south:exit",
+        "status": "allowed",
+        "confidence": "high",
+        "reason_codes": [
+          "DEFAULT_CORE_LEFT_ALLOWED"
+        ],
+        "reason_text": "core approach default left turn is allowed",
+        "breakpoints": [],
+        "turn_sense": "left",
+        "parallel_cross_count": 0,
+        "arm_relation": "adjacent",
+        "same_signalized_control_zone": true,
+        "source_approach_profile": "default_signalized",
+        "source_approach_profile_source": "default_derived",
+        "source_is_core_signalized_approach": true,
+        "source_paired_mainline_source": "not_applicable",
+        "target_exit_leg_role": "core_standard_exit",
+        "target_is_standard_exit_leg": true
+      }
+    },
+    "intersection:100|south:entry": {
+      "intersection:100|east_access:exit": {
+        "movement_id": "intersection:100|south:entry->east_access:exit",
+        "source_approach_id": "intersection:100|south:entry",
+        "target_approach_id": "intersection:100|east_access:exit",
+        "status": "forbidden",
+        "confidence": "high",
+        "reason_codes": [
+          "NON_STANDARD_EXIT_LEG"
+        ],
+        "reason_text": "target is a known non-standard exit leg",
+        "breakpoints": [
+          "target.exit_leg_role"
+        ],
+        "turn_sense": "right",
+        "parallel_cross_count": 0,
+        "arm_relation": "adjacent",
+        "same_signalized_control_zone": true,
+        "source_approach_profile": "default_signalized",
+        "source_approach_profile_source": "default_derived",
+        "source_is_core_signalized_approach": true,
+        "source_paired_mainline_source": "not_applicable",
+        "target_exit_leg_role": "access_exit",
+        "target_is_standard_exit_leg": false
+      },
+      "intersection:100|south:exit": {
+        "movement_id": "intersection:100|south:entry->south:exit",
+        "source_approach_id": "intersection:100|south:entry",
+        "target_approach_id": "intersection:100|south:exit",
+        "status": "unknown",
+        "confidence": "medium",
+        "reason_codes": [
+          "DEFAULT_UTURN_UNKNOWN"
+        ],
+        "reason_text": "default U-turn stays unknown",
+        "breakpoints": [],
+        "turn_sense": "uturn",
+        "parallel_cross_count": 0,
+        "arm_relation": "same",
+        "same_signalized_control_zone": true,
+        "source_approach_profile": "default_signalized",
+        "source_approach_profile_source": "default_derived",
+        "source_is_core_signalized_approach": true,
+        "source_paired_mainline_source": "not_applicable",
+        "target_exit_leg_role": "core_standard_exit",
+        "target_is_standard_exit_leg": true
+      }
+    }
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "baseline_name": "T10_phase11_manual_review_cycle_release_candidate",
+  "test_baseline_count": 65,
+  "formal_approach_profiles": [
+    "default_signalized",
+    "left_uturn_service",
+    "paired_mainline_no_left_uturn",
+    "unknown"
+  ],
+  "supported_run_modes": [
+    "memory",
+    "file",
+    "patch_dir",
+    "single_patch_all_mainids",
+    "multi_patch_manual",
+    "cli"
+  ],
+  "supported_outputs": [
+    "serialized_bundle.json",
+    "movement_results.json",
+    "movement_matrix.json",
+    "summary.txt",
+    "approach_catalog.json",
+    "manual_override.template.json",
+    "review_unknown_movements.json",
+    "review_nonstandard_targets.json",
+    "review_special_profile_gaps.json",
+    "review_summary.txt",
+    "override_roundtrip.json",
+    "run_diff.json",
+    "run_diff_summary.txt",
+    "baseline_snapshot_comparator"
+  ],
+  "unsupported_capabilities": [
+    "formway_bitmask_auto_detection",
+    "bit7_bit8_auto_detection",
+    "right_turn_service_formal_rule",
+    "lane_level_modeling",
+    "excel_output",
+    "complex_ui_frontend"
+  ],
+  "snapshot_cases": [
+    "basic_two_arm",
+    "left_service_tri_arm",
+    "access_exit_boundary"
+  ]
+}

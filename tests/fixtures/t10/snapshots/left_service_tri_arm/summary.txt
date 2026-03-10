@@ -1,0 +1,11 @@
+intersection_id: intersection:100
+mainid: 100
+approach_count: 6
+movement_count: 9
+manual_override_used: true
+status_counts:
+  allowed: 6
+  forbidden: 1
+  unknown: 2
+breakpoint_counts:
+  source.approach_profile: 3
