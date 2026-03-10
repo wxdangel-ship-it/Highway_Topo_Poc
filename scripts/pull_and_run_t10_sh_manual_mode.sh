@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Pull latest T10 manual-mode branch from GitHub, then run the SH WSL script.
-# Default branch: codex/t10-manual-mode-internal
+# Pull latest main branch from GitHub, then run the SH WSL script.
+# Default branch: main
 # Default dataset dir: /mnt/d/TestData/highway_topo_poc_data/Intersection/SH
 # Default mainnodeid: 12113465
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REMOTE_NAME="origin"
-BRANCH_NAME="codex/t10-manual-mode-internal"
+BRANCH_NAME="main"
 RUN_ARGS=()
 SKIP_PULL="0"
 
@@ -20,7 +20,7 @@ Usage:
 
 Options:
   --remote <name>                Git remote name, default origin
-  --branch <name>                Git branch name, default codex/t10-manual-mode-internal
+  --branch <name>                Git branch name, default main
   --skip-pull                    Skip fetch/switch/pull and only run local script
   --help                         Show this help
 
