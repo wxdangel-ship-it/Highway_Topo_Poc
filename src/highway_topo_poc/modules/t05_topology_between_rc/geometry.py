@@ -3148,6 +3148,73 @@ def _choose_pair_endpoint_xsec_cross_ref(
     return xsec_seed
 
 
+def _build_role_full_seed_mid_anchor_xsec(
+    *,
+    xsec_seed: LineString,
+    shape_ref_line: LineString,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+    anchor_ref: tuple[float, float],
+    nx: float,
+    ny: float,
+) -> tuple[LineString | BaseGeometry | None, LineString | None, str, int, float | None]:
+    valid_union = _xsec_valid_union(
+        xsec=xsec_seed,
+        gore_zone_metric=gore_zone_metric,
+    )
+    if drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty):
+        try:
+            inter = valid_union.intersection(drivezone_zone_metric) if valid_union is not None else None
+        except Exception:
+            inter = None
+        if inter is not None and not inter.is_empty:
+            valid_union = inter
+    parts = _iter_linestring_parts(valid_union)
+    if not parts:
+        return None, None, "role_full_seed", 0, 0.0
+    selected, _selected_by, n_inter = _pick_xsec_selected_part(
+        parts=parts,
+        shape_ref_line=shape_ref_line,
+        anchor_ref_xy=anchor_ref,
+    )
+    if selected is None or selected.is_empty or len(selected.coords) < 2:
+        return None, None, "role_full_seed", int(n_inter), 0.0
+    try:
+        mid = selected.interpolate(0.5, normalized=True)
+    except Exception:
+        return None, selected, "role_full_seed", int(n_inter), 0.0
+    mid_xy = point_xy_safe(mid, context="role_full_seed_mid_anchor")
+    if mid_xy is None:
+        return None, selected, "role_full_seed", int(n_inter), 0.0
+    mid_to_ref = float(
+        math.hypot(
+            float(mid_xy[0]) - float(anchor_ref[0]),
+            float(mid_xy[1]) - float(anchor_ref[1]),
+        )
+    )
+    if float(selected.length) <= 2.25:
+        return selected, selected, "role_full_seed_valid_mid", int(n_inter), mid_to_ref
+    half_len = float(min(2.0, max(1.0, 0.25 * float(selected.length))))
+    center_seg = _build_line_from_anchor(
+        anchor_xy=(float(mid_xy[0]), float(mid_xy[1])),
+        nx=nx,
+        ny=ny,
+        half_len=half_len,
+    )
+    if center_seg is None or center_seg.is_empty:
+        return selected, selected, "role_full_seed_valid_mid", int(n_inter), mid_to_ref
+    try:
+        clipped = center_seg.intersection(selected)
+    except Exception:
+        clipped = None
+    clipped_parts = _iter_linestring_parts(clipped)
+    if clipped_parts:
+        center_seg = max(clipped_parts, key=lambda g: float(g.length))
+    if center_seg.is_empty or len(center_seg.coords) < 2:
+        return selected, selected, "role_full_seed_valid_mid", int(n_inter), mid_to_ref
+    return center_seg, selected, "role_full_seed_mid_anchor", int(n_inter), mid_to_ref
+
+
 def build_pair_endpoint_xsec(
     *,
     xsec_seed: LineString,
@@ -3530,12 +3597,32 @@ def _build_xsec_road_for_endpoint(
     ny /= n_norm
     L = float(max(10.0, ref_half_len_m))
     if policy_mode == "role_full_seed":
-        out["selected_by"] = "role_full_seed"
-        out["mid_to_ref_m"] = 0.0
-        out["left_extent_m"] = float(max(0.0, 0.5 * float(xsec_seed.length)))
-        out["right_extent_m"] = float(max(0.0, 0.5 * float(xsec_seed.length)))
-        out["all_geom_type"] = str(getattr(xsec_seed, "geom_type", "")) or "LineString"
-        n_inter = _line_intersection_count(xsec_seed, shape_ref_line)
+        selected_mid, xsec_all_geom, selected_by, n_inter, mid_to_ref = _build_role_full_seed_mid_anchor_xsec(
+            xsec_seed=xsec_seed,
+            shape_ref_line=shape_ref_line,
+            drivezone_zone_metric=drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            anchor_ref=anchor_ref,
+            nx=nx,
+            ny=ny,
+        )
+        selected_geom = (
+            selected_mid
+            if isinstance(selected_mid, LineString) and (not selected_mid.is_empty) and len(selected_mid.coords) >= 2
+            else xsec_seed
+        )
+        all_geom = (
+            xsec_all_geom
+            if xsec_all_geom is not None and (not xsec_all_geom.is_empty)
+            else selected_geom
+        )
+        out["xsec_road_all"] = all_geom
+        out["xsec_road_selected"] = selected_geom
+        out["selected_by"] = str(selected_by)
+        out["mid_to_ref_m"] = float(mid_to_ref) if mid_to_ref is not None else 0.0
+        out["left_extent_m"] = float(max(0.0, _xsec_half_extent(selected_geom, anchor_ref, nx=-nx, ny=-ny)))
+        out["right_extent_m"] = float(max(0.0, _xsec_half_extent(selected_geom, anchor_ref, nx=nx, ny=ny)))
+        out["all_geom_type"] = str(getattr(all_geom, "geom_type", "")) or "LineString"
         out["intersects_ref"] = bool(n_inter > 0)
         out["ref_intersection_n"] = int(n_inter)
         return _finalize(out)
