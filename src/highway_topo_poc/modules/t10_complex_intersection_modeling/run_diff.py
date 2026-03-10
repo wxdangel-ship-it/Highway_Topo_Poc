@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .visual_review import write_t10_run_diff_html
+
 
 def compare_t10_run_dirs(
     before_dir: str | Path,
@@ -120,10 +122,12 @@ def write_t10_run_diff_outputs(
     summary_path = resolved_dir / "run_diff_summary.txt"
     diff_path.write_text(json.dumps(diff_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     summary_path.write_text(_build_run_diff_summary(diff_payload), encoding="utf-8")
-    return {
+    written_files = {
         "run_diff.json": str(diff_path),
         "run_diff_summary.txt": str(summary_path),
     }
+    written_files.update(write_t10_run_diff_html(diff_payload, resolved_dir))
+    return written_files
 
 
 def compare_t10_run_dirs_and_write_outputs(

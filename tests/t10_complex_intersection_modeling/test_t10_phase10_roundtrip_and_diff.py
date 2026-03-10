@@ -183,9 +183,12 @@ def test_phase10_run_diff_detects_status_changes_and_writes_summary(tmp_path: Pa
         if "before_status" in item
     )
     written = write_t10_run_diff_outputs(diff_payload, diff_dir)
-    assert set(written.keys()) == {"run_diff.json", "run_diff_summary.txt"}
+    assert set(written.keys()) == {"run_diff.json", "run_diff_summary.txt", "run_diff.html"}
     summary_text = (diff_dir / "run_diff_summary.txt").read_text(encoding="utf-8")
+    diff_html = (diff_dir / "run_diff.html").read_text(encoding="utf-8")
     assert "movement_status_change_count:" in summary_text
+    assert "T10 Run Diff" in diff_html
+    assert "Movement Status Changes" in diff_html
 
 
 def test_phase10_review_bundle_can_include_override_roundtrip_report(tmp_path: Path) -> None:
@@ -208,7 +211,9 @@ def test_phase10_review_bundle_can_include_override_roundtrip_report(tmp_path: P
     assert "manual_override.template.json" in written
     assert "review_unknown_movements.json" in written
     assert "override_roundtrip.json" in written
+    assert "review_bundle.html" in written
     assert (tmp_path / "override_roundtrip.json").exists()
+    assert (tmp_path / "review_bundle.html").exists()
 
 
 def test_phase10_cli_patch_dir_review_bundle_validate_and_diff_smoke(tmp_path: Path) -> None:
@@ -272,6 +277,7 @@ def test_phase10_cli_patch_dir_review_bundle_validate_and_diff_smoke(tmp_path: P
     assert (rerun_output / "manual_override.template.json").exists()
     assert (rerun_output / "review_special_profile_gaps.json").exists()
     assert (rerun_output / "override_roundtrip.json").exists()
+    assert (rerun_output / "review_bundle.html").exists()
 
     diff_proc = _run_cli(
         "--diff-before-dir",
@@ -287,6 +293,7 @@ def test_phase10_cli_patch_dir_review_bundle_validate_and_diff_smoke(tmp_path: P
     assert diff_payload["movement_status_change_count"] >= 1
     assert (diff_output / "run_diff.json").exists()
     assert (diff_output / "run_diff_summary.txt").exists()
+    assert (diff_output / "run_diff.html").exists()
 
 
 def test_phase10_cli_patch_root_emit_review_bundle_smoke(tmp_path: Path) -> None:
@@ -311,3 +318,4 @@ def test_phase10_cli_patch_root_emit_review_bundle_smoke(tmp_path: Path) -> None
     assert (output_root / "patch_a" / "mainid_100" / "approach_catalog.json").exists()
     assert (output_root / "patch_a" / "mainid_100" / "manual_override.template.json").exists()
     assert (output_root / "patch_a" / "mainid_100" / "review_summary.txt").exists()
+    assert (output_root / "patch_a" / "mainid_100" / "review_bundle.html").exists()

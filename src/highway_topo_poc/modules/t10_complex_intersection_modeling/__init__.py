@@ -123,6 +123,12 @@ from .writer import (
     write_t10_review_bundle,
     write_t10_run_result,
 )
+from .visual_review import (
+    build_t10_review_html,
+    build_t10_run_diff_html,
+    write_t10_review_html,
+    write_t10_run_diff_html,
+)
 
 __all__ = [
     "APPROACH_OVERRIDE_FIELDS",
@@ -221,8 +227,12 @@ __all__ = [
     "write_t10_patch_review_bundle",
     "write_t10_review_bundle",
     "write_t10_run_diff_outputs",
+    "write_t10_run_diff_html",
     "write_t10_run_result",
+    "write_t10_review_html",
     "write_t10_manual_support_outputs",
+    "build_t10_review_html",
+    "build_t10_run_diff_html",
     "normalize_node_features",
     "normalize_road_features",
 ]

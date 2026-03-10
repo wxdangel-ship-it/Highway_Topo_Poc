@@ -10,6 +10,7 @@ from typing import Any
 from .api import T10PatchBatchRunResult, T10RunResult
 from .manual_mode_support import write_t10_manual_support_outputs
 from .override_roundtrip import write_override_roundtrip_report
+from .visual_review import write_t10_review_html
 
 _NON_ALNUM = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -60,6 +61,8 @@ def write_t10_run_result(
                 write_review=include_review,
             )
         )
+    if include_review:
+        written_files.update(write_t10_review_html(result, resolved_dir))
     return written_files
 
 

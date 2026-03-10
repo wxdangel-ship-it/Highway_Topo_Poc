@@ -175,13 +175,18 @@ def test_writer_can_emit_catalog_template_and_review_outputs(tmp_path: Path) -> 
     assert "review_nonstandard_targets.json" in written
     assert "review_special_profile_gaps.json" in written
     assert "review_summary.txt" in written
+    assert "review_bundle.html" in written
 
     catalog = json.loads((tmp_path / "approach_catalog.json").read_text(encoding="utf-8"))
     template = json.loads((tmp_path / "manual_override.template.json").read_text(encoding="utf-8"))
     review_unknown = json.loads((tmp_path / "review_unknown_movements.json").read_text(encoding="utf-8"))
+    review_html = (tmp_path / "review_bundle.html").read_text(encoding="utf-8")
     assert catalog["intersection_id"] == "intersection:100"
     assert template["service_profile_map"] == {}
     assert review_unknown["unknown_movement_count"] >= 1
+    assert "Source Arm / Approach -&gt; Target Arm / Approach" in review_html
+    assert "Unknown Movements" in review_html
+    assert "Arm 1" in review_html
 
 
 def test_cli_patch_dir_mode_can_emit_manual_support_outputs(tmp_path: Path) -> None:
@@ -215,6 +220,7 @@ def test_cli_patch_dir_mode_can_emit_manual_support_outputs(tmp_path: Path) -> N
     assert (output_dir / "review_nonstandard_targets.json").exists()
     assert (output_dir / "review_special_profile_gaps.json").exists()
     assert (output_dir / "review_summary.txt").exists()
+    assert (output_dir / "review_bundle.html").exists()
 
 
 def test_cli_patch_root_mode_can_emit_manual_support_outputs(tmp_path: Path) -> None:
@@ -244,5 +250,6 @@ def test_cli_patch_root_mode_can_emit_manual_support_outputs(tmp_path: Path) -> 
     assert (output_root / "patch_a" / "mainid_100" / "approach_catalog.json").exists()
     assert (output_root / "patch_a" / "mainid_100" / "manual_override.template.json").exists()
     assert (output_root / "patch_a" / "mainid_100" / "review_unknown_movements.json").exists()
+    assert (output_root / "patch_a" / "mainid_100" / "review_bundle.html").exists()
     assert (output_root / "patch_a" / "manifest.json").exists()
     assert (output_root / "manifest.json").exists()
