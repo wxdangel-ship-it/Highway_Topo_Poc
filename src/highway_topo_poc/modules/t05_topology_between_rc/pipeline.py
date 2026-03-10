@@ -6582,6 +6582,7 @@ def _select_endpoint_post_anchor_target(
     road_line: LineString,
     endpoint_tag: str,
     xsec_geom: BaseGeometry | None,
+    traj_surface_metric: BaseGeometry | None,
     support: PairSupport | None,
     shape_ref_line: LineString | None,
     lane_boundaries_metric: Sequence[LineString] | None,
@@ -6617,22 +6618,40 @@ def _select_endpoint_post_anchor_target(
     if target_geom is None or target_geom.is_empty:
         return None, None, meta
 
+    candidate_source_geoms: list[BaseGeometry] = []
+    if traj_surface_metric is not None and (not traj_surface_metric.is_empty):
+        try:
+            surface_overlap = target_geom.intersection(
+                traj_surface_metric.buffer(float(max(1.0, min(3.0, 0.25 * buffer_m))))
+            )
+        except Exception:
+            surface_overlap = None
+        if surface_overlap is not None and not surface_overlap.is_empty:
+            candidate_source_geoms.append(surface_overlap)
+            meta["endpoint_target_surface_overlap_used"] = True
+    candidate_source_geoms.append(target_geom)
+
     candidate_parts: list[LineString] = []
     endpoint_window = _line_endpoint_window(line=road_line, endpoint_tag=endpoint_tag_norm, window_m=window_m)
-    if endpoint_window is not None:
-        try:
-            local_inter = target_geom.intersection(endpoint_window.buffer(float(max(1.0, buffer_m)), cap_style=2))
-        except Exception:
-            local_inter = None
-        candidate_parts = _iter_line_parts(local_inter)
-    if not candidate_parts:
-        try:
-            point_inter = target_geom.intersection(endpoint_pt.buffer(float(max(1.0, buffer_m * 1.5))))
-        except Exception:
-            point_inter = None
-        candidate_parts = _iter_line_parts(point_inter)
-    if not candidate_parts:
-        candidate_parts = _iter_line_parts(target_geom)
+    for source_geom in candidate_source_geoms:
+        if source_geom is None or source_geom.is_empty:
+            continue
+        if endpoint_window is not None:
+            try:
+                local_inter = source_geom.intersection(endpoint_window.buffer(float(max(1.0, buffer_m)), cap_style=2))
+            except Exception:
+                local_inter = None
+            candidate_parts = _iter_line_parts(local_inter)
+        if not candidate_parts:
+            try:
+                point_inter = source_geom.intersection(endpoint_pt.buffer(float(max(1.0, buffer_m * 1.5))))
+            except Exception:
+                point_inter = None
+            candidate_parts = _iter_line_parts(point_inter)
+        if not candidate_parts:
+            candidate_parts = _iter_line_parts(source_geom)
+        if candidate_parts:
+            break
     if not candidate_parts:
         return None, None, meta
 
@@ -6963,6 +6982,7 @@ def _post_anchor_merge_diverge_endpoints(
     lane_boundaries_metric: Sequence[LineString] | None,
     src_xsec: LineString,
     dst_xsec: LineString,
+    traj_surface_metric: BaseGeometry | None,
     segment_corridor_metric: BaseGeometry | None,
     drivezone_zone_metric: BaseGeometry | None,
     gore_zone_metric: BaseGeometry | None,
@@ -7004,6 +7024,7 @@ def _post_anchor_merge_diverge_endpoints(
             road_line=road_line,
             endpoint_tag="src",
             xsec_geom=src_target_geom,
+            traj_surface_metric=traj_surface_metric,
             support=support,
             shape_ref_line=shape_ref_line,
             lane_boundaries_metric=lane_boundaries_metric,
@@ -7019,6 +7040,7 @@ def _post_anchor_merge_diverge_endpoints(
             road_line=road_line,
             endpoint_tag="dst",
             xsec_geom=dst_target_geom,
+            traj_surface_metric=traj_surface_metric,
             support=support,
             shape_ref_line=shape_ref_line,
             lane_boundaries_metric=lane_boundaries_metric,
@@ -9588,6 +9610,7 @@ def _evaluate_candidate_road(
             lane_boundaries_metric=lane_boundaries_metric,
             src_xsec=src_xsec,
             dst_xsec=dst_xsec,
+            traj_surface_metric=traj_surface_hint.get("surface_metric"),
             segment_corridor_metric=segment_corridor_metric,
             drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
             gore_zone_metric=gore_zone_metric,
