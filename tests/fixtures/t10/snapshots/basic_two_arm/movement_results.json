@@ -1,0 +1,90 @@
+[
+  {
+    "movement_id": "intersection:100|north:entry->north:exit",
+    "source_approach_id": "intersection:100|north:entry",
+    "target_approach_id": "intersection:100|north:exit",
+    "status": "unknown",
+    "confidence": "medium",
+    "reason_codes": [
+      "DEFAULT_UTURN_UNKNOWN"
+    ],
+    "reason_text": "default U-turn stays unknown",
+    "breakpoints": [],
+    "turn_sense": "uturn",
+    "parallel_cross_count": 0,
+    "arm_relation": "same",
+    "same_signalized_control_zone": true,
+    "source_approach_profile": "default_signalized",
+    "source_approach_profile_source": "default_derived",
+    "source_is_core_signalized_approach": true,
+    "source_paired_mainline_source": "not_applicable",
+    "target_exit_leg_role": "core_standard_exit",
+    "target_is_standard_exit_leg": true
+  },
+  {
+    "movement_id": "intersection:100|north:entry->south:exit",
+    "source_approach_id": "intersection:100|north:entry",
+    "target_approach_id": "intersection:100|south:exit",
+    "status": "allowed",
+    "confidence": "high",
+    "reason_codes": [
+      "DEFAULT_THROUGH_ALLOWED"
+    ],
+    "reason_text": "default through movement is allowed",
+    "breakpoints": [],
+    "turn_sense": "through",
+    "parallel_cross_count": 0,
+    "arm_relation": "opposite",
+    "same_signalized_control_zone": true,
+    "source_approach_profile": "default_signalized",
+    "source_approach_profile_source": "default_derived",
+    "source_is_core_signalized_approach": true,
+    "source_paired_mainline_source": "not_applicable",
+    "target_exit_leg_role": "core_standard_exit",
+    "target_is_standard_exit_leg": true
+  },
+  {
+    "movement_id": "intersection:100|south:entry->north:exit",
+    "source_approach_id": "intersection:100|south:entry",
+    "target_approach_id": "intersection:100|north:exit",
+    "status": "allowed",
+    "confidence": "high",
+    "reason_codes": [
+      "DEFAULT_THROUGH_ALLOWED"
+    ],
+    "reason_text": "default through movement is allowed",
+    "breakpoints": [],
+    "turn_sense": "through",
+    "parallel_cross_count": 0,
+    "arm_relation": "opposite",
+    "same_signalized_control_zone": true,
+    "source_approach_profile": "default_signalized",
+    "source_approach_profile_source": "default_derived",
+    "source_is_core_signalized_approach": true,
+    "source_paired_mainline_source": "not_applicable",
+    "target_exit_leg_role": "core_standard_exit",
+    "target_is_standard_exit_leg": true
+  },
+  {
+    "movement_id": "intersection:100|south:entry->south:exit",
+    "source_approach_id": "intersection:100|south:entry",
+    "target_approach_id": "intersection:100|south:exit",
+    "status": "unknown",
+    "confidence": "medium",
+    "reason_codes": [
+      "DEFAULT_UTURN_UNKNOWN"
+    ],
+    "reason_text": "default U-turn stays unknown",
+    "breakpoints": [],
+    "turn_sense": "uturn",
+    "parallel_cross_count": 0,
+    "arm_relation": "same",
+    "same_signalized_control_zone": true,
+    "source_approach_profile": "default_signalized",
+    "source_approach_profile_source": "default_derived",
+    "source_is_core_signalized_approach": true,
+    "source_paired_mainline_source": "not_applicable",
+    "target_exit_leg_role": "core_standard_exit",
+    "target_is_standard_exit_leg": true
+  }
+]

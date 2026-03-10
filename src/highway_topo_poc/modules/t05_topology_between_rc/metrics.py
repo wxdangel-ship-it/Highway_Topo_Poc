@@ -60,46 +60,10 @@ def build_metrics_payload(
         dtype=np.float64,
     )
     endpoint_offsets = endpoint_offsets[np.isfinite(endpoint_offsets)]
-    endpoint_line_target_dists = np.asarray(
-        [
-            _to_float(v)
-            for r in roads
-            for v in (
-                r.get("endpoint_line_to_target_region_dist_src_m"),
-                r.get("endpoint_line_to_target_region_dist_dst_m"),
-            )
-        ],
-        dtype=np.float64,
-    )
-    endpoint_line_target_dists = endpoint_line_target_dists[np.isfinite(endpoint_line_target_dists)]
 
     hard_count = sum(1 for r in roads if bool(r.get("hard_anomaly", False)))
     soft_count = sum(len(list(r.get("soft_issue_flags", []))) for r in roads)
     low_support_count = sum(1 for r in roads if "LOW_SUPPORT" in set(r.get("soft_issue_flags", [])))
-    endpoint_line_target_closure_checked_count = sum(
-        1
-        for r in roads
-        for tag in ("src", "dst")
-        if r.get(f"endpoint_line_to_target_region_closure_ok_{tag}") is not None
-    )
-    endpoint_line_target_closure_fail_count = sum(
-        1
-        for r in roads
-        for tag in ("src", "dst")
-        if r.get(f"endpoint_line_to_target_region_closure_ok_{tag}") is False
-    )
-    merge_diverge_endpoint_closure_fail_count = sum(
-        1
-        for r in roads
-        if (
-            str(r.get("src_type") or "").strip().lower() == "merge"
-            and r.get("endpoint_line_to_target_region_closure_ok_src") is False
-        )
-        or (
-            str(r.get("dst_type") or "").strip().lower() == "diverge"
-            and r.get("endpoint_line_to_target_region_closure_ok_dst") is False
-        )
-    )
 
     pair_set = {(int(r.get("src_nodeid", -1)), int(r.get("dst_nodeid", -1))) for r in roads}
     same_pair_stats = _same_pair_resolution_stats(roads)
@@ -120,11 +84,6 @@ def build_metrics_payload(
         "endpoint_center_offset_p50": _safe_percentile(endpoint_offsets, 50.0),
         "endpoint_center_offset_p90": _safe_percentile(endpoint_offsets, 90.0),
         "endpoint_center_offset_max": _safe_stat(endpoint_offsets, np.max),
-        "endpoint_line_to_target_region_dist_p50": _safe_percentile(endpoint_line_target_dists, 50.0),
-        "endpoint_line_to_target_region_dist_p90": _safe_percentile(endpoint_line_target_dists, 90.0),
-        "endpoint_line_to_target_region_closure_checked_count": int(endpoint_line_target_closure_checked_count),
-        "endpoint_line_to_target_region_closure_fail_count": int(endpoint_line_target_closure_fail_count),
-        "merge_diverge_endpoint_closure_fail_count": int(merge_diverge_endpoint_closure_fail_count),
         "hard_breakpoint_count": int(len(hard_breakpoints)),
         "soft_breakpoint_count": int(len(soft_breakpoints)),
     }
