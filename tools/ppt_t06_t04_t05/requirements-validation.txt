@@ -1,4 +1,0 @@
-numpy
-Pillow
-pdf2image
-python-pptx
