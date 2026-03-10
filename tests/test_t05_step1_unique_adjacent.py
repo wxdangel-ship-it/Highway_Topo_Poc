@@ -4495,7 +4495,7 @@ def test_evaluate_candidate_road_post_anchors_merge_src_to_xsec_region_midpoint(
     center_diags = {
         "_xsec_road_selected_src_metric": merge_region,
         "_xsec_target_selected_src_metric": merge_region,
-        "_xsec_road_all_src_metric": merge_region,
+        "_xsec_road_all_src_metric": src_xsec,
         "_xsec_ref_src_metric": src_xsec,
         "_xsec_road_selected_dst_metric": dst_xsec,
         "_xsec_target_selected_dst_metric": dst_xsec,
@@ -4594,6 +4594,7 @@ def test_evaluate_candidate_road_post_anchors_merge_src_to_xsec_region_midpoint(
     assert float(endpoint_after.distance(merge_region)) <= 1e-6
     assert str(road.get("endpoint_target_region_mode_src")) == "merge_xsec_region_business_target"
     assert str(road.get("endpoint_post_anchor_mode_src")) == "merge_xsec_region_business_refit"
+    assert str(road.get("endpoint_post_anchor_target_source_src")) == "xsec_target_selected"
     assert str(road.get("xsec_target_mode_src")) == "merge_xsec_region_business_target"
     assert str(road.get("xsec_selected_by_src")) == "merge_xsec_region_business_refit"
     src_target_geom = road.get("_xsec_target_selected_src_metric")
@@ -4645,7 +4646,7 @@ def test_evaluate_candidate_road_post_anchors_diverge_dst_to_xsec_region_midpoin
         "_xsec_ref_src_metric": src_xsec,
         "_xsec_road_selected_dst_metric": diverge_region,
         "_xsec_target_selected_dst_metric": diverge_region,
-        "_xsec_road_all_dst_metric": diverge_region,
+        "_xsec_road_all_dst_metric": dst_xsec,
         "_xsec_ref_dst_metric": dst_xsec,
         "xsec_road_selected_by_src": "fallback_seed_due_center_empty",
         "xsec_road_selected_by_dst": "fallback_seed_due_center_empty",
@@ -4740,6 +4741,7 @@ def test_evaluate_candidate_road_post_anchors_diverge_dst_to_xsec_region_midpoin
     assert float(endpoint_after.distance(diverge_region)) <= 1e-6
     assert str(road.get("endpoint_target_region_mode_dst")) == "diverge_xsec_region_business_target"
     assert str(road.get("endpoint_post_anchor_mode_dst")) == "diverge_xsec_region_business_refit"
+    assert str(road.get("endpoint_post_anchor_target_source_dst")) == "xsec_target_selected"
     assert str(road.get("xsec_target_mode_dst")) == "diverge_xsec_region_business_target"
     assert str(road.get("xsec_selected_by_dst")) == "diverge_xsec_region_business_refit"
     dst_target_geom = road.get("_xsec_target_selected_dst_metric")
@@ -4789,6 +4791,142 @@ def test_select_endpoint_post_anchor_target_prefers_lane_boundary_supported_regi
     assert isinstance(target_region, LineString)
     assert float(target_region.length) > 0.0
     assert "lane_boundary" in str(meta.get("endpoint_target_region_ref_modes_src", meta.get("endpoint_target_region_ref_modes", "")))
+
+
+def test_evaluate_candidate_road_post_anchors_diverge_dst_uses_step1_branch_override_pair_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
+    )
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
+    params = dict(pipeline.DEFAULT_PARAMS)
+    src_xsec = LineString([(0.0, -10.0), (0.0, 10.0)])
+    dst_xsec = LineString([(100.0, -10.0), (100.0, 10.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t0"},
+        support_event_count=1,
+        traj_segments=[LineString([(0.0, 0.0), (100.0, 0.0)])],
+        src_cross_points=[Point(0.0, 0.0)],
+        dst_cross_points=[Point(100.0, 0.0)],
+    )
+    diverge_region = LineString([(100.0, -5.0), (100.0, -1.0)])
+    center_diags = {
+        "_xsec_road_selected_src_metric": src_xsec,
+        "_xsec_target_selected_src_metric": src_xsec,
+        "_xsec_road_all_src_metric": src_xsec,
+        "_xsec_ref_src_metric": src_xsec,
+        "_xsec_road_selected_dst_metric": dst_xsec,
+        "_xsec_target_selected_dst_metric": dst_xsec,
+        "_xsec_road_all_dst_metric": dst_xsec,
+        "_xsec_ref_dst_metric": dst_xsec,
+        "xsec_road_selected_by_src": "fallback_seed_due_center_empty",
+        "xsec_road_selected_by_dst": "fallback_seed_due_center_empty",
+        "xsec_target_mode_src": "fallback_seed_due_center_empty",
+        "xsec_target_mode_dst": "fallback_seed_due_center_empty",
+        "xsec_policy_mode_src": "auto",
+        "xsec_policy_mode_dst": "role_outward_cut",
+    }
+
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: geom_mod.CenterEstimate(
+            centerline_metric=LineString([(0.0, 0.0), (100.0, 0.0)]),
+            shape_ref_metric=LineString([(0.0, 0.0), (100.0, 0.0)]),
+            lb_path_found=False,
+            lb_path_edge_count=0,
+            lb_path_length_m=None,
+            stable_offset_m_src=None,
+            stable_offset_m_dst=None,
+            center_sample_coverage=1.0,
+            width_med_m=None,
+            width_p90_m=None,
+            max_turn_deg_per_10m=None,
+            used_lane_boundary=False,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="none",
+            dst_cut_mode="none",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
+            soft_flags=set(),
+            hard_flags=set(),
+            diagnostics=center_diags,
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: ({}, set(), set(), []),
+    )
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="merge",
+        dst_type="diverge",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": False, "surface_metric": None, "timing_ms": 0.0},
+        shape_ref_hint_metric=LineString([(0.0, 0.0), (100.0, 0.0)]),
+        segment_corridor_metric=LineString([(0.0, 0.0), (100.0, 0.0)]).buffer(20.0, cap_style=2),
+        road_prior_shape_ref_metric=None,
+        step1_used_road_prior=False,
+        step1_road_prior_mode=None,
+        same_pair_multichain=False,
+        candidate_branch_id=None,
+        support_mode="traj_support",
+        pair_xsec_target_dst_metric=diverge_region,
+        pair_xsec_primary_seed_dst_metric=dst_xsec,
+        pair_xsec_policy_dst="role_outward_cut",
+        step1_branch_override_used=True,
+    )
+
+    endpoint_after = road.get("_endpoint_after_dst_metric")
+    assert isinstance(endpoint_after, Point)
+    xy = geom_mod.point_xy_safe(endpoint_after, context="test_diverge_branch_override_post_anchor_after")
+    assert xy is not None
+    assert abs(float(xy[0]) - 100.0) <= 1e-6
+    assert -5.0 - 1e-6 <= float(xy[1]) <= -1.0 + 1e-6
+    assert float(endpoint_after.distance(diverge_region)) <= 1e-6
+    assert str(road.get("endpoint_post_anchor_target_source_dst")) == "pair_xsec_target_step1_branch_override"
+    assert str(road.get("endpoint_target_region_mode_dst")) == "diverge_xsec_region_business_target"
+    assert str(road.get("endpoint_post_anchor_mode_dst")) == "diverge_xsec_region_business_refit"
+    assert str(road.get("xsec_selected_by_dst")) == "diverge_xsec_region_business_refit"
 
 
 def test_same_pair_multi_road_selection_keeps_close_parallel_branches() -> None:

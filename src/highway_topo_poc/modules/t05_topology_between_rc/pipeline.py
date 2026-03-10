@@ -6881,6 +6881,53 @@ def _rebuild_endpoint_local_segment(
     return rebuilt, meta
 
 
+def _resolve_endpoint_post_anchor_xsec_geom(
+    *,
+    road: dict[str, Any],
+    endpoint_tag: str,
+    seed_xsec: LineString,
+) -> tuple[BaseGeometry | None, str | None]:
+    endpoint_tag_norm = str(endpoint_tag).strip().lower()
+    if endpoint_tag_norm not in {"src", "dst"}:
+        return seed_xsec, "seed_xsec"
+
+    selected_by = str(road.get(f"xsec_road_selected_by_{endpoint_tag_norm}") or "").strip().lower()
+    pair_policy_mode = str(
+        road.get(f"step1_pair_xsec_policy_{endpoint_tag_norm}")
+        or road.get(f"xsec_policy_mode_{endpoint_tag_norm}")
+        or ""
+    ).strip().lower()
+    branch_override_fallback = bool(
+        bool(road.get("step1_branch_override_used"))
+        and pair_policy_mode == "role_outward_cut"
+        and selected_by in {"", "none", "seed", "fallback_seed_due_center_empty"}
+    )
+
+    candidate_keys: list[tuple[str, str]] = []
+    if branch_override_fallback:
+        candidate_keys.extend(
+            (
+                (f"_pair_xsec_target_{endpoint_tag_norm}_metric", "pair_xsec_target_step1_branch_override"),
+                (f"_pair_xsec_primary_seed_{endpoint_tag_norm}_metric", "pair_xsec_primary_seed_step1_branch_override"),
+            )
+        )
+    candidate_keys.extend(
+        (
+            (f"_xsec_target_selected_{endpoint_tag_norm}_metric", "xsec_target_selected"),
+            (f"_xsec_road_selected_{endpoint_tag_norm}_metric", "xsec_road_selected"),
+            (f"_xsec_road_all_{endpoint_tag_norm}_metric", "xsec_road_all"),
+        )
+    )
+
+    for key, source in candidate_keys:
+        cand = road.get(key)
+        if isinstance(cand, BaseGeometry) and not cand.is_empty:
+            return cand, source
+    if isinstance(seed_xsec, BaseGeometry) and not seed_xsec.is_empty:
+        return seed_xsec, "seed_xsec"
+    return None, None
+
+
 def _post_anchor_merge_diverge_endpoints(
     *,
     road: dict[str, Any],
@@ -6911,18 +6958,18 @@ def _post_anchor_merge_diverge_endpoints(
     curve_step_m = float(max(0.5, params.get("STEP2_ENDPOINT_POST_ANCHOR_CURVE_STEP_M", 2.0)))
     max_ratio_drop = float(max(0.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_MAX_RATIO_DROP", 0.01)))
 
-    src_target_geom = (
-        road.get("_xsec_road_all_src_metric")
-        or road.get("_xsec_target_selected_src_metric")
-        or road.get("_xsec_road_selected_src_metric")
-        or src_xsec
+    src_target_geom, src_target_source = _resolve_endpoint_post_anchor_xsec_geom(
+        road=road,
+        endpoint_tag="src",
+        seed_xsec=src_xsec,
     )
-    dst_target_geom = (
-        road.get("_xsec_road_all_dst_metric")
-        or road.get("_xsec_target_selected_dst_metric")
-        or road.get("_xsec_road_selected_dst_metric")
-        or dst_xsec
+    dst_target_geom, dst_target_source = _resolve_endpoint_post_anchor_xsec_geom(
+        road=road,
+        endpoint_tag="dst",
+        seed_xsec=dst_xsec,
     )
+    meta["endpoint_post_anchor_target_source_src"] = src_target_source
+    meta["endpoint_post_anchor_target_source_dst"] = dst_target_source
 
     src_point_target = None
     dst_point_target = None
@@ -9139,6 +9186,12 @@ def _evaluate_candidate_road(
     road["_road_prior_shape_ref_metric"] = road_prior_shape_ref_metric if road_prior_shape_ref_valid else None
     road["_pair_xsec_target_src_metric"] = pair_xsec_target_src_metric if pair_target_src_available else None
     road["_pair_xsec_target_dst_metric"] = pair_xsec_target_dst_metric if pair_target_dst_available else None
+    road["_pair_xsec_primary_seed_src_metric"] = (
+        pair_xsec_primary_seed_src_metric if _is_valid_linestring(pair_xsec_primary_seed_src_metric) else None
+    )
+    road["_pair_xsec_primary_seed_dst_metric"] = (
+        pair_xsec_primary_seed_dst_metric if _is_valid_linestring(pair_xsec_primary_seed_dst_metric) else None
+    )
     for tag, bind_xsec, bind_reason in (
         ("src", bind_src_xsec, bind_src_reason),
         ("dst", bind_dst_xsec, bind_dst_reason),
@@ -14198,6 +14251,8 @@ def _make_base_road_record(
         "endpoint_target_region_mode_dst": None,
         "endpoint_post_anchor_mode_src": None,
         "endpoint_post_anchor_mode_dst": None,
+        "endpoint_post_anchor_target_source_src": None,
+        "endpoint_post_anchor_target_source_dst": None,
         "endpoint_line_to_target_region_source_src": None,
         "endpoint_line_to_target_region_source_dst": None,
         "endpoint_line_to_target_region_window_src_m": None,
