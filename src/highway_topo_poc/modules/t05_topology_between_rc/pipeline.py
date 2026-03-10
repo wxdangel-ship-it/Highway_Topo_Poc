@@ -46,6 +46,7 @@ from .geometry import (
     PairSupport,
     PairSupportBuildResult,
     _build_lb_graph_path,
+    _dedup_coords,
     build_pair_endpoint_xsec,
     build_pair_supports,
     compute_max_segment_m,
@@ -235,6 +236,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "DRIVEZONE_SAMPLE_STEP_M": 2.0,
     "DEBUG_DUMP": 0,
     "DEBUG_LAYER_MAX_ITEMS": 2000,
+    "DEBUG_NODE_XSEC_FRAME_ENABLE": 1,
+    "DEBUG_ENDPOINT_SLOT_ASSIGNMENT_ENABLE": 1,
     "XSEC_GATE_TRAJ_EVIDENCE_ENABLE": 1,
     "XSEC_GATE_TRAJ_EVIDENCE_MAX_POINTS": 300000,
     "XSEC_GATE_TRAJ_EVIDENCE_SAMPLE_STEP": 4,
@@ -243,6 +246,23 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP2_SEGMENT_CORRIDOR_MIN_INSIDE_RATIO": 0.999,
     "STEP2_SEGMENT_CORRIDOR_RESCUE_ENABLE": 1,
     "STEP2_SEGMENT_CORRIDOR_RESCUE_OUTSIDE_MAX_M": 5.0,
+    "STEP2_SEGMENT_CORRIDOR_NEAR_RESCUE_ENABLE": 1,
+    "STEP2_SEGMENT_CORRIDOR_NEAR_RESCUE_OUTSIDE_MAX_M": 0.75,
+    "STEP2_SEGMENT_CORRIDOR_NEAR_RESCUE_RATIO_EPS": 0.005,
+    "STEP2_DRIVEZONE_NEAR_RESCUE_ENABLE": 1,
+    "STEP2_DRIVEZONE_NEAR_RESCUE_OUTSIDE_MAX_M": 2.0,
+    "STEP2_DRIVEZONE_NEAR_RESCUE_MIN_IN_RATIO": 0.992,
+    "STEP2_TRAJ_SURFACE_NEAR_RESCUE_ENABLE": 1,
+    "STEP2_TRAJ_SURFACE_NEAR_RESCUE_IN_RATIO_EPS": 0.02,
+    "STEP2_TRAJ_SURFACE_NEAR_RESCUE_ENDPOINT_DIST_M": 3.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_ENABLE": 1,
+    "STEP2_ENDPOINT_POST_ANCHOR_WINDOW_M": 18.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_BUFFER_M": 8.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_MAX_DIST_M": 40.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_TRIM_M": 12.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_SMOOTH_SPAN_M": 28.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_CURVE_STEP_M": 2.0,
+    "STEP2_ENDPOINT_POST_ANCHOR_MAX_RATIO_DROP": 0.01,
     "STEP3_WIDENING_SUPPRESS_ENABLE": 1,
     "STEP3_WIDENING_RATIO_TRIGGER": 1.25,
     "STEP3_WIDENING_REQUIRE_EXPANDED_FLAG": 1,
@@ -2599,6 +2619,17 @@ def _run_patch_core(
         "traj_surface_best_boundary": _mk_debug_layer(),
         "lb_path_best": _mk_debug_layer(),
         "ref_axis_best": _mk_debug_layer(),
+        "node_xsec_frame_full": _mk_debug_layer(),
+        "node_xsec_frame_gated": _mk_debug_layer(),
+        "node_xsec_frame_active": _mk_debug_layer(),
+        "node_xsec_slot_parts": _mk_debug_layer(),
+        "node_xsec_slot_centers": _mk_debug_layer(),
+        "endpoint_slot_src": _mk_debug_layer(),
+        "endpoint_slot_dst": _mk_debug_layer(),
+        "endpoint_slot_src_region": _mk_debug_layer(),
+        "endpoint_slot_dst_region": _mk_debug_layer(),
+        "endpoint_slot_connector_src": _mk_debug_layer(),
+        "endpoint_slot_connector_dst": _mk_debug_layer(),
         "step1_corridor_centerline": _mk_debug_layer(),
         "step1_corridor_candidates": _mk_debug_layer(),
         "step1_corridor_zone": _mk_debug_layer(),
@@ -2658,6 +2689,29 @@ def _run_patch_core(
                     },
                 }
             )
+    node_xsec_frame_by_nodeid: dict[int, dict[str, Any]] = {}
+    if debug_enabled and bool(int(params.get("DEBUG_NODE_XSEC_FRAME_ENABLE", 1))):
+        node_xsec_frame_records: list[dict[str, Any]] = []
+        for nodeid in sorted(int(k) for k in xsec_cross_lookup_map.keys()):
+            raw_cs = xsec_map.get(int(nodeid))
+            gated_cs = xsec_cross_lookup_map.get(int(nodeid))
+            frame = _build_node_xsec_frame_for_debug(
+                nodeid=int(nodeid),
+                node_type=str(node_type_map.get(int(nodeid), "unknown")),
+                raw_xsec_geom=getattr(raw_cs, "geometry_metric", raw_cs),
+                gated_xsec_geom=getattr(gated_cs, "geometry_metric", gated_cs),
+                gate_all_xsec_geom=xsec_gate_all_lookup_map.get(int(nodeid)),
+                drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
+                gore_zone_metric=gore_zone_metric,
+            )
+            if not isinstance(frame, dict):
+                continue
+            node_xsec_frame_by_nodeid[int(nodeid)] = frame
+            _append_node_xsec_frame_debug_layers(debug_layers=debug_layers, frame=frame)
+            node_xsec_frame_records.append(_serialize_node_xsec_frame_for_debug(frame))
+        debug_json_payloads["debug/node_xsec_frames.json"] = {
+            "nodes": list(node_xsec_frame_records),
+        }
 
     total_pairs = int(len(supports))
     if progress is not None:
@@ -2861,6 +2915,13 @@ def _run_patch_core(
             road["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
             road["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
             road["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
+            road["step1_pair_target_ref_source"] = step1_corridor.get("pair_target_ref_source")
+            road["step1_road_prior_rerank_used"] = bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False))
+            road["step1_branch_override_used"] = bool(step1_corridor.get("branch_override_used", False))
+            road["step1_branch_override_from_traj_id"] = step1_corridor.get("branch_override_from_traj_id")
+            road["step1_branch_override_to_traj_id"] = step1_corridor.get("branch_override_to_traj_id")
+            road["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
+            road["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
             road["hard_anomaly"] = True
             road["hard_reasons"] = [str(step1_corridor.get("hard_reason"))]
             road["soft_issue_flags"] = []
@@ -2897,6 +2958,16 @@ def _run_patch_core(
                     )
                 if branch_corridor.get("hard_reason"):
                     continue
+                surface_axis_metric = None
+                surface_axis_source = None
+                if bool(branch_corridor.get("branch_override_used", False)):
+                    variant_road_prior_shape_ref = variant.get("road_prior_shape_ref_metric")
+                    if _is_valid_linestring(variant_road_prior_shape_ref):
+                        surface_axis_metric = variant_road_prior_shape_ref
+                        surface_axis_source = "step1_branch_override_road_prior_axis"
+                    elif _is_valid_linestring(branch_corridor.get("shape_ref_line")):
+                        surface_axis_metric = branch_corridor.get("shape_ref_line")
+                        surface_axis_source = "step1_branch_override_shape_ref_axis"
                 with stage_timer.scope("t_build_surfaces_total"):
                     surface_hint = _build_traj_surface_hint_for_cluster(
                         support=branch_support,
@@ -2910,6 +2981,8 @@ def _run_patch_core(
                         traj_points_cache=traj_points_cache,
                         traj_xy_index=traj_xy_index,
                         traj_meta_index=traj_meta_index,
+                        preferred_axis_metric=surface_axis_metric,
+                        preferred_axis_source=surface_axis_source,
                     )
                 stage_timer.add("t_build_traj_surface_compute", float(surface_hint.get("timing_ms", 0.0)))
                 key_k = f"{src}_{dst}_k{int(cluster_id)}"
@@ -2948,6 +3021,11 @@ def _run_patch_core(
                     dst_xsec=dst_xsec_gate.geometry_metric,
                     pair_xsec_target_src_metric=branch_corridor.get("_pair_xsec_target_src_metric"),
                     pair_xsec_target_dst_metric=branch_corridor.get("_pair_xsec_target_dst_metric"),
+                    pair_xsec_primary_seed_src_metric=branch_corridor.get("_pair_xsec_primary_seed_src_metric"),
+                    pair_xsec_primary_seed_dst_metric=branch_corridor.get("_pair_xsec_primary_seed_dst_metric"),
+                    pair_xsec_policy_src=branch_corridor.get("pair_xsec_policy_src"),
+                    pair_xsec_policy_dst=branch_corridor.get("pair_xsec_policy_dst"),
+                    step1_branch_override_used=bool(branch_corridor.get("branch_override_used", False)),
                 )
                 _apply_xsec_gate_meta_to_road(road=road_k, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
                 road_k["step1_strategy"] = branch_corridor.get("strategy")
@@ -2962,6 +3040,13 @@ def _run_patch_core(
                 road_k["step1_corridor_zone_source_count"] = branch_corridor.get("corridor_zone_source_count")
                 road_k["step1_corridor_zone_half_width_m"] = branch_corridor.get("corridor_zone_half_width_m")
                 road_k["step1_corridor_shape_ref_inside_ratio"] = branch_corridor.get("corridor_shape_ref_inside_ratio")
+                road_k["step1_pair_target_ref_source"] = branch_corridor.get("pair_target_ref_source")
+                road_k["step1_road_prior_rerank_used"] = bool(branch_corridor.get("road_prior_shape_ref_rerank_used", False))
+                road_k["step1_branch_override_used"] = bool(branch_corridor.get("branch_override_used", False))
+                road_k["step1_branch_override_from_traj_id"] = branch_corridor.get("branch_override_from_traj_id")
+                road_k["step1_branch_override_to_traj_id"] = branch_corridor.get("branch_override_to_traj_id")
+                road_k["step1_pair_xsec_policy_src"] = branch_corridor.get("pair_xsec_policy_src")
+                road_k["step1_pair_xsec_policy_dst"] = branch_corridor.get("pair_xsec_policy_dst")
                 road_k["step1_same_pair_multichain"] = True
                 road_k["step1_same_pair_multichain_count"] = int(same_pair_multi_chain_info.get("chain_count", 0))
                 road_k["same_pair_multi_road_branch_id"] = branch_id
@@ -3030,6 +3115,11 @@ def _run_patch_core(
                     dst_xsec=dst_xsec_gate.geometry_metric,
                     pair_xsec_target_src_metric=step1_corridor.get("_pair_xsec_target_src_metric"),
                     pair_xsec_target_dst_metric=step1_corridor.get("_pair_xsec_target_dst_metric"),
+                    pair_xsec_primary_seed_src_metric=step1_corridor.get("_pair_xsec_primary_seed_src_metric"),
+                    pair_xsec_primary_seed_dst_metric=step1_corridor.get("_pair_xsec_primary_seed_dst_metric"),
+                    pair_xsec_policy_src=step1_corridor.get("pair_xsec_policy_src"),
+                    pair_xsec_policy_dst=step1_corridor.get("pair_xsec_policy_dst"),
+                    step1_branch_override_used=bool(step1_corridor.get("branch_override_used", False)),
                 )
                 _apply_xsec_gate_meta_to_road(road=road_k, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
                 road_k["step1_strategy"] = step1_corridor.get("strategy")
@@ -3044,6 +3134,13 @@ def _run_patch_core(
                 road_k["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
                 road_k["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
                 road_k["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
+                road_k["step1_pair_target_ref_source"] = step1_corridor.get("pair_target_ref_source")
+                road_k["step1_road_prior_rerank_used"] = bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False))
+                road_k["step1_branch_override_used"] = bool(step1_corridor.get("branch_override_used", False))
+                road_k["step1_branch_override_from_traj_id"] = step1_corridor.get("branch_override_from_traj_id")
+                road_k["step1_branch_override_to_traj_id"] = step1_corridor.get("branch_override_to_traj_id")
+                road_k["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
+                road_k["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
                 road_k["pair_support_mode"] = "topology_road_prior_fallback"
                 stage_timer.add("t_build_lane_graph", float(road_k.get("_timing_lb_graph_ms", 0.0)))
                 sp_ms = float(road_k.get("_timing_shortest_path_ms", 0.0))
@@ -3058,6 +3155,16 @@ def _run_patch_core(
                 support_k = _subset_support_by_cluster(support, cluster_id)
                 if support_k is None or support_k.support_event_count <= 0:
                     continue
+                surface_axis_metric = None
+                surface_axis_source = None
+                if bool(step1_corridor.get("branch_override_used", False)):
+                    road_prior_shape_ref_metric = road_prior_pair_shape_ref_map.get((int(src), int(dst)))
+                    if _is_valid_linestring(road_prior_shape_ref_metric):
+                        surface_axis_metric = road_prior_shape_ref_metric
+                        surface_axis_source = "step1_branch_override_road_prior_axis"
+                    elif _is_valid_linestring(step1_corridor.get("shape_ref_line")):
+                        surface_axis_metric = step1_corridor.get("shape_ref_line")
+                        surface_axis_source = "step1_branch_override_shape_ref_axis"
                 with stage_timer.scope("t_build_surfaces_total"):
                     surface_hint = _build_traj_surface_hint_for_cluster(
                         support=support_k,
@@ -3071,6 +3178,8 @@ def _run_patch_core(
                         traj_points_cache=traj_points_cache,
                         traj_xy_index=traj_xy_index,
                         traj_meta_index=traj_meta_index,
+                        preferred_axis_metric=surface_axis_metric,
+                        preferred_axis_source=surface_axis_source,
                     )
                 stage_timer.add("t_build_traj_surface_compute", float(surface_hint.get("timing_ms", 0.0)))
                 key_k = f"{src}_{dst}_k{int(cluster_id)}"
@@ -3143,6 +3252,11 @@ def _run_patch_core(
                     dst_xsec=dst_xsec_gate.geometry_metric,
                     pair_xsec_target_src_metric=step1_corridor.get("_pair_xsec_target_src_metric"),
                     pair_xsec_target_dst_metric=step1_corridor.get("_pair_xsec_target_dst_metric"),
+                    pair_xsec_primary_seed_src_metric=step1_corridor.get("_pair_xsec_primary_seed_src_metric"),
+                    pair_xsec_primary_seed_dst_metric=step1_corridor.get("_pair_xsec_primary_seed_dst_metric"),
+                    pair_xsec_policy_src=step1_corridor.get("pair_xsec_policy_src"),
+                    pair_xsec_policy_dst=step1_corridor.get("pair_xsec_policy_dst"),
+                    step1_branch_override_used=bool(step1_corridor.get("branch_override_used", False)),
                 )
                 _apply_xsec_gate_meta_to_road(road=road_k, src_meta=src_gate_meta, dst_meta=dst_gate_meta)
                 road_k["step1_strategy"] = step1_corridor.get("strategy")
@@ -3157,6 +3271,13 @@ def _run_patch_core(
                 road_k["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
                 road_k["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
                 road_k["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
+                road_k["step1_pair_target_ref_source"] = step1_corridor.get("pair_target_ref_source")
+                road_k["step1_road_prior_rerank_used"] = bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False))
+                road_k["step1_branch_override_used"] = bool(step1_corridor.get("branch_override_used", False))
+                road_k["step1_branch_override_from_traj_id"] = step1_corridor.get("branch_override_from_traj_id")
+                road_k["step1_branch_override_to_traj_id"] = step1_corridor.get("branch_override_to_traj_id")
+                road_k["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
+                road_k["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
                 key_k = f"{src}_{dst}_k{int(cluster_id)}"
                 stage_timer.add("t_build_lane_graph", float(road_k.get("_timing_lb_graph_ms", 0.0)))
                 sp_ms = float(road_k.get("_timing_shortest_path_ms", 0.0))
@@ -3192,6 +3313,13 @@ def _run_patch_core(
             road["step1_corridor_zone_source_count"] = step1_corridor.get("corridor_zone_source_count")
             road["step1_corridor_zone_half_width_m"] = step1_corridor.get("corridor_zone_half_width_m")
             road["step1_corridor_shape_ref_inside_ratio"] = step1_corridor.get("corridor_shape_ref_inside_ratio")
+            road["step1_pair_target_ref_source"] = step1_corridor.get("pair_target_ref_source")
+            road["step1_road_prior_rerank_used"] = bool(step1_corridor.get("road_prior_shape_ref_rerank_used", False))
+            road["step1_branch_override_used"] = bool(step1_corridor.get("branch_override_used", False))
+            road["step1_branch_override_from_traj_id"] = step1_corridor.get("branch_override_from_traj_id")
+            road["step1_branch_override_to_traj_id"] = step1_corridor.get("branch_override_to_traj_id")
+            road["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
+            road["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
             road["hard_anomaly"] = True
             road["hard_reasons"] = [HARD_CENTER_EMPTY]
             road["soft_issue_flags"] = [SOFT_TRAJ_SURFACE_INSUFFICIENT]
@@ -3298,6 +3426,7 @@ def _run_patch_core(
                         dst_xsec=dst_xsec.geometry_metric,
                         gore_zone_metric=gore_zone_metric,
                         params=params,
+                        node_xsec_frame_by_nodeid=node_xsec_frame_by_nodeid,
                     )
                     continue
                 cand["_geometry_metric"] = None
@@ -3320,6 +3449,7 @@ def _run_patch_core(
                     dst_xsec=dst_xsec.geometry_metric,
                     gore_zone_metric=gore_zone_metric,
                     params=params,
+                    node_xsec_frame_by_nodeid=node_xsec_frame_by_nodeid,
                 )
             continue
         if len(viable_candidates) > 1:
@@ -3359,6 +3489,7 @@ def _run_patch_core(
                         dst_xsec=dst_xsec.geometry_metric,
                         gore_zone_metric=gore_zone_metric,
                         params=params,
+                        node_xsec_frame_by_nodeid=node_xsec_frame_by_nodeid,
                     )
                 continue
         selected = ranked_candidates[0]
@@ -3384,6 +3515,7 @@ def _run_patch_core(
             dst_xsec=dst_xsec.geometry_metric,
             gore_zone_metric=gore_zone_metric,
             params=params,
+            node_xsec_frame_by_nodeid=node_xsec_frame_by_nodeid,
         )
 
     overall_pass = True
@@ -4935,6 +5067,172 @@ def _resolve_step1_pair_cross_xsec(
     return xsec_seed
 
 
+def _resolve_step1_pair_target_metric(
+    *,
+    xsec_seed: LineString,
+    pair_xsec_meta: dict[str, Any] | None,
+) -> LineString:
+    if isinstance(pair_xsec_meta, dict):
+        for key in ("xsec_road_selected", "xsec_cross_ref", "xsec_ref"):
+            cand = pair_xsec_meta.get(key)
+            if isinstance(cand, LineString) and (not cand.is_empty) and len(cand.coords) >= 2:
+                return cand
+    return xsec_seed
+
+
+def _resolve_step1_pair_primary_seed_metric(
+    *,
+    xsec_seed: LineString,
+    pair_xsec_meta: dict[str, Any] | None,
+) -> LineString:
+    if not isinstance(pair_xsec_meta, dict):
+        return xsec_seed
+    policy_mode = str(pair_xsec_meta.get("policy_mode") or "").strip().lower()
+    if policy_mode == "role_outward_cut":
+        for key in ("xsec_cross_ref", "xsec_road_selected", "xsec_ref"):
+            cand = pair_xsec_meta.get(key)
+            if isinstance(cand, LineString) and (not cand.is_empty) and len(cand.coords) >= 2:
+                return cand
+        return xsec_seed
+    return xsec_seed
+
+
+def _annotate_step1_road_prior_metrics(
+    *,
+    items: Sequence[dict[str, Any]],
+    prior_line: LineString | None,
+    prior_zone_metric: BaseGeometry | None,
+) -> None:
+    if not _is_valid_linestring(prior_line):
+        return
+    for it in items:
+        seg = it.get("seg")
+        if not isinstance(seg, LineString) or seg.is_empty:
+            continue
+        try:
+            it["road_prior_gap_m"] = float(seg.distance(prior_line))
+        except Exception:
+            it["road_prior_gap_m"] = float("inf")
+        inside_ratio = _line_inside_ratio(seg, prior_zone_metric)
+        it["road_prior_inside_ratio"] = float(inside_ratio) if inside_ratio is not None else None
+
+
+def _annotate_step1_pair_target_metrics(
+    *,
+    items: Sequence[dict[str, Any]],
+    src_target_metric: LineString | None,
+    dst_target_metric: LineString | None,
+    src_policy: str | None,
+    dst_policy: str | None,
+    reach_xsec_m: float,
+) -> None:
+    src_relevant = _is_valid_linestring(src_target_metric) and str(src_policy or "").strip().lower() != "auto"
+    dst_relevant = _is_valid_linestring(dst_target_metric) and str(dst_policy or "").strip().lower() != "auto"
+    for it in items:
+        seg = it.get("seg")
+        if not isinstance(seg, LineString) or seg.is_empty:
+            continue
+        relevant_count = 0
+        hit_count = 0
+        role_dist_sum = 0.0
+        if src_relevant:
+            relevant_count += 1
+            try:
+                src_dist = float(seg.distance(src_target_metric))
+            except Exception:
+                src_dist = float("inf")
+            it["dist_to_pair_target_src_m"] = src_dist
+            if np.isfinite(src_dist):
+                role_dist_sum += float(src_dist)
+                if src_dist <= float(reach_xsec_m):
+                    hit_count += 1
+        else:
+            it["dist_to_pair_target_src_m"] = None
+        if dst_relevant:
+            relevant_count += 1
+            try:
+                dst_dist = float(seg.distance(dst_target_metric))
+            except Exception:
+                dst_dist = float("inf")
+            it["dist_to_pair_target_dst_m"] = dst_dist
+            if np.isfinite(dst_dist):
+                role_dist_sum += float(dst_dist)
+                if dst_dist <= float(reach_xsec_m):
+                    hit_count += 1
+        else:
+            it["dist_to_pair_target_dst_m"] = None
+        it["pair_target_relevant_count"] = int(relevant_count)
+        it["pair_target_hit_count"] = int(hit_count)
+        it["pair_target_role_dist_sum"] = float(role_dist_sum) if relevant_count > 0 else None
+
+
+def _step1_primary_item_sort_key(it: dict[str, Any]) -> tuple[float, ...]:
+    inside_ratio = _to_finite_float(it.get("inside_ratio"), 0.0)
+    reaches = bool(it.get("reaches_other_end", False))
+    violation = bool(it.get("constraint_violation", False))
+    gore_any = bool(it.get("gore_any", False))
+    prior_inside = it.get("road_prior_inside_ratio")
+    prior_gap = it.get("road_prior_gap_m")
+    pair_relevant_count = int(max(0.0, _to_finite_float(it.get("pair_target_relevant_count"), 0.0)))
+    pair_hit_count = int(max(0.0, _to_finite_float(it.get("pair_target_hit_count"), 0.0)))
+    pair_miss_count = float(max(0, pair_relevant_count - pair_hit_count))
+    pair_role_dist = (
+        _to_finite_float(it.get("pair_target_role_dist_sum"), 1e9)
+        if pair_relevant_count > 0
+        else 0.0
+    )
+    d_src = _to_finite_float(it.get("dist_to_src_xsec_m"), 1e9)
+    d_dst = _to_finite_float(it.get("dist_to_dst_xsec_m"), 1e9)
+    d_seed = _to_finite_float(it.get("d_seed"), 1e9)
+    seg_len = _to_finite_float(it.get("length_m"), 0.0)
+    return (
+        0.0 if reaches else 1.0,
+        1.0 - inside_ratio,
+        1.0 if violation else 0.0,
+        1.0 if gore_any else 0.0,
+        (1.0 - _to_finite_float(prior_inside, 0.0)) if prior_inside is not None else 0.0,
+        _to_finite_float(prior_gap, 1e9) if prior_gap is not None else 0.0,
+        pair_miss_count,
+        pair_role_dist,
+        d_src + d_dst,
+        d_seed,
+        -seg_len,
+        float(int(it.get("idx", -1))),
+    )
+
+
+def _step1_seed_baseline_sort_key(it: dict[str, Any]) -> tuple[float, ...]:
+    d_seed = _to_finite_float(it.get("d_seed"), 1e9)
+    d_src = _to_finite_float(it.get("dist_to_src_xsec_m"), 1e9)
+    d_dst = _to_finite_float(it.get("dist_to_dst_xsec_m"), 1e9)
+    seg_len = _to_finite_float(it.get("length_m"), 0.0)
+    return (
+        d_seed,
+        d_src + d_dst,
+        -seg_len,
+        float(int(it.get("idx", -1))),
+    )
+
+
+def _step1_branch_override_used(
+    *,
+    baseline_pick: dict[str, Any] | None,
+    picked: dict[str, Any] | None,
+    prior_line: LineString | None,
+) -> bool:
+    if not _is_valid_linestring(prior_line):
+        return False
+    if not isinstance(baseline_pick, dict) or not isinstance(picked, dict):
+        return False
+    if int(baseline_pick.get("idx", -1)) == int(picked.get("idx", -1)):
+        return False
+    base_gap = _to_finite_float(baseline_pick.get("road_prior_gap_m"), 1e9)
+    pick_gap = _to_finite_float(picked.get("road_prior_gap_m"), 1e9)
+    base_inside = _to_finite_float(baseline_pick.get("road_prior_inside_ratio"), 0.0)
+    pick_inside = _to_finite_float(picked.get("road_prior_inside_ratio"), 0.0)
+    return bool((pick_gap + 0.5 < base_gap) or (pick_inside > base_inside + 0.05))
+
+
 def _pick_step1_primary_item(items: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
     valid = [it for it in items if isinstance(it, dict) and isinstance(it.get("seg"), LineString)]
     if not valid:
@@ -4961,7 +5259,7 @@ def _pick_step1_primary_item(items: Sequence[dict[str, Any]]) -> dict[str, Any] 
             -seg_len,
         )
 
-    ranked = sorted(valid, key=_k)
+    ranked = sorted(valid, key=_step1_primary_item_sort_key)
     return ranked[0]
 
 
@@ -5236,6 +5534,11 @@ def _build_step1_corridor_for_pair(
         "corridor_shape_ref_inside_ratio": None,
         "road_prior_shape_ref_used": False,
         "road_prior_shape_ref_mode": None,
+        "road_prior_shape_ref_rerank_used": False,
+        "pair_target_ref_source": None,
+        "branch_override_used": False,
+        "branch_override_from_traj_id": None,
+        "branch_override_to_traj_id": None,
     }
 
     if str(dst_type) == "diverge":
@@ -5314,6 +5617,14 @@ def _build_step1_corridor_for_pair(
             except Exception:
                 pass
 
+    road_prior_zone_metric: BaseGeometry | None = None
+    if isinstance(prior_line, LineString) and not prior_line.is_empty:
+        road_prior_zone_metric, _road_prior_zone_source_count, _road_prior_zone_area = _build_buffered_corridor_zone(
+            lines=[prior_line],
+            half_width_m=float(out["corridor_zone_half_width_m"]),
+            clip_zone=passable_zone,
+        )
+
     inside_min = float(max(0.0, min(1.0, params.get("STEP1_TRAJ_IN_DRIVEZONE_MIN", 0.85))))
     inside_fallback_min = float(
         max(0.0, min(1.0, params.get("STEP1_TRAJ_IN_DRIVEZONE_FALLBACK_MIN", 0.60)))
@@ -5365,6 +5676,11 @@ def _build_step1_corridor_for_pair(
         )
 
     ranked_all.sort(key=lambda it: (float(it["d_seed"]), -float(it["length_m"]), int(it["idx"])))
+    _annotate_step1_road_prior_metrics(
+        items=ranked_all,
+        prior_line=prior_line,
+        prior_zone_metric=road_prior_zone_metric,
+    )
     ranked = list(ranked_all)
     if passable_zone is not None and (not passable_zone.is_empty):
         strict = [it for it in ranked if float(it.get("inside_ratio", 0.0)) >= inside_min]
@@ -5406,19 +5722,8 @@ def _build_step1_corridor_for_pair(
     ranked_reach = [it for it in ranked_used if bool(it.get("reaches_other_end", False))]
     ranked_main = ranked_reach if ranked_reach else ranked_used
     topk_pick = int(max(1, int(params.get("STEP1_PRIMARY_PICK_TOPK", 8))))
-    ranked_main = sorted(
-        ranked_main,
-        key=lambda it: (
-            0.0 if bool(it.get("reaches_other_end", False)) else 1.0,
-            1.0 - _to_finite_float(it.get("inside_ratio"), 0.0),
-            1.0 if bool(it.get("constraint_violation", False)) else 0.0,
-            1.0 if bool(it.get("gore_any", False)) else 0.0,
-            _to_finite_float(it.get("dist_to_src_xsec_m"), 1e9) + _to_finite_float(it.get("dist_to_dst_xsec_m"), 1e9),
-            _to_finite_float(it.get("d_seed"), 1e9),
-            -_to_finite_float(it.get("length_m"), 0.0),
-            int(it.get("idx", -1)),
-        ),
-    )
+    baseline_pick = min(ranked_main[:topk_pick], key=_step1_seed_baseline_sort_key) if ranked_main else None
+    ranked_main = sorted(ranked_main, key=_step1_primary_item_sort_key)
     topk_debug = ranked_main[:topk_pick]
     if not topk_debug:
         if isinstance(prior_line, LineString) and not prior_line.is_empty:
@@ -5481,12 +5786,14 @@ def _build_step1_corridor_for_pair(
     step1_pair_xsec_dst: dict[str, Any] | None = None
     src_xsec_cross = src_xsec
     dst_xsec_cross = dst_xsec
-    if _is_valid_linestring(provisional_shape_ref):
+    pair_target_ref_line = prior_line if _is_valid_linestring(prior_line) else provisional_shape_ref
+    pair_target_ref_source = "road_prior_shape_ref" if _is_valid_linestring(prior_line) else "provisional_shape_ref"
+    if _is_valid_linestring(pair_target_ref_line):
         step1_pair_xsec_src = _build_step1_pair_endpoint_xsec(
             xsec_seed=src_xsec,
             endpoint_tag="src",
             node_type=str(src_type),
-            shape_ref_line=provisional_shape_ref,
+            shape_ref_line=pair_target_ref_line,
             support=support,
             drivezone_zone_metric=drivezone_zone_metric,
             gore_zone_metric=gore_zone_metric,
@@ -5496,7 +5803,7 @@ def _build_step1_corridor_for_pair(
             xsec_seed=dst_xsec,
             endpoint_tag="dst",
             node_type=str(dst_type),
-            shape_ref_line=provisional_shape_ref,
+            shape_ref_line=pair_target_ref_line,
             support=support,
             drivezone_zone_metric=drivezone_zone_metric,
             gore_zone_metric=gore_zone_metric,
@@ -5510,6 +5817,20 @@ def _build_step1_corridor_for_pair(
             xsec_seed=dst_xsec,
             pair_xsec_meta=step1_pair_xsec_dst,
         )
+        _annotate_step1_pair_target_metrics(
+            items=ranked_all,
+            src_target_metric=_resolve_step1_pair_target_metric(
+                xsec_seed=src_xsec_cross,
+                pair_xsec_meta=step1_pair_xsec_src,
+            ),
+            dst_target_metric=_resolve_step1_pair_target_metric(
+                xsec_seed=dst_xsec_cross,
+                pair_xsec_meta=step1_pair_xsec_dst,
+            ),
+            src_policy=step1_pair_xsec_src.get("policy_mode") if isinstance(step1_pair_xsec_src, dict) else None,
+            dst_policy=step1_pair_xsec_dst.get("policy_mode") if isinstance(step1_pair_xsec_dst, dict) else None,
+            reach_xsec_m=reach_xsec_m,
+        )
         _apply_step1_xsec_metrics(
             items=ranked_all,
             src_xsec=src_xsec_cross,
@@ -5518,20 +5839,10 @@ def _build_step1_corridor_for_pair(
         )
         ranked_reach = [it for it in ranked_used if bool(it.get("reaches_other_end", False))]
         ranked_main = ranked_reach if ranked_reach else ranked_used
-        ranked_main = sorted(
-            ranked_main,
-            key=lambda it: (
-                0.0 if bool(it.get("reaches_other_end", False)) else 1.0,
-                1.0 - _to_finite_float(it.get("inside_ratio"), 0.0),
-                1.0 if bool(it.get("constraint_violation", False)) else 0.0,
-                1.0 if bool(it.get("gore_any", False)) else 0.0,
-                _to_finite_float(it.get("dist_to_src_xsec_m"), 1e9) + _to_finite_float(it.get("dist_to_dst_xsec_m"), 1e9),
-                _to_finite_float(it.get("d_seed"), 1e9),
-                -_to_finite_float(it.get("length_m"), 0.0),
-                int(it.get("idx", -1)),
-            ),
-        )
+        ranked_main = sorted(ranked_main, key=_step1_primary_item_sort_key)
         topk_debug = ranked_main[:topk_pick] if ranked_main else topk_debug
+        out["pair_target_ref_source"] = str(pair_target_ref_source)
+        out["road_prior_shape_ref_rerank_used"] = bool(pair_target_ref_source == "road_prior_shape_ref")
 
     weights = np.asarray([max(1.0, float(it.get("length_m", 0.0))) for it in topk_debug], dtype=np.float64)
     if weights.size > 0 and float(np.sum(weights)) > 1e-6:
@@ -5562,6 +5873,13 @@ def _build_step1_corridor_for_pair(
                 "drivezone_fallback_used": bool(out.get("drivezone_fallback_used", False)),
                 "dist_to_src_xsec_m": float(it.get("dist_to_src_xsec_m", float("inf"))),
                 "dist_to_dst_xsec_m": float(it.get("dist_to_dst_xsec_m", float("inf"))),
+                "road_prior_inside_ratio": it.get("road_prior_inside_ratio"),
+                "road_prior_gap_m": it.get("road_prior_gap_m"),
+                "dist_to_pair_target_src_m": it.get("dist_to_pair_target_src_m"),
+                "dist_to_pair_target_dst_m": it.get("dist_to_pair_target_dst_m"),
+                "pair_target_relevant_count": int(it.get("pair_target_relevant_count", 0)),
+                "pair_target_hit_count": int(it.get("pair_target_hit_count", 0)),
+                "pair_target_role_dist_sum": it.get("pair_target_role_dist_sum"),
                 "selected": bool(int(it.get("idx", -1)) == int(picked.get("idx", -2))),
                 "geometry": line,
             }
@@ -5580,6 +5898,13 @@ def _build_step1_corridor_for_pair(
             "inside_ratio": float(it.get("inside_ratio", 0.0)),
             "dist_to_src_xsec_m": float(it.get("dist_to_src_xsec_m", float("inf"))),
             "dist_to_dst_xsec_m": float(it.get("dist_to_dst_xsec_m", float("inf"))),
+            "road_prior_inside_ratio": it.get("road_prior_inside_ratio"),
+            "road_prior_gap_m": it.get("road_prior_gap_m"),
+            "dist_to_pair_target_src_m": it.get("dist_to_pair_target_src_m"),
+            "dist_to_pair_target_dst_m": it.get("dist_to_pair_target_dst_m"),
+            "pair_target_relevant_count": int(it.get("pair_target_relevant_count", 0)),
+            "pair_target_hit_count": int(it.get("pair_target_hit_count", 0)),
+            "pair_target_role_dist_sum": it.get("pair_target_role_dist_sum"),
             "reaches_other_end": bool(it.get("reaches_other_end", False)),
             "selected": bool(int(it.get("idx", -1)) == int(picked.get("idx", -2))),
         }
@@ -5599,6 +5924,13 @@ def _build_step1_corridor_for_pair(
             "corridor_id": corridor_id_by_idx.get(int(it["idx"])),
             "dist_to_src_xsec_m": float(it.get("dist_to_src_xsec_m", float("inf"))),
             "dist_to_dst_xsec_m": float(it.get("dist_to_dst_xsec_m", float("inf"))),
+            "road_prior_inside_ratio": it.get("road_prior_inside_ratio"),
+            "road_prior_gap_m": it.get("road_prior_gap_m"),
+            "dist_to_pair_target_src_m": it.get("dist_to_pair_target_src_m"),
+            "dist_to_pair_target_dst_m": it.get("dist_to_pair_target_dst_m"),
+            "pair_target_relevant_count": int(it.get("pair_target_relevant_count", 0)),
+            "pair_target_hit_count": int(it.get("pair_target_hit_count", 0)),
+            "pair_target_role_dist_sum": it.get("pair_target_role_dist_sum"),
             "reaches_other_end": bool(it.get("reaches_other_end", False)),
             "selected": False,
         }
@@ -5685,6 +6017,14 @@ def _build_step1_corridor_for_pair(
         out["_pair_xsec_cross_ref_dst_metric"] = dst_xsec_cross
         out["_pair_xsec_target_src_metric"] = step1_pair_xsec_src.get("xsec_road_selected")
         out["_pair_xsec_target_dst_metric"] = step1_pair_xsec_dst.get("xsec_road_selected")
+        out["_pair_xsec_primary_seed_src_metric"] = _resolve_step1_pair_primary_seed_metric(
+            xsec_seed=src_xsec,
+            pair_xsec_meta=step1_pair_xsec_src,
+        )
+        out["_pair_xsec_primary_seed_dst_metric"] = _resolve_step1_pair_primary_seed_metric(
+            xsec_seed=dst_xsec,
+            pair_xsec_meta=step1_pair_xsec_dst,
+        )
     zone_half_w = float(max(1.0, params.get("CORRIDOR_HALF_WIDTH_M", 15.0)))
     zone_topk = int(max(1, int(params.get("STEP1_CORRIDOR_ZONE_TOPK", 3))))
     zone_lines: list[LineString] = []
@@ -5714,6 +6054,14 @@ def _build_step1_corridor_for_pair(
     for item in out["traj_gore_flags"]:
         if int(item.get("idx", -1)) == int(picked.get("idx", -2)):
             item["selected"] = True
+    branch_override_used = _step1_branch_override_used(
+        baseline_pick=baseline_pick,
+        picked=picked,
+        prior_line=prior_line,
+    )
+    out["branch_override_used"] = bool(branch_override_used)
+    out["branch_override_from_traj_id"] = baseline_pick.get("traj_id") if isinstance(baseline_pick, dict) else None
+    out["branch_override_to_traj_id"] = picked.get("traj_id")
     src_fallback = picked.get("src_cp") if isinstance(picked.get("src_cp"), Point) else out.get("cross_point_src")
     dst_fallback = picked.get("dst_cp") if isinstance(picked.get("dst_cp"), Point) else out.get("cross_point_dst")
     out["cross_point_src"] = _line_xsec_contact_point(
@@ -5860,6 +6208,1005 @@ def _fallback_bind_endpoints_to_xsec(
     src_after_pt = Point(float(dedup[0][0]), float(dedup[0][1]))
     dst_after_pt = Point(float(dedup[-1][0]), float(dedup[-1][1]))
     return out_line, src_after_pt, dst_after_pt, src_before, dst_before
+
+
+def _line_endpoint_window(
+    *,
+    line: LineString,
+    endpoint_tag: str,
+    window_m: float,
+) -> LineString | None:
+    if not _is_valid_linestring(line):
+        return None
+    total_len = float(line.length)
+    if total_len <= 1e-6:
+        return None
+    use_win = float(max(1.0, min(total_len, window_m)))
+    if str(endpoint_tag).lower() == "src":
+        s0, s1 = 0.0, use_win
+    else:
+        s0, s1 = max(0.0, total_len - use_win), total_len
+    try:
+        part = substring(line, s0, s1)
+    except Exception:
+        return None
+    return part if _is_valid_linestring(part) else None
+
+
+def _resolve_primary_geometry_pair_target_xsec(
+    *,
+    endpoint_tag: str,
+    node_type: str,
+    xsec_seed: LineString,
+    pair_target_metric: LineString | None,
+    pair_primary_seed_metric: LineString | None = None,
+    pair_policy_mode: str | None = None,
+    step1_branch_override_used: bool = False,
+    support_mode: str | None = None,
+    same_pair_multichain: bool = False,
+) -> tuple[LineString, str | None]:
+    if not _is_valid_linestring(xsec_seed) or not _is_valid_linestring(pair_target_metric):
+        pair_target_metric = None
+    primary_seed_metric = pair_primary_seed_metric if _is_valid_linestring(pair_primary_seed_metric) else None
+    if pair_target_metric is None and primary_seed_metric is None:
+        return xsec_seed, None
+    try:
+        compare_metric = pair_target_metric if pair_target_metric is not None else primary_seed_metric
+        same_len = abs(float(compare_metric.length) - float(xsec_seed.length)) <= 1e-6
+        same_dist = float(compare_metric.distance(xsec_seed)) <= 1e-6
+        if same_len and same_dist:
+            return xsec_seed, None
+    except Exception:
+        pass
+    tag = str(endpoint_tag or "").strip().lower()
+    ntype = str(node_type or "").strip().lower()
+    support_mode_norm = str(support_mode or "").strip().lower()
+    policy_mode_norm = str(pair_policy_mode or "").strip().lower()
+    primary_seed_distinct = False
+    if primary_seed_metric is not None:
+        try:
+            primary_seed_distinct = not (
+                abs(float(primary_seed_metric.length) - float(xsec_seed.length)) <= 1e-6
+                and float(primary_seed_metric.distance(xsec_seed)) <= 1e-6
+            )
+        except Exception:
+            primary_seed_distinct = True
+    if tag == "src" and ntype == "merge" and pair_target_metric is not None:
+        return pair_target_metric, "pair_target_primary_merge_role_seed"
+    if tag == "dst" and ntype == "diverge" and pair_target_metric is not None:
+        return pair_target_metric, "pair_target_primary_diverge_role_seed"
+    if (
+        primary_seed_metric is not None
+        and primary_seed_distinct
+        and policy_mode_norm == "role_outward_cut"
+        and bool(step1_branch_override_used)
+        and support_mode_norm == "traj_support"
+        and not bool(same_pair_multichain)
+    ):
+        return primary_seed_metric, "pair_target_primary_outward_anchor_seed"
+    return xsec_seed, None
+
+
+def _resolve_branch_override_fallback_bind_xsec(
+    *,
+    xsec_seed: LineString,
+    pair_target_metric: LineString | None,
+    pair_primary_seed_metric: LineString | None,
+    pair_policy_mode: str | None,
+    step1_branch_override_used: bool,
+    support_mode: str | None,
+    same_pair_multichain: bool,
+) -> tuple[LineString, str | None]:
+    support_mode_norm = str(support_mode or "").strip().lower()
+    policy_mode_norm = str(pair_policy_mode or "").strip().lower()
+    if (
+        policy_mode_norm != "role_outward_cut"
+        or not bool(step1_branch_override_used)
+        or support_mode_norm != "traj_support"
+        or bool(same_pair_multichain)
+    ):
+        return xsec_seed, None
+    if _is_valid_linestring(pair_target_metric):
+        return pair_target_metric, "pair_target_step1_branch_override_outward_fallback"
+    if _is_valid_linestring(pair_primary_seed_metric):
+        try:
+            same_len = abs(float(pair_primary_seed_metric.length) - float(xsec_seed.length)) <= 1e-6
+            same_dist = float(pair_primary_seed_metric.distance(xsec_seed)) <= 1e-6
+            if same_len and same_dist:
+                return xsec_seed, None
+        except Exception:
+            pass
+        return pair_primary_seed_metric, "pair_primary_seed_step1_branch_override_outward_fallback"
+    return xsec_seed, None
+
+
+def _build_endpoint_line_to_target_region_meta(
+    *,
+    road: dict[str, Any],
+    road_line: LineString,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    window_m: float,
+) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
+    if not _is_valid_linestring(road_line):
+        return meta
+    use_window_m = float(max(4.0, window_m))
+    for endpoint_tag, seed_xsec in (("src", src_xsec), ("dst", dst_xsec)):
+        target_geom = None
+        target_source = None
+        for suffix, source in (
+            ("_xsec_target_selected_", "xsec_target_selected"),
+            ("_xsec_road_selected_", "xsec_road_selected"),
+            ("_xsec_road_all_", "xsec_road_all"),
+        ):
+            cand = road.get(f"{suffix}{endpoint_tag}_metric")
+            if isinstance(cand, BaseGeometry) and not cand.is_empty:
+                target_geom = cand
+                target_source = source
+                break
+        if target_geom is None and _is_valid_linestring(seed_xsec):
+            target_geom = seed_xsec
+            target_source = "seed_xsec"
+        meta[f"endpoint_line_to_target_region_source_{endpoint_tag}"] = target_source
+        if target_geom is None or target_geom.is_empty:
+            continue
+        endpoint_window = _line_endpoint_window(
+            line=road_line,
+            endpoint_tag=endpoint_tag,
+            window_m=use_window_m,
+        )
+        if not _is_valid_linestring(endpoint_window):
+            continue
+        meta[f"endpoint_line_to_target_region_window_{endpoint_tag}_m"] = float(endpoint_window.length)
+        try:
+            meta[f"endpoint_line_to_target_region_target_len_{endpoint_tag}_m"] = float(target_geom.length)
+        except Exception:
+            meta[f"endpoint_line_to_target_region_target_len_{endpoint_tag}_m"] = None
+        try:
+            meta[f"endpoint_line_to_target_region_dist_{endpoint_tag}_m"] = float(endpoint_window.distance(target_geom))
+        except Exception:
+            meta[f"endpoint_line_to_target_region_dist_{endpoint_tag}_m"] = None
+        try:
+            meta[f"endpoint_line_to_target_region_intersects_{endpoint_tag}"] = bool(
+                endpoint_window.intersects(target_geom.buffer(1e-3))
+            )
+        except Exception:
+            meta[f"endpoint_line_to_target_region_intersects_{endpoint_tag}"] = None
+        monotonic = None
+        coords = list(endpoint_window.coords)
+        if endpoint_tag == "src":
+            coords = list(reversed(coords))
+        if len(coords) >= 2:
+            try:
+                dists = [float(Point(float(x), float(y)).distance(target_geom)) for x, y in coords]
+                monotonic = all(float(dists[i + 1]) <= float(dists[i]) + 0.25 for i in range(len(dists) - 1))
+            except Exception:
+                monotonic = None
+        meta[f"endpoint_line_to_target_region_monotonic_{endpoint_tag}"] = monotonic
+        if meta.get(f"endpoint_line_to_target_region_intersects_{endpoint_tag}") is not None and monotonic is not None:
+            meta[f"endpoint_line_to_target_region_closure_ok_{endpoint_tag}"] = bool(
+                meta[f"endpoint_line_to_target_region_intersects_{endpoint_tag}"] and monotonic
+            )
+    return meta
+
+
+def _line_endpoint_trend(
+    *,
+    line: LineString,
+    endpoint_tag: str,
+) -> tuple[float, float]:
+    coords = list(line.coords)
+    if len(coords) < 2:
+        return (1.0, 0.0)
+    if str(endpoint_tag).lower() == "src":
+        p0, p1 = coords[0], coords[min(1, len(coords) - 1)]
+    else:
+        p0, p1 = coords[max(0, len(coords) - 2)], coords[-1]
+    vx = float(p1[0]) - float(p0[0])
+    vy = float(p1[1]) - float(p0[1])
+    norm = float(math.hypot(vx, vy))
+    if norm <= 1e-9:
+        return (1.0, 0.0)
+    return (vx / norm, vy / norm)
+
+
+def _line_tangent_at_station(
+    *,
+    line: LineString,
+    station_m: float,
+    endpoint_tag: str,
+) -> tuple[float, float] | None:
+    if not _is_valid_linestring(line):
+        return None
+    total_len = float(line.length)
+    if total_len <= 1e-6:
+        return None
+    s = float(max(0.0, min(total_len, station_m)))
+    ds = float(min(8.0, max(1.0, 0.1 * total_len)))
+    if str(endpoint_tag).lower() == "src":
+        s0, s1 = s, min(total_len, s + ds)
+        if s1 - s0 <= 1e-6:
+            s0 = max(0.0, s - ds)
+    else:
+        s0, s1 = max(0.0, s - ds), s
+        if s1 - s0 <= 1e-6:
+            s1 = min(total_len, s + ds)
+    try:
+        p0 = line.interpolate(float(s0))
+        p1 = line.interpolate(float(s1))
+    except Exception:
+        return None
+    p0_xy = point_xy_safe(p0, context="endpoint_rebuild_tan_p0")
+    p1_xy = point_xy_safe(p1, context="endpoint_rebuild_tan_p1")
+    if p0_xy is None or p1_xy is None:
+        return None
+    vx = float(p1_xy[0]) - float(p0_xy[0])
+    vy = float(p1_xy[1]) - float(p0_xy[1])
+    norm = float(math.hypot(vx, vy))
+    if norm <= 1e-9:
+        return None
+    return (vx / norm, vy / norm)
+
+
+def _align_tangent_to_reference(
+    tangent_xy: tuple[float, float] | None,
+    ref_xy: tuple[float, float],
+) -> tuple[float, float] | None:
+    if tangent_xy is None:
+        return None
+    dot = float(tangent_xy[0] * ref_xy[0] + tangent_xy[1] * ref_xy[1])
+    if dot < 0.0:
+        return (-float(tangent_xy[0]), -float(tangent_xy[1]))
+    return (float(tangent_xy[0]), float(tangent_xy[1]))
+
+
+def _blend_tangents(
+    primary_xy: tuple[float, float],
+    secondary_xy: tuple[float, float] | None,
+) -> tuple[float, float]:
+    if secondary_xy is None:
+        return (float(primary_xy[0]), float(primary_xy[1]))
+    vx = 0.7 * float(primary_xy[0]) + 0.3 * float(secondary_xy[0])
+    vy = 0.7 * float(primary_xy[1]) + 0.3 * float(secondary_xy[1])
+    norm = float(math.hypot(vx, vy))
+    if norm <= 1e-9:
+        return (float(primary_xy[0]), float(primary_xy[1]))
+    return (vx / norm, vy / norm)
+
+
+def _sample_reference_tangent_near_point(
+    *,
+    target_pt: Point,
+    endpoint_tag: str,
+    support: PairSupport | None,
+    shape_ref_line: LineString | None,
+    lane_boundaries_metric: Sequence[LineString] | None,
+    ref_xy: tuple[float, float],
+) -> tuple[tuple[float, float] | None, str | None]:
+    best_tan: tuple[float, float] | None = None
+    best_mode: str | None = None
+    best_dist = float("inf")
+    if support is not None:
+        for seg in support.traj_segments:
+            if not _is_valid_linestring(seg):
+                continue
+            try:
+                dist = float(seg.distance(target_pt))
+                s = float(seg.project(target_pt))
+            except Exception:
+                continue
+            tan = _line_tangent_at_station(line=seg, station_m=s, endpoint_tag=endpoint_tag)
+            tan = _align_tangent_to_reference(tan, ref_xy)
+            if tan is None:
+                continue
+            if dist < best_dist:
+                best_dist = dist
+                best_tan = tan
+                best_mode = "traj"
+    if best_tan is not None and best_dist <= 25.0:
+        return best_tan, best_mode
+    if lane_boundaries_metric:
+        for lb in lane_boundaries_metric:
+            if not _is_valid_linestring(lb):
+                continue
+            try:
+                dist = float(lb.distance(target_pt))
+                s = float(lb.project(target_pt))
+            except Exception:
+                continue
+            tan = _line_tangent_at_station(line=lb, station_m=s, endpoint_tag=endpoint_tag)
+            tan = _align_tangent_to_reference(tan, ref_xy)
+            if tan is None:
+                continue
+            if dist < best_dist:
+                best_dist = dist
+                best_tan = tan
+                best_mode = "lane_boundary"
+    if best_tan is not None and best_dist <= 20.0:
+        return best_tan, best_mode
+    if _is_valid_linestring(shape_ref_line):
+        try:
+            s = float(shape_ref_line.project(target_pt))
+        except Exception:
+            s = 0.0
+        tan = _line_tangent_at_station(line=shape_ref_line, station_m=s, endpoint_tag=endpoint_tag)
+        tan = _align_tangent_to_reference(tan, ref_xy)
+        if tan is not None:
+            return tan, "shape_ref"
+    return None, None
+
+
+def _build_cubic_connector(
+    *,
+    start_xy: tuple[float, float],
+    end_xy: tuple[float, float],
+    start_tangent_xy: tuple[float, float],
+    end_tangent_xy: tuple[float, float],
+    trim_m: float,
+    step_m: float,
+) -> list[tuple[float, float]]:
+    p0 = np.asarray([float(start_xy[0]), float(start_xy[1])], dtype=np.float64)
+    p3 = np.asarray([float(end_xy[0]), float(end_xy[1])], dtype=np.float64)
+    dist = float(np.linalg.norm(p3 - p0))
+    if dist <= 1e-6:
+        return [(float(p0[0]), float(p0[1])), (float(p3[0]), float(p3[1]))]
+    h = float(min(max(2.0, 0.35 * dist), max(4.0, trim_m)))
+    t0 = np.asarray([float(start_tangent_xy[0]), float(start_tangent_xy[1])], dtype=np.float64)
+    t1 = np.asarray([float(end_tangent_xy[0]), float(end_tangent_xy[1])], dtype=np.float64)
+    p1 = p0 + h * t0
+    p2 = p3 - h * t1
+    n_seg = int(max(6, min(24, math.ceil(dist / max(0.5, step_m)))))
+    coords: list[tuple[float, float]] = []
+    for i in range(n_seg + 1):
+        t = float(i) / float(max(1, n_seg))
+        omt = 1.0 - t
+        pt = (
+            (omt**3) * p0
+            + 3.0 * (omt**2) * t * p1
+            + 3.0 * omt * (t**2) * p2
+            + (t**3) * p3
+        )
+        coords.append((float(pt[0]), float(pt[1])))
+    return coords
+
+
+def _collect_endpoint_post_anchor_reference_lines(
+    *,
+    endpoint_pt: Point,
+    endpoint_window: LineString | None,
+    xsec_geom: BaseGeometry | None,
+    support: PairSupport | None,
+    shape_ref_line: LineString | None,
+    lane_boundaries_metric: Sequence[LineString] | None,
+    buffer_m: float,
+) -> list[tuple[LineString, str, float]]:
+    refs: list[tuple[LineString, str, float]] = []
+    if support is not None:
+        for seg in support.traj_segments:
+            if _is_valid_linestring(seg):
+                refs.append((seg, "traj", 1.0))
+    if _is_valid_linestring(shape_ref_line):
+        refs.append((shape_ref_line, "shape_ref", 0.8))
+    if not lane_boundaries_metric:
+        return refs
+    search_geom: BaseGeometry | None = None
+    try:
+        search_geoms: list[BaseGeometry] = [endpoint_pt.buffer(float(max(2.0, buffer_m * 1.5)))]
+        if endpoint_window is not None:
+            search_geoms.append(endpoint_window.buffer(float(max(2.0, buffer_m * 1.5)), cap_style=2))
+        if xsec_geom is not None and not xsec_geom.is_empty:
+            search_geoms.append(xsec_geom.buffer(float(max(1.0, buffer_m)), cap_style=2))
+        search_geom = unary_union(search_geoms)
+    except Exception:
+        search_geom = None
+    lb_ranked: list[tuple[float, LineString]] = []
+    for lb in lane_boundaries_metric:
+        if not _is_valid_linestring(lb):
+            continue
+        try:
+            dist = float(lb.distance(search_geom if search_geom is not None else endpoint_pt))
+        except Exception:
+            continue
+        if search_geom is not None and dist > float(max(6.0, buffer_m * 3.0)):
+            continue
+        lb_ranked.append((dist, lb))
+    lb_ranked.sort(key=lambda item: item[0])
+    for _, lb in lb_ranked[:4]:
+        refs.append((lb, "lane_boundary", 0.9))
+    return refs
+
+
+def _select_endpoint_post_anchor_target(
+    *,
+    road_line: LineString,
+    endpoint_tag: str,
+    xsec_geom: BaseGeometry | None,
+    support: PairSupport | None,
+    shape_ref_line: LineString | None,
+    lane_boundaries_metric: Sequence[LineString] | None,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+    window_m: float,
+    buffer_m: float,
+) -> tuple[Point | None, BaseGeometry | None, dict[str, Any]]:
+    meta: dict[str, Any] = {}
+    if not _is_valid_linestring(road_line):
+        return None, None, meta
+    if xsec_geom is None or xsec_geom.is_empty:
+        return None, None, meta
+    endpoint_tag_norm = str(endpoint_tag).lower()
+    if endpoint_tag_norm not in {"src", "dst"}:
+        return None, None, meta
+    endpoint_pt = Point(road_line.coords[0] if endpoint_tag_norm == "src" else road_line.coords[-1])
+    target_geom: BaseGeometry | None = xsec_geom
+    if gore_zone_metric is not None and (not gore_zone_metric.is_empty):
+        try:
+            diff = target_geom.difference(gore_zone_metric)
+            if diff is not None and not diff.is_empty:
+                target_geom = diff
+        except Exception:
+            pass
+    if drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty):
+        try:
+            inter = target_geom.intersection(drivezone_zone_metric)
+            if inter is not None and not inter.is_empty:
+                target_geom = inter
+        except Exception:
+            pass
+    if target_geom is None or target_geom.is_empty:
+        return None, None, meta
+
+    candidate_parts: list[LineString] = []
+    endpoint_window = _line_endpoint_window(line=road_line, endpoint_tag=endpoint_tag_norm, window_m=window_m)
+    if endpoint_window is not None:
+        try:
+            local_inter = target_geom.intersection(endpoint_window.buffer(float(max(1.0, buffer_m)), cap_style=2))
+        except Exception:
+            local_inter = None
+        candidate_parts = _iter_line_parts(local_inter)
+    if not candidate_parts:
+        try:
+            point_inter = target_geom.intersection(endpoint_pt.buffer(float(max(1.0, buffer_m * 1.5))))
+        except Exception:
+            point_inter = None
+        candidate_parts = _iter_line_parts(point_inter)
+    if not candidate_parts:
+        candidate_parts = _iter_line_parts(target_geom)
+    else:
+        # Keep the full target xsec as a fallback candidate. Local window clipping can
+        # truncate one side of a merge/diverge slot and bias the target back toward an
+        # already-shifted endpoint.
+        for full_part in _iter_line_parts(target_geom):
+            if not any(
+                _is_valid_linestring(existing)
+                and (
+                    existing.equals(full_part)
+                    or (
+                        abs(float(existing.length) - float(full_part.length)) <= 1e-6
+                        and float(existing.distance(full_part)) <= 1e-6
+                    )
+                )
+                for existing in candidate_parts
+            ):
+                candidate_parts.append(full_part)
+    if not candidate_parts:
+        return None, None, meta
+
+    reference_lines = _collect_endpoint_post_anchor_reference_lines(
+        endpoint_pt=endpoint_pt,
+        endpoint_window=endpoint_window,
+        xsec_geom=target_geom,
+        support=support,
+        shape_ref_line=shape_ref_line,
+        lane_boundaries_metric=lane_boundaries_metric,
+        buffer_m=buffer_m,
+    )
+    best_target: Point | None = None
+    best_region: BaseGeometry | None = None
+    best_score: tuple[float, float, float, float] | None = None
+    best_meta: dict[str, Any] = {}
+    for part in candidate_parts:
+        part_len = float(part.length)
+        if part_len <= 1e-6:
+            continue
+        try:
+            part_mid = part.interpolate(0.5, normalized=True)
+        except Exception:
+            continue
+        mid_xy = point_xy_safe(part_mid, context="endpoint_post_anchor_mid")
+        if mid_xy is None:
+            continue
+        part_ref_dist = float("inf")
+        station_refs: list[tuple[float, float, float, str]] = []
+        slot_meta: dict[str, Any] = {}
+        for ref_line, ref_mode, ref_weight in reference_lines:
+            if not _is_valid_linestring(ref_line):
+                continue
+            try:
+                ref_dist = float(part.distance(ref_line))
+            except Exception:
+                continue
+            try:
+                near_on_part, _ = nearest_points(part, ref_line)
+                station_m = float(part.project(near_on_part))
+            except Exception:
+                continue
+            part_ref_dist = min(part_ref_dist, ref_dist / max(0.2, ref_weight))
+            station_refs.append((station_m, ref_weight, ref_dist, ref_mode))
+        if station_refs:
+            weight_sum = float(sum(max(0.2, weight) for _, weight, _, _ in station_refs))
+            station_mid = float(
+                sum(station * max(0.2, weight) for station, weight, _, _ in station_refs)
+                / max(weight_sum, 1e-6)
+            )
+            close_cut = min(
+                float(max(2.0, buffer_m * 3.0)),
+                float(min((ref_dist for _, _, ref_dist, _ in station_refs), default=0.0) + max(2.0, buffer_m)),
+            )
+            close_station_refs = [item for item in station_refs if item[2] <= close_cut]
+            if not close_station_refs:
+                close_station_refs = list(station_refs)
+            close_refs = [station for station, _, _, _ in close_station_refs]
+            station_lo = float(min(close_refs))
+            station_hi = float(max(close_refs))
+            span_m = float(max(max(1.0, buffer_m * 0.5), station_hi - station_lo))
+            span_m = float(min(max(2.0, buffer_m * 2.0), max(span_m, 0.25 * part_len)))
+            station_mid = float(max(0.0, min(part_len, station_mid)))
+            lb_close_stations = sorted(
+                float(station)
+                for station, _, _, ref_mode in close_station_refs
+                if str(ref_mode).strip().lower() == "lane_boundary"
+            )
+            bracket_tol = float(max(0.5, buffer_m * 0.25))
+            lower_lb = max(
+                (station for station in lb_close_stations if station <= station_mid + bracket_tol),
+                default=None,
+            )
+            upper_lb = min(
+                (station for station in lb_close_stations if station >= station_mid - bracket_tol),
+                default=None,
+            )
+            if lower_lb is not None and upper_lb is not None and float(upper_lb) > float(lower_lb):
+                bracket_span = float(upper_lb - lower_lb)
+                bracket_span_min = float(max(1.0, buffer_m * 0.5))
+                bracket_span_max = float(min(max(12.0, buffer_m * 5.0), max(2.0, 0.85 * part_len)))
+                if bracket_span_min <= bracket_span <= bracket_span_max:
+                    # When nearby lane boundaries bracket the reference-biased target,
+                    # recenter inside that bounded xsec interval instead of following
+                    # an already-shifted support/shape_ref line.
+                    station_mid = float(0.5 * (lower_lb + upper_lb))
+                    span_m = float(
+                        min(
+                            max(2.0, buffer_m * 2.0),
+                            max(bracket_span, min(max(1.0, buffer_m * 0.5), 0.25 * part_len)),
+                        )
+                    )
+                    slot_meta["endpoint_target_region_slot_mode"] = "lane_boundary_bracket_center"
+                    slot_meta["endpoint_target_region_slot_span_m"] = bracket_span
+        else:
+            station_mid = 0.5 * part_len
+            span_m = float(min(max(2.0, buffer_m * 2.0), max(1.0, 0.25 * part_len)))
+        s0 = float(max(0.0, station_mid - 0.5 * span_m))
+        s1 = float(min(part_len, station_mid + 0.5 * span_m))
+        if s1 - s0 <= 1e-6:
+            s0 = float(max(0.0, station_mid - 0.5))
+            s1 = float(min(part_len, station_mid + 0.5))
+        try:
+            target_region = substring(part, s0, s1)
+        except Exception:
+            target_region = part
+        if not _is_valid_linestring(target_region):
+            target_region = part
+        try:
+            target_mid = target_region.interpolate(0.5, normalized=True)
+        except Exception:
+            target_mid = None
+        if not isinstance(target_mid, Point) or target_mid.is_empty:
+            continue
+        try:
+            dist = float(endpoint_pt.distance(target_mid))
+        except Exception:
+            continue
+        if not math.isfinite(part_ref_dist):
+            part_ref_dist = dist
+        slot_priority = 0.0 if slot_meta.get("endpoint_target_region_slot_mode") == "lane_boundary_bracket_center" else 1.0
+        if slot_priority <= 0.0:
+            score = (
+                0.0 if station_refs else 1.0,
+                slot_priority,
+                float(part_ref_dist),
+                -part_len,
+                dist,
+            )
+        else:
+            score = (
+                0.0 if station_refs else 1.0,
+                slot_priority,
+                float(part_ref_dist),
+                dist,
+                -part_len,
+            )
+        if best_score is None or score < best_score:
+            best_score = score
+            best_target = target_mid
+            best_region = target_region
+            part_meta = {
+                "endpoint_target_region_span_m": float(getattr(target_region, "length", 0.0)),
+                "endpoint_target_region_ref_count": int(len(station_refs)),
+                "endpoint_target_region_ref_modes": ",".join(sorted({mode for _, _, _, mode in station_refs})),
+            }
+            part_meta.update(slot_meta)
+            best_meta = part_meta
+    if best_target is None:
+        return None, None, meta
+    meta.update(best_meta)
+    return best_target, best_region, meta
+
+
+def _rebuild_endpoint_local_segment(
+    *,
+    line: LineString,
+    endpoint_tag: str,
+    target_point: Point,
+    target_geom: BaseGeometry | None,
+    target_region: BaseGeometry | None,
+    support: PairSupport | None,
+    shape_ref_line: LineString | None,
+    lane_boundaries_metric: Sequence[LineString] | None,
+    corridor_zone_metric: BaseGeometry | None,
+    drivezone_zone_metric: BaseGeometry | None,
+    trim_m: float,
+    smooth_span_m: float,
+    curve_step_m: float,
+    max_ratio_drop: float,
+) -> tuple[LineString, dict[str, Any]]:
+    meta: dict[str, Any] = {}
+    if not _is_valid_linestring(line):
+        return line, meta
+    target_xy = point_xy_safe(target_point, context="endpoint_rebuild_target")
+    if target_xy is None:
+        return line, meta
+    endpoint_tag_norm = str(endpoint_tag).lower()
+    if endpoint_tag_norm not in {"src", "dst"}:
+        return line, meta
+    total_len = float(line.length)
+    if total_len <= 1e-6:
+        return line, meta
+
+    target_check_geom = target_region if target_region is not None and not target_region.is_empty else target_geom
+    before_pt = Point(line.coords[0] if endpoint_tag_norm == "src" else line.coords[-1])
+    if target_check_geom is not None and not target_check_geom.is_empty:
+        try:
+            meta[f"endpoint_snap_dist_{endpoint_tag_norm}_before_m"] = float(before_pt.distance(target_check_geom))
+        except Exception:
+            meta[f"endpoint_snap_dist_{endpoint_tag_norm}_before_m"] = None
+    else:
+        meta[f"endpoint_snap_dist_{endpoint_tag_norm}_before_m"] = None
+    meta[f"_endpoint_before_{endpoint_tag_norm}_metric"] = before_pt
+
+    use_trim = float(min(max(4.0, trim_m), max(4.0, 0.45 * total_len)))
+    use_span = float(min(max(use_trim, smooth_span_m), max(use_trim, 0.65 * total_len)))
+    if endpoint_tag_norm == "src":
+        anchor_s = float(min(total_len, use_span))
+        try:
+            core = substring(line, anchor_s, total_len)
+        except Exception:
+            return line, {}
+    else:
+        anchor_s = float(max(0.0, total_len - use_span))
+        try:
+            core = substring(line, 0.0, anchor_s)
+        except Exception:
+            return line, {}
+    if not _is_valid_linestring(core):
+        return line, {}
+    try:
+        anchor_pt = line.interpolate(anchor_s)
+    except Exception:
+        return line, {}
+    anchor_xy = point_xy_safe(anchor_pt, context="endpoint_rebuild_anchor")
+    if anchor_xy is None:
+        return line, {}
+
+    anchor_tangent = _line_tangent_at_station(line=line, station_m=anchor_s, endpoint_tag=endpoint_tag_norm)
+    if anchor_tangent is None:
+        anchor_tangent = _line_endpoint_trend(line=line, endpoint_tag=endpoint_tag_norm)
+    ref_tangent, ref_mode = _sample_reference_tangent_near_point(
+        target_pt=target_point,
+        endpoint_tag=endpoint_tag_norm,
+        support=support,
+        shape_ref_line=shape_ref_line,
+        lane_boundaries_metric=lane_boundaries_metric,
+        ref_xy=anchor_tangent,
+    )
+    target_tangent = _blend_tangents(anchor_tangent, ref_tangent)
+    if endpoint_tag_norm == "src":
+        connector_coords = _build_cubic_connector(
+            start_xy=target_xy,
+            end_xy=anchor_xy,
+            start_tangent_xy=target_tangent,
+            end_tangent_xy=anchor_tangent,
+            trim_m=use_trim,
+            step_m=curve_step_m,
+        )
+        combined = connector_coords + list(core.coords)[1:]
+    else:
+        connector_coords = _build_cubic_connector(
+            start_xy=anchor_xy,
+            end_xy=target_xy,
+            start_tangent_xy=anchor_tangent,
+            end_tangent_xy=target_tangent,
+            trim_m=use_trim,
+            step_m=curve_step_m,
+        )
+        combined = list(core.coords)[:-1] + connector_coords
+    combined = _dedup_coords(combined, eps=1e-4)
+    if len(combined) < 2:
+        return line, {}
+    try:
+        rebuilt = LineString(combined)
+    except Exception:
+        return line, {}
+    if not _is_valid_linestring(rebuilt):
+        return line, {}
+
+    ratio_drop_allow = float(max(0.0, max_ratio_drop))
+    for zone_name, zone in (("corridor", corridor_zone_metric), ("drivezone", drivezone_zone_metric)):
+        before_ratio = _line_inside_ratio(line, zone)
+        after_ratio = _line_inside_ratio(rebuilt, zone)
+        if (
+            before_ratio is not None
+            and after_ratio is not None
+            and float(after_ratio) + 1e-9 < float(before_ratio) - ratio_drop_allow
+        ):
+            return line, {}
+        meta[f"endpoint_post_anchor_{zone_name}_ratio_{endpoint_tag_norm}_before"] = before_ratio
+        meta[f"endpoint_post_anchor_{zone_name}_ratio_{endpoint_tag_norm}_after"] = after_ratio
+
+    after_pt = Point(rebuilt.coords[0] if endpoint_tag_norm == "src" else rebuilt.coords[-1])
+    meta[f"_endpoint_after_{endpoint_tag_norm}_metric"] = after_pt
+    if target_check_geom is not None and not target_check_geom.is_empty:
+        try:
+            meta[f"endpoint_snap_dist_{endpoint_tag_norm}_after_m"] = float(after_pt.distance(target_check_geom))
+        except Exception:
+            meta[f"endpoint_snap_dist_{endpoint_tag_norm}_after_m"] = None
+    else:
+        meta[f"endpoint_snap_dist_{endpoint_tag_norm}_after_m"] = None
+    if target_check_geom is not None and not target_check_geom.is_empty:
+        try:
+            meta[f"endpoint_post_anchor_intersects_target_xsec_{endpoint_tag_norm}"] = bool(
+                rebuilt.intersects(target_check_geom.buffer(1e-3))
+            )
+        except Exception:
+            meta[f"endpoint_post_anchor_intersects_target_xsec_{endpoint_tag_norm}"] = None
+        try:
+            check_coords = list(connector_coords)
+            if endpoint_tag_norm == "src":
+                check_coords = list(reversed(check_coords))
+            dists = [float(Point(float(x), float(y)).distance(target_check_geom)) for x, y in check_coords]
+            monotonic = all(
+                float(dists[i + 1]) <= float(dists[i]) + 0.25 for i in range(len(dists) - 1)
+            )
+            meta[f"endpoint_post_anchor_monotonic_to_xsec_{endpoint_tag_norm}"] = bool(monotonic)
+            if not monotonic:
+                return line, {}
+            if meta.get(f"endpoint_post_anchor_intersects_target_xsec_{endpoint_tag_norm}") is False:
+                return line, {}
+        except Exception:
+            meta[f"endpoint_post_anchor_monotonic_to_xsec_{endpoint_tag_norm}"] = None
+    meta[f"endpoint_off_anchor_{endpoint_tag_norm}"] = bool(
+        meta.get(f"endpoint_snap_dist_{endpoint_tag_norm}_after_m") is not None
+        and float(meta.get(f"endpoint_snap_dist_{endpoint_tag_norm}_after_m")) > 1.0
+    )
+    meta[f"endpoint_post_anchor_ref_mode_{endpoint_tag_norm}"] = ref_mode or "road"
+    meta[f"endpoint_post_anchor_trim_len_{endpoint_tag_norm}_m"] = use_trim
+    meta[f"endpoint_post_anchor_span_len_{endpoint_tag_norm}_m"] = use_span
+    meta[f"endpoint_post_anchor_connector_len_{endpoint_tag_norm}_m"] = float(
+        LineString(connector_coords).length if len(connector_coords) >= 2 else 0.0
+    )
+    return rebuilt, meta
+
+
+def _resolve_endpoint_post_anchor_xsec_geom(
+    *,
+    road: dict[str, Any],
+    endpoint_tag: str,
+    seed_xsec: LineString,
+) -> tuple[BaseGeometry | None, str | None]:
+    endpoint_tag_norm = str(endpoint_tag).strip().lower()
+    if endpoint_tag_norm not in {"src", "dst"}:
+        return seed_xsec, "seed_xsec"
+
+    selected_by = str(road.get(f"xsec_road_selected_by_{endpoint_tag_norm}") or "").strip().lower()
+    pair_policy_mode = str(
+        road.get(f"step1_pair_xsec_policy_{endpoint_tag_norm}")
+        or road.get(f"xsec_policy_mode_{endpoint_tag_norm}")
+        or ""
+    ).strip().lower()
+    branch_override_fallback = bool(
+        bool(road.get("step1_branch_override_used"))
+        and pair_policy_mode == "role_outward_cut"
+        and selected_by in {"", "none", "seed", "fallback_seed_due_center_empty"}
+    )
+
+    candidate_keys: list[tuple[str, str]] = []
+    if branch_override_fallback:
+        candidate_keys.extend(
+            (
+                (f"_pair_xsec_target_{endpoint_tag_norm}_metric", "pair_xsec_target_step1_branch_override"),
+                (f"_pair_xsec_primary_seed_{endpoint_tag_norm}_metric", "pair_xsec_primary_seed_step1_branch_override"),
+            )
+        )
+    candidate_keys.extend(
+        (
+            (f"_xsec_target_selected_{endpoint_tag_norm}_metric", "xsec_target_selected"),
+            (f"_xsec_road_selected_{endpoint_tag_norm}_metric", "xsec_road_selected"),
+            (f"_xsec_road_all_{endpoint_tag_norm}_metric", "xsec_road_all"),
+        )
+    )
+
+    for key, source in candidate_keys:
+        cand = road.get(key)
+        if isinstance(cand, BaseGeometry) and not cand.is_empty:
+            return cand, source
+    if isinstance(seed_xsec, BaseGeometry) and not seed_xsec.is_empty:
+        return seed_xsec, "seed_xsec"
+    return None, None
+
+
+def _post_anchor_merge_diverge_endpoints(
+    *,
+    road: dict[str, Any],
+    road_line: LineString,
+    src_type: str,
+    dst_type: str,
+    support: PairSupport | None,
+    shape_ref_line: LineString | None,
+    lane_boundaries_metric: Sequence[LineString] | None,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    segment_corridor_metric: BaseGeometry | None,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+    params: dict[str, Any],
+) -> tuple[LineString, dict[str, Any]]:
+    meta: dict[str, Any] = {}
+    if not bool(int(params.get("STEP2_ENDPOINT_POST_ANCHOR_ENABLE", 1))):
+        return road_line, meta
+    if not _is_valid_linestring(road_line):
+        return road_line, meta
+
+    window_m = float(max(1.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_WINDOW_M", 18.0)))
+    buffer_m = float(max(1.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_BUFFER_M", 8.0)))
+    max_dist_m = float(max(1.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_MAX_DIST_M", 40.0)))
+    trim_m = float(max(4.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_TRIM_M", 12.0)))
+    smooth_span_m = float(max(trim_m, params.get("STEP2_ENDPOINT_POST_ANCHOR_SMOOTH_SPAN_M", 28.0)))
+    curve_step_m = float(max(0.5, params.get("STEP2_ENDPOINT_POST_ANCHOR_CURVE_STEP_M", 2.0)))
+    max_ratio_drop = float(max(0.0, params.get("STEP2_ENDPOINT_POST_ANCHOR_MAX_RATIO_DROP", 0.01)))
+
+    src_target_geom, src_target_source = _resolve_endpoint_post_anchor_xsec_geom(
+        road=road,
+        endpoint_tag="src",
+        seed_xsec=src_xsec,
+    )
+    dst_target_geom, dst_target_source = _resolve_endpoint_post_anchor_xsec_geom(
+        road=road,
+        endpoint_tag="dst",
+        seed_xsec=dst_xsec,
+    )
+    meta["endpoint_post_anchor_target_source_src"] = src_target_source
+    meta["endpoint_post_anchor_target_source_dst"] = dst_target_source
+
+    src_point_target = None
+    dst_point_target = None
+    src_target_region = None
+    dst_target_region = None
+    if str(src_type).strip().lower() == "merge":
+        src_point_target, src_target_region, src_target_meta = _select_endpoint_post_anchor_target(
+            road_line=road_line,
+            endpoint_tag="src",
+            xsec_geom=src_target_geom,
+            support=support,
+            shape_ref_line=shape_ref_line,
+            lane_boundaries_metric=lane_boundaries_metric,
+            drivezone_zone_metric=drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            window_m=window_m,
+            buffer_m=buffer_m,
+        )
+        if src_target_meta:
+            meta.update({f"{k}_src": v for k, v in src_target_meta.items()})
+    if str(dst_type).strip().lower() == "diverge":
+        dst_point_target, dst_target_region, dst_target_meta = _select_endpoint_post_anchor_target(
+            road_line=road_line,
+            endpoint_tag="dst",
+            xsec_geom=dst_target_geom,
+            support=support,
+            shape_ref_line=shape_ref_line,
+            lane_boundaries_metric=lane_boundaries_metric,
+            drivezone_zone_metric=drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            window_m=window_m,
+            buffer_m=buffer_m,
+        )
+        if dst_target_meta:
+            meta.update({f"{k}_dst": v for k, v in dst_target_meta.items()})
+    if src_point_target is None and dst_point_target is None:
+        return road_line, meta
+
+    src_before = Point(road_line.coords[0])
+    dst_before = Point(road_line.coords[-1])
+    if src_point_target is not None and float(src_before.distance(src_point_target)) > max_dist_m:
+        src_point_target = None
+    if dst_point_target is not None and float(dst_before.distance(dst_point_target)) > max_dist_m:
+        dst_point_target = None
+    if src_point_target is None and dst_point_target is None:
+        return road_line, meta
+
+    if src_point_target is not None:
+        rebuilt_src, src_meta = _rebuild_endpoint_local_segment(
+            line=road_line,
+            endpoint_tag="src",
+            target_point=src_point_target,
+            target_geom=src_target_geom,
+            target_region=src_target_region,
+            support=support,
+            shape_ref_line=shape_ref_line,
+            lane_boundaries_metric=lane_boundaries_metric,
+            corridor_zone_metric=segment_corridor_metric,
+            drivezone_zone_metric=drivezone_zone_metric,
+            trim_m=trim_m,
+            smooth_span_m=smooth_span_m,
+            curve_step_m=curve_step_m,
+            max_ratio_drop=max_ratio_drop,
+        )
+        src_applied = False
+        if _is_valid_linestring(rebuilt_src) and rebuilt_src is not road_line:
+            road_line = rebuilt_src
+            meta.update(src_meta)
+            src_applied = True
+        if src_applied:
+            chosen_src_geom = src_target_region if src_target_region is not None and not src_target_region.is_empty else src_target_geom
+            meta["_xsec_target_selected_src_metric"] = chosen_src_geom
+            meta["_xsec_road_selected_src_metric"] = chosen_src_geom
+            meta["endpoint_target_region_mode_src"] = "merge_xsec_region_business_target"
+            meta["endpoint_post_anchor_mode_src"] = "merge_xsec_region_business_refit"
+            meta["xsec_target_mode_src"] = "merge_xsec_region_business_target"
+            meta["xsec_selected_by_src"] = "merge_xsec_region_business_refit"
+            meta["xsec_road_selected_by_src"] = "merge_xsec_region_business_refit"
+    if dst_point_target is not None:
+        rebuilt_dst, dst_meta = _rebuild_endpoint_local_segment(
+            line=road_line,
+            endpoint_tag="dst",
+            target_point=dst_point_target,
+            target_geom=dst_target_geom,
+            target_region=dst_target_region,
+            support=support,
+            shape_ref_line=shape_ref_line,
+            lane_boundaries_metric=lane_boundaries_metric,
+            corridor_zone_metric=segment_corridor_metric,
+            drivezone_zone_metric=drivezone_zone_metric,
+            trim_m=trim_m,
+            smooth_span_m=smooth_span_m,
+            curve_step_m=curve_step_m,
+            max_ratio_drop=max_ratio_drop,
+        )
+        dst_applied = False
+        if _is_valid_linestring(rebuilt_dst) and rebuilt_dst is not road_line:
+            road_line = rebuilt_dst
+            meta.update(dst_meta)
+            dst_applied = True
+        if dst_applied:
+            chosen_dst_geom = dst_target_region if dst_target_region is not None and not dst_target_region.is_empty else dst_target_geom
+            meta["_xsec_target_selected_dst_metric"] = chosen_dst_geom
+            meta["_xsec_road_selected_dst_metric"] = chosen_dst_geom
+            meta["endpoint_target_region_mode_dst"] = "diverge_xsec_region_business_target"
+            meta["endpoint_post_anchor_mode_dst"] = "diverge_xsec_region_business_refit"
+            meta["xsec_target_mode_dst"] = "diverge_xsec_region_business_target"
+            meta["xsec_selected_by_dst"] = "diverge_xsec_region_business_refit"
+            meta["xsec_road_selected_by_dst"] = "diverge_xsec_region_business_refit"
+    return road_line, meta
 
 
 def _count_line_intersections_simple(line_a: BaseGeometry | None, line_b: BaseGeometry | None) -> int:
@@ -6047,6 +7394,17 @@ def _orient_axis_line(line: LineString, *, src_xsec: LineString, dst_xsec: LineS
     return line
 
 
+def _translate_axis_line(line: LineString, *, dx: float, dy: float) -> LineString | None:
+    if not _is_valid_linestring(line):
+        return None
+    try:
+        coords = [(float(x) + float(dx), float(y) + float(dy)) for x, y in line.coords]
+        shifted = LineString(coords)
+    except Exception:
+        return None
+    return shifted if _is_valid_linestring(shifted) else None
+
+
 def _pick_medoid_support_axis(
     *,
     support: PairSupport,
@@ -6069,6 +7427,59 @@ def _pick_medoid_support_axis(
     return _orient_axis_line(segs[medoid_idx], src_xsec=src_xsec, dst_xsec=dst_xsec)
 
 
+def _recenter_preferred_axis_to_support(
+    *,
+    preferred_axis: LineString,
+    medoid_axis: LineString | None,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    params: dict[str, Any],
+) -> tuple[LineString, str | None]:
+    oriented = _orient_axis_line(preferred_axis, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    if medoid_axis is None or not _is_valid_linestring(medoid_axis):
+        return oriented, None
+    corridor = float(max(3.0, params.get("CORRIDOR_HALF_WIDTH_M", 15.0)))
+    max_shift_m = float(max(3.0, min(1.25 * corridor, 20.0)))
+    deltas: list[tuple[float, float]] = []
+    for t in (0.25, 0.5, 0.75):
+        try:
+            pref_pt = oriented.interpolate(float(t), normalized=True)
+            _same_pt, medoid_pt = nearest_points(pref_pt, medoid_axis)
+        except Exception:
+            return oriented, None
+        pref_xy = point_xy_safe(pref_pt, context="preferred_axis_pt")
+        medoid_xy = point_xy_safe(medoid_pt, context="medoid_axis_pt")
+        if pref_xy is None or medoid_xy is None:
+            return oriented, None
+        dx = float(medoid_xy[0]) - float(pref_xy[0])
+        dy = float(medoid_xy[1]) - float(pref_xy[1])
+        dist = float(math.hypot(dx, dy))
+        if not np.isfinite(dist) or dist > max_shift_m + 1e-6:
+            return oriented, None
+        deltas.append((dx, dy))
+    if not deltas:
+        return oriented, None
+    avg_dx = float(sum(dx for dx, _ in deltas) / len(deltas))
+    avg_dy = float(sum(dy for _, dy in deltas) / len(deltas))
+    avg_norm = float(math.hypot(avg_dx, avg_dy))
+    if avg_norm <= 1e-6:
+        return oriented, None
+    spread = max(float(math.hypot(dx - avg_dx, dy - avg_dy)) for dx, dy in deltas)
+    if spread > float(max(1.0, 0.25 * max_shift_m)):
+        return oriented, None
+    shifted = _translate_axis_line(oriented, dx=avg_dx, dy=avg_dy)
+    if shifted is None:
+        return oriented, None
+    try:
+        before_dist = float(oriented.distance(medoid_axis))
+        after_dist = float(shifted.distance(medoid_axis))
+    except Exception:
+        return oriented, None
+    if not np.isfinite(after_dist) or after_dist > before_dist + 1e-6:
+        return oriented, None
+    return shifted, "centered_by_traj_medoid"
+
+
 def _choose_traj_surface_ref_axis(
     *,
     support: PairSupport,
@@ -6077,8 +7488,22 @@ def _choose_traj_surface_ref_axis(
     lane_boundaries_metric: Sequence[LineString],
     gore_zone_metric: BaseGeometry | None,
     params: dict[str, Any],
+    preferred_axis_metric: LineString | None = None,
+    preferred_axis_source: str | None = None,
 ) -> tuple[LineString | None, str]:
     medoid_axis = _pick_medoid_support_axis(support=support, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    if preferred_axis_metric is not None and not preferred_axis_metric.is_empty and preferred_axis_metric.length > 1.0:
+        preferred_axis, recenter_mode = _recenter_preferred_axis_to_support(
+            preferred_axis=preferred_axis_metric,
+            medoid_axis=medoid_axis,
+            src_xsec=src_xsec,
+            dst_xsec=dst_xsec,
+            params=params,
+        )
+        source = str(preferred_axis_source or "preferred_axis")
+        if recenter_mode:
+            source = f"{source}_{recenter_mode}"
+        return preferred_axis, source
     lb_axis_line: LineString | None = None
     try:
         lb_axis = _build_lb_graph_path(
@@ -6110,6 +7535,43 @@ def _choose_traj_surface_ref_axis(
     if medoid_axis is not None:
         return medoid_axis, "traj_medoid_axis"
     return None, "axis_missing"
+
+
+def _resolve_centerline_shape_ref_hint(
+    *,
+    support: PairSupport,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    shape_ref_hint_metric: LineString | None,
+    road_prior_shape_ref_metric: LineString | None,
+    use_road_prior_shape_ref: bool,
+    step1_branch_override_used: bool,
+    support_mode: str | None,
+    same_pair_multichain: bool,
+    params: dict[str, Any],
+) -> tuple[LineString | None, str | None]:
+    source = "road_prior_shape_ref" if bool(use_road_prior_shape_ref) else "step1_shape_ref"
+    base_line = road_prior_shape_ref_metric if bool(use_road_prior_shape_ref) else shape_ref_hint_metric
+    if not _is_valid_linestring(base_line):
+        return None, source
+    oriented = _orient_axis_line(base_line, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    if (
+        bool(step1_branch_override_used)
+        and str(support_mode or "").strip().lower() == "traj_support"
+        and (not bool(same_pair_multichain))
+    ):
+        medoid_axis = _pick_medoid_support_axis(support=support, src_xsec=src_xsec, dst_xsec=dst_xsec)
+        centered, recenter_mode = _recenter_preferred_axis_to_support(
+            preferred_axis=oriented,
+            medoid_axis=medoid_axis,
+            src_xsec=src_xsec,
+            dst_xsec=dst_xsec,
+            params=params,
+        )
+        if recenter_mode:
+            return centered, f"{source}_{recenter_mode}"
+        return centered, source
+    return oriented, source
 
 
 def _normalize_surface_polygon(surface: BaseGeometry | None) -> BaseGeometry | None:
@@ -6691,6 +8153,8 @@ def _build_traj_surface_hint_for_cluster(
     traj_points_cache: dict[tuple[str, ...], tuple[np.ndarray, int]] | None = None,
     traj_xy_index: dict[str, np.ndarray] | None = None,
     traj_meta_index: dict[str, dict[str, Any]] | None = None,
+    preferred_axis_metric: LineString | None = None,
+    preferred_axis_source: str | None = None,
 ) -> dict[str, Any]:
     t0 = perf_counter()
     ids_key = tuple(sorted(str(v) for v in support.support_traj_ids))
@@ -6746,6 +8210,8 @@ def _build_traj_surface_hint_for_cluster(
         lane_boundaries_metric=lane_boundaries_metric,
         gore_zone_metric=gore_zone_metric,
         params=params,
+        preferred_axis_metric=preferred_axis_metric,
+        preferred_axis_source=preferred_axis_source,
     )
     if ref_line is None or ref_line.length <= 1.0:
         out["reason"] = "ref_axis_missing"
@@ -7474,6 +8940,116 @@ def _drivezone_gate_diagnostics(
     return out
 
 
+def _remove_candidate_breakpoints_by_reason(
+    breakpoints: Sequence[dict[str, Any]],
+    *,
+    reason: str,
+) -> list[dict[str, Any]]:
+    return [
+        dict(bp)
+        for bp in breakpoints
+        if isinstance(bp, dict) and str(bp.get("reason") or "") != str(reason)
+    ]
+
+
+def _candidate_append_soft_rescue_breakpoint(
+    *,
+    road: dict[str, Any],
+    breakpoints: list[dict[str, Any]],
+    reason: str,
+    mode: str,
+    hint: str,
+) -> None:
+    breakpoints.append(
+        build_breakpoint(
+            road=road,
+            reason=reason,
+            severity="soft",
+            hint=f"rescued_mode={mode};{hint}",
+        )
+    )
+
+
+def _candidate_near_threshold_corridor_rescue_mode(
+    *,
+    road: dict[str, Any],
+    params: dict[str, Any],
+) -> str | None:
+    if not bool(int(params.get("STEP2_SEGMENT_CORRIDOR_NEAR_RESCUE_ENABLE", 1))):
+        return None
+    outside_len = _to_finite_float(road.get("segment_corridor_outside_len_m"), float("inf"))
+    inside_ratio = _to_finite_float(road.get("segment_corridor_inside_ratio"), float("nan"))
+    shape_ref_ratio = _to_finite_float(road.get("segment_corridor_shape_ref_inside_ratio"), float("nan"))
+    min_ratio = _to_finite_float(road.get("segment_corridor_min_inside_ratio"), 0.999)
+    ratio_eps = float(max(0.0, params.get("STEP2_SEGMENT_CORRIDOR_NEAR_RESCUE_RATIO_EPS", 0.005)))
+    outside_max_m = float(max(0.0, params.get("STEP2_SEGMENT_CORRIDOR_NEAR_RESCUE_OUTSIDE_MAX_M", 0.75)))
+    if not np.isfinite(outside_len) or outside_len > outside_max_m + 1e-6:
+        return None
+    if not np.isfinite(inside_ratio) or inside_ratio + 1e-9 < min_ratio - ratio_eps:
+        return None
+    if np.isfinite(shape_ref_ratio) and shape_ref_ratio + 1e-9 < min_ratio - ratio_eps:
+        return None
+    return "near_threshold_inside_ratio"
+
+
+def _candidate_near_threshold_drivezone_rescue_mode(
+    *,
+    road: dict[str, Any],
+    params: dict[str, Any],
+) -> str | None:
+    if not bool(int(params.get("STEP2_DRIVEZONE_NEAR_RESCUE_ENABLE", 1))):
+        return None
+    outside_len = _to_finite_float(road.get("road_outside_drivezone_len_m"), float("inf"))
+    in_ratio = _to_finite_float(road.get("road_in_drivezone_ratio"), float("nan"))
+    outside_max_m = float(max(0.0, params.get("STEP2_DRIVEZONE_NEAR_RESCUE_OUTSIDE_MAX_M", 2.0)))
+    min_in_ratio = float(max(0.0, min(1.0, params.get("STEP2_DRIVEZONE_NEAR_RESCUE_MIN_IN_RATIO", 0.992))))
+    if not np.isfinite(outside_len) or outside_len > outside_max_m + 1e-6:
+        return None
+    if not np.isfinite(in_ratio) or in_ratio + 1e-9 < min_in_ratio:
+        return None
+    if road.get("endpoint_in_drivezone_src") is False or road.get("endpoint_in_drivezone_dst") is False:
+        return None
+    return "near_threshold_inside_ratio"
+
+
+def _candidate_near_threshold_traj_surface_rescue_mode(
+    *,
+    road: dict[str, Any],
+    params: dict[str, Any],
+) -> str | None:
+    if not bool(int(params.get("STEP2_TRAJ_SURFACE_NEAR_RESCUE_ENABLE", 1))):
+        return None
+    failure_mode = str(road.get("traj_surface_gate_failure_mode") or "").strip().lower()
+    if not failure_mode:
+        return None
+    in_ratio = _to_finite_float(road.get("traj_in_ratio"), float("nan"))
+    if not np.isfinite(in_ratio):
+        in_ratio = _to_finite_float(road.get("traj_in_ratio_est"), float("nan"))
+    if not np.isfinite(in_ratio):
+        return None
+    in_ratio_min = float(max(0.0, min(1.0, params.get("IN_RATIO_MIN", 0.95))))
+    in_ratio_eps = float(max(0.0, params.get("STEP2_TRAJ_SURFACE_NEAR_RESCUE_IN_RATIO_EPS", 0.02)))
+    endpoint_dist_max = float(max(0.0, params.get("STEP2_TRAJ_SURFACE_NEAR_RESCUE_ENDPOINT_DIST_M", 3.0)))
+    if failure_mode == "in_ratio_only":
+        if in_ratio + 1e-9 >= in_ratio_min - in_ratio_eps:
+            return "near_threshold_in_ratio_only"
+        return None
+    if failure_mode not in {"endpoint_single", "endpoint_both"}:
+        return None
+    if in_ratio + 1e-9 < in_ratio_min - in_ratio_eps:
+        return None
+    fail_dists: list[float] = []
+    if road.get("endpoint_in_traj_surface_src") is False:
+        fail_dists.append(_to_finite_float(road.get("endpoint_dist_to_traj_surface_src_m"), float("inf")))
+    if road.get("endpoint_in_traj_surface_dst") is False:
+        fail_dists.append(_to_finite_float(road.get("endpoint_dist_to_traj_surface_dst_m"), float("inf")))
+    if not fail_dists:
+        return None
+    if all(np.isfinite(v) and v <= endpoint_dist_max + 1e-6 for v in fail_dists):
+        return f"near_threshold_{failure_mode}"
+    return None
+
+
 def _evaluate_candidate_road(
     *,
     src: int,
@@ -7505,6 +9081,11 @@ def _evaluate_candidate_road(
     support_mode: str | None = None,
     pair_xsec_target_src_metric: LineString | None = None,
     pair_xsec_target_dst_metric: LineString | None = None,
+    pair_xsec_primary_seed_src_metric: LineString | None = None,
+    pair_xsec_primary_seed_dst_metric: LineString | None = None,
+    pair_xsec_policy_src: str | None = None,
+    pair_xsec_policy_dst: str | None = None,
+    step1_branch_override_used: bool = False,
 ) -> dict[str, Any]:
     t0_center = perf_counter()
     traj_surface_enforced = bool(traj_surface_hint.get("traj_surface_enforced", False))
@@ -7512,12 +9093,21 @@ def _evaluate_candidate_road(
     road_prior_shape_ref_valid = _is_valid_linestring(road_prior_shape_ref_metric)
     support_mode_norm = str(support_mode or "").strip().lower()
     fallback_bind_modes = {"topology_road_prior_fallback", "road_prior_fallback"}
-    pair_target_src_valid = bool(
-        support_mode_norm in fallback_bind_modes and _is_valid_linestring(pair_xsec_target_src_metric)
+    pair_target_src_available = bool(_is_valid_linestring(pair_xsec_target_src_metric))
+    pair_target_dst_available = bool(_is_valid_linestring(pair_xsec_target_dst_metric))
+    road_prior_gap_fill_mode = _should_enable_road_prior_gap_fill(
+        road_prior_shape_ref_valid=bool(road_prior_shape_ref_valid),
+        traj_surface_enforced=bool(traj_surface_enforced),
+        step1_used_road_prior=bool(step1_used_road_prior),
+        step1_road_prior_mode=step1_road_prior_mode,
+        same_pair_multichain=bool(same_pair_multichain),
+        support_mode=support_mode_norm,
     )
-    pair_target_dst_valid = bool(
-        support_mode_norm in fallback_bind_modes and _is_valid_linestring(pair_xsec_target_dst_metric)
+    entry_bind_allowed = bool(
+        road_prior_shape_ref_valid and (support_mode_norm in fallback_bind_modes or road_prior_gap_fill_mode)
     )
+    pair_target_src_valid = bool(support_mode_norm in fallback_bind_modes and pair_target_src_available)
+    pair_target_dst_valid = bool(support_mode_norm in fallback_bind_modes and pair_target_dst_available)
     bind_src_xsec = pair_xsec_target_src_metric if pair_target_src_valid else src_xsec
     bind_dst_xsec = pair_xsec_target_dst_metric if pair_target_dst_valid else dst_xsec
     bind_src_reason = (
@@ -7530,7 +9120,29 @@ def _evaluate_candidate_road(
         if support_mode_norm == "topology_road_prior_fallback" and pair_target_dst_valid
         else ("pair_target_road_prior_fallback" if support_mode_norm == "road_prior_fallback" and pair_target_dst_valid else None)
     )
-    if road_prior_shape_ref_valid and support_mode_norm in fallback_bind_modes:
+    primary_src_xsec, primary_src_reason = _resolve_primary_geometry_pair_target_xsec(
+        endpoint_tag="src",
+        node_type=src_type,
+        xsec_seed=src_xsec,
+        pair_target_metric=(pair_xsec_target_src_metric if pair_target_src_available else None),
+        pair_primary_seed_metric=pair_xsec_primary_seed_src_metric,
+        pair_policy_mode=pair_xsec_policy_src,
+        step1_branch_override_used=step1_branch_override_used,
+        support_mode=support_mode_norm,
+        same_pair_multichain=same_pair_multichain,
+    )
+    primary_dst_xsec, primary_dst_reason = _resolve_primary_geometry_pair_target_xsec(
+        endpoint_tag="dst",
+        node_type=dst_type,
+        xsec_seed=dst_xsec,
+        pair_target_metric=(pair_xsec_target_dst_metric if pair_target_dst_available else None),
+        pair_primary_seed_metric=pair_xsec_primary_seed_dst_metric,
+        pair_policy_mode=pair_xsec_policy_dst,
+        step1_branch_override_used=step1_branch_override_used,
+        support_mode=support_mode_norm,
+        same_pair_multichain=same_pair_multichain,
+    )
+    if entry_bind_allowed:
         try:
             _shape_ref_line_unused, src_entry_xsec, dst_entry_xsec = _resolve_fallback_support_entry_xsecs(
                 shape_ref_metric=road_prior_shape_ref_metric,
@@ -7549,25 +9161,46 @@ def _evaluate_candidate_road(
             bind_src_reason = (
                 "topology_fallback_entry_xsec"
                 if support_mode_norm == "topology_road_prior_fallback"
-                else "road_prior_fallback_entry_xsec"
+                else ("road_prior_fallback_entry_xsec" if support_mode_norm == "road_prior_fallback" else "road_prior_gap_fill_entry_xsec")
             )
         if (not pair_target_dst_valid) and _is_valid_linestring(dst_entry_xsec):
             bind_dst_xsec = dst_entry_xsec
             bind_dst_reason = (
                 "topology_fallback_entry_xsec"
                 if support_mode_norm == "topology_road_prior_fallback"
-                else "road_prior_fallback_entry_xsec"
+                else ("road_prior_fallback_entry_xsec" if support_mode_norm == "road_prior_fallback" else "road_prior_gap_fill_entry_xsec")
             )
-    road_prior_gap_fill_mode = _should_enable_road_prior_gap_fill(
-        road_prior_shape_ref_valid=bool(road_prior_shape_ref_valid),
-        traj_surface_enforced=bool(traj_surface_enforced),
-        step1_used_road_prior=bool(step1_used_road_prior),
-        step1_road_prior_mode=step1_road_prior_mode,
-        same_pair_multichain=bool(same_pair_multichain),
+    fallback_src_xsec, fallback_src_reason = _resolve_branch_override_fallback_bind_xsec(
+        xsec_seed=bind_src_xsec,
+        pair_target_metric=(pair_xsec_target_src_metric if pair_target_src_available else None),
+        pair_primary_seed_metric=pair_xsec_primary_seed_src_metric,
+        pair_policy_mode=pair_xsec_policy_src,
+        step1_branch_override_used=step1_branch_override_used,
         support_mode=support_mode_norm,
+        same_pair_multichain=same_pair_multichain,
+    )
+    fallback_dst_xsec, fallback_dst_reason = _resolve_branch_override_fallback_bind_xsec(
+        xsec_seed=bind_dst_xsec,
+        pair_target_metric=(pair_xsec_target_dst_metric if pair_target_dst_available else None),
+        pair_primary_seed_metric=pair_xsec_primary_seed_dst_metric,
+        pair_policy_mode=pair_xsec_policy_dst,
+        step1_branch_override_used=step1_branch_override_used,
+        support_mode=support_mode_norm,
+        same_pair_multichain=same_pair_multichain,
     )
     use_road_prior_shape_ref = bool(road_prior_shape_ref_valid and (road_prior_gap_fill_mode or (not step1_shape_ref_valid)))
-    shape_ref_hint_for_center = road_prior_shape_ref_metric if use_road_prior_shape_ref else shape_ref_hint_metric
+    shape_ref_hint_for_center, shape_ref_hint_for_center_source = _resolve_centerline_shape_ref_hint(
+        support=support,
+        src_xsec=primary_src_xsec,
+        dst_xsec=primary_dst_xsec,
+        shape_ref_hint_metric=shape_ref_hint_metric,
+        road_prior_shape_ref_metric=road_prior_shape_ref_metric,
+        use_road_prior_shape_ref=use_road_prior_shape_ref,
+        step1_branch_override_used=step1_branch_override_used,
+        support_mode=support_mode_norm,
+        same_pair_multichain=same_pair_multichain,
+        params=params,
+    )
     traj_surface_metric_for_center = None if road_prior_gap_fill_mode else traj_surface_hint.get("surface_metric")
     segment_corridor_for_gate = segment_corridor_metric
     if road_prior_gap_fill_mode and road_prior_shape_ref_valid:
@@ -7589,8 +9222,8 @@ def _evaluate_candidate_road(
             same_pair_rescue_corridor_zone = rescue_corridor_zone
     center = estimate_centerline(
         support=support,
-        src_xsec=src_xsec,
-        dst_xsec=dst_xsec,
+        src_xsec=primary_src_xsec,
+        dst_xsec=primary_dst_xsec,
         src_type=src_type,
         dst_type=dst_type,
         src_out_degree=int(src_out_degree),
@@ -7675,6 +9308,10 @@ def _evaluate_candidate_road(
     road["same_pair_multi_road_support_mode"] = (support_mode_norm if bool(same_pair_multichain) else None)
     road["same_pair_multi_road_geometry_mode"] = None
     road["topology_fallback_geometry_mode"] = None
+    road["primary_geometry_pair_target_applied_src"] = bool(primary_src_reason)
+    road["primary_geometry_pair_target_applied_dst"] = bool(primary_dst_reason)
+    road["primary_geometry_xsec_seed_by_src"] = str(primary_src_reason or "seed_xsec")
+    road["primary_geometry_xsec_seed_by_dst"] = str(primary_dst_reason or "seed_xsec")
     road["cluster_count"] = int(parent_support.cluster_count)
     road["main_cluster_ratio"] = float(parent_support.main_cluster_ratio)
     road["cluster_sep_m_est"] = parent_support.cluster_sep_m_est
@@ -7799,17 +9436,28 @@ def _evaluate_candidate_road(
     road["road_prior_shape_ref_used"] = bool(use_road_prior_shape_ref)
     road["road_prior_gap_fill_mode"] = bool(road_prior_gap_fill_mode)
     road["step1_road_prior_mode"] = str(step1_road_prior_mode or "") or None
+    road["step1_branch_override_used"] = bool(step1_branch_override_used)
+    road["shape_ref_hint_for_center_source"] = str(shape_ref_hint_for_center_source or "") or None
     road["road_prior_shape_ref_length_m"] = (
         float(road_prior_shape_ref_metric.length) if road_prior_shape_ref_valid else None
     )
     road["_road_prior_shape_ref_metric"] = road_prior_shape_ref_metric if road_prior_shape_ref_valid else None
-    road["_pair_xsec_target_src_metric"] = pair_xsec_target_src_metric if pair_target_src_valid else None
-    road["_pair_xsec_target_dst_metric"] = pair_xsec_target_dst_metric if pair_target_dst_valid else None
+    road["_shape_ref_hint_for_center_metric"] = (
+        shape_ref_hint_for_center if _is_valid_linestring(shape_ref_hint_for_center) else None
+    )
+    road["_pair_xsec_target_src_metric"] = pair_xsec_target_src_metric if pair_target_src_available else None
+    road["_pair_xsec_target_dst_metric"] = pair_xsec_target_dst_metric if pair_target_dst_available else None
+    road["_pair_xsec_primary_seed_src_metric"] = (
+        pair_xsec_primary_seed_src_metric if _is_valid_linestring(pair_xsec_primary_seed_src_metric) else None
+    )
+    road["_pair_xsec_primary_seed_dst_metric"] = (
+        pair_xsec_primary_seed_dst_metric if _is_valid_linestring(pair_xsec_primary_seed_dst_metric) else None
+    )
     for tag, bind_xsec, bind_reason in (
         ("src", bind_src_xsec, bind_src_reason),
         ("dst", bind_dst_xsec, bind_dst_reason),
     ):
-        if support_mode_norm not in fallback_bind_modes or not _is_valid_linestring(bind_xsec):
+        if (not entry_bind_allowed) or (not bind_reason) or (not _is_valid_linestring(bind_xsec)):
             continue
         road[f"_xsec_road_selected_{tag}_metric"] = bind_xsec
         road[f"_xsec_target_selected_{tag}_metric"] = bind_xsec
@@ -7829,6 +9477,8 @@ def _evaluate_candidate_road(
     road["segment_corridor_shape_ref_inside_ratio"] = None
     road["segment_corridor_outside_len_m"] = None
     road["segment_corridor_rescue_mode"] = None
+    road["drivezone_rescue_mode"] = None
+    road["traj_surface_rescue_mode"] = None
     road["segment_corridor_inside_tol_m"] = float(
         max(0.0, float(params.get("STEP2_SEGMENT_CORRIDOR_INSIDE_TOL_M", 0.5)))
     )
@@ -7840,8 +9490,8 @@ def _evaluate_candidate_road(
     if road_prior_shape_ref_valid:
         road_prior_direct_fallback_line = _fallback_geometry_from_shape_ref(
             shape_ref_line=road_prior_shape_ref_metric,
-            src_xsec=bind_src_xsec,
-            dst_xsec=bind_dst_xsec,
+            src_xsec=fallback_src_xsec,
+            dst_xsec=fallback_dst_xsec,
         )
         if (
             not _is_valid_linestring(road_prior_direct_fallback_line)
@@ -7849,15 +9499,15 @@ def _evaluate_candidate_road(
         ):
             road_prior_direct_fallback_line = _orient_axis_line(
                 road_prior_shape_ref_metric,
-                src_xsec=bind_src_xsec,
-                dst_xsec=bind_dst_xsec,
+                src_xsec=fallback_src_xsec,
+                dst_xsec=fallback_dst_xsec,
             )
 
     center_empty_like = bool(HARD_CENTER_EMPTY in set(center.hard_flags)) or (not _is_valid_linestring(center.centerline_metric))
     if center_empty_like:
         for tag, xsec, bind_reason in (
-            ("src", bind_src_xsec, bind_src_reason),
-            ("dst", bind_dst_xsec, bind_dst_reason),
+            ("src", fallback_src_xsec, (fallback_src_reason or bind_src_reason)),
+            ("dst", fallback_dst_xsec, (fallback_dst_reason or bind_dst_reason)),
         ):
             sel_key = f"_xsec_road_selected_{tag}_metric"
             all_key = f"_xsec_road_all_{tag}_metric"
@@ -7896,7 +9546,7 @@ def _evaluate_candidate_road(
                 if road.get(f"xsec_barrier_final_count_{tag}") is None:
                     road[f"xsec_barrier_final_count_{tag}"] = 0
                 road[f"_xsec_target_selected_{tag}_metric"] = sel_geom
-                road[f"xsec_selected_by_{tag}"] = road.get(by_key)
+            road[f"xsec_selected_by_{tag}"] = road.get(by_key)
 
     soft_flags = set(center.soft_flags)
     hard_flags = set(center.hard_flags)
@@ -7945,8 +9595,8 @@ def _evaluate_candidate_road(
     if not (isinstance(road_line, LineString) and (not road_line.is_empty)):
         fallback_line = _fallback_geometry_from_shape_ref(
             shape_ref_line=primary_shape_ref_metric,
-            src_xsec=bind_src_xsec,
-            dst_xsec=bind_dst_xsec,
+            src_xsec=fallback_src_xsec,
+            dst_xsec=fallback_dst_xsec,
         )
         if (
             not _is_valid_linestring(fallback_line)
@@ -7955,8 +9605,8 @@ def _evaluate_candidate_road(
         ):
             fallback_line = _orient_axis_line(
                 primary_shape_ref_metric,
-                src_xsec=bind_src_xsec,
-                dst_xsec=bind_dst_xsec,
+                src_xsec=fallback_src_xsec,
+                dst_xsec=fallback_dst_xsec,
             )
         if isinstance(fallback_line, LineString) and (not fallback_line.is_empty):
             road_line = fallback_line
@@ -7965,14 +9615,22 @@ def _evaluate_candidate_road(
             road["endpoint_fallback_mode_dst"] = str(road.get("endpoint_fallback_mode_dst") or "shape_ref_substring_fallback")
     if _is_valid_linestring(road_line):
         src_sel_metric = (
-            bind_src_xsec
-            if support_mode_norm in fallback_bind_modes and _is_valid_linestring(bind_src_xsec)
-            else road.get("_xsec_road_selected_src_metric")
+            fallback_src_xsec
+            if (centerline_fallback_used and _is_valid_linestring(fallback_src_xsec))
+            else (
+                bind_src_xsec
+                if entry_bind_allowed and _is_valid_linestring(bind_src_xsec)
+                else road.get("_xsec_road_selected_src_metric")
+            )
         )
         dst_sel_metric = (
-            bind_dst_xsec
-            if support_mode_norm in fallback_bind_modes and _is_valid_linestring(bind_dst_xsec)
-            else road.get("_xsec_road_selected_dst_metric")
+            fallback_dst_xsec
+            if (centerline_fallback_used and _is_valid_linestring(fallback_dst_xsec))
+            else (
+                bind_dst_xsec
+                if entry_bind_allowed and _is_valid_linestring(bind_dst_xsec)
+                else road.get("_xsec_road_selected_dst_metric")
+            )
         )
         src_sel = src_sel_metric if _is_valid_linestring(src_sel_metric) else src_xsec
         dst_sel = dst_sel_metric if _is_valid_linestring(dst_sel_metric) else dst_xsec
@@ -8146,6 +9804,40 @@ def _evaluate_candidate_road(
     )
     road["divstrip_constructor_retry_mode"] = divstrip_retry_mode
     if isinstance(road_line, LineString) and not road_line.is_empty:
+        road_line, endpoint_post_anchor_meta = _post_anchor_merge_diverge_endpoints(
+            road=road,
+            road_line=road_line,
+            src_type=src_type,
+            dst_type=dst_type,
+            support=support,
+            shape_ref_line=primary_shape_ref_metric,
+            lane_boundaries_metric=lane_boundaries_metric,
+            src_xsec=src_xsec,
+            dst_xsec=dst_xsec,
+            segment_corridor_metric=segment_corridor_metric,
+            drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            params=params,
+        )
+        if endpoint_post_anchor_meta:
+            road.update(endpoint_post_anchor_meta)
+            if isinstance(road.get("_endpoint_after_src_metric"), Point) and not road["_endpoint_after_src_metric"].is_empty:
+                src_anchor_geom = road.get("_xsec_target_selected_src_metric") or road.get("_xsec_road_selected_src_metric") or src_xsec
+                try:
+                    road["endpoint_dist_to_xsec_src_m"] = float(road["_endpoint_after_src_metric"].distance(src_anchor_geom))
+                except Exception:
+                    pass
+                if road.get("endpoint_snap_dist_src_after_m") is None:
+                    road["endpoint_snap_dist_src_after_m"] = road.get("endpoint_dist_to_xsec_src_m")
+            if isinstance(road.get("_endpoint_after_dst_metric"), Point) and not road["_endpoint_after_dst_metric"].is_empty:
+                dst_anchor_geom = road.get("_xsec_target_selected_dst_metric") or road.get("_xsec_road_selected_dst_metric") or dst_xsec
+                try:
+                    road["endpoint_dist_to_xsec_dst_m"] = float(road["_endpoint_after_dst_metric"].distance(dst_anchor_geom))
+                except Exception:
+                    pass
+                if road.get("endpoint_snap_dist_dst_after_m") is None:
+                    road["endpoint_snap_dist_dst_after_m"] = road.get("endpoint_dist_to_xsec_dst_m")
+    if isinstance(road_line, LineString) and not road_line.is_empty:
         road["_geometry_metric"] = road_line
         road["length_m"] = float(road_line.length)
         seg_idx, seg_len = _max_segment_detail(road_line)
@@ -8157,6 +9849,20 @@ def _evaluate_candidate_road(
             road["seg_index0_len_m"] = float(np.linalg.norm(c1 - c0))
         else:
             road["seg_index0_len_m"] = None
+        road.update(
+            _build_endpoint_line_to_target_region_meta(
+                road=road,
+                road_line=road_line,
+                src_xsec=src_xsec,
+                dst_xsec=dst_xsec,
+                window_m=float(
+                    max(
+                        params.get("STEP2_ENDPOINT_POST_ANCHOR_WINDOW_M", 18.0),
+                        params.get("STEP2_ENDPOINT_POST_ANCHOR_SMOOTH_SPAN_M", 28.0),
+                    )
+                ),
+            )
+        )
     else:
         road_line = None
         road["length_m"] = 0.0
@@ -8359,6 +10065,79 @@ def _evaluate_candidate_road(
 
     if road.get("_traj_surface_geom_metric") is None and traj_surface_hint.get("surface_metric") is not None:
         road["_traj_surface_geom_metric"] = traj_surface_hint.get("surface_metric")
+
+    if _HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR in hard_flags:
+        corridor_rescue_mode = _candidate_near_threshold_corridor_rescue_mode(road=road, params=params)
+        if corridor_rescue_mode:
+            hard_flags.discard(_HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR)
+            if not road.get("segment_corridor_rescue_mode"):
+                road["segment_corridor_rescue_mode"] = str(corridor_rescue_mode)
+            _candidate_append_soft_rescue_breakpoint(
+                road=road,
+                breakpoints=candidate_soft_breakpoints,
+                reason=_HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR,
+                mode=str(corridor_rescue_mode),
+                hint=(
+                    f"outside_len_m={road.get('segment_corridor_outside_len_m')};"
+                    f"in_ratio={road.get('segment_corridor_inside_ratio')};"
+                    f"shape_ref_in_ratio={road.get('segment_corridor_shape_ref_inside_ratio')};"
+                    f"threshold={road.get('segment_corridor_min_inside_ratio')}"
+                ),
+            )
+
+    if HARD_ROAD_OUTSIDE_DRIVEZONE in hard_flags:
+        drivezone_rescue_mode = _candidate_near_threshold_drivezone_rescue_mode(road=road, params=params)
+        if drivezone_rescue_mode:
+            hard_flags.discard(HARD_ROAD_OUTSIDE_DRIVEZONE)
+            road["drivezone_rescue_mode"] = str(drivezone_rescue_mode)
+            _candidate_append_soft_rescue_breakpoint(
+                road=road,
+                breakpoints=candidate_soft_breakpoints,
+                reason=HARD_ROAD_OUTSIDE_DRIVEZONE,
+                mode=str(drivezone_rescue_mode),
+                hint=(
+                    f"outside_len_m={road.get('road_outside_drivezone_len_m')};"
+                    f"in_ratio={road.get('road_in_drivezone_ratio')};"
+                    f"endpoint_src={road.get('endpoint_in_drivezone_src')};"
+                    f"endpoint_dst={road.get('endpoint_in_drivezone_dst')}"
+                ),
+            )
+
+    if SOFT_ROAD_OUTSIDE_TRAJ_SURFACE in hard_flags:
+        remaining_blocking = {
+            str(v)
+            for v in hard_flags
+            if str(v)
+            not in {
+                str(SOFT_ROAD_OUTSIDE_TRAJ_SURFACE),
+                str(HARD_ROAD_OUTSIDE_DRIVEZONE),
+                str(_HARD_ROAD_OUTSIDE_SEGMENT_CORRIDOR),
+            }
+        }
+        traj_surface_rescue_mode = _candidate_near_threshold_traj_surface_rescue_mode(road=road, params=params)
+        if traj_surface_rescue_mode and not remaining_blocking:
+            hard_flags.discard(SOFT_ROAD_OUTSIDE_TRAJ_SURFACE)
+            soft_flags.add(SOFT_ROAD_OUTSIDE_TRAJ_SURFACE)
+            road["traj_surface_rescue_mode"] = str(traj_surface_rescue_mode)
+            candidate_hard_breakpoints = _remove_candidate_breakpoints_by_reason(
+                candidate_hard_breakpoints,
+                reason=SOFT_ROAD_OUTSIDE_TRAJ_SURFACE,
+            )
+            _candidate_append_soft_rescue_breakpoint(
+                road=road,
+                breakpoints=candidate_soft_breakpoints,
+                reason=SOFT_ROAD_OUTSIDE_TRAJ_SURFACE,
+                mode=str(traj_surface_rescue_mode),
+                hint=(
+                    f"in_ratio={road.get('traj_in_ratio')};"
+                    f"endpoint_src={road.get('endpoint_in_traj_surface_src')};"
+                    f"endpoint_dst={road.get('endpoint_in_traj_surface_dst')};"
+                    f"endpoint_src_dist_m={road.get('endpoint_dist_to_traj_surface_src_m')};"
+                    f"endpoint_dst_dist_m={road.get('endpoint_dist_to_traj_surface_dst_m')};"
+                    f"gate_failure_mode={road.get('traj_surface_gate_failure_mode')};"
+                    f"threshold={float(params.get('IN_RATIO_MIN', 0.95)):.2f}"
+                ),
+            )
 
     road["_timing_centerline_ms"] = float(max(0.0, t_center_ms))
     road["_timing_gate_ms"] = float(max(0.0, t_gate_ms if road_line is not None else 0.0))
@@ -8720,6 +10499,424 @@ def _iter_polygon_parts(geom: BaseGeometry | None) -> list[BaseGeometry]:
     return []
 
 
+def _pick_debug_primary_line(geom: BaseGeometry | None) -> LineString | None:
+    parts = [ls for ls in _iter_line_parts(geom) if isinstance(ls, LineString) and not ls.is_empty and ls.length > 1e-6]
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    try:
+        merged = linemerge(MultiLineString(parts))
+    except Exception:
+        merged = None
+    merged_parts = [ls for ls in _iter_line_parts(merged) if isinstance(ls, LineString) and not ls.is_empty and ls.length > 1e-6]
+    if merged_parts:
+        return max(merged_parts, key=lambda ls: float(ls.length))
+    return max(parts, key=lambda ls: float(ls.length))
+
+
+def _node_xsec_frame_roles(node_type: str) -> tuple[str, str]:
+    node_type_norm = str(node_type or "").strip().lower()
+    if node_type_norm == "merge":
+        return "merge_post_full", "merge_pre_branch"
+    if node_type_norm == "diverge":
+        return "diverge_pre_full", "diverge_post_branch"
+    return "default_full", "default_branch"
+
+
+def _endpoint_slot_family(node_type: str, endpoint_tag: str) -> tuple[str, str]:
+    node_type_norm = str(node_type or "").strip().lower()
+    endpoint_tag_norm = str(endpoint_tag or "").strip().lower()
+    if endpoint_tag_norm == "src":
+        if node_type_norm == "merge":
+            return "full", "merge_start_full_xsec"
+        if node_type_norm == "diverge":
+            return "split", "diverge_start_split_xsec"
+    if endpoint_tag_norm == "dst":
+        if node_type_norm == "merge":
+            return "split", "merge_end_split_xsec"
+        if node_type_norm == "diverge":
+            return "full", "diverge_end_full_xsec"
+    return "full", f"{endpoint_tag_norm or 'unknown'}_default_full_xsec"
+
+
+def _build_node_xsec_frame_for_debug(
+    *,
+    nodeid: int,
+    node_type: str,
+    raw_xsec_geom: BaseGeometry | None,
+    gated_xsec_geom: BaseGeometry | None,
+    gate_all_xsec_geom: BaseGeometry | None,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+) -> dict[str, Any] | None:
+    raw_line = _pick_debug_primary_line(raw_xsec_geom)
+    gated_line = _pick_debug_primary_line(gated_xsec_geom)
+    gate_all_line = _pick_debug_primary_line(gate_all_xsec_geom)
+    frame_line = raw_line or gated_line or gate_all_line
+    if frame_line is None or frame_line.is_empty or frame_line.length <= 1e-6:
+        return None
+    full_role, split_role = _node_xsec_frame_roles(node_type)
+    road_surface = drivezone_zone_metric
+    slot_parts: list[LineString] = []
+    slot_source = "frame_fallback"
+    if road_surface is not None and not road_surface.is_empty:
+        surface_for_slots = road_surface
+        if gore_zone_metric is not None and not gore_zone_metric.is_empty:
+            try:
+                diff = road_surface.difference(gore_zone_metric)
+                if diff is not None and not diff.is_empty:
+                    surface_for_slots = diff
+                    slot_source = "drivezone_minus_gore"
+                else:
+                    slot_source = "drivezone_only"
+            except Exception:
+                slot_source = "drivezone_only"
+        else:
+            slot_source = "drivezone_only"
+        try:
+            slot_inter = frame_line.intersection(surface_for_slots)
+        except Exception:
+            slot_inter = None
+        slot_parts = [
+            ls
+            for ls in _iter_line_parts(slot_inter)
+            if isinstance(ls, LineString) and not ls.is_empty and float(ls.length) > 0.5
+        ]
+    if not slot_parts:
+        slot_parts = [frame_line]
+        slot_source = "frame_fallback"
+    slot_records: list[dict[str, Any]] = []
+    frame_mid_station = 0.5 * float(frame_line.length)
+    sortable: list[tuple[float, dict[str, Any]]] = []
+    for part in slot_parts:
+        try:
+            mid = part.interpolate(0.5, normalized=True)
+        except Exception:
+            mid = None
+        if not isinstance(mid, Point) or mid.is_empty:
+            continue
+        try:
+            station = float(frame_line.project(mid))
+        except Exception:
+            station = float("inf")
+        if not math.isfinite(station):
+            station = float("inf")
+        if station < frame_mid_station - 1e-6:
+            side = "negative"
+        elif station > frame_mid_station + 1e-6:
+            side = "positive"
+        else:
+            side = "center"
+        sortable.append(
+            (
+                station,
+                {
+                    "geometry_metric": part,
+                    "midpoint_metric": mid,
+                    "mid_station_m": station,
+                    "side": side,
+                    "length_m": float(part.length),
+                },
+            )
+        )
+    for slot_order, (_station, payload) in enumerate(sorted(sortable, key=lambda it: (it[0], -float(it[1]["length_m"])))):
+        payload["slot_order"] = int(slot_order)
+        slot_records.append(payload)
+    return {
+        "nodeid": int(nodeid),
+        "node_type": str(node_type or "unknown"),
+        "raw_xsec_metric": raw_line,
+        "gated_xsec_metric": gated_line,
+        "gate_all_xsec_metric": gate_all_line,
+        "frame_xsec_metric": frame_line,
+        "full_role": full_role,
+        "split_role": split_role,
+        "slot_source": slot_source,
+        "slot_count": int(len(slot_records)),
+        "slots": slot_records,
+    }
+
+
+def _serialize_node_xsec_frame_for_debug(frame: dict[str, Any]) -> dict[str, Any]:
+    slots = []
+    for slot in frame.get("slots", []):
+        if not isinstance(slot, dict):
+            continue
+        slots.append(
+            {
+                "slot_order": int(slot.get("slot_order", -1)),
+                "side": str(slot.get("side") or ""),
+                "mid_station_m": _to_finite_float(slot.get("mid_station_m"), float("nan")),
+                "length_m": _to_finite_float(slot.get("length_m"), float("nan")),
+            }
+        )
+    return {
+        "nodeid": int(frame.get("nodeid", -1)),
+        "node_type": str(frame.get("node_type") or "unknown"),
+        "full_role": str(frame.get("full_role") or ""),
+        "split_role": str(frame.get("split_role") or ""),
+        "slot_source": str(frame.get("slot_source") or ""),
+        "slot_count": int(frame.get("slot_count", 0)),
+        "slots": slots,
+    }
+
+
+def _append_node_xsec_frame_debug_layers(
+    *,
+    debug_layers: dict[str, list[dict[str, Any]]],
+    frame: dict[str, Any],
+) -> None:
+    nodeid = int(frame.get("nodeid", -1))
+    node_type = str(frame.get("node_type") or "unknown")
+    full_role = str(frame.get("full_role") or "")
+    split_role = str(frame.get("split_role") or "")
+    slot_source = str(frame.get("slot_source") or "")
+    slot_count = int(frame.get("slot_count", 0))
+    for layer_name, geom, source in (
+        ("node_xsec_frame_full", frame.get("raw_xsec_metric"), "raw_xsec"),
+        ("node_xsec_frame_gated", frame.get("gated_xsec_metric"), "gated_xsec"),
+        ("node_xsec_frame_active", frame.get("frame_xsec_metric"), "frame_xsec"),
+    ):
+        for ls in _iter_line_parts(geom):
+            debug_layers[layer_name].append(
+                {
+                    "geometry": ls,
+                    "properties": {
+                        "nodeid": nodeid,
+                        "node_type": node_type,
+                        "frame_source": source,
+                        "full_role": full_role,
+                        "split_role": split_role,
+                        "slot_source": slot_source,
+                        "slot_count": slot_count,
+                    },
+                }
+            )
+    for slot in frame.get("slots", []):
+        if not isinstance(slot, dict):
+            continue
+        slot_order = int(slot.get("slot_order", -1))
+        side = str(slot.get("side") or "")
+        length_m = _to_finite_float(slot.get("length_m"), float("nan"))
+        geom = slot.get("geometry_metric")
+        mid = slot.get("midpoint_metric")
+        for ls in _iter_line_parts(geom):
+            debug_layers["node_xsec_slot_parts"].append(
+                {
+                    "geometry": ls,
+                    "properties": {
+                        "nodeid": nodeid,
+                        "node_type": node_type,
+                        "slot_order": slot_order,
+                        "slot_side": side,
+                        "slot_length_m": length_m,
+                        "slot_role": split_role,
+                        "slot_source": slot_source,
+                    },
+                }
+            )
+        if isinstance(mid, Point) and not mid.is_empty:
+            debug_layers["node_xsec_slot_centers"].append(
+                {
+                    "geometry": mid,
+                    "properties": {
+                        "nodeid": nodeid,
+                        "node_type": node_type,
+                        "slot_order": slot_order,
+                        "slot_side": side,
+                        "slot_role": split_role,
+                        "slot_source": slot_source,
+                    },
+                }
+            )
+
+
+def _endpoint_slot_anchor_candidates_for_debug(endpoint_tag: str, *, prefer_split: bool) -> list[str]:
+    endpoint_tag_norm = str(endpoint_tag or "").strip().lower()
+    if endpoint_tag_norm not in {"src", "dst"}:
+        return []
+    if prefer_split:
+        return [
+            f"_pair_xsec_target_{endpoint_tag_norm}_metric",
+            f"_xsec_target_selected_{endpoint_tag_norm}_metric",
+            f"_xsec_road_selected_{endpoint_tag_norm}_metric",
+            f"_pair_xsec_primary_seed_{endpoint_tag_norm}_metric",
+            f"_xsec_ref_{endpoint_tag_norm}_metric",
+        ]
+    return [
+        f"_xsec_ref_{endpoint_tag_norm}_metric",
+        f"_xsec_road_selected_{endpoint_tag_norm}_metric",
+        f"_xsec_target_selected_{endpoint_tag_norm}_metric",
+        f"_pair_xsec_primary_seed_{endpoint_tag_norm}_metric",
+        f"_pair_xsec_target_{endpoint_tag_norm}_metric",
+    ]
+
+
+def _first_valid_line_from_road(road: dict[str, Any], keys: Sequence[str]) -> tuple[LineString | None, str | None]:
+    for key in keys:
+        geom = road.get(key)
+        line = _pick_debug_primary_line(geom)
+        if line is not None and not line.is_empty and line.length > 1e-6:
+            return line, str(key)
+    return None, None
+
+
+def _project_point_to_line(line: LineString | None, point: Point | None) -> Point | None:
+    if not isinstance(line, LineString) or line.is_empty:
+        return None
+    if not isinstance(point, Point) or point.is_empty:
+        try:
+            mid = line.interpolate(0.5, normalized=True)
+        except Exception:
+            mid = None
+        return mid if isinstance(mid, Point) and not mid.is_empty else None
+    try:
+        line_pt, _ = nearest_points(line, point)
+    except Exception:
+        return None
+    return line_pt if isinstance(line_pt, Point) and not line_pt.is_empty else None
+
+
+def _resolve_endpoint_slot_assignment_for_debug(
+    *,
+    road: dict[str, Any],
+    endpoint_tag: str,
+    nodeid: int,
+    node_type: str,
+    frame: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(frame, dict):
+        return None
+    endpoint_tag_norm = str(endpoint_tag or "").strip().lower()
+    if endpoint_tag_norm not in {"src", "dst"}:
+        return None
+    road_line = road.get("_geometry_metric")
+    if isinstance(road_line, LineString) and not road_line.is_empty:
+        endpoint_pt = Point(road_line.coords[0] if endpoint_tag_norm == "src" else road_line.coords[-1])
+    else:
+        endpoint_pt = None
+    requested_family, business_role = _endpoint_slot_family(node_type, endpoint_tag_norm)
+    slot_records = [slot for slot in frame.get("slots", []) if isinstance(slot, dict)]
+    use_split = requested_family == "split" and len(slot_records) >= 2
+    anchor_geom, anchor_source = _first_valid_line_from_road(
+        road,
+        _endpoint_slot_anchor_candidates_for_debug(endpoint_tag_norm, prefer_split=use_split),
+    )
+    anchor_point = _project_point_to_line(anchor_geom, endpoint_pt)
+    frame_line = frame.get("frame_xsec_metric")
+    chosen_slot: dict[str, Any] | None = None
+    fallback_reason = None
+    if use_split:
+        best_score = None
+        anchor_station = float("inf")
+        if isinstance(frame_line, LineString) and isinstance(anchor_point, Point) and not anchor_point.is_empty:
+            try:
+                anchor_station = float(frame_line.project(anchor_point))
+            except Exception:
+                anchor_station = float("inf")
+        for slot in slot_records:
+            slot_geom = slot.get("geometry_metric")
+            slot_mid = slot.get("midpoint_metric")
+            if not isinstance(slot_geom, LineString) or slot_geom.is_empty:
+                continue
+            overlap_len = 0.0
+            if isinstance(anchor_geom, LineString) and not anchor_geom.is_empty:
+                try:
+                    overlap_len = float(sum(part.length for part in _iter_line_parts(slot_geom.intersection(anchor_geom))))
+                except Exception:
+                    overlap_len = 0.0
+            station_gap = float("inf")
+            if math.isfinite(anchor_station):
+                station_gap = abs(_to_finite_float(slot.get("mid_station_m"), float("inf")) - anchor_station)
+            dist_to_anchor = float(slot_geom.distance(anchor_point)) if isinstance(anchor_point, Point) else float("inf")
+            dist_mid = float(slot_mid.distance(anchor_point)) if isinstance(slot_mid, Point) and isinstance(anchor_point, Point) else dist_to_anchor
+            score = (
+                0 if overlap_len > 1e-6 else 1,
+                -overlap_len,
+                station_gap,
+                dist_mid,
+                dist_to_anchor,
+            )
+            if best_score is None or score < best_score:
+                best_score = score
+                chosen_slot = slot
+        if chosen_slot is None:
+            fallback_reason = "split_slot_pick_failed"
+            use_split = False
+    else:
+        if requested_family == "split":
+            fallback_reason = "split_slots_unavailable"
+    if use_split and isinstance(chosen_slot, dict):
+        slot_geom = chosen_slot.get("geometry_metric")
+        slot_order = chosen_slot.get("slot_order")
+        resolved_family = "split"
+        slot_role = str(frame.get("split_role") or "")
+    else:
+        slot_geom = frame_line
+        slot_order = None
+        resolved_family = "full"
+        slot_role = str(frame.get("full_role") or "")
+    slot_point = _project_point_to_line(slot_geom, anchor_point or endpoint_pt)
+    connector_geom = None
+    if isinstance(endpoint_pt, Point) and isinstance(slot_point, Point) and (not endpoint_pt.is_empty) and (not slot_point.is_empty):
+        if float(endpoint_pt.distance(slot_point)) > 1e-6:
+            connector_geom = LineString([endpoint_pt, slot_point])
+    return {
+        "nodeid": int(nodeid),
+        "node_type": str(node_type or "unknown"),
+        "endpoint_tag": endpoint_tag_norm,
+        "requested_family": requested_family,
+        "resolved_family": resolved_family,
+        "business_role": business_role,
+        "slot_role": slot_role,
+        "slot_order": int(slot_order) if slot_order is not None else None,
+        "slot_count": int(len(slot_records)),
+        "assignment_source": anchor_source,
+        "family_fallback_reason": fallback_reason,
+        "slot_geom_metric": slot_geom,
+        "slot_point_metric": slot_point,
+        "endpoint_metric": endpoint_pt,
+        "connector_metric": connector_geom,
+    }
+
+
+def _append_endpoint_slot_assignment_debug_layers(
+    *,
+    debug_layers: dict[str, list[dict[str, Any]]],
+    road_id: str,
+    assignment: dict[str, Any] | None,
+) -> None:
+    if not isinstance(assignment, dict):
+        return
+    endpoint_tag = str(assignment.get("endpoint_tag") or "")
+    point_layer = f"endpoint_slot_{endpoint_tag}"
+    connector_layer = f"endpoint_slot_connector_{endpoint_tag}"
+    slot_geom = assignment.get("slot_geom_metric")
+    slot_point = assignment.get("slot_point_metric")
+    connector_geom = assignment.get("connector_metric")
+    props = {
+        "road_id": road_id,
+        "nodeid": int(assignment.get("nodeid", -1)),
+        "node_type": str(assignment.get("node_type") or "unknown"),
+        "endpoint_tag": endpoint_tag,
+        "requested_family": str(assignment.get("requested_family") or ""),
+        "resolved_family": str(assignment.get("resolved_family") or ""),
+        "business_role": str(assignment.get("business_role") or ""),
+        "slot_role": str(assignment.get("slot_role") or ""),
+        "slot_order": assignment.get("slot_order"),
+        "slot_count": int(assignment.get("slot_count", 0)),
+        "assignment_source": assignment.get("assignment_source"),
+        "family_fallback_reason": assignment.get("family_fallback_reason"),
+    }
+    for ls in _iter_line_parts(slot_geom):
+        debug_layers[f"{point_layer}_region"].append({"geometry": ls, "properties": dict(props)})
+    if isinstance(slot_point, Point) and not slot_point.is_empty:
+        debug_layers[point_layer].append({"geometry": slot_point, "properties": dict(props)})
+    if isinstance(connector_geom, LineString) and not connector_geom.is_empty:
+        debug_layers[connector_layer].append({"geometry": connector_geom, "properties": dict(props)})
+
+
 def _xsec_has_surface_support(
     *,
     xsec: LineString,
@@ -8763,6 +10960,8 @@ def _collect_debug_layers_for_selected(
     dst_xsec: LineString,
     gore_zone_metric: BaseGeometry | None,
     bridge_max_seg_m: float,
+    node_xsec_frame_by_nodeid: dict[int, dict[str, Any]] | None = None,
+    endpoint_slot_debug_enabled: bool = False,
 ) -> None:
     road_id = str(road.get("road_id"))
     surface = road.get("_traj_surface_geom_metric")
@@ -8786,6 +10985,41 @@ def _collect_debug_layers_for_selected(
                 "properties": {"road_id": road_id, "axis_source": road.get("traj_surface_hint_axis_source")},
             }
         )
+    if endpoint_slot_debug_enabled and node_xsec_frame_by_nodeid:
+        try:
+            src_nodeid = int(road.get("src_nodeid", road.get("src")))
+        except Exception:
+            src_nodeid = None
+        try:
+            dst_nodeid = int(road.get("dst_nodeid", road.get("dst")))
+        except Exception:
+            dst_nodeid = None
+        if src_nodeid is not None:
+            src_assignment = _resolve_endpoint_slot_assignment_for_debug(
+                road=road,
+                endpoint_tag="src",
+                nodeid=int(src_nodeid),
+                node_type=str(road.get("src_type") or "unknown"),
+                frame=node_xsec_frame_by_nodeid.get(int(src_nodeid)),
+            )
+            _append_endpoint_slot_assignment_debug_layers(
+                debug_layers=debug_layers,
+                road_id=road_id,
+                assignment=src_assignment,
+            )
+        if dst_nodeid is not None:
+            dst_assignment = _resolve_endpoint_slot_assignment_for_debug(
+                road=road,
+                endpoint_tag="dst",
+                nodeid=int(dst_nodeid),
+                node_type=str(road.get("dst_type") or "unknown"),
+                frame=node_xsec_frame_by_nodeid.get(int(dst_nodeid)),
+            )
+            _append_endpoint_slot_assignment_debug_layers(
+                debug_layers=debug_layers,
+                road_id=road_id,
+                assignment=dst_assignment,
+            )
 
     src_valid = src_xsec
     dst_valid = dst_xsec
@@ -9391,6 +11625,7 @@ def _append_selected_candidate_road(
     dst_xsec: LineString,
     gore_zone_metric: BaseGeometry | None,
     params: dict[str, Any],
+    node_xsec_frame_by_nodeid: dict[int, dict[str, Any]] | None = None,
 ) -> None:
     road_line = selected.get("_geometry_metric")
     if not (isinstance(road_line, LineString) and (not road_line.is_empty)):
@@ -9505,6 +11740,8 @@ def _append_selected_candidate_road(
                 dst_xsec=dst_xsec,
                 gore_zone_metric=gore_zone_metric,
                 bridge_max_seg_m=float(params["BRIDGE_MAX_SEG_M"]),
+                node_xsec_frame_by_nodeid=node_xsec_frame_by_nodeid,
+                endpoint_slot_debug_enabled=bool(int(params.get("DEBUG_ENDPOINT_SLOT_ASSIGNMENT_ENABLE", 1))),
             )
 
 
@@ -12729,10 +14966,34 @@ def _make_base_road_record(
         "endpoint_snap_dist_dst_after_m": None,
         "endpoint_dist_to_xsec_src_m": None,
         "endpoint_dist_to_xsec_dst_m": None,
+        "endpoint_target_region_mode_src": None,
+        "endpoint_target_region_mode_dst": None,
+        "endpoint_post_anchor_mode_src": None,
+        "endpoint_post_anchor_mode_dst": None,
+        "endpoint_post_anchor_target_source_src": None,
+        "endpoint_post_anchor_target_source_dst": None,
+        "endpoint_line_to_target_region_source_src": None,
+        "endpoint_line_to_target_region_source_dst": None,
+        "endpoint_line_to_target_region_window_src_m": None,
+        "endpoint_line_to_target_region_window_dst_m": None,
+        "endpoint_line_to_target_region_target_len_src_m": None,
+        "endpoint_line_to_target_region_target_len_dst_m": None,
+        "endpoint_line_to_target_region_dist_src_m": None,
+        "endpoint_line_to_target_region_dist_dst_m": None,
+        "endpoint_line_to_target_region_intersects_src": None,
+        "endpoint_line_to_target_region_intersects_dst": None,
+        "endpoint_line_to_target_region_monotonic_src": None,
+        "endpoint_line_to_target_region_monotonic_dst": None,
+        "endpoint_line_to_target_region_closure_ok_src": None,
+        "endpoint_line_to_target_region_closure_ok_dst": None,
         "width_med_m": None,
         "width_p90_m": None,
         "max_turn_deg_per_10m": None,
         "seg_index0_len_m": None,
+        "primary_geometry_pair_target_applied_src": False,
+        "primary_geometry_pair_target_applied_dst": False,
+        "primary_geometry_xsec_seed_by_src": None,
+        "primary_geometry_xsec_seed_by_dst": None,
         "src_is_gore_tip": False,
         "dst_is_gore_tip": False,
         "src_is_expanded": False,
@@ -12860,6 +15121,13 @@ def _make_base_road_record(
         "step1_corridor_zone_source_count": None,
         "step1_corridor_zone_half_width_m": None,
         "step1_corridor_shape_ref_inside_ratio": None,
+        "step1_pair_target_ref_source": None,
+        "step1_road_prior_rerank_used": False,
+        "step1_branch_override_used": False,
+        "step1_branch_override_from_traj_id": None,
+        "step1_branch_override_to_traj_id": None,
+        "step1_pair_xsec_policy_src": None,
+        "step1_pair_xsec_policy_dst": None,
         "gore_fallback_used_src": False,
         "gore_fallback_used_dst": False,
         "traj_drop_count_by_drivezone": 0,
@@ -12870,6 +15138,9 @@ def _make_base_road_record(
         "segment_corridor_outside_len_m": None,
         "segment_corridor_inside_tol_m": None,
         "segment_corridor_min_inside_ratio": None,
+        "segment_corridor_rescue_mode": None,
+        "drivezone_rescue_mode": None,
+        "traj_surface_rescue_mode": None,
         "step3_width_ratio_src": None,
         "step3_width_ratio_dst": None,
         "step3_widening_suppressed": False,

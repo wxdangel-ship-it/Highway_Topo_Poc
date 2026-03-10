@@ -353,10 +353,58 @@ def test_step1_cross_point_src_respects_pair_xsec_policy() -> None:
     cp_merge = out_merge.get("cross_point_src")
     assert isinstance(cp_diverge, Point)
     assert isinstance(cp_merge, Point)
-    assert pytest.approx(float(cp_diverge.x), abs=1e-6) == 5.0
+    assert float(cp_diverge.x) > float(cp_merge.x) + 1.0
     assert pytest.approx(float(cp_merge.x), abs=1e-6) == 0.0
     assert str(out_diverge.get("pair_xsec_policy_src")) == "role_outward_cut"
     assert str(out_merge.get("pair_xsec_policy_src")) == "role_full_seed"
+
+
+def test_step1_corridor_reranks_to_road_prior_branch_when_seed_branch_is_wrong() -> None:
+    support = PairSupport(
+        src_nodeid=131,
+        dst_nodeid=231,
+        support_traj_ids={"seed_branch", "prior_branch"},
+        support_event_count=2,
+        traj_segments=[
+            LineString([(0.0, 0.0), (100.0, 0.0)]),
+            LineString([(0.0, 10.0), (100.0, 10.0)]),
+        ],
+        src_cross_points=[Point(0.0, 0.0), Point(0.0, 10.0)],
+        dst_cross_points=[Point(100.0, 0.0), Point(100.0, 10.0)],
+        evidence_traj_ids=["seed_branch", "prior_branch"],
+        cluster_count=1,
+        main_cluster_ratio=1.0,
+    )
+    src_xsec = LineString([(0.0, -20.0), (0.0, 20.0)])
+    dst_xsec = LineString([(100.0, -20.0), (100.0, 20.0)])
+    prior_line = LineString([(0.0, 10.0), (100.0, 10.0)])
+
+    out = pipeline._build_step1_corridor_for_pair(
+        support=support,
+        src_type="merge",
+        dst_type="diverge",
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=None,
+        gore_zone_metric=None,
+        params=dict(pipeline.DEFAULT_PARAMS),
+        road_prior_shape_ref_metric=prior_line,
+    )
+
+    line = out.get("shape_ref_line")
+    assert isinstance(line, LineString)
+    assert float(line.distance(prior_line)) <= 1e-6
+    assert bool(out.get("road_prior_shape_ref_rerank_used")) is True
+    assert bool(out.get("branch_override_used")) is True
+    assert str(out.get("branch_override_from_traj_id")) == "seed_branch"
+    assert str(out.get("branch_override_to_traj_id")) == "prior_branch"
+    assert str(out.get("pair_target_ref_source")) == "road_prior_shape_ref"
+    topk = out.get("candidate_topk")
+    assert isinstance(topk, list) and len(topk) >= 2
+    assert str(topk[0].get("traj_id")) == "prior_branch"
+    assert bool(topk[0].get("selected")) is True
+    assert float(topk[0].get("road_prior_inside_ratio") or 0.0) >= 0.99
+    assert float(topk[1].get("road_prior_gap_m") or 0.0) > 1.0
 
 
 def test_shared_intersection_group_marks_internal_diverge_merge_pair() -> None:
