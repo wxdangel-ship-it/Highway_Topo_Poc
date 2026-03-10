@@ -6633,6 +6633,23 @@ def _select_endpoint_post_anchor_target(
         candidate_parts = _iter_line_parts(point_inter)
     if not candidate_parts:
         candidate_parts = _iter_line_parts(target_geom)
+    else:
+        # Keep the full target xsec as a fallback candidate. Local window clipping can
+        # truncate one side of a merge/diverge slot and bias the target back toward an
+        # already-shifted endpoint.
+        for full_part in _iter_line_parts(target_geom):
+            if not any(
+                _is_valid_linestring(existing)
+                and (
+                    existing.equals(full_part)
+                    or (
+                        abs(float(existing.length) - float(full_part.length)) <= 1e-6
+                        and float(existing.distance(full_part)) <= 1e-6
+                    )
+                )
+                for existing in candidate_parts
+            ):
+                candidate_parts.append(full_part)
     if not candidate_parts:
         return None, None, meta
 
@@ -6662,6 +6679,7 @@ def _select_endpoint_post_anchor_target(
             continue
         part_ref_dist = float("inf")
         station_refs: list[tuple[float, float, float, str]] = []
+        slot_meta: dict[str, Any] = {}
         for ref_line, ref_mode, ref_weight in reference_lines:
             if not _is_valid_linestring(ref_line):
                 continue
@@ -6686,14 +6704,46 @@ def _select_endpoint_post_anchor_target(
                 float(max(2.0, buffer_m * 3.0)),
                 float(min((ref_dist for _, _, ref_dist, _ in station_refs), default=0.0) + max(2.0, buffer_m)),
             )
-            close_refs = [station for station, _, ref_dist, _ in station_refs if ref_dist <= close_cut]
-            if not close_refs:
-                close_refs = [station for station, _, _, _ in station_refs]
+            close_station_refs = [item for item in station_refs if item[2] <= close_cut]
+            if not close_station_refs:
+                close_station_refs = list(station_refs)
+            close_refs = [station for station, _, _, _ in close_station_refs]
             station_lo = float(min(close_refs))
             station_hi = float(max(close_refs))
             span_m = float(max(max(1.0, buffer_m * 0.5), station_hi - station_lo))
             span_m = float(min(max(2.0, buffer_m * 2.0), max(span_m, 0.25 * part_len)))
             station_mid = float(max(0.0, min(part_len, station_mid)))
+            lb_close_stations = sorted(
+                float(station)
+                for station, _, _, ref_mode in close_station_refs
+                if str(ref_mode).strip().lower() == "lane_boundary"
+            )
+            bracket_tol = float(max(0.5, buffer_m * 0.25))
+            lower_lb = max(
+                (station for station in lb_close_stations if station <= station_mid + bracket_tol),
+                default=None,
+            )
+            upper_lb = min(
+                (station for station in lb_close_stations if station >= station_mid - bracket_tol),
+                default=None,
+            )
+            if lower_lb is not None and upper_lb is not None and float(upper_lb) > float(lower_lb):
+                bracket_span = float(upper_lb - lower_lb)
+                bracket_span_min = float(max(1.0, buffer_m * 0.5))
+                bracket_span_max = float(min(max(12.0, buffer_m * 5.0), max(2.0, 0.85 * part_len)))
+                if bracket_span_min <= bracket_span <= bracket_span_max:
+                    # When nearby lane boundaries bracket the reference-biased target,
+                    # recenter inside that bounded xsec interval instead of following
+                    # an already-shifted support/shape_ref line.
+                    station_mid = float(0.5 * (lower_lb + upper_lb))
+                    span_m = float(
+                        min(
+                            max(2.0, buffer_m * 2.0),
+                            max(bracket_span, min(max(1.0, buffer_m * 0.5), 0.25 * part_len)),
+                        )
+                    )
+                    slot_meta["endpoint_target_region_slot_mode"] = "lane_boundary_bracket_center"
+                    slot_meta["endpoint_target_region_slot_span_m"] = bracket_span
         else:
             station_mid = 0.5 * part_len
             span_m = float(min(max(2.0, buffer_m * 2.0), max(1.0, 0.25 * part_len)))
@@ -6720,21 +6770,34 @@ def _select_endpoint_post_anchor_target(
             continue
         if not math.isfinite(part_ref_dist):
             part_ref_dist = dist
-        score = (
-            0.0 if station_refs else 1.0,
-            float(part_ref_dist),
-            dist,
-            -part_len,
-        )
+        slot_priority = 0.0 if slot_meta.get("endpoint_target_region_slot_mode") == "lane_boundary_bracket_center" else 1.0
+        if slot_priority <= 0.0:
+            score = (
+                0.0 if station_refs else 1.0,
+                slot_priority,
+                float(part_ref_dist),
+                -part_len,
+                dist,
+            )
+        else:
+            score = (
+                0.0 if station_refs else 1.0,
+                slot_priority,
+                float(part_ref_dist),
+                dist,
+                -part_len,
+            )
         if best_score is None or score < best_score:
             best_score = score
             best_target = target_mid
             best_region = target_region
-            best_meta = {
+            part_meta = {
                 "endpoint_target_region_span_m": float(getattr(target_region, "length", 0.0)),
                 "endpoint_target_region_ref_count": int(len(station_refs)),
                 "endpoint_target_region_ref_modes": ",".join(sorted({mode for _, _, _, mode in station_refs})),
             }
+            part_meta.update(slot_meta)
+            best_meta = part_meta
     if best_target is None:
         return None, None, meta
     meta.update(best_meta)
