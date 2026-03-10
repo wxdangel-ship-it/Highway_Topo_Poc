@@ -121,6 +121,36 @@ def test_build_pair_endpoint_xsec_role_full_seed_merge_uses_valid_mid_anchor() -
     assert cross_ref.equals(xsec_seed)
 
 
+def test_choose_traj_surface_ref_axis_prefers_branch_override_axis() -> None:
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t0"},
+        support_event_count=1,
+        traj_segments=[LineString([(0.0, 0.0), (100.0, 0.0)])],
+        src_cross_points=[Point(0.0, 0.0)],
+        dst_cross_points=[Point(100.0, 0.0)],
+    )
+    src_xsec = LineString([(0.0, -5.0), (0.0, 5.0)])
+    dst_xsec = LineString([(100.0, -5.0), (100.0, 5.0)])
+    preferred_axis = LineString([(20.0, 0.0), (80.0, 0.0)])
+
+    ref_line, axis_source = pipeline._choose_traj_surface_ref_axis(
+        support=support,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        lane_boundaries_metric=[],
+        gore_zone_metric=None,
+        params=dict(pipeline.DEFAULT_PARAMS),
+        preferred_axis_metric=preferred_axis,
+        preferred_axis_source="step1_branch_override_shape_ref_axis",
+    )
+
+    assert isinstance(ref_line, LineString)
+    assert ref_line.equals(preferred_axis)
+    assert axis_source == "step1_branch_override_shape_ref_axis"
+
+
 def test_build_pair_endpoint_xsec_role_full_seed_diverge_uses_valid_mid_anchor() -> None:
     xsec_seed = LineString([(100.0, -10.0), (100.0, 10.0)])
     shape_ref_line = LineString([(80.0, -3.0), (120.0, -3.0)])

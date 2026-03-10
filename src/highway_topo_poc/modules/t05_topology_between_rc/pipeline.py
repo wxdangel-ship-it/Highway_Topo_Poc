@@ -2922,6 +2922,16 @@ def _run_patch_core(
                     )
                 if branch_corridor.get("hard_reason"):
                     continue
+                surface_axis_metric = None
+                surface_axis_source = None
+                if bool(branch_corridor.get("branch_override_used", False)):
+                    variant_road_prior_shape_ref = variant.get("road_prior_shape_ref_metric")
+                    if _is_valid_linestring(variant_road_prior_shape_ref):
+                        surface_axis_metric = variant_road_prior_shape_ref
+                        surface_axis_source = "step1_branch_override_road_prior_axis"
+                    elif _is_valid_linestring(branch_corridor.get("shape_ref_line")):
+                        surface_axis_metric = branch_corridor.get("shape_ref_line")
+                        surface_axis_source = "step1_branch_override_shape_ref_axis"
                 with stage_timer.scope("t_build_surfaces_total"):
                     surface_hint = _build_traj_surface_hint_for_cluster(
                         support=branch_support,
@@ -2935,6 +2945,8 @@ def _run_patch_core(
                         traj_points_cache=traj_points_cache,
                         traj_xy_index=traj_xy_index,
                         traj_meta_index=traj_meta_index,
+                        preferred_axis_metric=surface_axis_metric,
+                        preferred_axis_source=surface_axis_source,
                     )
                 stage_timer.add("t_build_traj_surface_compute", float(surface_hint.get("timing_ms", 0.0)))
                 key_k = f"{src}_{dst}_k{int(cluster_id)}"
@@ -3107,6 +3119,16 @@ def _run_patch_core(
                 support_k = _subset_support_by_cluster(support, cluster_id)
                 if support_k is None or support_k.support_event_count <= 0:
                     continue
+                surface_axis_metric = None
+                surface_axis_source = None
+                if bool(step1_corridor.get("branch_override_used", False)):
+                    road_prior_shape_ref_metric = road_prior_pair_shape_ref_map.get((int(src), int(dst)))
+                    if _is_valid_linestring(road_prior_shape_ref_metric):
+                        surface_axis_metric = road_prior_shape_ref_metric
+                        surface_axis_source = "step1_branch_override_road_prior_axis"
+                    elif _is_valid_linestring(step1_corridor.get("shape_ref_line")):
+                        surface_axis_metric = step1_corridor.get("shape_ref_line")
+                        surface_axis_source = "step1_branch_override_shape_ref_axis"
                 with stage_timer.scope("t_build_surfaces_total"):
                     surface_hint = _build_traj_surface_hint_for_cluster(
                         support=support_k,
@@ -3120,6 +3142,8 @@ def _run_patch_core(
                         traj_points_cache=traj_points_cache,
                         traj_xy_index=traj_xy_index,
                         traj_meta_index=traj_meta_index,
+                        preferred_axis_metric=surface_axis_metric,
+                        preferred_axis_source=surface_axis_source,
                     )
                 stage_timer.add("t_build_traj_surface_compute", float(surface_hint.get("timing_ms", 0.0)))
                 key_k = f"{src}_{dst}_k{int(cluster_id)}"
@@ -7297,7 +7321,14 @@ def _choose_traj_surface_ref_axis(
     lane_boundaries_metric: Sequence[LineString],
     gore_zone_metric: BaseGeometry | None,
     params: dict[str, Any],
+    preferred_axis_metric: LineString | None = None,
+    preferred_axis_source: str | None = None,
 ) -> tuple[LineString | None, str]:
+    if preferred_axis_metric is not None and not preferred_axis_metric.is_empty and preferred_axis_metric.length > 1.0:
+        return (
+            _orient_axis_line(preferred_axis_metric, src_xsec=src_xsec, dst_xsec=dst_xsec),
+            str(preferred_axis_source or "preferred_axis"),
+        )
     medoid_axis = _pick_medoid_support_axis(support=support, src_xsec=src_xsec, dst_xsec=dst_xsec)
     lb_axis_line: LineString | None = None
     try:
@@ -7911,6 +7942,8 @@ def _build_traj_surface_hint_for_cluster(
     traj_points_cache: dict[tuple[str, ...], tuple[np.ndarray, int]] | None = None,
     traj_xy_index: dict[str, np.ndarray] | None = None,
     traj_meta_index: dict[str, dict[str, Any]] | None = None,
+    preferred_axis_metric: LineString | None = None,
+    preferred_axis_source: str | None = None,
 ) -> dict[str, Any]:
     t0 = perf_counter()
     ids_key = tuple(sorted(str(v) for v in support.support_traj_ids))
@@ -7966,6 +7999,8 @@ def _build_traj_surface_hint_for_cluster(
         lane_boundaries_metric=lane_boundaries_metric,
         gore_zone_metric=gore_zone_metric,
         params=params,
+        preferred_axis_metric=preferred_axis_metric,
+        preferred_axis_source=preferred_axis_source,
     )
     if ref_line is None or ref_line.length <= 1.0:
         out["reason"] = "ref_axis_missing"
