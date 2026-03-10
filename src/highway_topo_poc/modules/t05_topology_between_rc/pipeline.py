@@ -7434,6 +7434,43 @@ def _choose_traj_surface_ref_axis(
     return None, "axis_missing"
 
 
+def _resolve_centerline_shape_ref_hint(
+    *,
+    support: PairSupport,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    shape_ref_hint_metric: LineString | None,
+    road_prior_shape_ref_metric: LineString | None,
+    use_road_prior_shape_ref: bool,
+    step1_branch_override_used: bool,
+    support_mode: str | None,
+    same_pair_multichain: bool,
+    params: dict[str, Any],
+) -> tuple[LineString | None, str | None]:
+    source = "road_prior_shape_ref" if bool(use_road_prior_shape_ref) else "step1_shape_ref"
+    base_line = road_prior_shape_ref_metric if bool(use_road_prior_shape_ref) else shape_ref_hint_metric
+    if not _is_valid_linestring(base_line):
+        return None, source
+    oriented = _orient_axis_line(base_line, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    if (
+        bool(step1_branch_override_used)
+        and str(support_mode or "").strip().lower() == "traj_support"
+        and (not bool(same_pair_multichain))
+    ):
+        medoid_axis = _pick_medoid_support_axis(support=support, src_xsec=src_xsec, dst_xsec=dst_xsec)
+        centered, recenter_mode = _recenter_preferred_axis_to_support(
+            preferred_axis=oriented,
+            medoid_axis=medoid_axis,
+            src_xsec=src_xsec,
+            dst_xsec=dst_xsec,
+            params=params,
+        )
+        if recenter_mode:
+            return centered, f"{source}_{recenter_mode}"
+        return centered, source
+    return oriented, source
+
+
 def _normalize_surface_polygon(surface: BaseGeometry | None) -> BaseGeometry | None:
     if surface is None or surface.is_empty:
         return None
@@ -9049,7 +9086,18 @@ def _evaluate_candidate_road(
         same_pair_multichain=same_pair_multichain,
     )
     use_road_prior_shape_ref = bool(road_prior_shape_ref_valid and (road_prior_gap_fill_mode or (not step1_shape_ref_valid)))
-    shape_ref_hint_for_center = road_prior_shape_ref_metric if use_road_prior_shape_ref else shape_ref_hint_metric
+    shape_ref_hint_for_center, shape_ref_hint_for_center_source = _resolve_centerline_shape_ref_hint(
+        support=support,
+        src_xsec=primary_src_xsec,
+        dst_xsec=primary_dst_xsec,
+        shape_ref_hint_metric=shape_ref_hint_metric,
+        road_prior_shape_ref_metric=road_prior_shape_ref_metric,
+        use_road_prior_shape_ref=use_road_prior_shape_ref,
+        step1_branch_override_used=step1_branch_override_used,
+        support_mode=support_mode_norm,
+        same_pair_multichain=same_pair_multichain,
+        params=params,
+    )
     traj_surface_metric_for_center = None if road_prior_gap_fill_mode else traj_surface_hint.get("surface_metric")
     segment_corridor_for_gate = segment_corridor_metric
     if road_prior_gap_fill_mode and road_prior_shape_ref_valid:
@@ -9286,10 +9334,14 @@ def _evaluate_candidate_road(
     road["road_prior_gap_fill_mode"] = bool(road_prior_gap_fill_mode)
     road["step1_road_prior_mode"] = str(step1_road_prior_mode or "") or None
     road["step1_branch_override_used"] = bool(step1_branch_override_used)
+    road["shape_ref_hint_for_center_source"] = str(shape_ref_hint_for_center_source or "") or None
     road["road_prior_shape_ref_length_m"] = (
         float(road_prior_shape_ref_metric.length) if road_prior_shape_ref_valid else None
     )
     road["_road_prior_shape_ref_metric"] = road_prior_shape_ref_metric if road_prior_shape_ref_valid else None
+    road["_shape_ref_hint_for_center_metric"] = (
+        shape_ref_hint_for_center if _is_valid_linestring(shape_ref_hint_for_center) else None
+    )
     road["_pair_xsec_target_src_metric"] = pair_xsec_target_src_metric if pair_target_src_available else None
     road["_pair_xsec_target_dst_metric"] = pair_xsec_target_dst_metric if pair_target_dst_available else None
     road["_pair_xsec_primary_seed_src_metric"] = (
