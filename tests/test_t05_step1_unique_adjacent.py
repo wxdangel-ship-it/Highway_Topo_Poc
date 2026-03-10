@@ -181,6 +181,224 @@ def test_choose_traj_surface_ref_axis_recenters_preferred_axis_by_medoid() -> No
     assert float(ref_line.distance(LineString([(0.0, 0.0), (100.0, 0.0)]))) <= 1e-6
 
 
+def test_build_node_cluster_slot_targets_assigns_shared_node_slots() -> None:
+    supports = {
+        (1, 2): PairSupport(
+            src_nodeid=1,
+            dst_nodeid=2,
+            support_traj_ids={"a0", "a1"},
+            support_event_count=2,
+            traj_segments=[LineString([(0.0, -4.0), (100.0, -4.0)])],
+            src_cross_points=[Point(0.0, -4.5), Point(0.0, -3.5)],
+            dst_cross_points=[Point(100.0, -4.0)],
+        ),
+        (1, 3): PairSupport(
+            src_nodeid=1,
+            dst_nodeid=3,
+            support_traj_ids={"b0", "b1"},
+            support_event_count=2,
+            traj_segments=[LineString([(0.0, 4.0), (100.0, 4.0)])],
+            src_cross_points=[Point(0.0, 3.5), Point(0.0, 4.5)],
+            dst_cross_points=[Point(100.0, 4.0)],
+        ),
+    }
+    xsec_lookup = {
+        1: CrossSection(nodeid=1, geometry_metric=LineString([(0.0, -10.0), (0.0, 10.0)]), properties={"nodeid": 1}),
+        2: CrossSection(nodeid=2, geometry_metric=LineString([(100.0, -10.0), (100.0, 10.0)]), properties={"nodeid": 2}),
+        3: CrossSection(nodeid=3, geometry_metric=LineString([(100.0, -10.0), (100.0, 10.0)]), properties={"nodeid": 3}),
+    }
+
+    out = pipeline._build_node_cluster_slot_targets(
+        supports=supports,
+        xsec_lookup_map=xsec_lookup,
+        primary_by_nodeid={},
+        params=dict(pipeline.DEFAULT_PARAMS),
+    )
+
+    assert (1, 2) in out
+    assert (1, 3) in out
+    src_slot_12 = out[(1, 2)]["src_slot_point"]
+    src_slot_13 = out[(1, 3)]["src_slot_point"]
+    assert isinstance(src_slot_12, Point)
+    assert isinstance(src_slot_13, Point)
+    xy12 = geom_mod.point_xy_safe(src_slot_12, context="slot_12")
+    xy13 = geom_mod.point_xy_safe(src_slot_13, context="slot_13")
+    assert xy12 is not None
+    assert xy13 is not None
+    assert float(xy12[1]) < 0.0
+    assert float(xy13[1]) > 0.0
+    assert int(out[(1, 2)]["src_slot_group_size"]) == 2
+    assert int(out[(1, 3)]["src_slot_group_size"]) == 2
+    assert int(out[(1, 2)]["src_slot_rank"]) == 0
+    assert int(out[(1, 3)]["src_slot_rank"]) == 1
+
+
+def test_apply_node_cluster_slot_targets_to_step1_corridor_warps_shape_ref() -> None:
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t0"},
+        support_event_count=1,
+        traj_segments=[LineString([(0.0, -6.0), (100.0, -6.0)])],
+        src_cross_points=[Point(0.0, -6.0)],
+        dst_cross_points=[Point(100.0, -6.0)],
+    )
+    src_xsec = LineString([(0.0, -10.0), (0.0, 10.0)])
+    dst_xsec = LineString([(100.0, -10.0), (100.0, 10.0)])
+    step1_corridor = {
+        "shape_ref_line": LineString([(0.0, -6.0), (100.0, -6.0)]),
+        "cross_point_src": Point(0.0, -6.0),
+        "cross_point_dst": Point(100.0, -6.0),
+        "pair_xsec_policy_src": None,
+        "pair_xsec_policy_dst": None,
+    }
+    slot_meta = {
+        "src_slot_metric": LineString([(0.0, -2.0), (0.0, 2.0)]),
+        "dst_slot_metric": LineString([(100.0, -2.0), (100.0, 2.0)]),
+        "src_slot_point": Point(0.0, 0.0),
+        "dst_slot_point": Point(100.0, 0.0),
+        "src_slot_group_size": 2,
+        "dst_slot_group_size": 2,
+        "src_slot_rank": 0,
+        "dst_slot_rank": 0,
+    }
+
+    out = pipeline._apply_node_cluster_slot_targets_to_step1_corridor(
+        step1_corridor=step1_corridor,
+        support=support,
+        src_type="unknown",
+        dst_type="unknown",
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        drivezone_zone_metric=None,
+        gore_zone_metric=None,
+        params=dict(pipeline.DEFAULT_PARAMS),
+        node_cluster_slot_meta=slot_meta,
+    )
+
+    assert str(out.get("pair_xsec_policy_src")) == "node_cluster_slot"
+    assert str(out.get("pair_xsec_policy_dst")) == "node_cluster_slot"
+    assert bool(out.get("node_cluster_slot_applied_src")) is True
+    assert bool(out.get("node_cluster_slot_applied_dst")) is True
+    assert isinstance(out.get("_pair_xsec_target_src_metric"), LineString)
+    assert isinstance(out.get("_pair_xsec_target_dst_metric"), LineString)
+    warped = out.get("shape_ref_line")
+    assert isinstance(warped, LineString)
+    assert float(warped.distance(LineString([(0.0, 0.0), (100.0, 0.0)]))) <= 1e-6
+
+
+def test_build_same_pair_variant_slot_targets_assigns_branch_slots() -> None:
+    variants = [
+        {
+            "branch_id": "1_2__b0",
+            "support": PairSupport(
+                src_nodeid=1,
+                dst_nodeid=2,
+                support_traj_ids={"a0"},
+                support_event_count=1,
+                traj_segments=[LineString([(0.0, -5.0), (100.0, -5.0)])],
+                src_cross_points=[Point(0.0, -5.5), Point(0.0, -4.5)],
+                dst_cross_points=[Point(100.0, -5.0)],
+            ),
+        },
+        {
+            "branch_id": "1_2__b1",
+            "support": PairSupport(
+                src_nodeid=1,
+                dst_nodeid=2,
+                support_traj_ids={"b0"},
+                support_event_count=1,
+                traj_segments=[LineString([(0.0, 5.0), (100.0, 5.0)])],
+                src_cross_points=[Point(0.0, 4.5), Point(0.0, 5.5)],
+                dst_cross_points=[Point(100.0, 5.0)],
+            ),
+        },
+    ]
+
+    out = pipeline._build_same_pair_variant_slot_targets(
+        variants=variants,
+        src_xsec=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        dst_xsec=LineString([(100.0, -10.0), (100.0, 10.0)]),
+        params=dict(pipeline.DEFAULT_PARAMS),
+    )
+
+    assert set(out) == {"1_2__b0", "1_2__b1"}
+    assert int(out["1_2__b0"]["src_slot_group_size"]) == 2
+    assert int(out["1_2__b1"]["src_slot_group_size"]) == 2
+    assert int(out["1_2__b0"]["src_slot_rank"]) == 0
+    assert int(out["1_2__b1"]["src_slot_rank"]) == 1
+    src_slot_0 = out["1_2__b0"]["src_slot_point"]
+    src_slot_1 = out["1_2__b1"]["src_slot_point"]
+    assert isinstance(src_slot_0, Point)
+    assert isinstance(src_slot_1, Point)
+    xy0 = geom_mod.point_xy_safe(src_slot_0, context="same_pair_slot_0")
+    xy1 = geom_mod.point_xy_safe(src_slot_1, context="same_pair_slot_1")
+    assert xy0 is not None
+    assert xy1 is not None
+    assert float(xy0[1]) < 0.0
+    assert float(xy1[1]) > 0.0
+
+
+def test_build_same_pair_variant_slot_targets_deduplicates_fallback_variants() -> None:
+    variants = [
+        {
+            "branch_id": "1_2__b0",
+            "support_mode": "traj_support",
+            "support": PairSupport(
+                src_nodeid=1,
+                dst_nodeid=2,
+                support_traj_ids={"a0", "a1"},
+                support_event_count=2,
+                traj_segments=[LineString([(0.0, -5.0), (100.0, -5.0)])],
+                src_cross_points=[Point(0.0, -5.5), Point(0.0, -4.5)],
+                dst_cross_points=[Point(100.0, -5.0)],
+            ),
+        },
+        {
+            "branch_id": "1_2__b0",
+            "support_mode": "road_prior_fallback",
+            "support": PairSupport(
+                src_nodeid=1,
+                dst_nodeid=2,
+                support_traj_ids=set(),
+                support_event_count=0,
+                traj_segments=[],
+                src_cross_points=[Point(0.0, -4.0)],
+                dst_cross_points=[Point(100.0, -4.0)],
+            ),
+        },
+        {
+            "branch_id": "1_2__b1",
+            "support_mode": "traj_support",
+            "support": PairSupport(
+                src_nodeid=1,
+                dst_nodeid=2,
+                support_traj_ids={"b0"},
+                support_event_count=1,
+                traj_segments=[LineString([(0.0, 5.0), (100.0, 5.0)])],
+                src_cross_points=[Point(0.0, 5.0)],
+                dst_cross_points=[Point(100.0, 5.0)],
+            ),
+        },
+    ]
+
+    out = pipeline._build_same_pair_variant_slot_targets(
+        variants=variants,
+        src_xsec=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        dst_xsec=LineString([(100.0, -10.0), (100.0, 10.0)]),
+        params=dict(pipeline.DEFAULT_PARAMS),
+    )
+
+    assert set(out) == {"1_2__b0", "1_2__b1"}
+    assert int(out["1_2__b0"]["src_slot_group_size"]) == 2
+    assert int(out["1_2__b1"]["src_slot_group_size"]) == 2
+    src_slot_0 = out["1_2__b0"]["src_slot_point"]
+    assert isinstance(src_slot_0, Point)
+    xy0 = geom_mod.point_xy_safe(src_slot_0, context="same_pair_slot_dup_0")
+    assert xy0 is not None
+    assert abs(float(xy0[1]) + 5.0) <= 0.5
+
+
 def test_build_pair_endpoint_xsec_role_full_seed_diverge_uses_valid_mid_anchor() -> None:
     xsec_seed = LineString([(100.0, -10.0), (100.0, 10.0)])
     shape_ref_line = LineString([(80.0, -3.0), (120.0, -3.0)])
@@ -1643,6 +1861,10 @@ def test_topology_unique_mode_same_pair_multichain_outputs_multi_roads_with_chan
     assert {int(props.get("channel_count", 0)) for props in out["road_properties"]} == {2}
     assert all(bool(props.get("same_pair_multi_road", False)) for props in out["road_properties"])
     assert all(bool(props.get("same_pair_handled", False)) for props in out["road_properties"])
+    assert all(bool(props.get("node_cluster_slot_applied_src", False)) for props in out["road_properties"])
+    assert all(bool(props.get("node_cluster_slot_applied_dst", False)) for props in out["road_properties"])
+    assert {int(props.get("node_cluster_slot_group_size_src", 0)) for props in out["road_properties"]} == {2}
+    assert {int(props.get("node_cluster_slot_group_size_dst", 0)) for props in out["road_properties"]} == {2}
     assert {str(props.get("same_pair_resolution_state")) for props in out["road_properties"]} == {"multi_output_valid"}
     assert {int(props.get("same_pair_final_output_count_for_pair", 0)) for props in out["road_properties"]} == {2}
     assert {int(props.get("same_pair_unresolved_branch_count_for_pair", 0)) for props in out["road_properties"]} == {0}
@@ -1685,7 +1907,11 @@ def test_topology_unique_mode_same_pair_multichain_uses_road_prior_fallback_for_
         xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
         road_prior_path=road_path,
     )
-    patch_inputs.drivezone_zone_metric = Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 30.0), (-20.0, 30.0)])
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 30.0), (-20.0, 30.0)]),
+    )
     support = PairSupport(
         src_nodeid=1,
         dst_nodeid=2,
@@ -3206,6 +3432,127 @@ def test_evaluate_candidate_road_uses_pair_targets_for_primary_merge_diverge_geo
     assert isinstance(geom, LineString)
     assert abs(float(geom.coords[0][0]) - 20.0) <= 1e-6
     assert abs(float(geom.coords[-1][0]) - 80.0) <= 1e-6
+
+
+def test_evaluate_candidate_road_uses_node_cluster_slot_for_primary_geometry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
+    )
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
+    params = dict(pipeline.DEFAULT_PARAMS)
+    params["STEP2_ENDPOINT_POST_ANCHOR_ENABLE"] = 0
+    src_xsec = LineString([(0.0, -8.0), (0.0, 8.0)])
+    dst_xsec = LineString([(100.0, -8.0), (100.0, 8.0)])
+    src_slot = LineString([(0.0, -2.0), (0.0, 2.0)])
+    dst_slot = LineString([(100.0, -3.0), (100.0, 3.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t0"},
+        support_event_count=1,
+        traj_segments=[LineString([(0.0, 0.0), (100.0, 0.0)])],
+        src_cross_points=[Point(0.0, 0.0)],
+        dst_cross_points=[Point(100.0, 0.0)],
+    )
+    captured: dict[str, LineString] = {}
+
+    def _fake_estimate_centerline(**kwargs):  # type: ignore[no-untyped-def]
+        captured["src_xsec"] = kwargs["src_xsec"]
+        captured["dst_xsec"] = kwargs["dst_xsec"]
+        return geom_mod.CenterEstimate(
+            centerline_metric=LineString([(0.0, 0.0), (100.0, 0.0)]),
+            shape_ref_metric=LineString([(0.0, 0.0), (100.0, 0.0)]),
+            lb_path_found=False,
+            lb_path_edge_count=0,
+            lb_path_length_m=None,
+            stable_offset_m_src=None,
+            stable_offset_m_dst=None,
+            center_sample_coverage=1.0,
+            width_med_m=None,
+            width_p90_m=None,
+            max_turn_deg_per_10m=None,
+            used_lane_boundary=False,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="none",
+            dst_cut_mode="none",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
+            soft_flags=set(),
+            hard_flags=set(),
+            diagnostics={},
+        )
+
+    monkeypatch.setattr(pipeline, "estimate_centerline", _fake_estimate_centerline)
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: ({}, set(), set(), []),
+    )
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="unknown",
+        dst_type="unknown",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=2,
+        dst_in_degree=2,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": False, "surface_metric": None, "timing_ms": 0.0},
+        shape_ref_hint_metric=LineString([(0.0, 0.0), (100.0, 0.0)]),
+        segment_corridor_metric=LineString([(0.0, 0.0), (100.0, 0.0)]).buffer(20.0, cap_style=2),
+        road_prior_shape_ref_metric=None,
+        step1_used_road_prior=False,
+        step1_road_prior_mode=None,
+        same_pair_multichain=False,
+        candidate_branch_id=None,
+        support_mode="traj_support",
+        pair_xsec_target_src_metric=src_slot,
+        pair_xsec_target_dst_metric=dst_slot,
+        pair_xsec_primary_seed_src_metric=src_slot,
+        pair_xsec_primary_seed_dst_metric=dst_slot,
+        pair_xsec_policy_src="node_cluster_slot",
+        pair_xsec_policy_dst="node_cluster_slot",
+    )
+
+    assert isinstance(captured.get("src_xsec"), LineString)
+    assert isinstance(captured.get("dst_xsec"), LineString)
+    assert captured["src_xsec"].equals(src_slot)
+    assert captured["dst_xsec"].equals(dst_slot)
+    assert str(road.get("primary_geometry_xsec_seed_by_src")) == "pair_target_primary_node_cluster_slot"
+    assert str(road.get("primary_geometry_xsec_seed_by_dst")) == "pair_target_primary_node_cluster_slot"
 
 
 def test_evaluate_candidate_road_uses_outward_anchor_seed_only_with_branch_override(
@@ -4986,6 +5333,140 @@ def test_evaluate_candidate_road_post_anchors_diverge_dst_to_xsec_region_midpoin
     assert bool(road.get("endpoint_line_to_target_region_intersects_dst")) is True
     assert bool(road.get("endpoint_line_to_target_region_monotonic_dst")) is True
     assert bool(road.get("endpoint_line_to_target_region_closure_ok_dst")) is True
+
+
+def test_evaluate_candidate_road_post_anchors_merge_src_uses_node_cluster_slot_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    patch_inputs = _mk_patch_inputs(
+        tmp_path=tmp_path,
+        xsecs=[_mk_xsec(1, 0.0), _mk_xsec(2, 100.0)],
+    )
+    object.__setattr__(
+        patch_inputs,
+        "drivezone_zone_metric",
+        Polygon([(-20.0, -20.0), (120.0, -20.0), (120.0, 20.0), (-20.0, 20.0)]),
+    )
+    params = dict(pipeline.DEFAULT_PARAMS)
+    src_xsec = LineString([(0.0, -10.0), (0.0, 10.0)])
+    dst_xsec = LineString([(100.0, -10.0), (100.0, 10.0)])
+    support = PairSupport(
+        src_nodeid=1,
+        dst_nodeid=2,
+        support_traj_ids={"t0"},
+        support_event_count=1,
+        traj_segments=[LineString([(0.0, 0.0), (100.0, 0.0)])],
+        src_cross_points=[Point(0.0, 0.0)],
+        dst_cross_points=[Point(100.0, 0.0)],
+    )
+    merge_region = LineString([(0.0, 2.0), (0.0, 6.0)])
+    center_diags = {
+        "_xsec_road_selected_src_metric": src_xsec,
+        "_xsec_target_selected_src_metric": src_xsec,
+        "_xsec_road_all_src_metric": src_xsec,
+        "_xsec_ref_src_metric": src_xsec,
+        "_xsec_road_selected_dst_metric": dst_xsec,
+        "_xsec_target_selected_dst_metric": dst_xsec,
+        "_xsec_road_all_dst_metric": dst_xsec,
+        "_xsec_ref_dst_metric": dst_xsec,
+        "xsec_road_selected_by_src": "fallback_seed_due_center_empty",
+        "xsec_road_selected_by_dst": "fallback_seed_due_center_empty",
+        "xsec_target_mode_src": "fallback_seed_due_center_empty",
+        "xsec_target_mode_dst": "fallback_seed_due_center_empty",
+        "xsec_policy_mode_src": "node_cluster_slot",
+        "xsec_policy_mode_dst": "auto",
+    }
+
+    monkeypatch.setattr(
+        pipeline,
+        "estimate_centerline",
+        lambda **kwargs: geom_mod.CenterEstimate(
+            centerline_metric=LineString([(0.0, 0.0), (100.0, 0.0)]),
+            shape_ref_metric=LineString([(0.0, 0.0), (100.0, 0.0)]),
+            lb_path_found=False,
+            lb_path_edge_count=0,
+            lb_path_length_m=None,
+            stable_offset_m_src=None,
+            stable_offset_m_dst=None,
+            center_sample_coverage=1.0,
+            width_med_m=None,
+            width_p90_m=None,
+            max_turn_deg_per_10m=None,
+            used_lane_boundary=False,
+            src_is_gore_tip=False,
+            dst_is_gore_tip=False,
+            src_is_expanded=False,
+            dst_is_expanded=False,
+            src_width_near_m=None,
+            dst_width_near_m=None,
+            src_width_base_m=None,
+            dst_width_base_m=None,
+            src_gore_overlap_near=None,
+            dst_gore_overlap_near=None,
+            src_stable_s_m=None,
+            dst_stable_s_m=None,
+            src_cut_mode="none",
+            dst_cut_mode="none",
+            endpoint_tangent_deviation_deg_src=None,
+            endpoint_tangent_deviation_deg_dst=None,
+            endpoint_center_offset_m_src=None,
+            endpoint_center_offset_m_dst=None,
+            endpoint_proj_dist_to_core_m_src=None,
+            endpoint_proj_dist_to_core_m_dst=None,
+            soft_flags=set(),
+            hard_flags=set(),
+            diagnostics=center_diags,
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_eval_traj_surface_gate",
+        lambda **kwargs: ({}, set(), set(), []),
+    )
+
+    road = pipeline._evaluate_candidate_road(
+        src=1,
+        dst=2,
+        src_type="merge",
+        dst_type="merge",
+        support=support,
+        parent_support=support,
+        cluster_id=0,
+        neighbor_search_pass=1,
+        src_xsec=src_xsec,
+        dst_xsec=dst_xsec,
+        src_out_degree=1,
+        dst_in_degree=1,
+        lane_boundaries_metric=[],
+        surface_points_xyz=np.empty((0, 3), dtype=np.float64),
+        non_ground_xy=np.empty((0, 2), dtype=np.float64),
+        patch_inputs=patch_inputs,
+        gore_zone_metric=None,
+        params=params,
+        traj_surface_hint={"traj_surface_enforced": False, "surface_metric": None, "timing_ms": 0.0},
+        shape_ref_hint_metric=LineString([(0.0, 0.0), (100.0, 0.0)]),
+        segment_corridor_metric=LineString([(0.0, 0.0), (100.0, 0.0)]).buffer(20.0, cap_style=2),
+        road_prior_shape_ref_metric=None,
+        step1_used_road_prior=False,
+        step1_road_prior_mode=None,
+        same_pair_multichain=False,
+        candidate_branch_id=None,
+        support_mode="traj_support",
+        pair_xsec_target_src_metric=merge_region,
+        pair_xsec_primary_seed_src_metric=merge_region,
+        pair_xsec_policy_src="node_cluster_slot",
+    )
+
+    endpoint_after = road.get("_endpoint_after_src_metric")
+    assert isinstance(endpoint_after, Point)
+    xy = geom_mod.point_xy_safe(endpoint_after, context="test_merge_node_cluster_slot_post_anchor_after")
+    assert xy is not None
+    assert abs(float(xy[0])) <= 1e-6
+    assert 2.0 - 1e-6 <= float(xy[1]) <= 6.0 + 1e-6
+    assert float(endpoint_after.distance(merge_region)) <= 1e-6
+    assert str(road.get("endpoint_post_anchor_target_source_src")) == "pair_xsec_target_node_cluster_slot"
+    assert str(road.get("endpoint_post_anchor_mode_src")) == "merge_xsec_region_business_refit"
+    assert str(road.get("xsec_selected_by_src")) == "merge_xsec_region_business_refit"
 
 
 def test_select_endpoint_post_anchor_target_prefers_lane_boundary_supported_region() -> None:

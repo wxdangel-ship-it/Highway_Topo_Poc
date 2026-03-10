@@ -213,8 +213,13 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP1_MULTI_CORRIDOR_MIN_RATIO": 0.60,
     "STEP1_MULTI_CORRIDOR_HARD": 0,
     "STEP1_PRIMARY_PICK_TOPK": 8,
-    "STEP1_DISABLE_PAIR_CLUSTER_WHEN_GATE": 1,
-    "STEP1_PAIR_CLUSTER_ENABLE": 0,
+    "STEP1_DISABLE_PAIR_CLUSTER_WHEN_GATE": 0,
+    "STEP1_PAIR_CLUSTER_ENABLE": 1,
+    "NODE_CLUSTER_SLOT_ENABLE": 1,
+    "NODE_CLUSTER_SLOT_GROUP_MIN_SIZE": 2,
+    "NODE_CLUSTER_SLOT_HALF_LEN_M": 6.0,
+    "NODE_CLUSTER_SLOT_WARP_ENABLE": 1,
+    "NODE_CLUSTER_SLOT_WARP_MAX_ENDPOINT_GAP_M": 30.0,
     "STEP1_DEBUG_SUPPORT_TRAJS_ALL_MAX_PER_PAIR": 1,
     "STEP1_GORE_NEAR_M": 30.0,
     "STEP1_TRAJ_IN_DRIVEZONE_MIN": 0.85,
@@ -264,7 +269,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP3_WIDENING_SUPPRESS_ENABLE": 1,
     "STEP3_WIDENING_RATIO_TRIGGER": 1.25,
     "STEP3_WIDENING_REQUIRE_EXPANDED_FLAG": 1,
-    "STEP0_MODE": "off",
+    "STEP0_MODE": "lite",
     "STEP0_LITE_MIN_IN_DRIVEZONE_RATIO": 0.90,
     "STEP0_LITE_MAX_IN_DIVSTRIP_RATIO": 0.01,
     "STEP0_LITE_MIN_LEN_M": 5.0,
@@ -2677,6 +2682,13 @@ def _run_patch_core(
                 }
             )
 
+    node_cluster_slot_targets = _build_node_cluster_slot_targets(
+        supports=supports,
+        xsec_lookup_map=xsec_cross_lookup_map,
+        primary_by_nodeid=shared_xsec_primary_by_nodeid,
+        params=params,
+    )
+
     total_pairs = int(len(supports))
     if progress is not None:
         progress.mark("road_eval_start", total_pairs=total_pairs)
@@ -2824,6 +2836,18 @@ def _run_patch_core(
             params=params,
             road_prior_shape_ref_metric=road_prior_pair_shape_ref_map.get((int(src), int(dst))),
         )
+        step1_corridor = _apply_node_cluster_slot_targets_to_step1_corridor(
+            step1_corridor=step1_corridor,
+            support=support,
+            src_type=str(src_type),
+            dst_type=str(dst_type),
+            src_xsec=src_xsec_gate.geometry_metric,
+            dst_xsec=dst_xsec_gate.geometry_metric,
+            drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            params=params,
+            node_cluster_slot_meta=node_cluster_slot_targets.get((int(src), int(dst))),
+        )
         pair_stage["step1_corridor_status"] = "hard_reject" if step1_corridor.get("hard_reason") else "ok"
         pair_stage["step1_corridor_reason"] = step1_corridor.get("hard_reason")
         pair_stage["step1_corridor_hint"] = step1_corridor.get("hard_hint")
@@ -2842,6 +2866,7 @@ def _run_patch_core(
             )
         same_pair_multi_chain_info = step1_same_dst_multi_chain_pairs.get((int(src), int(dst)))
         same_pair_variants: list[dict[str, Any]] = []
+        same_pair_variant_slot_targets: dict[str, dict[str, Any]] = {}
         if same_pair_multi_chain_info is not None:
             same_pair_variants = _build_same_pair_multichain_variants(
                 pair=(int(src), int(dst)),
@@ -2855,6 +2880,12 @@ def _run_patch_core(
                 params=params,
                 anchor_decisions=step1_topology_anchor_decisions,
                 edge_geometry_by_id=road_prior_edge_geometry_map,
+            )
+            same_pair_variant_slot_targets = _build_same_pair_variant_slot_targets(
+                variants=same_pair_variants,
+                src_xsec=src_xsec_gate.geometry_metric,
+                dst_xsec=dst_xsec_gate.geometry_metric,
+                params=params,
             )
         if step1_corridor.get("hard_reason") and not same_pair_variants:
             pair_stage["selected_or_rejected_stage"] = "step1_corridor_rejected"
@@ -2886,6 +2917,12 @@ def _run_patch_core(
             road["step1_branch_override_to_traj_id"] = step1_corridor.get("branch_override_to_traj_id")
             road["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
             road["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
+            road["node_cluster_slot_applied_src"] = bool(step1_corridor.get("node_cluster_slot_applied_src", False))
+            road["node_cluster_slot_applied_dst"] = bool(step1_corridor.get("node_cluster_slot_applied_dst", False))
+            road["node_cluster_slot_group_size_src"] = step1_corridor.get("node_cluster_slot_group_size_src")
+            road["node_cluster_slot_group_size_dst"] = step1_corridor.get("node_cluster_slot_group_size_dst")
+            road["node_cluster_slot_rank_src"] = step1_corridor.get("node_cluster_slot_rank_src")
+            road["node_cluster_slot_rank_dst"] = step1_corridor.get("node_cluster_slot_rank_dst")
             road["hard_anomaly"] = True
             road["hard_reasons"] = [str(step1_corridor.get("hard_reason"))]
             road["soft_issue_flags"] = []
@@ -2909,6 +2946,19 @@ def _run_patch_core(
                     continue
                 cluster_id = int(variant.get("cluster_id", 0))
                 branch_id = str(variant.get("branch_id") or f"{src}_{dst}__b{int(cluster_id)}")
+                branch_corridor = _apply_node_cluster_slot_targets_to_step1_corridor(
+                    step1_corridor=branch_corridor,
+                    support=branch_support,
+                    src_type=str(src_type),
+                    dst_type=str(dst_type),
+                    src_xsec=src_xsec_gate.geometry_metric,
+                    dst_xsec=dst_xsec_gate.geometry_metric,
+                    drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
+                    gore_zone_metric=gore_zone_metric,
+                    params=params,
+                    node_cluster_slot_meta=same_pair_variant_slot_targets.get(branch_id),
+                )
+                variant["step1_corridor"] = branch_corridor
                 if debug_enabled:
                     _append_step1_corridor_debug_layers(
                         debug_layers=debug_layers,
@@ -3011,6 +3061,12 @@ def _run_patch_core(
                 road_k["step1_branch_override_to_traj_id"] = branch_corridor.get("branch_override_to_traj_id")
                 road_k["step1_pair_xsec_policy_src"] = branch_corridor.get("pair_xsec_policy_src")
                 road_k["step1_pair_xsec_policy_dst"] = branch_corridor.get("pair_xsec_policy_dst")
+                road_k["node_cluster_slot_applied_src"] = bool(branch_corridor.get("node_cluster_slot_applied_src", False))
+                road_k["node_cluster_slot_applied_dst"] = bool(branch_corridor.get("node_cluster_slot_applied_dst", False))
+                road_k["node_cluster_slot_group_size_src"] = branch_corridor.get("node_cluster_slot_group_size_src")
+                road_k["node_cluster_slot_group_size_dst"] = branch_corridor.get("node_cluster_slot_group_size_dst")
+                road_k["node_cluster_slot_rank_src"] = branch_corridor.get("node_cluster_slot_rank_src")
+                road_k["node_cluster_slot_rank_dst"] = branch_corridor.get("node_cluster_slot_rank_dst")
                 road_k["step1_same_pair_multichain"] = True
                 road_k["step1_same_pair_multichain_count"] = int(same_pair_multi_chain_info.get("chain_count", 0))
                 road_k["same_pair_multi_road_branch_id"] = branch_id
@@ -3105,6 +3161,12 @@ def _run_patch_core(
                 road_k["step1_branch_override_to_traj_id"] = step1_corridor.get("branch_override_to_traj_id")
                 road_k["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
                 road_k["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
+                road_k["node_cluster_slot_applied_src"] = bool(step1_corridor.get("node_cluster_slot_applied_src", False))
+                road_k["node_cluster_slot_applied_dst"] = bool(step1_corridor.get("node_cluster_slot_applied_dst", False))
+                road_k["node_cluster_slot_group_size_src"] = step1_corridor.get("node_cluster_slot_group_size_src")
+                road_k["node_cluster_slot_group_size_dst"] = step1_corridor.get("node_cluster_slot_group_size_dst")
+                road_k["node_cluster_slot_rank_src"] = step1_corridor.get("node_cluster_slot_rank_src")
+                road_k["node_cluster_slot_rank_dst"] = step1_corridor.get("node_cluster_slot_rank_dst")
                 road_k["pair_support_mode"] = "topology_road_prior_fallback"
                 stage_timer.add("t_build_lane_graph", float(road_k.get("_timing_lb_graph_ms", 0.0)))
                 sp_ms = float(road_k.get("_timing_shortest_path_ms", 0.0))
@@ -3242,6 +3304,12 @@ def _run_patch_core(
                 road_k["step1_branch_override_to_traj_id"] = step1_corridor.get("branch_override_to_traj_id")
                 road_k["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
                 road_k["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
+                road_k["node_cluster_slot_applied_src"] = bool(step1_corridor.get("node_cluster_slot_applied_src", False))
+                road_k["node_cluster_slot_applied_dst"] = bool(step1_corridor.get("node_cluster_slot_applied_dst", False))
+                road_k["node_cluster_slot_group_size_src"] = step1_corridor.get("node_cluster_slot_group_size_src")
+                road_k["node_cluster_slot_group_size_dst"] = step1_corridor.get("node_cluster_slot_group_size_dst")
+                road_k["node_cluster_slot_rank_src"] = step1_corridor.get("node_cluster_slot_rank_src")
+                road_k["node_cluster_slot_rank_dst"] = step1_corridor.get("node_cluster_slot_rank_dst")
                 key_k = f"{src}_{dst}_k{int(cluster_id)}"
                 stage_timer.add("t_build_lane_graph", float(road_k.get("_timing_lb_graph_ms", 0.0)))
                 sp_ms = float(road_k.get("_timing_shortest_path_ms", 0.0))
@@ -3284,6 +3352,12 @@ def _run_patch_core(
             road["step1_branch_override_to_traj_id"] = step1_corridor.get("branch_override_to_traj_id")
             road["step1_pair_xsec_policy_src"] = step1_corridor.get("pair_xsec_policy_src")
             road["step1_pair_xsec_policy_dst"] = step1_corridor.get("pair_xsec_policy_dst")
+            road["node_cluster_slot_applied_src"] = bool(step1_corridor.get("node_cluster_slot_applied_src", False))
+            road["node_cluster_slot_applied_dst"] = bool(step1_corridor.get("node_cluster_slot_applied_dst", False))
+            road["node_cluster_slot_group_size_src"] = step1_corridor.get("node_cluster_slot_group_size_src")
+            road["node_cluster_slot_group_size_dst"] = step1_corridor.get("node_cluster_slot_group_size_dst")
+            road["node_cluster_slot_rank_src"] = step1_corridor.get("node_cluster_slot_rank_src")
+            road["node_cluster_slot_rank_dst"] = step1_corridor.get("node_cluster_slot_rank_dst")
             road["hard_anomaly"] = True
             road["hard_reasons"] = [HARD_CENTER_EMPTY]
             road["soft_issue_flags"] = [SOFT_TRAJ_SURFACE_INSUFFICIENT]
@@ -4746,6 +4820,425 @@ def _line_xsec_contact_point(
     if isinstance(fallback, Point) and (not fallback.is_empty):
         return fallback
     return None
+
+
+def _representative_cross_point_on_xsec(
+    *,
+    points: Sequence[Point],
+    xsec: LineString,
+) -> Point | None:
+    if not _is_valid_linestring(xsec):
+        return None
+    stations: list[float] = []
+    for pt in points:
+        if not isinstance(pt, Point) or pt.is_empty:
+            continue
+        try:
+            station = float(line_locate_point(xsec, pt))
+        except Exception:
+            continue
+        if np.isfinite(station):
+            stations.append(float(max(0.0, min(float(xsec.length), station))))
+    if not stations:
+        return None
+    station_mid = float(np.median(np.asarray(stations, dtype=np.float64)))
+    try:
+        rep = line_interpolate_point(xsec, station_mid)
+    except Exception:
+        return None
+    if not isinstance(rep, Point) or rep.is_empty:
+        return None
+    return rep
+
+
+def _line_segment_around_station(
+    *,
+    xsec: LineString,
+    center_s: float,
+    half_len_m: float,
+) -> LineString | None:
+    if not _is_valid_linestring(xsec):
+        return None
+    xsec_len = float(xsec.length)
+    if xsec_len <= 1e-6:
+        return None
+    center = float(max(0.0, min(xsec_len, center_s)))
+    half_len = float(max(0.5, half_len_m))
+    s0 = float(max(0.0, center - half_len))
+    s1 = float(min(xsec_len, center + half_len))
+    if s1 - s0 <= 1e-6:
+        s0 = float(max(0.0, center - 0.5))
+        s1 = float(min(xsec_len, center + 0.5))
+    try:
+        seg = substring(xsec, s0, s1)
+    except Exception:
+        seg = None
+    if isinstance(seg, LineString) and (not seg.is_empty) and len(seg.coords) >= 2:
+        return seg
+    try:
+        p0 = line_interpolate_point(xsec, s0)
+        p1 = line_interpolate_point(xsec, s1)
+    except Exception:
+        return None
+    p0_xy = point_xy_safe(p0, context="node_cluster_slot_seg_p0")
+    p1_xy = point_xy_safe(p1, context="node_cluster_slot_seg_p1")
+    if p0_xy is None or p1_xy is None:
+        return None
+    try:
+        out = LineString(
+            [
+                (float(p0_xy[0]), float(p0_xy[1])),
+                (float(p1_xy[0]), float(p1_xy[1])),
+            ]
+        )
+    except Exception:
+        return None
+    if out.is_empty or len(out.coords) < 2:
+        return None
+    return out
+
+
+def _build_node_cluster_slot_targets(
+    *,
+    supports: dict[tuple[int, int], PairSupport],
+    xsec_lookup_map: dict[int, CrossSection],
+    primary_by_nodeid: dict[int, int],
+    params: dict[str, Any],
+) -> dict[tuple[int, int], dict[str, Any]]:
+    if not bool(int(params.get("NODE_CLUSTER_SLOT_ENABLE", 1))):
+        return {}
+    min_group_size = int(max(2, int(params.get("NODE_CLUSTER_SLOT_GROUP_MIN_SIZE", 2))))
+    slot_half_len_m = float(max(0.5, params.get("NODE_CLUSTER_SLOT_HALF_LEN_M", 6.0)))
+    entries_by_group: dict[int, list[dict[str, Any]]] = {}
+    for pair, support in supports.items():
+        pair_key = (int(pair[0]), int(pair[1]))
+        for tag, nodeid, points in (
+            ("src", int(pair[0]), support.src_cross_points),
+            ("dst", int(pair[1]), support.dst_cross_points),
+        ):
+            cs = xsec_lookup_map.get(int(nodeid))
+            xsec = getattr(cs, "geometry_metric", None)
+            if not _is_valid_linestring(xsec):
+                continue
+            rep_pt = _representative_cross_point_on_xsec(points=points, xsec=xsec)
+            if rep_pt is None:
+                continue
+            rep_xy = point_xy_safe(rep_pt, context=f"node_cluster_slot_{tag}_rep")
+            if rep_xy is None:
+                continue
+            try:
+                station = float(line_locate_point(xsec, rep_pt))
+            except Exception:
+                continue
+            if not np.isfinite(station):
+                continue
+            group_key = int(primary_by_nodeid.get(int(nodeid), int(nodeid)))
+            entries_by_group.setdefault(group_key, []).append(
+                {
+                    "pair": pair_key,
+                    "tag": str(tag),
+                    "nodeid": int(nodeid),
+                    "xsec": xsec,
+                    "station": float(max(0.0, min(float(xsec.length), station))),
+                    "point": Point(float(rep_xy[0]), float(rep_xy[1])),
+                }
+            )
+
+    out: dict[tuple[int, int], dict[str, Any]] = {}
+    for group_key, raw_entries in entries_by_group.items():
+        entries = sorted(
+            raw_entries,
+            key=lambda item: (
+                float(item.get("station", 0.0)),
+                str(item.get("tag") or ""),
+                int(item.get("pair", (0, 0))[0]),
+                int(item.get("pair", (0, 0))[1]),
+            ),
+        )
+        if len(entries) < min_group_size:
+            continue
+        for idx, entry in enumerate(entries):
+            xsec = entry.get("xsec")
+            if not _is_valid_linestring(xsec):
+                continue
+            station = float(entry.get("station", 0.0))
+            prev_station = float(entries[idx - 1]["station"]) if idx > 0 else None
+            next_station = float(entries[idx + 1]["station"]) if idx + 1 < len(entries) else None
+            half_candidates = [float(slot_half_len_m)]
+            if prev_station is not None:
+                half_candidates.append(max(0.5, 0.5 * abs(station - prev_station)))
+            if next_station is not None:
+                half_candidates.append(max(0.5, 0.5 * abs(next_station - station)))
+            half_len = float(min(half_candidates))
+            slot_metric = _line_segment_around_station(
+                xsec=xsec,
+                center_s=station,
+                half_len_m=half_len,
+            )
+            if not _is_valid_linestring(slot_metric):
+                continue
+            pair_key = (int(entry["pair"][0]), int(entry["pair"][1]))
+            tag = str(entry.get("tag") or "")
+            slot_point = entry.get("point")
+            payload = out.setdefault(pair_key, {})
+            payload[f"{tag}_slot_metric"] = slot_metric
+            payload[f"{tag}_slot_point"] = slot_point
+            payload[f"{tag}_slot_group_key"] = int(group_key)
+            payload[f"{tag}_slot_group_size"] = int(len(entries))
+            payload[f"{tag}_slot_rank"] = int(idx)
+            payload[f"{tag}_slot_station_m"] = float(station)
+    return out
+
+
+def _build_same_pair_variant_slot_targets(
+    *,
+    variants: Sequence[dict[str, Any]],
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    params: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    if not bool(int(params.get("NODE_CLUSTER_SLOT_ENABLE", 1))):
+        return {}
+    min_group_size = int(max(2, int(params.get("NODE_CLUSTER_SLOT_GROUP_MIN_SIZE", 2))))
+    slot_half_len_m = float(max(0.5, params.get("NODE_CLUSTER_SLOT_HALF_LEN_M", 6.0)))
+    entries_by_tag: dict[str, dict[str, dict[str, Any]]] = {"src": {}, "dst": {}}
+    for idx, variant in enumerate(variants):
+        support = variant.get("support")
+        if not isinstance(support, PairSupport):
+            continue
+        branch_id = str(variant.get("branch_id") or f"variant_{int(idx)}")
+        support_mode = str(variant.get("support_mode") or "")
+        priority = (
+            0 if support_mode == "traj_support" else 1,
+            -int(getattr(support, "support_event_count", 0) or 0),
+            int(idx),
+        )
+        for tag, xsec, points in (
+            ("src", src_xsec, support.src_cross_points),
+            ("dst", dst_xsec, support.dst_cross_points),
+        ):
+            rep_pt = _representative_cross_point_on_xsec(points=points, xsec=xsec)
+            if rep_pt is None:
+                continue
+            rep_xy = point_xy_safe(rep_pt, context=f"same_pair_variant_slot_{tag}")
+            if rep_xy is None:
+                continue
+            try:
+                station = float(line_locate_point(xsec, rep_pt))
+            except Exception:
+                continue
+            if not np.isfinite(station):
+                continue
+            tag_entries = entries_by_tag[str(tag)]
+            candidate = {
+                "branch_id": branch_id,
+                "station": float(max(0.0, min(float(xsec.length), station))),
+                "point": Point(float(rep_xy[0]), float(rep_xy[1])),
+                "_priority": priority,
+            }
+            prev = tag_entries.get(branch_id)
+            if prev is None or tuple(candidate["_priority"]) < tuple(prev.get("_priority") or (999, 999, 999)):
+                tag_entries[branch_id] = candidate
+    out: dict[str, dict[str, Any]] = {}
+    for tag, by_branch in entries_by_tag.items():
+        entries_raw = list(by_branch.values())
+        entries = sorted(entries_raw, key=lambda item: (float(item.get("station", 0.0)), str(item.get("branch_id") or "")))
+        if len(entries) < min_group_size:
+            continue
+        xsec = src_xsec if tag == "src" else dst_xsec
+        for idx, entry in enumerate(entries):
+            station = float(entry.get("station", 0.0))
+            prev_station = float(entries[idx - 1]["station"]) if idx > 0 else None
+            next_station = float(entries[idx + 1]["station"]) if idx + 1 < len(entries) else None
+            half_candidates = [float(slot_half_len_m)]
+            if prev_station is not None:
+                half_candidates.append(max(0.5, 0.5 * abs(station - prev_station)))
+            if next_station is not None:
+                half_candidates.append(max(0.5, 0.5 * abs(next_station - station)))
+            half_len = float(min(half_candidates))
+            slot_metric = _line_segment_around_station(
+                xsec=xsec,
+                center_s=station,
+                half_len_m=half_len,
+            )
+            if not _is_valid_linestring(slot_metric):
+                continue
+            branch_id = str(entry.get("branch_id") or "")
+            payload = out.setdefault(branch_id, {})
+            payload[f"{tag}_slot_metric"] = slot_metric
+            payload[f"{tag}_slot_point"] = entry.get("point")
+            payload[f"{tag}_slot_group_key"] = f"same_pair:{tag}"
+            payload[f"{tag}_slot_group_size"] = int(len(entries))
+            payload[f"{tag}_slot_rank"] = int(idx)
+            payload[f"{tag}_slot_station_m"] = float(station)
+    return out
+
+
+def _warp_shape_ref_line_to_endpoint_targets(
+    *,
+    line: LineString | None,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    src_target_pt: Point | None,
+    dst_target_pt: Point | None,
+    max_endpoint_gap_m: float,
+) -> LineString | None:
+    if not _is_valid_linestring(line):
+        return line
+    line_oriented = _orient_axis_line(line, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    src_current = _line_xsec_contact_point(
+        line=line_oriented,
+        xsec=src_xsec,
+        fallback=Point(line_oriented.coords[0]),
+    )
+    dst_current = _line_xsec_contact_point(
+        line=line_oriented,
+        xsec=dst_xsec,
+        fallback=Point(line_oriented.coords[-1]),
+    )
+    src_current_xy = point_xy_safe(src_current, context="node_cluster_warp_src_current")
+    dst_current_xy = point_xy_safe(dst_current, context="node_cluster_warp_dst_current")
+    src_target_xy = point_xy_safe(src_target_pt, context="node_cluster_warp_src_target")
+    dst_target_xy = point_xy_safe(dst_target_pt, context="node_cluster_warp_dst_target")
+    deltas: dict[str, tuple[float, float]] = {}
+    if src_current_xy is not None and src_target_xy is not None:
+        dx = float(src_target_xy[0]) - float(src_current_xy[0])
+        dy = float(src_target_xy[1]) - float(src_current_xy[1])
+        if math.hypot(dx, dy) <= float(max_endpoint_gap_m):
+            deltas["src"] = (dx, dy)
+    if dst_current_xy is not None and dst_target_xy is not None:
+        dx = float(dst_target_xy[0]) - float(dst_current_xy[0])
+        dy = float(dst_target_xy[1]) - float(dst_current_xy[1])
+        if math.hypot(dx, dy) <= float(max_endpoint_gap_m):
+            deltas["dst"] = (dx, dy)
+    if not deltas:
+        return line_oriented
+    coords = np.asarray(line_oriented.coords, dtype=np.float64)
+    if coords.shape[0] < 2:
+        return line_oriented
+    line_len = float(line_oriented.length)
+    if line_len <= 1e-6:
+        return line_oriented
+    warped_coords: list[tuple[float, float]] = []
+    if "src" in deltas and "dst" not in deltas:
+        dx_src, dy_src = deltas["src"]
+        for coord in coords:
+            warped_coords.append((float(coord[0] + dx_src), float(coord[1] + dy_src)))
+    elif "dst" in deltas and "src" not in deltas:
+        dx_dst, dy_dst = deltas["dst"]
+        for coord in coords:
+            warped_coords.append((float(coord[0] + dx_dst), float(coord[1] + dy_dst)))
+    else:
+        dx_src, dy_src = deltas["src"]
+        dx_dst, dy_dst = deltas["dst"]
+        for coord in coords:
+            try:
+                s = float(line_locate_point(line_oriented, Point(float(coord[0]), float(coord[1]))))
+            except Exception:
+                s = 0.0
+            if not np.isfinite(s):
+                s = 0.0
+            t = float(max(0.0, min(1.0, s / max(line_len, 1e-6))))
+            dx = float((1.0 - t) * dx_src + t * dx_dst)
+            dy = float((1.0 - t) * dy_src + t * dy_dst)
+            warped_coords.append((float(coord[0] + dx), float(coord[1] + dy)))
+    try:
+        warped = LineString(warped_coords)
+    except Exception:
+        return line_oriented
+    if warped.is_empty or len(warped.coords) < 2:
+        return line_oriented
+    return _orient_axis_line(warped, src_xsec=src_xsec, dst_xsec=dst_xsec)
+
+
+def _apply_node_cluster_slot_targets_to_step1_corridor(
+    *,
+    step1_corridor: dict[str, Any],
+    support: PairSupport,
+    src_type: str,
+    dst_type: str,
+    src_xsec: LineString,
+    dst_xsec: LineString,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+    params: dict[str, Any],
+    node_cluster_slot_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(step1_corridor, dict) or not isinstance(node_cluster_slot_meta, dict):
+        return step1_corridor
+    src_slot_metric = node_cluster_slot_meta.get("src_slot_metric")
+    dst_slot_metric = node_cluster_slot_meta.get("dst_slot_metric")
+    src_slot_pt = node_cluster_slot_meta.get("src_slot_point")
+    dst_slot_pt = node_cluster_slot_meta.get("dst_slot_point")
+    src_slot_valid = _is_valid_linestring(src_slot_metric)
+    dst_slot_valid = _is_valid_linestring(dst_slot_metric)
+    if not src_slot_valid and not dst_slot_valid:
+        return step1_corridor
+    out = dict(step1_corridor)
+    base_shape_ref = out.get("shape_ref_line")
+    if not _is_valid_linestring(base_shape_ref):
+        base_shape_ref = _pick_medoid_support_axis(support=support, src_xsec=src_xsec, dst_xsec=dst_xsec)
+    if bool(int(params.get("NODE_CLUSTER_SLOT_WARP_ENABLE", 1))):
+        warped_shape_ref = _warp_shape_ref_line_to_endpoint_targets(
+            line=base_shape_ref,
+            src_xsec=src_xsec,
+            dst_xsec=dst_xsec,
+            src_target_pt=(src_slot_pt if isinstance(src_slot_pt, Point) else None),
+            dst_target_pt=(dst_slot_pt if isinstance(dst_slot_pt, Point) else None),
+            max_endpoint_gap_m=float(max(1.0, params.get("NODE_CLUSTER_SLOT_WARP_MAX_ENDPOINT_GAP_M", 30.0))),
+        )
+    else:
+        warped_shape_ref = base_shape_ref
+    if _is_valid_linestring(warped_shape_ref):
+        out["shape_ref_line"] = warped_shape_ref
+        step1_pair_xsec_src = _build_step1_pair_endpoint_xsec(
+            xsec_seed=src_xsec,
+            endpoint_tag="src",
+            node_type=str(src_type),
+            shape_ref_line=warped_shape_ref,
+            support=support,
+            drivezone_zone_metric=drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            params=params,
+        )
+        step1_pair_xsec_dst = _build_step1_pair_endpoint_xsec(
+            xsec_seed=dst_xsec,
+            endpoint_tag="dst",
+            node_type=str(dst_type),
+            shape_ref_line=warped_shape_ref,
+            support=support,
+            drivezone_zone_metric=drivezone_zone_metric,
+            gore_zone_metric=gore_zone_metric,
+            params=params,
+        )
+        out["_pair_xsec_cross_ref_src_metric"] = _resolve_step1_pair_cross_xsec(
+            xsec_seed=src_xsec,
+            pair_xsec_meta=step1_pair_xsec_src,
+        )
+        out["_pair_xsec_cross_ref_dst_metric"] = _resolve_step1_pair_cross_xsec(
+            xsec_seed=dst_xsec,
+            pair_xsec_meta=step1_pair_xsec_dst,
+        )
+    if src_slot_valid:
+        out["pair_xsec_policy_src"] = "node_cluster_slot"
+        out["_pair_xsec_target_src_metric"] = src_slot_metric
+        out["_pair_xsec_primary_seed_src_metric"] = src_slot_metric
+        out["cross_point_src"] = src_slot_pt if isinstance(src_slot_pt, Point) else out.get("cross_point_src")
+    if dst_slot_valid:
+        out["pair_xsec_policy_dst"] = "node_cluster_slot"
+        out["_pair_xsec_target_dst_metric"] = dst_slot_metric
+        out["_pair_xsec_primary_seed_dst_metric"] = dst_slot_metric
+        out["cross_point_dst"] = dst_slot_pt if isinstance(dst_slot_pt, Point) else out.get("cross_point_dst")
+    out["node_cluster_slot_applied_src"] = bool(src_slot_valid)
+    out["node_cluster_slot_applied_dst"] = bool(dst_slot_valid)
+    out["node_cluster_slot_group_key_src"] = node_cluster_slot_meta.get("src_slot_group_key")
+    out["node_cluster_slot_group_key_dst"] = node_cluster_slot_meta.get("dst_slot_group_key")
+    out["node_cluster_slot_group_size_src"] = node_cluster_slot_meta.get("src_slot_group_size")
+    out["node_cluster_slot_group_size_dst"] = node_cluster_slot_meta.get("dst_slot_group_size")
+    out["node_cluster_slot_rank_src"] = node_cluster_slot_meta.get("src_slot_rank")
+    out["node_cluster_slot_rank_dst"] = node_cluster_slot_meta.get("dst_slot_rank")
+    out["pair_target_ref_source"] = "node_cluster_slot"
+    return out
 
 
 def _line_midpoint(line: LineString | None) -> Point | None:
@@ -6235,6 +6728,8 @@ def _resolve_primary_geometry_pair_target_xsec(
         return pair_target_metric, "pair_target_primary_merge_role_seed"
     if tag == "dst" and ntype == "diverge" and pair_target_metric is not None:
         return pair_target_metric, "pair_target_primary_diverge_role_seed"
+    if policy_mode_norm == "node_cluster_slot" and pair_target_metric is not None:
+        return pair_target_metric, "pair_target_primary_node_cluster_slot"
     if (
         primary_seed_metric is not None
         and primary_seed_distinct
@@ -6259,6 +6754,8 @@ def _resolve_branch_override_fallback_bind_xsec(
 ) -> tuple[LineString, str | None]:
     support_mode_norm = str(support_mode or "").strip().lower()
     policy_mode_norm = str(pair_policy_mode or "").strip().lower()
+    if policy_mode_norm == "node_cluster_slot" and _is_valid_linestring(pair_target_metric):
+        return pair_target_metric, "pair_target_node_cluster_slot_fallback"
     if (
         policy_mode_norm != "role_outward_cut"
         or not bool(step1_branch_override_used)
@@ -6921,6 +7418,7 @@ def _resolve_endpoint_post_anchor_xsec_geom(
         or road.get(f"xsec_policy_mode_{endpoint_tag_norm}")
         or ""
     ).strip().lower()
+    node_cluster_slot_bind = bool(pair_policy_mode == "node_cluster_slot")
     branch_override_fallback = bool(
         bool(road.get("step1_branch_override_used"))
         and pair_policy_mode == "role_outward_cut"
@@ -6928,6 +7426,16 @@ def _resolve_endpoint_post_anchor_xsec_geom(
     )
 
     candidate_keys: list[tuple[str, str]] = []
+    if node_cluster_slot_bind:
+        candidate_keys.extend(
+            (
+                (f"_pair_xsec_target_{endpoint_tag_norm}_metric", "pair_xsec_target_node_cluster_slot"),
+                (
+                    f"_pair_xsec_primary_seed_{endpoint_tag_norm}_metric",
+                    "pair_xsec_primary_seed_node_cluster_slot",
+                ),
+            )
+        )
     if branch_override_fallback:
         candidate_keys.extend(
             (
@@ -13784,7 +14292,7 @@ def _truncate_cross_sections_for_crossing(
         if step0_mode == "lite":
             if seed_len_m < step0_lite_min_len_m:
                 lite_failed_reasons.append("seed_too_short")
-            if seed_drive_ratio is None or seed_drive_ratio < step0_lite_min_in_drivezone_ratio:
+            if use_drivezone_gate and (seed_drive_ratio is None or seed_drive_ratio < step0_lite_min_in_drivezone_ratio):
                 lite_failed_reasons.append("drivezone_ratio_below_threshold")
             if divstrip_available:
                 if seed_div_ratio is None:
