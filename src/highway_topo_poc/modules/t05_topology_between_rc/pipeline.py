@@ -6223,6 +6223,39 @@ def _resolve_primary_geometry_pair_target_xsec(
     return xsec_seed, None
 
 
+def _resolve_branch_override_fallback_bind_xsec(
+    *,
+    xsec_seed: LineString,
+    pair_target_metric: LineString | None,
+    pair_primary_seed_metric: LineString | None,
+    pair_policy_mode: str | None,
+    step1_branch_override_used: bool,
+    support_mode: str | None,
+    same_pair_multichain: bool,
+) -> tuple[LineString, str | None]:
+    support_mode_norm = str(support_mode or "").strip().lower()
+    policy_mode_norm = str(pair_policy_mode or "").strip().lower()
+    if (
+        policy_mode_norm != "role_outward_cut"
+        or not bool(step1_branch_override_used)
+        or support_mode_norm != "traj_support"
+        or bool(same_pair_multichain)
+    ):
+        return xsec_seed, None
+    if _is_valid_linestring(pair_target_metric):
+        return pair_target_metric, "pair_target_step1_branch_override_outward_fallback"
+    if _is_valid_linestring(pair_primary_seed_metric):
+        try:
+            same_len = abs(float(pair_primary_seed_metric.length) - float(xsec_seed.length)) <= 1e-6
+            same_dist = float(pair_primary_seed_metric.distance(xsec_seed)) <= 1e-6
+            if same_len and same_dist:
+                return xsec_seed, None
+        except Exception:
+            pass
+        return pair_primary_seed_metric, "pair_primary_seed_step1_branch_override_outward_fallback"
+    return xsec_seed, None
+
+
 def _build_endpoint_line_to_target_region_meta(
     *,
     road: dict[str, Any],
@@ -8844,6 +8877,24 @@ def _evaluate_candidate_road(
                 if support_mode_norm == "topology_road_prior_fallback"
                 else ("road_prior_fallback_entry_xsec" if support_mode_norm == "road_prior_fallback" else "road_prior_gap_fill_entry_xsec")
             )
+    fallback_src_xsec, fallback_src_reason = _resolve_branch_override_fallback_bind_xsec(
+        xsec_seed=bind_src_xsec,
+        pair_target_metric=(pair_xsec_target_src_metric if pair_target_src_available else None),
+        pair_primary_seed_metric=pair_xsec_primary_seed_src_metric,
+        pair_policy_mode=pair_xsec_policy_src,
+        step1_branch_override_used=step1_branch_override_used,
+        support_mode=support_mode_norm,
+        same_pair_multichain=same_pair_multichain,
+    )
+    fallback_dst_xsec, fallback_dst_reason = _resolve_branch_override_fallback_bind_xsec(
+        xsec_seed=bind_dst_xsec,
+        pair_target_metric=(pair_xsec_target_dst_metric if pair_target_dst_available else None),
+        pair_primary_seed_metric=pair_xsec_primary_seed_dst_metric,
+        pair_policy_mode=pair_xsec_policy_dst,
+        step1_branch_override_used=step1_branch_override_used,
+        support_mode=support_mode_norm,
+        same_pair_multichain=same_pair_multichain,
+    )
     use_road_prior_shape_ref = bool(road_prior_shape_ref_valid and (road_prior_gap_fill_mode or (not step1_shape_ref_valid)))
     shape_ref_hint_for_center = road_prior_shape_ref_metric if use_road_prior_shape_ref else shape_ref_hint_metric
     traj_surface_metric_for_center = None if road_prior_gap_fill_mode else traj_surface_hint.get("surface_metric")
@@ -9125,8 +9176,8 @@ def _evaluate_candidate_road(
     if road_prior_shape_ref_valid:
         road_prior_direct_fallback_line = _fallback_geometry_from_shape_ref(
             shape_ref_line=road_prior_shape_ref_metric,
-            src_xsec=bind_src_xsec,
-            dst_xsec=bind_dst_xsec,
+            src_xsec=fallback_src_xsec,
+            dst_xsec=fallback_dst_xsec,
         )
         if (
             not _is_valid_linestring(road_prior_direct_fallback_line)
@@ -9134,15 +9185,15 @@ def _evaluate_candidate_road(
         ):
             road_prior_direct_fallback_line = _orient_axis_line(
                 road_prior_shape_ref_metric,
-                src_xsec=bind_src_xsec,
-                dst_xsec=bind_dst_xsec,
+                src_xsec=fallback_src_xsec,
+                dst_xsec=fallback_dst_xsec,
             )
 
     center_empty_like = bool(HARD_CENTER_EMPTY in set(center.hard_flags)) or (not _is_valid_linestring(center.centerline_metric))
     if center_empty_like:
         for tag, xsec, bind_reason in (
-            ("src", bind_src_xsec, bind_src_reason),
-            ("dst", bind_dst_xsec, bind_dst_reason),
+            ("src", fallback_src_xsec, (fallback_src_reason or bind_src_reason)),
+            ("dst", fallback_dst_xsec, (fallback_dst_reason or bind_dst_reason)),
         ):
             sel_key = f"_xsec_road_selected_{tag}_metric"
             all_key = f"_xsec_road_all_{tag}_metric"
@@ -9230,8 +9281,8 @@ def _evaluate_candidate_road(
     if not (isinstance(road_line, LineString) and (not road_line.is_empty)):
         fallback_line = _fallback_geometry_from_shape_ref(
             shape_ref_line=primary_shape_ref_metric,
-            src_xsec=bind_src_xsec,
-            dst_xsec=bind_dst_xsec,
+            src_xsec=fallback_src_xsec,
+            dst_xsec=fallback_dst_xsec,
         )
         if (
             not _is_valid_linestring(fallback_line)
@@ -9240,8 +9291,8 @@ def _evaluate_candidate_road(
         ):
             fallback_line = _orient_axis_line(
                 primary_shape_ref_metric,
-                src_xsec=bind_src_xsec,
-                dst_xsec=bind_dst_xsec,
+                src_xsec=fallback_src_xsec,
+                dst_xsec=fallback_dst_xsec,
             )
         if isinstance(fallback_line, LineString) and (not fallback_line.is_empty):
             road_line = fallback_line
@@ -9250,14 +9301,22 @@ def _evaluate_candidate_road(
             road["endpoint_fallback_mode_dst"] = str(road.get("endpoint_fallback_mode_dst") or "shape_ref_substring_fallback")
     if _is_valid_linestring(road_line):
         src_sel_metric = (
-            bind_src_xsec
-            if entry_bind_allowed and _is_valid_linestring(bind_src_xsec)
-            else road.get("_xsec_road_selected_src_metric")
+            fallback_src_xsec
+            if (centerline_fallback_used and _is_valid_linestring(fallback_src_xsec))
+            else (
+                bind_src_xsec
+                if entry_bind_allowed and _is_valid_linestring(bind_src_xsec)
+                else road.get("_xsec_road_selected_src_metric")
+            )
         )
         dst_sel_metric = (
-            bind_dst_xsec
-            if entry_bind_allowed and _is_valid_linestring(bind_dst_xsec)
-            else road.get("_xsec_road_selected_dst_metric")
+            fallback_dst_xsec
+            if (centerline_fallback_used and _is_valid_linestring(fallback_dst_xsec))
+            else (
+                bind_dst_xsec
+                if entry_bind_allowed and _is_valid_linestring(bind_dst_xsec)
+                else road.get("_xsec_road_selected_dst_metric")
+            )
         )
         src_sel = src_sel_metric if _is_valid_linestring(src_sel_metric) else src_xsec
         dst_sel = dst_sel_metric if _is_valid_linestring(dst_sel_metric) else dst_xsec
