@@ -5121,6 +5121,38 @@ def test_build_node_xsec_frame_for_debug_partitions_by_support_anchor_stations()
     assert len(list(frame.get("slot_boundary_stations_m") or [])) == 2
 
 
+def test_build_node_xsec_frame_for_debug_uses_probe_shift_to_split_branch_slots() -> None:
+    frame = pipeline._build_node_xsec_frame_for_debug(
+        nodeid=1010,
+        node_type="diverge",
+        raw_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gated_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gate_all_xsec_geom=None,
+        drivezone_zone_metric=Polygon([(-20.0, -8.0), (20.0, -8.0), (20.0, 8.0), (-20.0, 8.0)]),
+        gore_zone_metric=Polygon([(4.0, -1.0), (6.0, -1.0), (6.0, 1.0), (4.0, 1.0)]),
+        split_anchor_stations_base=[5.0, 15.0],
+        probe_direction_xy=(1.0, 0.0),
+        probe_shift_m=5.0,
+    )
+
+    assert isinstance(frame, dict)
+    assert str(frame.get("slot_source")) == "drivezone_minus_gore"
+    assert int(frame.get("slot_count", 0)) == 2
+    assert int(frame.get("base_split_slot_count", 0)) == 2
+    probe_slots = list(frame.get("slots") or [])
+    base_split_slots = list(frame.get("base_split_slots") or [])
+    assert len(probe_slots) == 2
+    assert len(base_split_slots) == 2
+    probe_line = frame.get("probe_xsec_metric")
+    assert isinstance(probe_line, LineString)
+    probe_mid = probe_line.interpolate(0.5, normalized=True)
+    probe_mid_xy = geom_mod.point_xy_safe(probe_mid, context="test_probe_shift_mid")
+    assert probe_mid_xy is not None
+    assert abs(float(probe_mid_xy[0]) - 5.0) <= 1e-6
+    base_slot_centers = [slot.get("midpoint_metric") for slot in base_split_slots]
+    assert all(isinstance(pt, Point) and abs(float(pt.x)) <= 1e-6 for pt in base_slot_centers)
+
+
 def test_resolve_endpoint_slot_assignment_for_debug_prefers_split_slot_for_diverge_src() -> None:
     frame = pipeline._build_node_xsec_frame_for_debug(
         nodeid=1002,
@@ -5159,6 +5191,48 @@ def test_resolve_endpoint_slot_assignment_for_debug_prefers_split_slot_for_diver
     assert xy is not None
     assert abs(float(xy[0])) <= 1e-6
     assert -8.0 - 1e-6 <= float(xy[1]) <= -4.0 + 1e-6
+
+
+def test_resolve_endpoint_slot_assignment_for_debug_maps_split_slot_back_to_base_xsec() -> None:
+    frame = pipeline._build_node_xsec_frame_for_debug(
+        nodeid=1011,
+        node_type="diverge",
+        raw_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gated_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gate_all_xsec_geom=None,
+        drivezone_zone_metric=Polygon([(-20.0, -8.0), (20.0, -8.0), (20.0, 8.0), (-20.0, 8.0)]),
+        gore_zone_metric=Polygon([(4.0, -1.0), (6.0, -1.0), (6.0, 1.0), (4.0, 1.0)]),
+        split_anchor_stations_base=[5.0, 15.0],
+        probe_direction_xy=(1.0, 0.0),
+        probe_shift_m=5.0,
+    )
+    road = {
+        "src": 1011,
+        "dst": 1012,
+        "src_type": "diverge",
+        "_geometry_metric": LineString([(0.0, -6.0), (100.0, -6.0)]),
+        "_pair_xsec_target_src_metric": LineString([(0.0, -8.0), (0.0, -4.0)]),
+        "_xsec_ref_src_metric": LineString([(0.0, -10.0), (0.0, 10.0)]),
+    }
+
+    assignment = pipeline._resolve_endpoint_slot_assignment_for_debug(
+        road=road,
+        endpoint_tag="src",
+        nodeid=1011,
+        node_type="diverge",
+        frame=frame,
+    )
+
+    assert isinstance(assignment, dict)
+    assert str(assignment.get("requested_family")) == "split"
+    assert str(assignment.get("resolved_family")) == "split"
+    assert str(assignment.get("slot_region_source")) == "probe_branch_mapped_by_support_anchor"
+    slot_point = assignment.get("slot_point_metric")
+    assert isinstance(slot_point, Point)
+    xy = geom_mod.point_xy_safe(slot_point, context="test_diverge_src_maps_back_to_base_xsec")
+    assert xy is not None
+    assert abs(float(xy[0])) <= 1e-6
+    assert -10.0 - 1e-6 <= float(xy[1]) <= 0.0 + 1e-6
 
 
 def test_resolve_endpoint_slot_assignment_for_debug_uses_lane_boundary_partition_slot() -> None:

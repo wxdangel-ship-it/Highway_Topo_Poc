@@ -12,6 +12,7 @@ from time import perf_counter
 from typing import Any, Sequence
 
 import numpy as np
+from shapely.affinity import translate
 from shapely import contains_xy, get_x, get_y, line_interpolate_point, line_locate_point, points
 from shapely.geometry import LineString, MultiLineString, Point, Polygon, mapping, shape
 from shapely.geometry.base import BaseGeometry
@@ -238,6 +239,7 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "DEBUG_LAYER_MAX_ITEMS": 2000,
     "DEBUG_NODE_XSEC_FRAME_ENABLE": 1,
     "DEBUG_ENDPOINT_SLOT_ASSIGNMENT_ENABLE": 1,
+    "DEBUG_NODE_XSEC_PROBE_SHIFT_M": 5.0,
     "XSEC_GATE_TRAJ_EVIDENCE_ENABLE": 1,
     "XSEC_GATE_TRAJ_EVIDENCE_MAX_POINTS": 300000,
     "XSEC_GATE_TRAJ_EVIDENCE_SAMPLE_STEP": 4,
@@ -2622,9 +2624,15 @@ def _run_patch_core(
         "node_xsec_frame_full": _mk_debug_layer(),
         "node_xsec_frame_gated": _mk_debug_layer(),
         "node_xsec_frame_active": _mk_debug_layer(),
+        "node_xsec_frame_base": _mk_debug_layer(),
+        "node_xsec_frame_probe": _mk_debug_layer(),
+        "node_xsec_frame_probe_gated": _mk_debug_layer(),
         "node_xsec_slot_parts": _mk_debug_layer(),
         "node_xsec_slot_boundaries": _mk_debug_layer(),
         "node_xsec_slot_centers": _mk_debug_layer(),
+        "node_xsec_base_slot_parts": _mk_debug_layer(),
+        "node_xsec_base_slot_boundaries": _mk_debug_layer(),
+        "node_xsec_base_slot_centers": _mk_debug_layer(),
         "endpoint_slot_src": _mk_debug_layer(),
         "endpoint_slot_dst": _mk_debug_layer(),
         "endpoint_slot_src_region": _mk_debug_layer(),
@@ -2692,15 +2700,17 @@ def _run_patch_core(
             )
     node_xsec_frame_by_nodeid: dict[int, dict[str, Any]] = {}
     if debug_enabled and bool(int(params.get("DEBUG_NODE_XSEC_FRAME_ENABLE", 1))):
-        node_slot_anchor_stations_by_nodeid = _collect_node_slot_anchor_stations_for_debug(
+        node_slot_debug_context_by_nodeid = _collect_node_slot_debug_contexts_for_debug(
             supports=supports,
             xsec_map=xsec_map,
             xsec_gate_all_lookup_map=xsec_gate_all_lookup_map,
+            node_type_map=node_type_map,
         )
         node_xsec_frame_records: list[dict[str, Any]] = []
         for nodeid in sorted(int(k) for k in xsec_cross_lookup_map.keys()):
             raw_cs = xsec_map.get(int(nodeid))
             gated_cs = xsec_cross_lookup_map.get(int(nodeid))
+            node_debug_ctx = node_slot_debug_context_by_nodeid.get(int(nodeid), {})
             frame = _build_node_xsec_frame_for_debug(
                 nodeid=int(nodeid),
                 node_type=str(node_type_map.get(int(nodeid), "unknown")),
@@ -2710,7 +2720,9 @@ def _run_patch_core(
                 drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
                 gore_zone_metric=gore_zone_metric,
                 lane_boundaries_metric=patch_inputs.lane_boundaries_metric,
-                slot_anchor_stations=node_slot_anchor_stations_by_nodeid.get(int(nodeid)),
+                split_anchor_stations_base=node_debug_ctx.get("split_anchor_stations_base"),
+                probe_direction_xy=node_debug_ctx.get("probe_direction_xy"),
+                probe_shift_m=float(params.get("DEBUG_NODE_XSEC_PROBE_SHIFT_M", 5.0)),
             )
             if not isinstance(frame, dict):
                 continue
@@ -10712,13 +10724,95 @@ def _filter_slot_parts_for_debug(
     return out
 
 
-def _collect_node_slot_anchor_stations_for_debug(
+def _normalize_debug_unit_vector(vx: float, vy: float) -> tuple[float, float] | None:
+    norm = float(math.hypot(float(vx), float(vy)))
+    if norm <= 1e-9:
+        return None
+    return (float(vx) / norm, float(vy) / norm)
+
+
+def _average_debug_unit_vectors(vectors: Sequence[tuple[float, float]]) -> tuple[float, float] | None:
+    valid: list[tuple[float, float]] = []
+    for vec in vectors:
+        if not isinstance(vec, tuple) or len(vec) != 2:
+            continue
+        normed = _normalize_debug_unit_vector(float(vec[0]), float(vec[1]))
+        if normed is not None:
+            valid.append(normed)
+    if not valid:
+        return None
+    ref = valid[0]
+    sum_x = 0.0
+    sum_y = 0.0
+    for vx, vy in valid:
+        dot = float(vx * ref[0] + vy * ref[1])
+        use_x, use_y = ((-vx, -vy) if dot < 0.0 else (vx, vy))
+        sum_x += float(use_x)
+        sum_y += float(use_y)
+    return _normalize_debug_unit_vector(sum_x, sum_y)
+
+
+def _translate_debug_line(
+    line: LineString | None,
+    *,
+    direction_xy: tuple[float, float] | None,
+    shift_m: float,
+) -> LineString | None:
+    if not isinstance(line, LineString) or line.is_empty:
+        return None
+    if direction_xy is None:
+        return line
+    use_shift_m = float(shift_m)
+    if abs(use_shift_m) <= 1e-6:
+        return line
+    dx = float(direction_xy[0]) * use_shift_m
+    dy = float(direction_xy[1]) * use_shift_m
+    try:
+        moved = translate(line, xoff=dx, yoff=dy)
+    except Exception:
+        return line
+    return moved if isinstance(moved, LineString) and not moved.is_empty else line
+
+
+def _infer_slot_boundary_stations_from_parts(
+    axis_line: LineString | None,
+    slot_parts: Sequence[LineString],
+) -> list[float]:
+    if not isinstance(axis_line, LineString) or axis_line.is_empty:
+        return []
+    ranges: list[tuple[float, float, float]] = []
+    axis_len = float(axis_line.length)
+    for part in slot_parts:
+        if not isinstance(part, LineString) or part.is_empty or len(part.coords) < 2:
+            continue
+        try:
+            s0 = float(axis_line.project(Point(part.coords[0])))
+            s1 = float(axis_line.project(Point(part.coords[-1])))
+        except Exception:
+            continue
+        lo = float(min(s0, s1))
+        hi = float(max(s0, s1))
+        mid = 0.5 * (lo + hi)
+        ranges.append((mid, lo, hi))
+    if len(ranges) < 2:
+        return []
+    ranges.sort(key=lambda item: item[0])
+    boundaries: list[float] = []
+    for (_, _lo_prev, hi_prev), (_, lo_next, _hi_next) in zip(ranges[:-1], ranges[1:]):
+        boundary = 0.5 * (float(hi_prev) + float(lo_next))
+        if math.isfinite(boundary):
+            boundaries.append(boundary)
+    return _dedupe_axis_stations(boundaries, axis_len_m=axis_len, tol_m=0.75)
+
+
+def _collect_node_slot_debug_contexts_for_debug(
     *,
     supports: dict[tuple[int, int], PairSupport],
     xsec_map: dict[int, CrossSection],
     xsec_gate_all_lookup_map: dict[int, BaseGeometry | None],
-) -> dict[int, list[float]]:
-    out: dict[int, list[float]] = {}
+    node_type_map: dict[int, str],
+) -> dict[int, dict[str, Any]]:
+    out: dict[int, dict[str, Any]] = {}
 
     def _node_full_line(nodeid: int) -> LineString | None:
         raw_cs = xsec_map.get(int(nodeid))
@@ -10726,7 +10820,17 @@ def _collect_node_slot_anchor_stations_for_debug(
         gate_all_line = _pick_debug_primary_line(xsec_gate_all_lookup_map.get(int(nodeid)))
         return raw_line or gate_all_line
 
-    def _append_median_station(nodeid: int, pts: Sequence[Point] | None) -> None:
+    def _ensure_ctx(nodeid: int) -> dict[str, Any]:
+        return out.setdefault(
+            int(nodeid),
+            {
+                "split_anchor_stations_base": [],
+                "full_anchor_stations_base": [],
+                "probe_vectors": [],
+            },
+        )
+
+    def _append_median_station(nodeid: int, pts: Sequence[Point] | None, *, key: str) -> None:
         axis_line = _node_full_line(int(nodeid))
         if not isinstance(axis_line, LineString) or axis_line.is_empty or not pts:
             return
@@ -10742,23 +10846,70 @@ def _collect_node_slot_anchor_stations_for_debug(
                 stations.append(station)
         if not stations:
             return
-        out.setdefault(int(nodeid), []).append(float(np.median(np.asarray(stations, dtype=np.float64))))
+        _ensure_ctx(int(nodeid)).setdefault(str(key), []).append(float(np.median(np.asarray(stations, dtype=np.float64))))
+
+    def _append_probe_vectors(nodeid: int, segs: Sequence[LineString] | None, *, endpoint_tag: str, reverse: bool) -> None:
+        if not segs:
+            return
+        ctx = _ensure_ctx(int(nodeid))
+        for seg in segs:
+            if not isinstance(seg, LineString) or seg.is_empty or float(seg.length) <= 1e-6:
+                continue
+            station_m = 0.0 if str(endpoint_tag).lower() == "src" else float(seg.length)
+            tan = _line_tangent_at_station(line=seg, station_m=station_m, endpoint_tag=endpoint_tag)
+            if tan is None:
+                continue
+            vx, vy = tan
+            if reverse:
+                vx, vy = -float(vx), -float(vy)
+            normed = _normalize_debug_unit_vector(vx, vy)
+            if normed is not None:
+                ctx.setdefault("probe_vectors", []).append(normed)
 
     for (src, dst), support in supports.items():
         if not isinstance(support, PairSupport):
             continue
-        _append_median_station(int(src), list(support.src_cross_points or []))
-        _append_median_station(int(dst), list(support.dst_cross_points or []))
+        src_i = int(src)
+        dst_i = int(dst)
+        src_type = str(node_type_map.get(src_i, "unknown") or "unknown").strip().lower()
+        dst_type = str(node_type_map.get(dst_i, "unknown") or "unknown").strip().lower()
 
-    deduped_out: dict[int, list[float]] = {}
-    for nodeid, stations in out.items():
+        if src_type == "diverge":
+            _append_median_station(src_i, list(support.src_cross_points or []), key="split_anchor_stations_base")
+            _append_probe_vectors(src_i, support.traj_segments, endpoint_tag="src", reverse=False)
+        elif src_type == "merge":
+            _append_median_station(src_i, list(support.src_cross_points or []), key="full_anchor_stations_base")
+
+        if dst_type == "merge":
+            _append_median_station(dst_i, list(support.dst_cross_points or []), key="split_anchor_stations_base")
+            _append_probe_vectors(dst_i, support.traj_segments, endpoint_tag="dst", reverse=True)
+        elif dst_type == "diverge":
+            _append_median_station(dst_i, list(support.dst_cross_points or []), key="full_anchor_stations_base")
+
+    finalized: dict[int, dict[str, Any]] = {}
+    for nodeid, ctx in out.items():
         axis_line = _node_full_line(int(nodeid))
         if not isinstance(axis_line, LineString) or axis_line.is_empty:
             continue
-        deduped = _dedupe_axis_stations(stations, axis_len_m=float(axis_line.length), tol_m=1.0)
-        if deduped:
-            deduped_out[int(nodeid)] = deduped
-    return deduped_out
+        axis_len = float(axis_line.length)
+        split_anchor_stations = _dedupe_axis_stations(
+            list(ctx.get("split_anchor_stations_base") or []),
+            axis_len_m=axis_len,
+            tol_m=1.0,
+        )
+        full_anchor_stations = _dedupe_axis_stations(
+            list(ctx.get("full_anchor_stations_base") or []),
+            axis_len_m=axis_len,
+            tol_m=1.0,
+        )
+        probe_direction_xy = _average_debug_unit_vectors(list(ctx.get("probe_vectors") or []))
+        finalized[int(nodeid)] = {
+            "split_anchor_stations_base": split_anchor_stations,
+            "full_anchor_stations_base": full_anchor_stations,
+            "probe_direction_xy": probe_direction_xy,
+            "probe_direction_source": "support_traj_direction" if probe_direction_xy is not None else "unavailable",
+        }
+    return finalized
 
 
 def _node_xsec_frame_roles(node_type: str) -> tuple[str, str]:
@@ -10797,150 +10948,278 @@ def _build_node_xsec_frame_for_debug(
     gore_zone_metric: BaseGeometry | None,
     lane_boundaries_metric: Sequence[LineString] | None = None,
     slot_anchor_stations: Sequence[float] | None = None,
+    split_anchor_stations_base: Sequence[float] | None = None,
+    probe_direction_xy: tuple[float, float] | None = None,
+    probe_shift_m: float = 5.0,
 ) -> dict[str, Any] | None:
     raw_line = _pick_debug_primary_line(raw_xsec_geom)
     gated_line = _pick_debug_primary_line(gated_xsec_geom)
     gate_all_line = _pick_debug_primary_line(gate_all_xsec_geom)
-    full_line = raw_line or gate_all_line or gated_line
-    if full_line is None or full_line.is_empty or full_line.length <= 1e-6:
+    base_line = raw_line or gate_all_line or gated_line
+    if base_line is None or base_line.is_empty or base_line.length <= 1e-6:
         return None
     full_role, split_role = _node_xsec_frame_roles(node_type)
-    gated_geom, gate_source = _build_debug_gated_xsec_geometry(
-        full_line=full_line,
+    base_gated_geom, base_gate_source = _build_debug_gated_xsec_geometry(
+        full_line=base_line,
         drivezone_zone_metric=drivezone_zone_metric,
         gore_zone_metric=gore_zone_metric,
     )
-    gated_parts = _filter_slot_parts_for_debug(
-        _iter_line_parts(gated_geom),
+    split_anchor_station_list = list(split_anchor_stations_base or slot_anchor_stations or [])
+    probe_line = _translate_debug_line(
+        base_line,
+        direction_xy=probe_direction_xy,
+        shift_m=float(probe_shift_m),
+    )
+    probe_gated_geom, probe_gate_source = _build_debug_gated_xsec_geometry(
+        full_line=probe_line,
         drivezone_zone_metric=drivezone_zone_metric,
         gore_zone_metric=gore_zone_metric,
     )
-    slot_parts: list[LineString] = []
-    slot_source = "frame_fallback"
-    slot_boundary_stations: list[float] = []
-    if len(gated_parts) >= 2:
-        slot_parts = list(gated_parts)
-        slot_source = gate_source
+    probe_gated_parts = _filter_slot_parts_for_debug(
+        _iter_line_parts(probe_gated_geom),
+        drivezone_zone_metric=drivezone_zone_metric,
+        gore_zone_metric=gore_zone_metric,
+    )
+
+    def _build_slot_records(axis_line: LineString, parts: Sequence[LineString]) -> list[dict[str, Any]]:
+        out_records: list[dict[str, Any]] = []
+        frame_mid_station = 0.5 * float(axis_line.length)
+        sortable: list[tuple[float, dict[str, Any]]] = []
+        for part in parts:
+            if not isinstance(part, LineString) or part.is_empty:
+                continue
+            try:
+                mid = part.interpolate(0.5, normalized=True)
+            except Exception:
+                mid = None
+            if not isinstance(mid, Point) or mid.is_empty:
+                continue
+            try:
+                station = float(axis_line.project(mid))
+            except Exception:
+                station = float("inf")
+            if not math.isfinite(station):
+                station = float("inf")
+            if station < frame_mid_station - 1e-6:
+                side = "negative"
+            elif station > frame_mid_station + 1e-6:
+                side = "positive"
+            else:
+                side = "center"
+            sortable.append(
+                (
+                    station,
+                    {
+                        "geometry_metric": part,
+                        "midpoint_metric": mid,
+                        "mid_station_m": station,
+                        "side": side,
+                        "length_m": float(part.length),
+                    },
+                )
+            )
+        for slot_order, (_station, payload) in enumerate(sorted(sortable, key=lambda it: (it[0], -float(it[1]["length_m"])))):
+            payload["slot_order"] = int(slot_order)
+            out_records.append(payload)
+        return out_records
+
+    probe_slot_parts: list[LineString] = []
+    probe_slot_source = "frame_fallback"
+    probe_slot_boundary_stations: list[float] = []
+    if len(probe_gated_parts) >= 2:
+        probe_slot_parts = list(probe_gated_parts)
+        probe_slot_source = probe_gate_source
+        probe_slot_boundary_stations = _infer_slot_boundary_stations_from_parts(probe_line, probe_slot_parts)
     else:
         anchor_cut_stations: list[float] = []
-        if slot_anchor_stations and len(slot_anchor_stations) >= 2:
-            anchor_station_list = _dedupe_axis_stations(
-                slot_anchor_stations,
-                axis_len_m=float(full_line.length),
+        if split_anchor_station_list and len(split_anchor_station_list) >= 2:
+            deduped_anchor_stations = _dedupe_axis_stations(
+                split_anchor_station_list,
+                axis_len_m=float(probe_line.length),
                 tol_m=1.0,
             )
-            if len(anchor_station_list) >= 2:
+            if len(deduped_anchor_stations) >= 2:
                 anchor_cut_stations = [
                     0.5 * (float(a) + float(b))
-                    for a, b in zip(anchor_station_list[:-1], anchor_station_list[1:])
+                    for a, b in zip(deduped_anchor_stations[:-1], deduped_anchor_stations[1:])
                 ]
         if anchor_cut_stations:
             anchor_parts = _filter_slot_parts_for_debug(
-                _cut_line_by_axis_stations(full_line, anchor_cut_stations),
+                _cut_line_by_axis_stations(probe_line, anchor_cut_stations),
                 drivezone_zone_metric=drivezone_zone_metric,
                 gore_zone_metric=gore_zone_metric,
             )
             if len(anchor_parts) >= 2:
-                slot_parts = list(anchor_parts)
-                slot_source = "support_anchor_partition"
-                slot_boundary_stations = list(anchor_cut_stations)
-        if not slot_parts:
+                probe_slot_parts = list(anchor_parts)
+                probe_slot_source = "support_anchor_partition"
+                probe_slot_boundary_stations = list(anchor_cut_stations)
+        if not probe_slot_parts:
             partition_stations = _collect_lane_boundary_partition_stations_for_debug(
-                full_line,
+                probe_line,
                 lane_boundaries_metric,
             )
             if partition_stations:
                 partition_parts = _filter_slot_parts_for_debug(
-                    _cut_line_by_axis_stations(full_line, partition_stations),
+                    _cut_line_by_axis_stations(probe_line, partition_stations),
                     drivezone_zone_metric=drivezone_zone_metric,
                     gore_zone_metric=gore_zone_metric,
                 )
                 if len(partition_parts) >= 2:
-                    slot_parts = list(partition_parts)
-                    slot_source = "lane_boundary_partition"
-                    slot_boundary_stations = list(partition_stations)
-    if not slot_parts:
-        slot_parts = list(gated_parts) if gated_parts else [full_line]
-        slot_source = gate_source if gated_parts else "frame_fallback"
-    frame_line = _pick_debug_primary_line(gated_geom) or full_line
-    axis_line = full_line
-    slot_records: list[dict[str, Any]] = []
-    frame_mid_station = 0.5 * float(axis_line.length)
-    sortable: list[tuple[float, dict[str, Any]]] = []
-    for part in slot_parts:
-        try:
-            mid = part.interpolate(0.5, normalized=True)
-        except Exception:
-            mid = None
-        if not isinstance(mid, Point) or mid.is_empty:
-            continue
-        try:
-            station = float(axis_line.project(mid))
-        except Exception:
-            station = float("inf")
-        if not math.isfinite(station):
-            station = float("inf")
-        if station < frame_mid_station - 1e-6:
-            side = "negative"
-        elif station > frame_mid_station + 1e-6:
-            side = "positive"
-        else:
-            side = "center"
-        sortable.append(
-            (
-                station,
-                {
-                    "geometry_metric": part,
-                    "midpoint_metric": mid,
-                    "mid_station_m": station,
-                    "side": side,
-                    "length_m": float(part.length),
-                },
+                    probe_slot_parts = list(partition_parts)
+                    probe_slot_source = "lane_boundary_partition"
+                    probe_slot_boundary_stations = list(partition_stations)
+    if not probe_slot_parts:
+        probe_slot_parts = list(probe_gated_parts) if probe_gated_parts else [probe_line]
+        probe_slot_source = probe_gate_source if probe_gated_parts else "frame_fallback"
+        probe_slot_boundary_stations = _infer_slot_boundary_stations_from_parts(probe_line, probe_slot_parts)
+
+    base_split_slot_parts: list[LineString] = []
+    base_split_slot_source = "full_family_only"
+    base_split_boundary_stations: list[float] = []
+    if len(probe_slot_parts) >= 2:
+        anchor_boundary_stations: list[float] = []
+        if split_anchor_station_list and len(split_anchor_station_list) >= 2:
+            deduped_anchor_stations = _dedupe_axis_stations(
+                split_anchor_station_list,
+                axis_len_m=float(base_line.length),
+                tol_m=1.0,
             )
-        )
-    for slot_order, (_station, payload) in enumerate(sorted(sortable, key=lambda it: (it[0], -float(it[1]["length_m"])))):
-        payload["slot_order"] = int(slot_order)
-        slot_records.append(payload)
-    boundary_points: list[Point] = []
-    for station in slot_boundary_stations:
+            if len(deduped_anchor_stations) >= 2:
+                anchor_boundary_stations = [
+                    0.5 * (float(a) + float(b))
+                    for a, b in zip(deduped_anchor_stations[:-1], deduped_anchor_stations[1:])
+                ]
+        if anchor_boundary_stations:
+            anchor_parts = _filter_slot_parts_for_debug(
+                _cut_line_by_axis_stations(base_line, anchor_boundary_stations),
+                drivezone_zone_metric=drivezone_zone_metric,
+                gore_zone_metric=gore_zone_metric,
+            )
+            if len(anchor_parts) == len(probe_slot_parts):
+                base_split_slot_parts = list(anchor_parts)
+                base_split_slot_source = "probe_branch_mapped_by_support_anchor"
+                base_split_boundary_stations = list(anchor_boundary_stations)
+        if not base_split_slot_parts and probe_slot_boundary_stations:
+            base_len = float(base_line.length)
+            probe_len = float(probe_line.length)
+            if base_len > 1e-6 and probe_len > 1e-6:
+                mapped_boundary_stations = [
+                    max(0.0, min(base_len, base_len * float(station) / probe_len))
+                    for station in probe_slot_boundary_stations
+                ]
+                mapped_parts = _filter_slot_parts_for_debug(
+                    _cut_line_by_axis_stations(base_line, mapped_boundary_stations),
+                    drivezone_zone_metric=drivezone_zone_metric,
+                    gore_zone_metric=gore_zone_metric,
+                )
+                if len(mapped_parts) == len(probe_slot_parts):
+                    base_split_slot_parts = list(mapped_parts)
+                    base_split_slot_source = "probe_branch_mapped_by_probe_ratio"
+                    base_split_boundary_stations = list(mapped_boundary_stations)
+        if not base_split_slot_parts and anchor_boundary_stations:
+            anchor_parts = _filter_slot_parts_for_debug(
+                _cut_line_by_axis_stations(base_line, anchor_boundary_stations),
+                drivezone_zone_metric=drivezone_zone_metric,
+                gore_zone_metric=gore_zone_metric,
+            )
+            if len(anchor_parts) >= 2:
+                base_split_slot_parts = list(anchor_parts)
+                base_split_slot_source = "probe_branch_mapped_by_support_anchor_fallback"
+                base_split_boundary_stations = list(anchor_boundary_stations)
+
+    base_full_slot_parts: list[LineString] = []
+    base_gated_parts = _filter_slot_parts_for_debug(
+        _iter_line_parts(base_gated_geom),
+        drivezone_zone_metric=drivezone_zone_metric,
+        gore_zone_metric=gore_zone_metric,
+    )
+    if base_gated_parts:
+        base_full_slot_parts = list(base_gated_parts)
+    else:
+        base_full_slot_parts = [base_line]
+
+    probe_slot_records = _build_slot_records(probe_line, probe_slot_parts)
+    base_split_slot_records = _build_slot_records(base_line, base_split_slot_parts)
+    base_full_slot_records = _build_slot_records(base_line, base_full_slot_parts)
+
+    probe_boundary_points: list[Point] = []
+    for station in probe_slot_boundary_stations:
         try:
-            pt = axis_line.interpolate(float(station))
+            pt = probe_line.interpolate(float(station))
         except Exception:
             pt = None
         if isinstance(pt, Point) and not pt.is_empty:
-            boundary_points.append(pt)
+            probe_boundary_points.append(pt)
+
+    base_split_boundary_points: list[Point] = []
+    for station in base_split_boundary_stations:
+        try:
+            pt = base_line.interpolate(float(station))
+        except Exception:
+            pt = None
+        if isinstance(pt, Point) and not pt.is_empty:
+            base_split_boundary_points.append(pt)
+
+    frame_line = probe_line
+    axis_line = base_line
     return {
         "nodeid": int(nodeid),
         "node_type": str(node_type or "unknown"),
-        "raw_xsec_metric": full_line,
+        "raw_xsec_metric": base_line,
         "input_gated_xsec_metric": gated_line,
-        "gated_xsec_metric": gated_geom,
+        "gated_xsec_metric": probe_gated_geom,
         "gate_all_xsec_metric": gate_all_line,
         "frame_xsec_metric": frame_line,
         "axis_xsec_metric": axis_line,
+        "base_xsec_metric": base_line,
+        "base_gated_xsec_metric": base_gated_geom,
+        "probe_xsec_metric": probe_line,
+        "probe_gated_xsec_metric": probe_gated_geom,
         "full_role": full_role,
         "split_role": split_role,
-        "slot_source": slot_source,
-        "slot_count": int(len(slot_records)),
-        "slot_boundary_stations_m": list(slot_boundary_stations),
-        "slot_boundary_points_metric": boundary_points,
-        "slots": slot_records,
+        "slot_source": probe_slot_source,
+        "slot_count": int(len(probe_slot_records)),
+        "slot_boundary_stations_m": list(probe_slot_boundary_stations),
+        "slot_boundary_points_metric": probe_boundary_points,
+        "slots": probe_slot_records,
+        "base_split_slot_source": base_split_slot_source,
+        "base_split_slot_count": int(len(base_split_slot_records)),
+        "base_split_slot_boundary_stations_m": list(base_split_boundary_stations),
+        "base_split_slot_boundary_points_metric": base_split_boundary_points,
+        "base_split_slots": base_split_slot_records,
+        "base_full_slot_count": int(len(base_full_slot_records)),
+        "base_full_slots": base_full_slot_records,
+        "probe_shift_m": float(probe_shift_m),
+        "probe_direction_xy": probe_direction_xy,
+        "probe_direction_source": "provided" if probe_direction_xy is not None else "unavailable",
+        "base_gate_source": base_gate_source,
+        "probe_gate_source": probe_gate_source,
     }
 
 
 def _serialize_node_xsec_frame_for_debug(frame: dict[str, Any]) -> dict[str, Any]:
-    slots = []
-    for slot in frame.get("slots", []):
-        if not isinstance(slot, dict):
-            continue
-        slots.append(
-            {
-                "slot_order": int(slot.get("slot_order", -1)),
-                "side": str(slot.get("side") or ""),
-                "mid_station_m": _to_finite_float(slot.get("mid_station_m"), float("nan")),
-                "length_m": _to_finite_float(slot.get("length_m"), float("nan")),
-            }
-        )
+    def _serialize_slots(slot_items: Sequence[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        out_slots: list[dict[str, Any]] = []
+        for slot in slot_items or []:
+            if not isinstance(slot, dict):
+                continue
+            out_slots.append(
+                {
+                    "slot_order": int(slot.get("slot_order", -1)),
+                    "side": str(slot.get("side") or ""),
+                    "mid_station_m": _to_finite_float(slot.get("mid_station_m"), float("nan")),
+                    "length_m": _to_finite_float(slot.get("length_m"), float("nan")),
+                }
+            )
+        return out_slots
+
+    slots = _serialize_slots(frame.get("slots", []))
+    base_split_slots = _serialize_slots(frame.get("base_split_slots", []))
+    probe_direction_xy = frame.get("probe_direction_xy")
+    if isinstance(probe_direction_xy, tuple) and len(probe_direction_xy) == 2:
+        probe_direction_xy = [_to_finite_float(probe_direction_xy[0], float("nan")), _to_finite_float(probe_direction_xy[1], float("nan"))]
+    else:
+        probe_direction_xy = None
     return {
         "nodeid": int(frame.get("nodeid", -1)),
         "node_type": str(frame.get("node_type") or "unknown"),
@@ -10949,7 +11228,14 @@ def _serialize_node_xsec_frame_for_debug(frame: dict[str, Any]) -> dict[str, Any
         "slot_source": str(frame.get("slot_source") or ""),
         "slot_count": int(frame.get("slot_count", 0)),
         "slot_boundary_count": int(len(frame.get("slot_boundary_stations_m") or [])),
+        "base_split_slot_source": str(frame.get("base_split_slot_source") or ""),
+        "base_split_slot_count": int(frame.get("base_split_slot_count", 0)),
+        "base_split_slot_boundary_count": int(len(frame.get("base_split_slot_boundary_stations_m") or [])),
+        "probe_shift_m": _to_finite_float(frame.get("probe_shift_m"), float("nan")),
+        "probe_direction_xy": probe_direction_xy,
+        "probe_direction_source": str(frame.get("probe_direction_source") or ""),
         "slots": slots,
+        "base_split_slots": base_split_slots,
     }
 
 
@@ -10964,10 +11250,15 @@ def _append_node_xsec_frame_debug_layers(
     split_role = str(frame.get("split_role") or "")
     slot_source = str(frame.get("slot_source") or "")
     slot_count = int(frame.get("slot_count", 0))
+    base_split_slot_source = str(frame.get("base_split_slot_source") or "")
+    base_split_slot_count = int(frame.get("base_split_slot_count", 0))
     for layer_name, geom, source in (
-        ("node_xsec_frame_full", frame.get("raw_xsec_metric"), "raw_xsec"),
-        ("node_xsec_frame_gated", frame.get("gated_xsec_metric"), "gated_xsec"),
-        ("node_xsec_frame_active", frame.get("frame_xsec_metric"), "frame_xsec"),
+        ("node_xsec_frame_full", frame.get("base_xsec_metric"), "base_xsec"),
+        ("node_xsec_frame_gated", frame.get("probe_gated_xsec_metric"), "probe_gated_xsec"),
+        ("node_xsec_frame_active", frame.get("probe_xsec_metric"), "probe_xsec"),
+        ("node_xsec_frame_base", frame.get("base_xsec_metric"), "base_xsec"),
+        ("node_xsec_frame_probe", frame.get("probe_xsec_metric"), "probe_xsec"),
+        ("node_xsec_frame_probe_gated", frame.get("probe_gated_xsec_metric"), "probe_gated_xsec"),
     ):
         for ls in _iter_line_parts(geom):
             debug_layers[layer_name].append(
@@ -10981,6 +11272,8 @@ def _append_node_xsec_frame_debug_layers(
                         "split_role": split_role,
                         "slot_source": slot_source,
                         "slot_count": slot_count,
+                        "base_split_slot_source": base_split_slot_source,
+                        "base_split_slot_count": base_split_slot_count,
                     },
                 }
             )
@@ -11004,6 +11297,7 @@ def _append_node_xsec_frame_debug_layers(
                         "slot_length_m": length_m,
                         "slot_role": split_role,
                         "slot_source": slot_source,
+                        "slot_family": "probe_split",
                     },
                 }
             )
@@ -11018,6 +11312,46 @@ def _append_node_xsec_frame_debug_layers(
                         "slot_side": side,
                         "slot_role": split_role,
                         "slot_source": slot_source,
+                        "slot_family": "probe_split",
+                    },
+                }
+            )
+    for slot in frame.get("base_split_slots", []):
+        if not isinstance(slot, dict):
+            continue
+        slot_order = int(slot.get("slot_order", -1))
+        side = str(slot.get("side") or "")
+        length_m = _to_finite_float(slot.get("length_m"), float("nan"))
+        geom = slot.get("geometry_metric")
+        mid = slot.get("midpoint_metric")
+        for ls in _iter_line_parts(geom):
+            debug_layers["node_xsec_base_slot_parts"].append(
+                {
+                    "geometry": ls,
+                    "properties": {
+                        "nodeid": nodeid,
+                        "node_type": node_type,
+                        "slot_order": slot_order,
+                        "slot_side": side,
+                        "slot_length_m": length_m,
+                        "slot_role": split_role,
+                        "slot_source": base_split_slot_source,
+                        "slot_family": "base_split",
+                    },
+                }
+            )
+        if isinstance(mid, Point) and not mid.is_empty:
+            debug_layers["node_xsec_base_slot_centers"].append(
+                {
+                    "geometry": mid,
+                    "properties": {
+                        "nodeid": nodeid,
+                        "node_type": node_type,
+                        "slot_order": slot_order,
+                        "slot_side": side,
+                        "slot_role": split_role,
+                        "slot_source": base_split_slot_source,
+                        "slot_family": "base_split",
                     },
                 }
             )
@@ -11033,6 +11367,23 @@ def _append_node_xsec_frame_debug_layers(
                         "split_role": split_role,
                         "slot_source": slot_source,
                         "slot_count": slot_count,
+                        "slot_family": "probe_split",
+                    },
+                }
+            )
+    for pt in frame.get("base_split_slot_boundary_points_metric", []):
+        if isinstance(pt, Point) and not pt.is_empty:
+            debug_layers["node_xsec_base_slot_boundaries"].append(
+                {
+                    "geometry": pt,
+                    "properties": {
+                        "nodeid": nodeid,
+                        "node_type": node_type,
+                        "full_role": full_role,
+                        "split_role": split_role,
+                        "slot_source": base_split_slot_source,
+                        "slot_count": base_split_slot_count,
+                        "slot_family": "base_split",
                     },
                 }
             )
@@ -11103,14 +11454,14 @@ def _resolve_endpoint_slot_assignment_for_debug(
     else:
         endpoint_pt = None
     requested_family, business_role = _endpoint_slot_family(node_type, endpoint_tag_norm)
-    slot_records = [slot for slot in frame.get("slots", []) if isinstance(slot, dict)]
-    use_split = requested_family == "split" and len(slot_records) >= 2
+    split_slot_records = [slot for slot in frame.get("base_split_slots", []) if isinstance(slot, dict)]
+    use_split = requested_family == "split" and len(split_slot_records) >= 2
     anchor_geom, anchor_source = _first_valid_line_from_road(
         road,
         _endpoint_slot_anchor_candidates_for_debug(endpoint_tag_norm, prefer_split=use_split),
     )
     anchor_point = _project_point_to_line(anchor_geom, endpoint_pt)
-    frame_line = frame.get("axis_xsec_metric") or frame.get("frame_xsec_metric")
+    frame_line = frame.get("base_xsec_metric") or frame.get("axis_xsec_metric") or frame.get("frame_xsec_metric")
     chosen_slot: dict[str, Any] | None = None
     fallback_reason = None
     if use_split:
@@ -11121,7 +11472,7 @@ def _resolve_endpoint_slot_assignment_for_debug(
                 anchor_station = float(frame_line.project(anchor_point))
             except Exception:
                 anchor_station = float("inf")
-        for slot in slot_records:
+        for slot in split_slot_records:
             slot_geom = slot.get("geometry_metric")
             slot_mid = slot.get("midpoint_metric")
             if not isinstance(slot_geom, LineString) or slot_geom.is_empty:
@@ -11158,11 +11509,13 @@ def _resolve_endpoint_slot_assignment_for_debug(
         slot_order = chosen_slot.get("slot_order")
         resolved_family = "split"
         slot_role = str(frame.get("split_role") or "")
+        slot_region_source = str(frame.get("base_split_slot_source") or "")
     else:
-        slot_geom = frame.get("raw_xsec_metric") or frame.get("frame_xsec_metric") or frame_line
+        slot_geom = frame.get("base_xsec_metric") or frame.get("raw_xsec_metric") or frame.get("frame_xsec_metric") or frame_line
         slot_order = None
         resolved_family = "full"
         slot_role = str(frame.get("full_role") or "")
+        slot_region_source = str(frame.get("base_gate_source") or "base_xsec")
     slot_point = _project_point_to_line(slot_geom, anchor_point or endpoint_pt)
     connector_geom = None
     if isinstance(endpoint_pt, Point) and isinstance(slot_point, Point) and (not endpoint_pt.is_empty) and (not slot_point.is_empty):
@@ -11177,8 +11530,9 @@ def _resolve_endpoint_slot_assignment_for_debug(
         "business_role": business_role,
         "slot_role": slot_role,
         "slot_order": int(slot_order) if slot_order is not None else None,
-        "slot_count": int(len(slot_records)),
+        "slot_count": int(len(split_slot_records)),
         "assignment_source": anchor_source,
+        "slot_region_source": slot_region_source,
         "family_fallback_reason": fallback_reason,
         "slot_geom_metric": slot_geom,
         "slot_point_metric": slot_point,
@@ -11213,6 +11567,7 @@ def _append_endpoint_slot_assignment_debug_layers(
         "slot_order": assignment.get("slot_order"),
         "slot_count": int(assignment.get("slot_count", 0)),
         "assignment_source": assignment.get("assignment_source"),
+        "slot_region_source": assignment.get("slot_region_source"),
         "family_fallback_reason": assignment.get("family_fallback_reason"),
     }
     for ls in _iter_line_parts(slot_geom):
