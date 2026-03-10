@@ -5103,6 +5103,24 @@ def test_build_node_xsec_frame_for_debug_partitions_by_lane_boundaries() -> None
     assert [str(slot.get("side")) for slot in slots] == ["negative", "center", "positive"]
 
 
+def test_build_node_xsec_frame_for_debug_partitions_by_support_anchor_stations() -> None:
+    frame = pipeline._build_node_xsec_frame_for_debug(
+        nodeid=1009,
+        node_type="diverge",
+        raw_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gated_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gate_all_xsec_geom=None,
+        drivezone_zone_metric=Polygon([(-20.0, -8.0), (20.0, -8.0), (20.0, 8.0), (-20.0, 8.0)]),
+        gore_zone_metric=None,
+        slot_anchor_stations=[3.0, 10.0, 17.0],
+    )
+
+    assert isinstance(frame, dict)
+    assert str(frame.get("slot_source")) == "support_anchor_partition"
+    assert int(frame.get("slot_count", 0)) == 3
+    assert len(list(frame.get("slot_boundary_stations_m") or [])) == 2
+
+
 def test_resolve_endpoint_slot_assignment_for_debug_prefers_split_slot_for_diverge_src() -> None:
     frame = pipeline._build_node_xsec_frame_for_debug(
         nodeid=1002,

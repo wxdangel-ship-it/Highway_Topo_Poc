@@ -2623,6 +2623,7 @@ def _run_patch_core(
         "node_xsec_frame_gated": _mk_debug_layer(),
         "node_xsec_frame_active": _mk_debug_layer(),
         "node_xsec_slot_parts": _mk_debug_layer(),
+        "node_xsec_slot_boundaries": _mk_debug_layer(),
         "node_xsec_slot_centers": _mk_debug_layer(),
         "endpoint_slot_src": _mk_debug_layer(),
         "endpoint_slot_dst": _mk_debug_layer(),
@@ -2691,6 +2692,11 @@ def _run_patch_core(
             )
     node_xsec_frame_by_nodeid: dict[int, dict[str, Any]] = {}
     if debug_enabled and bool(int(params.get("DEBUG_NODE_XSEC_FRAME_ENABLE", 1))):
+        node_slot_anchor_stations_by_nodeid = _collect_node_slot_anchor_stations_for_debug(
+            supports=supports,
+            xsec_map=xsec_map,
+            xsec_gate_all_lookup_map=xsec_gate_all_lookup_map,
+        )
         node_xsec_frame_records: list[dict[str, Any]] = []
         for nodeid in sorted(int(k) for k in xsec_cross_lookup_map.keys()):
             raw_cs = xsec_map.get(int(nodeid))
@@ -2704,6 +2710,7 @@ def _run_patch_core(
                 drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
                 gore_zone_metric=gore_zone_metric,
                 lane_boundaries_metric=patch_inputs.lane_boundaries_metric,
+                slot_anchor_stations=node_slot_anchor_stations_by_nodeid.get(int(nodeid)),
             )
             if not isinstance(frame, dict):
                 continue
@@ -10705,6 +10712,55 @@ def _filter_slot_parts_for_debug(
     return out
 
 
+def _collect_node_slot_anchor_stations_for_debug(
+    *,
+    supports: dict[tuple[int, int], PairSupport],
+    xsec_map: dict[int, CrossSection],
+    xsec_gate_all_lookup_map: dict[int, BaseGeometry | None],
+) -> dict[int, list[float]]:
+    out: dict[int, list[float]] = {}
+
+    def _node_full_line(nodeid: int) -> LineString | None:
+        raw_cs = xsec_map.get(int(nodeid))
+        raw_line = _pick_debug_primary_line(getattr(raw_cs, "geometry_metric", raw_cs))
+        gate_all_line = _pick_debug_primary_line(xsec_gate_all_lookup_map.get(int(nodeid)))
+        return raw_line or gate_all_line
+
+    def _append_median_station(nodeid: int, pts: Sequence[Point] | None) -> None:
+        axis_line = _node_full_line(int(nodeid))
+        if not isinstance(axis_line, LineString) or axis_line.is_empty or not pts:
+            return
+        stations: list[float] = []
+        for pt in pts:
+            if not isinstance(pt, Point) or pt.is_empty:
+                continue
+            try:
+                station = float(axis_line.project(pt))
+            except Exception:
+                continue
+            if math.isfinite(station):
+                stations.append(station)
+        if not stations:
+            return
+        out.setdefault(int(nodeid), []).append(float(np.median(np.asarray(stations, dtype=np.float64))))
+
+    for (src, dst), support in supports.items():
+        if not isinstance(support, PairSupport):
+            continue
+        _append_median_station(int(src), list(support.src_cross_points or []))
+        _append_median_station(int(dst), list(support.dst_cross_points or []))
+
+    deduped_out: dict[int, list[float]] = {}
+    for nodeid, stations in out.items():
+        axis_line = _node_full_line(int(nodeid))
+        if not isinstance(axis_line, LineString) or axis_line.is_empty:
+            continue
+        deduped = _dedupe_axis_stations(stations, axis_len_m=float(axis_line.length), tol_m=1.0)
+        if deduped:
+            deduped_out[int(nodeid)] = deduped
+    return deduped_out
+
+
 def _node_xsec_frame_roles(node_type: str) -> tuple[str, str]:
     node_type_norm = str(node_type or "").strip().lower()
     if node_type_norm == "merge":
@@ -10740,6 +10796,7 @@ def _build_node_xsec_frame_for_debug(
     drivezone_zone_metric: BaseGeometry | None,
     gore_zone_metric: BaseGeometry | None,
     lane_boundaries_metric: Sequence[LineString] | None = None,
+    slot_anchor_stations: Sequence[float] | None = None,
 ) -> dict[str, Any] | None:
     raw_line = _pick_debug_primary_line(raw_xsec_geom)
     gated_line = _pick_debug_primary_line(gated_xsec_geom)
@@ -10760,23 +10817,48 @@ def _build_node_xsec_frame_for_debug(
     )
     slot_parts: list[LineString] = []
     slot_source = "frame_fallback"
+    slot_boundary_stations: list[float] = []
     if len(gated_parts) >= 2:
         slot_parts = list(gated_parts)
         slot_source = gate_source
     else:
-        partition_stations = _collect_lane_boundary_partition_stations_for_debug(
-            full_line,
-            lane_boundaries_metric,
-        )
-        if partition_stations:
-            partition_parts = _filter_slot_parts_for_debug(
-                _cut_line_by_axis_stations(full_line, partition_stations),
+        anchor_cut_stations: list[float] = []
+        if slot_anchor_stations and len(slot_anchor_stations) >= 2:
+            anchor_station_list = _dedupe_axis_stations(
+                slot_anchor_stations,
+                axis_len_m=float(full_line.length),
+                tol_m=1.0,
+            )
+            if len(anchor_station_list) >= 2:
+                anchor_cut_stations = [
+                    0.5 * (float(a) + float(b))
+                    for a, b in zip(anchor_station_list[:-1], anchor_station_list[1:])
+                ]
+        if anchor_cut_stations:
+            anchor_parts = _filter_slot_parts_for_debug(
+                _cut_line_by_axis_stations(full_line, anchor_cut_stations),
                 drivezone_zone_metric=drivezone_zone_metric,
                 gore_zone_metric=gore_zone_metric,
             )
-            if len(partition_parts) >= 2:
-                slot_parts = list(partition_parts)
-                slot_source = "lane_boundary_partition"
+            if len(anchor_parts) >= 2:
+                slot_parts = list(anchor_parts)
+                slot_source = "support_anchor_partition"
+                slot_boundary_stations = list(anchor_cut_stations)
+        if not slot_parts:
+            partition_stations = _collect_lane_boundary_partition_stations_for_debug(
+                full_line,
+                lane_boundaries_metric,
+            )
+            if partition_stations:
+                partition_parts = _filter_slot_parts_for_debug(
+                    _cut_line_by_axis_stations(full_line, partition_stations),
+                    drivezone_zone_metric=drivezone_zone_metric,
+                    gore_zone_metric=gore_zone_metric,
+                )
+                if len(partition_parts) >= 2:
+                    slot_parts = list(partition_parts)
+                    slot_source = "lane_boundary_partition"
+                    slot_boundary_stations = list(partition_stations)
     if not slot_parts:
         slot_parts = list(gated_parts) if gated_parts else [full_line]
         slot_source = gate_source if gated_parts else "frame_fallback"
@@ -10819,6 +10901,14 @@ def _build_node_xsec_frame_for_debug(
     for slot_order, (_station, payload) in enumerate(sorted(sortable, key=lambda it: (it[0], -float(it[1]["length_m"])))):
         payload["slot_order"] = int(slot_order)
         slot_records.append(payload)
+    boundary_points: list[Point] = []
+    for station in slot_boundary_stations:
+        try:
+            pt = axis_line.interpolate(float(station))
+        except Exception:
+            pt = None
+        if isinstance(pt, Point) and not pt.is_empty:
+            boundary_points.append(pt)
     return {
         "nodeid": int(nodeid),
         "node_type": str(node_type or "unknown"),
@@ -10832,6 +10922,8 @@ def _build_node_xsec_frame_for_debug(
         "split_role": split_role,
         "slot_source": slot_source,
         "slot_count": int(len(slot_records)),
+        "slot_boundary_stations_m": list(slot_boundary_stations),
+        "slot_boundary_points_metric": boundary_points,
         "slots": slot_records,
     }
 
@@ -10856,6 +10948,7 @@ def _serialize_node_xsec_frame_for_debug(frame: dict[str, Any]) -> dict[str, Any
         "split_role": str(frame.get("split_role") or ""),
         "slot_source": str(frame.get("slot_source") or ""),
         "slot_count": int(frame.get("slot_count", 0)),
+        "slot_boundary_count": int(len(frame.get("slot_boundary_stations_m") or [])),
         "slots": slots,
     }
 
@@ -10925,6 +11018,21 @@ def _append_node_xsec_frame_debug_layers(
                         "slot_side": side,
                         "slot_role": split_role,
                         "slot_source": slot_source,
+                    },
+                }
+            )
+    for pt in frame.get("slot_boundary_points_metric", []):
+        if isinstance(pt, Point) and not pt.is_empty:
+            debug_layers["node_xsec_slot_boundaries"].append(
+                {
+                    "geometry": pt,
+                    "properties": {
+                        "nodeid": nodeid,
+                        "node_type": node_type,
+                        "full_role": full_role,
+                        "split_role": split_role,
+                        "slot_source": slot_source,
+                        "slot_count": slot_count,
                     },
                 }
             )
