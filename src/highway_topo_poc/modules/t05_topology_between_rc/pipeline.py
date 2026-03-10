@@ -5025,7 +5025,7 @@ def _resolve_step1_pair_primary_seed_metric(
         return xsec_seed
     policy_mode = str(pair_xsec_meta.get("policy_mode") or "").strip().lower()
     if policy_mode == "role_outward_cut":
-        for key in ("xsec_ref", "xsec_cross_ref", "xsec_road_selected"):
+        for key in ("xsec_cross_ref", "xsec_road_selected", "xsec_ref"):
             cand = pair_xsec_meta.get(key)
             if isinstance(cand, LineString) and (not cand.is_empty) and len(cand.coords) >= 2:
                 return cand

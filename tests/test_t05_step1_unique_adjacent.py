@@ -3311,6 +3311,26 @@ def test_evaluate_candidate_road_uses_outward_anchor_seed_only_with_branch_overr
     assert str(road_no_override.get("primary_geometry_xsec_seed_by_src")) == "seed_xsec"
 
 
+def test_resolve_step1_pair_primary_seed_metric_prefers_cross_ref_for_outward_cut() -> None:
+    xsec_seed = LineString([(0.0, -10.0), (0.0, 10.0)])
+    xsec_ref = LineString([(0.0, -30.0), (0.0, 30.0)])
+    xsec_cross_ref = LineString([(20.0, -8.0), (20.0, 8.0)])
+    xsec_road_selected = LineString([(20.0, -4.0), (20.0, 4.0)])
+
+    selected = pipeline._resolve_step1_pair_primary_seed_metric(
+        xsec_seed=xsec_seed,
+        pair_xsec_meta={
+            "policy_mode": "role_outward_cut",
+            "xsec_ref": xsec_ref,
+            "xsec_cross_ref": xsec_cross_ref,
+            "xsec_road_selected": xsec_road_selected,
+        },
+    )
+
+    assert isinstance(selected, LineString)
+    assert selected.equals(xsec_cross_ref)
+
+
 def test_evaluate_candidate_road_center_empty_uses_outward_branch_override_fallback_bind(
     tmp_path: Path, monkeypatch
 ) -> None:
