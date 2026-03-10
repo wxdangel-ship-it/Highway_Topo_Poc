@@ -2703,6 +2703,7 @@ def _run_patch_core(
                 gate_all_xsec_geom=xsec_gate_all_lookup_map.get(int(nodeid)),
                 drivezone_zone_metric=patch_inputs.drivezone_zone_metric,
                 gore_zone_metric=gore_zone_metric,
+                lane_boundaries_metric=patch_inputs.lane_boundaries_metric,
             )
             if not isinstance(frame, dict):
                 continue
@@ -10477,6 +10478,26 @@ def _iter_line_parts(geom: BaseGeometry | None) -> list[LineString]:
     return []
 
 
+def _iter_point_parts(geom: BaseGeometry | None) -> list[Point]:
+    if geom is None or geom.is_empty:
+        return []
+    gtype = str(getattr(geom, "geom_type", ""))
+    if gtype == "Point" and isinstance(geom, Point):
+        return [geom]
+    if gtype == "MultiPoint":
+        out: list[Point] = []
+        for g in getattr(geom, "geoms", []):
+            if isinstance(g, Point) and not g.is_empty:
+                out.append(g)
+        return out
+    if gtype == "GeometryCollection":
+        out: list[Point] = []
+        for g in getattr(geom, "geoms", []):
+            out.extend(_iter_point_parts(g))
+        return out
+    return []
+
+
 def _iter_polygon_parts(geom: BaseGeometry | None) -> list[BaseGeometry]:
     if geom is None or geom.is_empty:
         return []
@@ -10515,6 +10536,175 @@ def _pick_debug_primary_line(geom: BaseGeometry | None) -> LineString | None:
     return max(parts, key=lambda ls: float(ls.length))
 
 
+def _dedupe_axis_stations(
+    stations_m: Sequence[float],
+    *,
+    axis_len_m: float,
+    tol_m: float = 0.5,
+) -> list[float]:
+    if axis_len_m <= 1e-6:
+        return []
+    clipped: list[float] = []
+    for raw in stations_m:
+        try:
+            station = float(raw)
+        except Exception:
+            continue
+        if not math.isfinite(station):
+            continue
+        station = max(0.0, min(float(axis_len_m), station))
+        if station <= float(tol_m) or station >= float(axis_len_m) - float(tol_m):
+            continue
+        clipped.append(station)
+    clipped.sort()
+    deduped: list[float] = []
+    for station in clipped:
+        if not deduped or abs(station - deduped[-1]) > float(tol_m):
+            deduped.append(station)
+    return deduped
+
+
+def _cut_line_by_axis_stations(
+    axis_line: LineString | None,
+    stations_m: Sequence[float],
+    *,
+    min_len_m: float = 0.5,
+) -> list[LineString]:
+    if not isinstance(axis_line, LineString) or axis_line.is_empty:
+        return []
+    axis_len = float(axis_line.length)
+    if axis_len <= 1e-6:
+        return []
+    cut_stations = _dedupe_axis_stations(stations_m, axis_len_m=axis_len, tol_m=float(min_len_m))
+    if not cut_stations:
+        return [axis_line]
+    out: list[LineString] = []
+    start = 0.0
+    for end in [*cut_stations, axis_len]:
+        if end - start <= float(min_len_m):
+            start = end
+            continue
+        try:
+            part = substring(axis_line, start, end)
+        except Exception:
+            start = end
+            continue
+        for ls in _iter_line_parts(part):
+            if isinstance(ls, LineString) and not ls.is_empty and float(ls.length) > float(min_len_m):
+                out.append(ls)
+        start = end
+    return out or [axis_line]
+
+
+def _build_debug_gated_xsec_geometry(
+    *,
+    full_line: LineString | None,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+) -> tuple[BaseGeometry | None, str]:
+    if not isinstance(full_line, LineString) or full_line.is_empty:
+        return None, "unavailable"
+    working: BaseGeometry = full_line
+    source = "raw_xsec"
+    if drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty):
+        try:
+            inter = full_line.intersection(drivezone_zone_metric)
+        except Exception:
+            inter = None
+        if inter is not None and not inter.is_empty and _iter_line_parts(inter):
+            working = inter
+            source = "drivezone_only"
+    if gore_zone_metric is not None and (not gore_zone_metric.is_empty):
+        try:
+            diff = working.difference(gore_zone_metric)
+        except Exception:
+            diff = None
+        if diff is not None and not diff.is_empty and _iter_line_parts(diff):
+            working = diff
+            source = "drivezone_minus_gore" if source == "drivezone_only" else "xsec_minus_gore"
+    line_parts = _iter_line_parts(working)
+    if not line_parts:
+        return None, source
+    if len(line_parts) == 1:
+        return line_parts[0], source
+    return MultiLineString(line_parts), source
+
+
+def _collect_lane_boundary_partition_stations_for_debug(
+    axis_line: LineString | None,
+    lane_boundaries_metric: Sequence[LineString] | None,
+    *,
+    max_dist_m: float = 1.5,
+) -> list[float]:
+    if not isinstance(axis_line, LineString) or axis_line.is_empty or not lane_boundaries_metric:
+        return []
+    axis_len = float(axis_line.length)
+    if axis_len <= 1e-6:
+        return []
+    stations: list[float] = []
+    for lb in lane_boundaries_metric:
+        if not isinstance(lb, LineString) or lb.is_empty:
+            continue
+        try:
+            inter = axis_line.intersection(lb)
+        except Exception:
+            inter = None
+        points = _iter_point_parts(inter)
+        if not points:
+            try:
+                dist = float(axis_line.distance(lb))
+            except Exception:
+                continue
+            if dist > float(max_dist_m):
+                continue
+            try:
+                on_axis, _ = nearest_points(axis_line, lb)
+            except Exception:
+                continue
+            points = [on_axis] if isinstance(on_axis, Point) and not on_axis.is_empty else []
+        for pt in points:
+            try:
+                station = float(axis_line.project(pt))
+            except Exception:
+                continue
+            if math.isfinite(station):
+                stations.append(station)
+    return _dedupe_axis_stations(stations, axis_len_m=axis_len, tol_m=max(0.5, float(max_dist_m) * 0.5))
+
+
+def _filter_slot_parts_for_debug(
+    slot_parts: Sequence[LineString],
+    *,
+    drivezone_zone_metric: BaseGeometry | None,
+    gore_zone_metric: BaseGeometry | None,
+    min_len_m: float = 0.5,
+) -> list[LineString]:
+    out: list[LineString] = []
+    for part in slot_parts:
+        if not isinstance(part, LineString) or part.is_empty or float(part.length) <= float(min_len_m):
+            continue
+        try:
+            mid = part.interpolate(0.5, normalized=True)
+        except Exception:
+            mid = None
+        if not isinstance(mid, Point) or mid.is_empty:
+            continue
+        if drivezone_zone_metric is not None and (not drivezone_zone_metric.is_empty):
+            try:
+                if not (drivezone_zone_metric.buffer(1e-6).covers(mid) or float(drivezone_zone_metric.distance(mid)) <= 1e-6):
+                    continue
+            except Exception:
+                pass
+        if gore_zone_metric is not None and (not gore_zone_metric.is_empty):
+            try:
+                if gore_zone_metric.buffer(1e-6).covers(mid) or float(gore_zone_metric.distance(mid)) <= 1e-6:
+                    continue
+            except Exception:
+                pass
+        out.append(part)
+    return out
+
+
 def _node_xsec_frame_roles(node_type: str) -> tuple[str, str]:
     node_type_norm = str(node_type or "").strip().lower()
     if node_type_norm == "merge":
@@ -10549,45 +10739,51 @@ def _build_node_xsec_frame_for_debug(
     gate_all_xsec_geom: BaseGeometry | None,
     drivezone_zone_metric: BaseGeometry | None,
     gore_zone_metric: BaseGeometry | None,
+    lane_boundaries_metric: Sequence[LineString] | None = None,
 ) -> dict[str, Any] | None:
     raw_line = _pick_debug_primary_line(raw_xsec_geom)
     gated_line = _pick_debug_primary_line(gated_xsec_geom)
     gate_all_line = _pick_debug_primary_line(gate_all_xsec_geom)
-    frame_line = raw_line or gated_line or gate_all_line
-    if frame_line is None or frame_line.is_empty or frame_line.length <= 1e-6:
+    full_line = raw_line or gate_all_line or gated_line
+    if full_line is None or full_line.is_empty or full_line.length <= 1e-6:
         return None
     full_role, split_role = _node_xsec_frame_roles(node_type)
-    road_surface = drivezone_zone_metric
+    gated_geom, gate_source = _build_debug_gated_xsec_geometry(
+        full_line=full_line,
+        drivezone_zone_metric=drivezone_zone_metric,
+        gore_zone_metric=gore_zone_metric,
+    )
+    gated_parts = _filter_slot_parts_for_debug(
+        _iter_line_parts(gated_geom),
+        drivezone_zone_metric=drivezone_zone_metric,
+        gore_zone_metric=gore_zone_metric,
+    )
     slot_parts: list[LineString] = []
     slot_source = "frame_fallback"
-    if road_surface is not None and not road_surface.is_empty:
-        surface_for_slots = road_surface
-        if gore_zone_metric is not None and not gore_zone_metric.is_empty:
-            try:
-                diff = road_surface.difference(gore_zone_metric)
-                if diff is not None and not diff.is_empty:
-                    surface_for_slots = diff
-                    slot_source = "drivezone_minus_gore"
-                else:
-                    slot_source = "drivezone_only"
-            except Exception:
-                slot_source = "drivezone_only"
-        else:
-            slot_source = "drivezone_only"
-        try:
-            slot_inter = frame_line.intersection(surface_for_slots)
-        except Exception:
-            slot_inter = None
-        slot_parts = [
-            ls
-            for ls in _iter_line_parts(slot_inter)
-            if isinstance(ls, LineString) and not ls.is_empty and float(ls.length) > 0.5
-        ]
+    if len(gated_parts) >= 2:
+        slot_parts = list(gated_parts)
+        slot_source = gate_source
+    else:
+        partition_stations = _collect_lane_boundary_partition_stations_for_debug(
+            full_line,
+            lane_boundaries_metric,
+        )
+        if partition_stations:
+            partition_parts = _filter_slot_parts_for_debug(
+                _cut_line_by_axis_stations(full_line, partition_stations),
+                drivezone_zone_metric=drivezone_zone_metric,
+                gore_zone_metric=gore_zone_metric,
+            )
+            if len(partition_parts) >= 2:
+                slot_parts = list(partition_parts)
+                slot_source = "lane_boundary_partition"
     if not slot_parts:
-        slot_parts = [frame_line]
-        slot_source = "frame_fallback"
+        slot_parts = list(gated_parts) if gated_parts else [full_line]
+        slot_source = gate_source if gated_parts else "frame_fallback"
+    frame_line = _pick_debug_primary_line(gated_geom) or full_line
+    axis_line = full_line
     slot_records: list[dict[str, Any]] = []
-    frame_mid_station = 0.5 * float(frame_line.length)
+    frame_mid_station = 0.5 * float(axis_line.length)
     sortable: list[tuple[float, dict[str, Any]]] = []
     for part in slot_parts:
         try:
@@ -10597,7 +10793,7 @@ def _build_node_xsec_frame_for_debug(
         if not isinstance(mid, Point) or mid.is_empty:
             continue
         try:
-            station = float(frame_line.project(mid))
+            station = float(axis_line.project(mid))
         except Exception:
             station = float("inf")
         if not math.isfinite(station):
@@ -10626,10 +10822,12 @@ def _build_node_xsec_frame_for_debug(
     return {
         "nodeid": int(nodeid),
         "node_type": str(node_type or "unknown"),
-        "raw_xsec_metric": raw_line,
-        "gated_xsec_metric": gated_line,
+        "raw_xsec_metric": full_line,
+        "input_gated_xsec_metric": gated_line,
+        "gated_xsec_metric": gated_geom,
         "gate_all_xsec_metric": gate_all_line,
         "frame_xsec_metric": frame_line,
+        "axis_xsec_metric": axis_line,
         "full_role": full_role,
         "split_role": split_role,
         "slot_source": slot_source,
@@ -10804,7 +11002,7 @@ def _resolve_endpoint_slot_assignment_for_debug(
         _endpoint_slot_anchor_candidates_for_debug(endpoint_tag_norm, prefer_split=use_split),
     )
     anchor_point = _project_point_to_line(anchor_geom, endpoint_pt)
-    frame_line = frame.get("frame_xsec_metric")
+    frame_line = frame.get("axis_xsec_metric") or frame.get("frame_xsec_metric")
     chosen_slot: dict[str, Any] | None = None
     fallback_reason = None
     if use_split:
@@ -10853,7 +11051,7 @@ def _resolve_endpoint_slot_assignment_for_debug(
         resolved_family = "split"
         slot_role = str(frame.get("split_role") or "")
     else:
-        slot_geom = frame_line
+        slot_geom = frame.get("raw_xsec_metric") or frame.get("frame_xsec_metric") or frame_line
         slot_order = None
         resolved_family = "full"
         slot_role = str(frame.get("full_role") or "")

@@ -5081,6 +5081,28 @@ def test_build_node_xsec_frame_for_debug_splits_drivezone_minus_gore() -> None:
     assert all(float(slot.get("length_m", 0.0)) >= 6.9 for slot in slots)
 
 
+def test_build_node_xsec_frame_for_debug_partitions_by_lane_boundaries() -> None:
+    frame = pipeline._build_node_xsec_frame_for_debug(
+        nodeid=1006,
+        node_type="diverge",
+        raw_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gated_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gate_all_xsec_geom=None,
+        drivezone_zone_metric=Polygon([(-20.0, -8.0), (20.0, -8.0), (20.0, 8.0), (-20.0, 8.0)]),
+        gore_zone_metric=None,
+        lane_boundaries_metric=[
+            LineString([(-10.0, -3.0), (10.0, -3.0)]),
+            LineString([(-10.0, 3.0), (10.0, 3.0)]),
+        ],
+    )
+
+    assert isinstance(frame, dict)
+    assert str(frame.get("slot_source")) == "lane_boundary_partition"
+    assert int(frame.get("slot_count", 0)) == 3
+    slots = list(frame.get("slots") or [])
+    assert [str(slot.get("side")) for slot in slots] == ["negative", "center", "positive"]
+
+
 def test_resolve_endpoint_slot_assignment_for_debug_prefers_split_slot_for_diverge_src() -> None:
     frame = pipeline._build_node_xsec_frame_for_debug(
         nodeid=1002,
@@ -5119,6 +5141,48 @@ def test_resolve_endpoint_slot_assignment_for_debug_prefers_split_slot_for_diver
     assert xy is not None
     assert abs(float(xy[0])) <= 1e-6
     assert -8.0 - 1e-6 <= float(xy[1]) <= -4.0 + 1e-6
+
+
+def test_resolve_endpoint_slot_assignment_for_debug_uses_lane_boundary_partition_slot() -> None:
+    frame = pipeline._build_node_xsec_frame_for_debug(
+        nodeid=1007,
+        node_type="diverge",
+        raw_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gated_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gate_all_xsec_geom=None,
+        drivezone_zone_metric=Polygon([(-20.0, -8.0), (20.0, -8.0), (20.0, 8.0), (-20.0, 8.0)]),
+        gore_zone_metric=None,
+        lane_boundaries_metric=[
+            LineString([(-10.0, -3.0), (10.0, -3.0)]),
+            LineString([(-10.0, 3.0), (10.0, 3.0)]),
+        ],
+    )
+    road = {
+        "src": 1007,
+        "dst": 1008,
+        "src_type": "diverge",
+        "_geometry_metric": LineString([(0.0, -5.0), (100.0, -5.0)]),
+        "_pair_xsec_target_src_metric": LineString([(0.0, -8.0), (0.0, -3.2)]),
+        "_xsec_ref_src_metric": LineString([(0.0, -10.0), (0.0, 10.0)]),
+    }
+
+    assignment = pipeline._resolve_endpoint_slot_assignment_for_debug(
+        road=road,
+        endpoint_tag="src",
+        nodeid=1007,
+        node_type="diverge",
+        frame=frame,
+    )
+
+    assert isinstance(assignment, dict)
+    assert str(assignment.get("resolved_family")) == "split"
+    assert int(assignment.get("slot_order", -1)) == 0
+    slot_point = assignment.get("slot_point_metric")
+    assert isinstance(slot_point, Point)
+    xy = geom_mod.point_xy_safe(slot_point, context="test_diverge_src_lane_boundary_partition_slot")
+    assert xy is not None
+    assert abs(float(xy[0])) <= 1e-6
+    assert -8.0 - 1e-6 <= float(xy[1]) <= -3.0 + 1e-6
 
 
 def test_resolve_endpoint_slot_assignment_for_debug_prefers_full_family_for_merge_src() -> None:
