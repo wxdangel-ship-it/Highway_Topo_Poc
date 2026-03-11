@@ -5081,7 +5081,7 @@ def test_build_node_xsec_frame_for_debug_splits_drivezone_minus_gore() -> None:
     assert all(float(slot.get("length_m", 0.0)) >= 6.9 for slot in slots)
 
 
-def test_build_node_xsec_frame_for_debug_partitions_by_lane_boundaries() -> None:
+def test_build_node_xsec_frame_for_debug_keeps_split_unresolved_without_physical_cut_even_with_lane_boundaries() -> None:
     frame = pipeline._build_node_xsec_frame_for_debug(
         nodeid=1006,
         node_type="diverge",
@@ -5097,13 +5097,14 @@ def test_build_node_xsec_frame_for_debug_partitions_by_lane_boundaries() -> None
     )
 
     assert isinstance(frame, dict)
-    assert str(frame.get("slot_source")) == "lane_boundary_partition"
-    assert int(frame.get("slot_count", 0)) == 3
-    slots = list(frame.get("slots") or [])
-    assert [str(slot.get("side")) for slot in slots] == ["negative", "center", "positive"]
+    assert str(frame.get("slot_source")) == "probe_split_unresolved_no_physical_cut"
+    assert bool(frame.get("probe_split_detected")) is False
+    assert int(frame.get("slot_count", 0)) == 1
+    assert len(list(frame.get("probe_lane_boundary_hint_boundary_stations_m") or [])) == 2
+    assert int(frame.get("base_split_slot_count", 0)) == 0
 
 
-def test_build_node_xsec_frame_for_debug_partitions_by_support_anchor_stations() -> None:
+def test_build_node_xsec_frame_for_debug_keeps_split_unresolved_without_physical_cut_even_with_support_anchors() -> None:
     frame = pipeline._build_node_xsec_frame_for_debug(
         nodeid=1009,
         node_type="diverge",
@@ -5116,9 +5117,11 @@ def test_build_node_xsec_frame_for_debug_partitions_by_support_anchor_stations()
     )
 
     assert isinstance(frame, dict)
-    assert str(frame.get("slot_source")) == "support_anchor_partition"
-    assert int(frame.get("slot_count", 0)) == 3
-    assert len(list(frame.get("slot_boundary_stations_m") or [])) == 2
+    assert str(frame.get("slot_source")) == "probe_split_unresolved_no_physical_cut"
+    assert bool(frame.get("probe_split_detected")) is False
+    assert int(frame.get("slot_count", 0)) == 1
+    assert len(list(frame.get("probe_support_anchor_hint_boundary_stations_m") or [])) == 2
+    assert int(frame.get("base_split_slot_count", 0)) == 0
 
 
 def test_build_node_xsec_frame_for_debug_uses_probe_shift_to_split_branch_slots() -> None:
@@ -5235,7 +5238,7 @@ def test_resolve_endpoint_slot_assignment_for_debug_maps_split_slot_back_to_base
     assert -10.0 - 1e-6 <= float(xy[1]) <= 0.0 + 1e-6
 
 
-def test_resolve_endpoint_slot_assignment_for_debug_uses_lane_boundary_partition_slot() -> None:
+def test_resolve_endpoint_slot_assignment_for_debug_falls_back_to_full_when_probe_split_is_unresolved() -> None:
     frame = pipeline._build_node_xsec_frame_for_debug(
         nodeid=1007,
         node_type="diverge",
@@ -5267,11 +5270,13 @@ def test_resolve_endpoint_slot_assignment_for_debug_uses_lane_boundary_partition
     )
 
     assert isinstance(assignment, dict)
-    assert str(assignment.get("resolved_family")) == "split"
-    assert int(assignment.get("slot_order", -1)) == 0
+    assert str(assignment.get("requested_family")) == "split"
+    assert str(assignment.get("resolved_family")) == "full"
+    assert assignment.get("slot_order") is None
+    assert str(assignment.get("family_fallback_reason")) == "probe_split_unresolved"
     slot_point = assignment.get("slot_point_metric")
     assert isinstance(slot_point, Point)
-    xy = geom_mod.point_xy_safe(slot_point, context="test_diverge_src_lane_boundary_partition_slot")
+    xy = geom_mod.point_xy_safe(slot_point, context="test_diverge_src_probe_split_unresolved_slot_point")
     assert xy is not None
     assert abs(float(xy[0])) <= 1e-6
     assert -8.0 - 1e-6 <= float(xy[1]) <= -3.0 + 1e-6

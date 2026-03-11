@@ -11023,60 +11023,37 @@ def _build_node_xsec_frame_for_debug(
             out_records.append(payload)
         return out_records
 
-    probe_slot_parts: list[LineString] = []
-    probe_slot_source = "frame_fallback"
-    probe_slot_boundary_stations: list[float] = []
-    if len(probe_gated_parts) >= 2:
+    support_anchor_hint_boundary_stations: list[float] = []
+    if split_anchor_station_list and len(split_anchor_station_list) >= 2:
+        deduped_anchor_stations = _dedupe_axis_stations(
+            split_anchor_station_list,
+            axis_len_m=float(probe_line.length),
+            tol_m=1.0,
+        )
+        if len(deduped_anchor_stations) >= 2:
+            support_anchor_hint_boundary_stations = [
+                0.5 * (float(a) + float(b))
+                for a, b in zip(deduped_anchor_stations[:-1], deduped_anchor_stations[1:])
+            ]
+    lane_boundary_hint_boundary_stations = _collect_lane_boundary_partition_stations_for_debug(
+        probe_line,
+        lane_boundaries_metric,
+    )
+
+    probe_physical_split_detected = len(probe_gated_parts) >= 2
+    if probe_physical_split_detected:
         probe_slot_parts = list(probe_gated_parts)
         probe_slot_source = probe_gate_source
         probe_slot_boundary_stations = _infer_slot_boundary_stations_from_parts(probe_line, probe_slot_parts)
     else:
-        anchor_cut_stations: list[float] = []
-        if split_anchor_station_list and len(split_anchor_station_list) >= 2:
-            deduped_anchor_stations = _dedupe_axis_stations(
-                split_anchor_station_list,
-                axis_len_m=float(probe_line.length),
-                tol_m=1.0,
-            )
-            if len(deduped_anchor_stations) >= 2:
-                anchor_cut_stations = [
-                    0.5 * (float(a) + float(b))
-                    for a, b in zip(deduped_anchor_stations[:-1], deduped_anchor_stations[1:])
-                ]
-        if anchor_cut_stations:
-            anchor_parts = _filter_slot_parts_for_debug(
-                _cut_line_by_axis_stations(probe_line, anchor_cut_stations),
-                drivezone_zone_metric=drivezone_zone_metric,
-                gore_zone_metric=gore_zone_metric,
-            )
-            if len(anchor_parts) >= 2:
-                probe_slot_parts = list(anchor_parts)
-                probe_slot_source = "support_anchor_partition"
-                probe_slot_boundary_stations = list(anchor_cut_stations)
-        if not probe_slot_parts:
-            partition_stations = _collect_lane_boundary_partition_stations_for_debug(
-                probe_line,
-                lane_boundaries_metric,
-            )
-            if partition_stations:
-                partition_parts = _filter_slot_parts_for_debug(
-                    _cut_line_by_axis_stations(probe_line, partition_stations),
-                    drivezone_zone_metric=drivezone_zone_metric,
-                    gore_zone_metric=gore_zone_metric,
-                )
-                if len(partition_parts) >= 2:
-                    probe_slot_parts = list(partition_parts)
-                    probe_slot_source = "lane_boundary_partition"
-                    probe_slot_boundary_stations = list(partition_stations)
-    if not probe_slot_parts:
         probe_slot_parts = list(probe_gated_parts) if probe_gated_parts else [probe_line]
-        probe_slot_source = probe_gate_source if probe_gated_parts else "frame_fallback"
-        probe_slot_boundary_stations = _infer_slot_boundary_stations_from_parts(probe_line, probe_slot_parts)
+        probe_slot_source = "probe_split_unresolved_no_physical_cut"
+        probe_slot_boundary_stations = []
 
     base_split_slot_parts: list[LineString] = []
-    base_split_slot_source = "full_family_only"
+    base_split_slot_source = "split_unresolved"
     base_split_boundary_stations: list[float] = []
-    if len(probe_slot_parts) >= 2:
+    if probe_physical_split_detected and len(probe_slot_parts) >= 2:
         anchor_boundary_stations: list[float] = []
         if split_anchor_station_list and len(split_anchor_station_list) >= 2:
             deduped_anchor_stations = _dedupe_axis_stations(
@@ -11179,7 +11156,10 @@ def _build_node_xsec_frame_for_debug(
         "split_role": split_role,
         "slot_source": probe_slot_source,
         "slot_count": int(len(probe_slot_records)),
+        "probe_split_detected": bool(probe_physical_split_detected),
         "slot_boundary_stations_m": list(probe_slot_boundary_stations),
+        "probe_support_anchor_hint_boundary_stations_m": list(support_anchor_hint_boundary_stations),
+        "probe_lane_boundary_hint_boundary_stations_m": list(lane_boundary_hint_boundary_stations),
         "slot_boundary_points_metric": probe_boundary_points,
         "slots": probe_slot_records,
         "base_split_slot_source": base_split_slot_source,
@@ -11227,7 +11207,10 @@ def _serialize_node_xsec_frame_for_debug(frame: dict[str, Any]) -> dict[str, Any
         "split_role": str(frame.get("split_role") or ""),
         "slot_source": str(frame.get("slot_source") or ""),
         "slot_count": int(frame.get("slot_count", 0)),
+        "probe_split_detected": bool(frame.get("probe_split_detected", False)),
         "slot_boundary_count": int(len(frame.get("slot_boundary_stations_m") or [])),
+        "probe_support_anchor_hint_boundary_count": int(len(frame.get("probe_support_anchor_hint_boundary_stations_m") or [])),
+        "probe_lane_boundary_hint_boundary_count": int(len(frame.get("probe_lane_boundary_hint_boundary_stations_m") or [])),
         "base_split_slot_source": str(frame.get("base_split_slot_source") or ""),
         "base_split_slot_count": int(frame.get("base_split_slot_count", 0)),
         "base_split_slot_boundary_count": int(len(frame.get("base_split_slot_boundary_stations_m") or [])),
@@ -11455,7 +11438,8 @@ def _resolve_endpoint_slot_assignment_for_debug(
         endpoint_pt = None
     requested_family, business_role = _endpoint_slot_family(node_type, endpoint_tag_norm)
     split_slot_records = [slot for slot in frame.get("base_split_slots", []) if isinstance(slot, dict)]
-    use_split = requested_family == "split" and len(split_slot_records) >= 2
+    probe_split_detected = bool(frame.get("probe_split_detected"))
+    use_split = requested_family == "split" and probe_split_detected and len(split_slot_records) >= 2
     anchor_geom, anchor_source = _first_valid_line_from_road(
         road,
         _endpoint_slot_anchor_candidates_for_debug(endpoint_tag_norm, prefer_split=use_split),
@@ -11503,7 +11487,7 @@ def _resolve_endpoint_slot_assignment_for_debug(
             use_split = False
     else:
         if requested_family == "split":
-            fallback_reason = "split_slots_unavailable"
+            fallback_reason = "probe_split_unresolved" if not probe_split_detected else "split_slots_unavailable"
     if use_split and isinstance(chosen_slot, dict):
         slot_geom = chosen_slot.get("geometry_metric")
         slot_order = chosen_slot.get("slot_order")
