@@ -425,7 +425,7 @@ def build_t10_review_html(result: Any) -> str:
       const jsonView = document.getElementById("movement-json");
       if (!payload) {{
         kv.innerHTML = '<div class="key">状态</div><div>点击矩阵格子查看详情</div>';
-        jsonView.textContent = '{}';
+        jsonView.textContent = '{{}}';
         return;
       }}
       const rows = [
