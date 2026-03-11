@@ -5156,6 +5156,35 @@ def test_build_node_xsec_frame_for_debug_uses_probe_shift_to_split_branch_slots(
     assert all(isinstance(pt, Point) and abs(float(pt.x)) <= 1e-6 for pt in base_slot_centers)
 
 
+def test_build_node_xsec_frame_for_debug_searches_forward_until_probe_physically_splits() -> None:
+    frame = pipeline._build_node_xsec_frame_for_debug(
+        nodeid=1013,
+        node_type="diverge",
+        raw_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gated_xsec_geom=LineString([(0.0, -10.0), (0.0, 10.0)]),
+        gate_all_xsec_geom=None,
+        drivezone_zone_metric=Polygon([(-20.0, -8.0), (20.0, -8.0), (20.0, 8.0), (-20.0, 8.0)]),
+        gore_zone_metric=Polygon([(7.5, -1.0), (9.5, -1.0), (9.5, 1.0), (7.5, 1.0)]),
+        split_anchor_stations_base=[5.0, 15.0],
+        probe_direction_xy=(1.0, 0.0),
+        probe_shift_m=5.0,
+        probe_search_max_extra_m=5.0,
+        probe_search_step_m=1.0,
+    )
+
+    assert isinstance(frame, dict)
+    assert bool(frame.get("probe_split_detected")) is True
+    assert str(frame.get("slot_source")) == "drivezone_minus_gore"
+    assert int(frame.get("slot_count", 0)) == 2
+    assert abs(float(frame.get("probe_shift_effective_m", 0.0)) - 8.0) <= 1e-6
+    probe_line = frame.get("probe_xsec_metric")
+    assert isinstance(probe_line, LineString)
+    probe_mid = probe_line.interpolate(0.5, normalized=True)
+    probe_mid_xy = geom_mod.point_xy_safe(probe_mid, context="test_probe_search_mid")
+    assert probe_mid_xy is not None
+    assert abs(float(probe_mid_xy[0]) - 8.0) <= 1e-6
+
+
 def test_resolve_endpoint_slot_assignment_for_debug_prefers_split_slot_for_diverge_src() -> None:
     frame = pipeline._build_node_xsec_frame_for_debug(
         nodeid=1002,

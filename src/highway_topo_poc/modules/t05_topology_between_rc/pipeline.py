@@ -240,6 +240,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "DEBUG_NODE_XSEC_FRAME_ENABLE": 1,
     "DEBUG_ENDPOINT_SLOT_ASSIGNMENT_ENABLE": 1,
     "DEBUG_NODE_XSEC_PROBE_SHIFT_M": 5.0,
+    "DEBUG_NODE_XSEC_PROBE_SEARCH_MAX_EXTRA_M": 10.0,
+    "DEBUG_NODE_XSEC_PROBE_SEARCH_STEP_M": 1.0,
     "XSEC_GATE_TRAJ_EVIDENCE_ENABLE": 1,
     "XSEC_GATE_TRAJ_EVIDENCE_MAX_POINTS": 300000,
     "XSEC_GATE_TRAJ_EVIDENCE_SAMPLE_STEP": 4,
@@ -2723,6 +2725,8 @@ def _run_patch_core(
                 split_anchor_stations_base=node_debug_ctx.get("split_anchor_stations_base"),
                 probe_direction_xy=node_debug_ctx.get("probe_direction_xy"),
                 probe_shift_m=float(params.get("DEBUG_NODE_XSEC_PROBE_SHIFT_M", 5.0)),
+                probe_search_max_extra_m=float(params.get("DEBUG_NODE_XSEC_PROBE_SEARCH_MAX_EXTRA_M", 10.0)),
+                probe_search_step_m=float(params.get("DEBUG_NODE_XSEC_PROBE_SEARCH_STEP_M", 1.0)),
             )
             if not isinstance(frame, dict):
                 continue
@@ -10774,6 +10778,28 @@ def _translate_debug_line(
     return moved if isinstance(moved, LineString) and not moved.is_empty else line
 
 
+def _debug_probe_shift_candidates(
+    preferred_shift_m: float,
+    *,
+    extra_m: float,
+    step_m: float,
+) -> list[float]:
+    base = max(0.0, float(preferred_shift_m))
+    step = max(0.5, float(step_m))
+    extra = max(0.0, float(extra_m))
+    candidates = [base]
+    cur = base + step
+    limit = base + extra + 1e-6
+    while cur <= limit:
+        candidates.append(cur)
+        cur += step
+    out: list[float] = []
+    for val in candidates:
+        if not out or abs(val - out[-1]) > 1e-6:
+            out.append(float(val))
+    return out
+
+
 def _infer_slot_boundary_stations_from_parts(
     axis_line: LineString | None,
     slot_parts: Sequence[LineString],
@@ -10951,6 +10977,8 @@ def _build_node_xsec_frame_for_debug(
     split_anchor_stations_base: Sequence[float] | None = None,
     probe_direction_xy: tuple[float, float] | None = None,
     probe_shift_m: float = 5.0,
+    probe_search_max_extra_m: float = 10.0,
+    probe_search_step_m: float = 1.0,
 ) -> dict[str, Any] | None:
     raw_line = _pick_debug_primary_line(raw_xsec_geom)
     gated_line = _pick_debug_primary_line(gated_xsec_geom)
@@ -10965,6 +10993,11 @@ def _build_node_xsec_frame_for_debug(
         gore_zone_metric=gore_zone_metric,
     )
     split_anchor_station_list = list(split_anchor_stations_base or slot_anchor_stations or [])
+    probe_shift_candidates_m = _debug_probe_shift_candidates(
+        float(probe_shift_m),
+        extra_m=float(probe_search_max_extra_m),
+        step_m=float(probe_search_step_m),
+    )
     probe_line = _translate_debug_line(
         base_line,
         direction_xy=probe_direction_xy,
@@ -10980,6 +11013,31 @@ def _build_node_xsec_frame_for_debug(
         drivezone_zone_metric=drivezone_zone_metric,
         gore_zone_metric=gore_zone_metric,
     )
+    probe_shift_effective_m = float(probe_shift_m)
+    if probe_direction_xy is not None and len(probe_gated_parts) < 2:
+        for cand_shift_m in probe_shift_candidates_m[1:]:
+            cand_probe_line = _translate_debug_line(
+                base_line,
+                direction_xy=probe_direction_xy,
+                shift_m=float(cand_shift_m),
+            )
+            cand_probe_gated_geom, cand_probe_gate_source = _build_debug_gated_xsec_geometry(
+                full_line=cand_probe_line,
+                drivezone_zone_metric=drivezone_zone_metric,
+                gore_zone_metric=gore_zone_metric,
+            )
+            cand_probe_gated_parts = _filter_slot_parts_for_debug(
+                _iter_line_parts(cand_probe_gated_geom),
+                drivezone_zone_metric=drivezone_zone_metric,
+                gore_zone_metric=gore_zone_metric,
+            )
+            if len(cand_probe_gated_parts) >= 2:
+                probe_line = cand_probe_line
+                probe_gated_geom = cand_probe_gated_geom
+                probe_gate_source = cand_probe_gate_source
+                probe_gated_parts = cand_probe_gated_parts
+                probe_shift_effective_m = float(cand_shift_m)
+                break
 
     def _build_slot_records(axis_line: LineString, parts: Sequence[LineString]) -> list[dict[str, Any]]:
         out_records: list[dict[str, Any]] = []
@@ -11170,6 +11228,8 @@ def _build_node_xsec_frame_for_debug(
         "base_full_slot_count": int(len(base_full_slot_records)),
         "base_full_slots": base_full_slot_records,
         "probe_shift_m": float(probe_shift_m),
+        "probe_shift_effective_m": float(probe_shift_effective_m),
+        "probe_shift_candidates_m": list(probe_shift_candidates_m),
         "probe_direction_xy": probe_direction_xy,
         "probe_direction_source": "provided" if probe_direction_xy is not None else "unavailable",
         "base_gate_source": base_gate_source,
@@ -11215,6 +11275,8 @@ def _serialize_node_xsec_frame_for_debug(frame: dict[str, Any]) -> dict[str, Any
         "base_split_slot_count": int(frame.get("base_split_slot_count", 0)),
         "base_split_slot_boundary_count": int(len(frame.get("base_split_slot_boundary_stations_m") or [])),
         "probe_shift_m": _to_finite_float(frame.get("probe_shift_m"), float("nan")),
+        "probe_shift_effective_m": _to_finite_float(frame.get("probe_shift_effective_m"), float("nan")),
+        "probe_shift_candidate_count": int(len(frame.get("probe_shift_candidates_m") or [])),
         "probe_direction_xy": probe_direction_xy,
         "probe_direction_source": str(frame.get("probe_direction_source") or ""),
         "slots": slots,
