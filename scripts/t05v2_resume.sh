@@ -11,6 +11,7 @@ PATCH_ID=""
 RUN_ID=""
 OUT_ROOT="$(t05v2_default_out_root "$REPO_ROOT")"
 DEBUG=0
+EXTRA_ARGS=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -19,7 +20,14 @@ while [ $# -gt 0 ]; do
     --run_id) RUN_ID="$2"; shift 2 ;;
     --out_root) OUT_ROOT="$2"; shift 2 ;;
     --debug) DEBUG=1; shift ;;
-    *) echo "ERROR: unknown arg: $1" >&2; exit 2 ;;
+    *)
+      EXTRA_ARGS+=("$1")
+      shift
+      if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+        EXTRA_ARGS+=("$1")
+        shift
+      fi
+      ;;
   esac
 done
 
@@ -44,6 +52,9 @@ run_if_needed() {
     local cmd=(bash "$SCRIPT_DIR/$script_name" --data_root "$DATA_ROOT" --patch_id "$PATCH_ID" --run_id "$RUN_ID" --out_root "$OUT_ROOT")
     if [ "$DEBUG" = "1" ]; then
       cmd+=(--debug)
+    fi
+    if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
+      cmd+=("${EXTRA_ARGS[@]}")
     fi
     "${cmd[@]}"
   fi

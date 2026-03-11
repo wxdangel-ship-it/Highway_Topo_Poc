@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,13 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "SEGMENT_MAX_OTHER_XSEC_CROSSINGS": 1,
     "SEGMENT_CLUSTER_OFFSET_M": 6.0,
     "SEGMENT_CLUSTER_LINE_DIST_M": 5.0,
+    "STEP2_STRICT_ADJACENT_PAIRING": 1,
+    "STEP2_ALLOW_ONE_INTERMEDIATE_XSEC": 0,
+    "STEP2_SAME_PAIR_TOPK": 1,
+    "STEP2_CROSS1_MIN_SUPPORT": 2,
+    "STEP2_CROSS1_MIN_DRIVEZONE_RATIO": 0.98,
+    "STEP2_CROSS1_MAX_LENGTH_RATIO": 1.35,
+    "STEP2_CROSS1_REQUIRE_NO_CROSS0_BETTER": 1,
     "PRIOR_ENDPOINT_ANCHOR_M": 20.0,
     "DIVSTRIP_BUFFER_M": 0.5,
     "WITNESS_HALF_LENGTH_M": 30.0,
@@ -406,20 +415,152 @@ def _load_stage_payload(out_root: Path | str, run_id: str, patch_id: str, stage:
     return read_json(path)
 
 
+def _pair_midpoint_distance_for_nodes(
+    xsec_map: dict[int, BaseCrossSection],
+    src_nodeid: int,
+    dst_nodeid: int,
+) -> float:
+    src = xsec_map.get(int(src_nodeid))
+    dst = xsec_map.get(int(dst_nodeid))
+    if src is None or dst is None:
+        return 0.0
+    return float(_line_midpoint(src.geometry_metric()).distance(_line_midpoint(dst.geometry_metric())))
+
+
+def _histogram(values: list[int]) -> dict[str, int]:
+    counts = Counter(int(v) for v in values)
+    return {str(int(key)): int(value) for key, value in sorted(counts.items(), key=lambda item: int(item[0]))}
+
+
+def _candidate_support_count(candidate: dict[str, Any]) -> int:
+    return int(max(1, len({str(v) for v in candidate.get("support_traj_ids", set())})))
+
+
+def _candidate_feature_properties(
+    candidate: dict[str, Any],
+    *,
+    stage: str,
+    status: str,
+    reason: str,
+) -> dict[str, Any]:
+    pair_distance = float(candidate.get("pair_midpoint_distance_m", 0.0))
+    line_length = float(candidate.get("line_length_m", getattr(candidate.get("line"), "length", 0.0)))
+    length_ratio = float(line_length / max(pair_distance, 1e-6)) if pair_distance > 1e-6 else 1.0
+    return {
+        "candidate_id": str(candidate.get("candidate_id", "")),
+        "source": str(candidate.get("source", "")),
+        "src_nodeid": int(candidate.get("src_nodeid", 0)),
+        "dst_nodeid": int(candidate.get("dst_nodeid", 0)),
+        "stage": str(stage),
+        "status": str(status),
+        "reason": str(reason),
+        "support_count": int(_candidate_support_count(candidate)),
+        "crossing_dist": int(candidate.get("other_xsec_crossing_count", 0)),
+        "other_xsec_crossing_count": int(candidate.get("other_xsec_crossing_count", 0)),
+        "inside_ratio": float(candidate.get("drivezone_ratio", 0.0)),
+        "drivezone_ratio": float(candidate.get("drivezone_ratio", 0.0)),
+        "gore_conflict": bool(candidate.get("crosses_divstrip", False)),
+        "crosses_divstrip": bool(candidate.get("crosses_divstrip", False)),
+        "line_length_m": float(line_length),
+        "length_ratio": float(length_ratio),
+        "pair_index_gap": int(candidate.get("pair_index_gap", 0)),
+        "pairing_mode": str(candidate.get("pairing_mode", "")),
+        "prior_supported": bool(candidate.get("prior_supported", False)),
+    }
+
+
+def _segment_length_ratio(segment: Segment, xsec_map: dict[int, BaseCrossSection]) -> float:
+    pair_distance = _pair_midpoint_distance_for_nodes(xsec_map, int(segment.src_nodeid), int(segment.dst_nodeid))
+    if pair_distance <= 1e-6:
+        return 1.0
+    return float(segment.length_m / max(pair_distance, 1e-6))
+
+
+def _segment_feature_properties(segment: Segment, *, status: str, reason: str = "", dropped_reason: str = "") -> dict[str, Any]:
+    props = {
+        "segment_id": str(segment.segment_id),
+        "src_nodeid": int(segment.src_nodeid),
+        "dst_nodeid": int(segment.dst_nodeid),
+        "support_count": int(segment.support_count),
+        "dedup_count": int(segment.dedup_count),
+        "source_modes": list(segment.source_modes),
+        "prior_supported": bool(segment.prior_supported),
+        "crossing_dist": int(segment.other_xsec_crossing_count),
+        "other_xsec_crossing_count": int(segment.other_xsec_crossing_count),
+        "formation_reason": str(segment.formation_reason),
+        "length_m": float(segment.length_m),
+        "inside_ratio": float(segment.drivezone_ratio),
+        "drivezone_ratio": float(segment.drivezone_ratio),
+        "gore_conflict": bool(segment.crosses_divstrip),
+        "crosses_divstrip": bool(segment.crosses_divstrip),
+        "same_pair_rank": None if segment.same_pair_rank is None else int(segment.same_pair_rank),
+        "kept_reason": str(segment.kept_reason),
+        "status": str(status),
+    }
+    if reason:
+        props["reason"] = str(reason)
+    if dropped_reason:
+        props["dropped_reason"] = str(dropped_reason)
+    return props
+
+
 def _segment_candidates(
     inputs: PatchInputs,
     frame: InputFrame,
     prior_roads: list[Any],
     params: dict[str, Any],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> dict[str, Any]:
     xsec_map = _xsec_map(frame)
+    raw_candidates: list[dict[str, Any]] = []
+    pairing_candidates: list[dict[str, Any]] = []
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
+    debug_features: list[tuple[LineString, dict[str, Any]]] = []
     hit_buffer = float(params["TRAJ_XSEC_HIT_BUFFER_M"])
     max_other = int(params["SEGMENT_MAX_OTHER_XSEC_CROSSINGS"])
     min_len = float(params["SEGMENT_MIN_LENGTH_M"])
     min_drivezone = float(params["SEGMENT_MIN_DRIVEZONE_RATIO"])
+    strict_adjacent = bool(int(params["STEP2_STRICT_ADJACENT_PAIRING"]))
     divstrip_buffer = load_divstrip_buffer(inputs.divstrip_zone_metric, float(params["DIVSTRIP_BUFFER_M"]))
+
+    def record(candidate: dict[str, Any], *, stage: str, status: str, reason: str) -> None:
+        line = candidate.get("line")
+        if isinstance(line, LineString) and (not line.is_empty) and line.length > 1e-6:
+            debug_features.append((line, _candidate_feature_properties(candidate, stage=stage, status=status, reason=reason)))
+
+    def make_candidate(
+        *,
+        candidate_id: str,
+        source: str,
+        src_nodeid: int,
+        dst_nodeid: int,
+        line: LineString,
+        support_traj_ids: set[str],
+        intermediate_nodeids: list[int],
+        prior_supported: bool,
+        pair_index_gap: int,
+        pairing_mode: str,
+    ) -> dict[str, Any]:
+        return {
+            "candidate_id": str(candidate_id),
+            "source": str(source),
+            "src_nodeid": int(src_nodeid),
+            "dst_nodeid": int(dst_nodeid),
+            "line": line,
+            "support_traj_ids": {str(v) for v in support_traj_ids},
+            "intermediate_nodeids": [int(v) for v in intermediate_nodeids],
+            "prior_supported": bool(prior_supported),
+            "pair_index_gap": int(pair_index_gap),
+            "pairing_mode": str(pairing_mode),
+            "line_length_m": float(line.length),
+            "pair_midpoint_distance_m": float(_pair_midpoint_distance_for_nodes(xsec_map, int(src_nodeid), int(dst_nodeid))),
+        }
+
+    def reject(candidate: dict[str, Any], *, stage: str, reason: str) -> None:
+        candidate["reason"] = str(reason)
+        candidate["dropped_stage"] = str(stage)
+        rejected.append(candidate)
+        record(candidate, stage=stage, status="dropped", reason=reason)
 
     def evaluate_candidate(candidate: dict[str, Any]) -> None:
         line = candidate["line"]
@@ -433,23 +574,20 @@ def _segment_candidates(
         candidate["other_xsec_crossing_count"] = int(len(other_nodes))
         candidate["crosses_divstrip"] = bool(divstrip_cross)
         if float(line.length) < min_len:
-            candidate["reason"] = "segment_too_short"
-            rejected.append(candidate)
+            reject(candidate, stage="cross_filter", reason="segment_too_short")
             return
         if inside_ratio < min_drivezone:
-            candidate["reason"] = "segment_outside_drivezone"
-            rejected.append(candidate)
+            reject(candidate, stage="cross_filter", reason="segment_outside_drivezone")
             return
         if divstrip_cross:
-            candidate["reason"] = "segment_crosses_divstrip"
-            rejected.append(candidate)
+            reject(candidate, stage="cross_filter", reason="segment_crosses_divstrip")
             return
         if len(other_nodes) > max_other:
-            candidate["reason"] = "segment_crosses_too_many_other_xsecs"
-            rejected.append(candidate)
+            reject(candidate, stage="cross_filter", reason="segment_crosses_too_many_other_xsecs")
             return
-        candidate["reason"] = "accepted"
+        candidate["reason"] = "candidate_survives_cross_filter"
         accepted.append(candidate)
+        record(candidate, stage="cross_filter", status="selected", reason="candidate_survives_cross_filter")
 
     for traj in inputs.trajectories:
         traj_line = _trajectory_line(traj)
@@ -474,24 +612,40 @@ def _segment_candidates(
                 subline = _candidate_subline_from_traj(traj, int(events[i]["index"]), int(events[j]["index"]))
                 if subline is None:
                     continue
-                evaluate_candidate(
-                    {
-                        "candidate_id": f"traj_{traj.traj_id}_{i}_{j}",
-                        "source": "traj",
-                        "src_nodeid": int(src_nodeid),
-                        "dst_nodeid": int(dst_nodeid),
-                        "line": subline,
-                        "support_traj_ids": {str(traj.traj_id)},
-                        "intermediate_nodeids": [int(v) for v in intermediate],
-                        "prior_supported": False,
-                    }
+                candidate = make_candidate(
+                    candidate_id=f"traj_{traj.traj_id}_{i}_{j}",
+                    source="traj",
+                    src_nodeid=int(src_nodeid),
+                    dst_nodeid=int(dst_nodeid),
+                    line=subline,
+                    support_traj_ids={str(traj.traj_id)},
+                    intermediate_nodeids=[int(v) for v in intermediate],
+                    prior_supported=False,
+                    pair_index_gap=int(j - i),
+                    pairing_mode="adjacent" if int(j - i) == 1 else "skip_pair",
                 )
+                raw_candidates.append(candidate)
+                record(candidate, stage="raw_generated", status="generated", reason="raw_candidate_generated")
     for idx, road in enumerate(prior_roads):
         line = getattr(road, "line", None)
         if not isinstance(line, LineString) or line.is_empty or line.length <= 1e-6:
             continue
         src_nodeid = int(getattr(road, "snodeid", 0))
         dst_nodeid = int(getattr(road, "enodeid", 0))
+        candidate = make_candidate(
+            candidate_id=f"prior_{idx}",
+            source="prior",
+            src_nodeid=int(src_nodeid),
+            dst_nodeid=int(dst_nodeid),
+            line=line,
+            support_traj_ids=set(),
+            intermediate_nodeids=[],
+            prior_supported=True,
+            pair_index_gap=0,
+            pairing_mode="prior",
+        )
+        raw_candidates.append(candidate)
+        record(candidate, stage="raw_generated", status="generated", reason="raw_candidate_generated")
         if src_nodeid not in xsec_map or dst_nodeid not in xsec_map:
             start_pt = Point(float(line.coords[0][0]), float(line.coords[0][1]))
             end_pt = Point(float(line.coords[-1][0]), float(line.coords[-1][1]))
@@ -510,34 +664,36 @@ def _segment_candidates(
                         best_cost = cost_reverse
                         best_pair = (int(xsec_b.nodeid), int(xsec_a.nodeid))
             if best_pair is None or best_cost > float(params["PRIOR_ENDPOINT_ANCHOR_M"]) * 2.0:
-                rejected.append(
-                    {
-                        "candidate_id": f"prior_{idx}",
-                        "source": "prior",
-                        "src_nodeid": int(src_nodeid),
-                        "dst_nodeid": int(dst_nodeid),
-                        "line": line,
-                        "support_traj_ids": set(),
-                        "intermediate_nodeids": [],
-                        "prior_supported": True,
-                        "reason": "prior_endpoints_not_anchored",
-                    }
-                )
+                reject(candidate, stage="pairing_filter", reason="prior_endpoints_not_anchored")
                 continue
-            src_nodeid, dst_nodeid = best_pair
-        evaluate_candidate(
-            {
-                "candidate_id": f"prior_{idx}",
-                "source": "prior",
-                "src_nodeid": int(src_nodeid),
-                "dst_nodeid": int(dst_nodeid),
-                "line": line,
-                "support_traj_ids": set(),
-                "intermediate_nodeids": [],
-                "prior_supported": True,
-            }
-        )
-    return accepted, rejected
+            candidate["src_nodeid"], candidate["dst_nodeid"] = (int(best_pair[0]), int(best_pair[1]))
+            candidate["pair_midpoint_distance_m"] = float(_pair_midpoint_distance_for_nodes(xsec_map, int(best_pair[0]), int(best_pair[1])))
+        pairing_candidates.append(candidate)
+        record(candidate, stage="pairing_filter", status="selected", reason="prior_candidate_retained")
+    for candidate in raw_candidates:
+        if str(candidate["source"]) != "traj":
+            continue
+        if strict_adjacent and int(candidate.get("pair_index_gap", 0)) > 1:
+            reject(candidate, stage="pairing_filter", reason="non_adjacent_pair_blocked")
+            continue
+        pairing_candidates.append(candidate)
+        reason = "adjacent_pair_retained" if int(candidate.get("pair_index_gap", 0)) <= 1 else "non_adjacent_pair_retained"
+        record(candidate, stage="pairing_filter", status="selected", reason=reason)
+    for candidate in pairing_candidates:
+        evaluate_candidate(candidate)
+    return {
+        "raw_candidates": raw_candidates,
+        "paired_candidates": pairing_candidates,
+        "accepted_candidates": accepted,
+        "rejected_candidates": rejected,
+        "candidate_debug_features": debug_features,
+        "stats": {
+            "raw_candidate_count": int(len(raw_candidates)),
+            "candidate_count_after_pairing": int(len(pairing_candidates)),
+            "candidate_count_after_cross_filter": int(len(accepted)),
+            "crossing_dist_hist_raw": _histogram([int(item.get("other_xsec_crossing_count", 0)) for item in pairing_candidates]),
+        },
+    }
 
 
 def _cluster_segments(candidates: list[dict[str, Any]], frame: InputFrame, params: dict[str, Any]) -> list[Segment]:
@@ -607,54 +763,148 @@ def _cluster_segments(candidates: list[dict[str, Any]], frame: InputFrame, param
                     support_count=int(len(cluster)),
                     dedup_count=int(dedup_count),
                     representative_offset_m=float(representative_offset),
-                    other_xsec_crossing_count=int(representative["other_xsec_crossing_count"]),
+                    other_xsec_crossing_count=int(min(int(item.get("other_xsec_crossing_count", 0)) for item in cluster)),
                     tolerated_other_xsec_crossings=int(params["SEGMENT_MAX_OTHER_XSEC_CROSSINGS"]),
                     prior_supported=bool(any(bool(item["prior_supported"]) for item in cluster)),
                     formation_reason=str(formation_reason),
+                    length_m=float(representative["line"].length),
+                    drivezone_ratio=float(sum(float(item.get("drivezone_ratio", 0.0)) for item in cluster) / max(1, len(cluster))),
+                    crosses_divstrip=bool(any(bool(item.get("crosses_divstrip", False)) for item in cluster)),
                 )
             )
     return out
 
 
-def _segment_debug_features(candidates: list[dict[str, Any]], *, status: str) -> list[tuple[LineString, dict[str, Any]]]:
+def _select_segments_same_pair(
+    segments: list[Segment],
+    frame: InputFrame,
+    params: dict[str, Any],
+) -> tuple[list[Segment], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    xsec_map = _xsec_map(frame)
+    topk = max(1, int(params["STEP2_SAME_PAIR_TOPK"]))
+    allow_cross1 = bool(int(params["STEP2_ALLOW_ONE_INTERMEDIATE_XSEC"]))
+    cross1_min_support = max(1, int(params["STEP2_CROSS1_MIN_SUPPORT"]))
+    cross1_min_drivezone = float(params["STEP2_CROSS1_MIN_DRIVEZONE_RATIO"])
+    cross1_max_length_ratio = float(params["STEP2_CROSS1_MAX_LENGTH_RATIO"])
+    cross1_require_no_cross0 = bool(int(params["STEP2_CROSS1_REQUIRE_NO_CROSS0_BETTER"]))
+    by_pair: dict[tuple[int, int], list[Segment]] = {}
+    for segment in segments:
+        by_pair.setdefault((int(segment.src_nodeid), int(segment.dst_nodeid)), []).append(segment)
+
+    def sort_key(segment: Segment) -> tuple[Any, ...]:
+        return (
+            int(segment.other_xsec_crossing_count),
+            -int(segment.support_count),
+            -float(segment.drivezone_ratio),
+            1 if bool(segment.crosses_divstrip) else 0,
+            float(_segment_length_ratio(segment, xsec_map)),
+            float(segment.length_m),
+            abs(float(segment.representative_offset_m)),
+            str(segment.segment_id),
+        )
+
+    selected: list[Segment] = []
+    dropped: list[dict[str, Any]] = []
+    group_payloads: list[dict[str, Any]] = []
+    for (src_nodeid, dst_nodeid), pair_segments in sorted(by_pair.items()):
+        ordered = sorted(pair_segments, key=sort_key)
+        has_cross0 = any(int(segment.other_xsec_crossing_count) == 0 for segment in ordered)
+        kept_count = 0
+        segment_payloads: list[dict[str, Any]] = []
+        for rank, segment in enumerate(ordered, start=1):
+            length_ratio = float(_segment_length_ratio(segment, xsec_map))
+            dropped_reason = ""
+            kept_reason = ""
+            if int(segment.other_xsec_crossing_count) == 0:
+                kept_reason = "cross0_primary"
+            else:
+                if not allow_cross1:
+                    dropped_reason = "cross1_disabled"
+                elif int(segment.support_count) < cross1_min_support:
+                    dropped_reason = "cross1_support_too_low"
+                elif float(segment.drivezone_ratio) < cross1_min_drivezone:
+                    dropped_reason = "cross1_drivezone_ratio_too_low"
+                elif bool(segment.crosses_divstrip):
+                    dropped_reason = "cross1_gore_conflict"
+                elif float(length_ratio) > cross1_max_length_ratio:
+                    dropped_reason = "cross1_length_ratio_too_high"
+                elif cross1_require_no_cross0 and has_cross0:
+                    dropped_reason = "cross1_has_cross0_alternative"
+                else:
+                    kept_reason = (
+                        f"cross1_exception:support={int(segment.support_count)}:"
+                        f"drivezone_ratio={float(segment.drivezone_ratio):.3f}:"
+                        f"length_ratio={float(length_ratio):.3f}"
+                    )
+            if not dropped_reason and kept_count >= topk:
+                dropped_reason = "same_pair_topk_exceeded"
+            if dropped_reason:
+                dropped.append(
+                    {
+                        "segment": replace(segment, same_pair_rank=int(rank), kept_reason=""),
+                        "dropped_reason": str(dropped_reason),
+                        "length_ratio": float(length_ratio),
+                    }
+                )
+            else:
+                kept_count += 1
+                selected.append(replace(segment, same_pair_rank=int(rank), kept_reason=str(kept_reason)))
+            segment_payloads.append(
+                {
+                    "segment_id": str(segment.segment_id),
+                    "sort_rank": int(rank),
+                    "support_count": int(segment.support_count),
+                    "crossing_dist": int(segment.other_xsec_crossing_count),
+                    "drivezone_ratio": float(segment.drivezone_ratio),
+                    "gore_conflict": bool(segment.crosses_divstrip),
+                    "length_m": float(segment.length_m),
+                    "length_ratio": float(length_ratio),
+                    "selected": bool(not dropped_reason),
+                    "kept_reason": str(kept_reason),
+                    "dropped_reason": str(dropped_reason),
+                }
+            )
+        group_payloads.append(
+            {
+                "src_nodeid": int(src_nodeid),
+                "dst_nodeid": int(dst_nodeid),
+                "candidate_segment_count": int(len(pair_segments)),
+                "selected_segment_count": int(sum(1 for item in segment_payloads if bool(item["selected"]))),
+                "same_pair_topk": int(topk),
+                "has_cross0_candidate": bool(has_cross0),
+                "segments": segment_payloads,
+            }
+        )
+    metrics = {
+        "candidate_count_after_same_pair_topk": int(len(selected)),
+        "crossing_dist_hist_selected": _histogram([int(item.other_xsec_crossing_count) for item in selected]),
+        "pair_count": int(len(group_payloads)),
+        "same_pair_hist": _histogram([int(item["selected_segment_count"]) for item in group_payloads]),
+        "pairs_with_multi_segments": int(sum(1 for item in group_payloads if int(item["selected_segment_count"]) > 1)),
+        "max_segments_per_pair": int(max((int(item["selected_segment_count"]) for item in group_payloads), default=0)),
+    }
+    return selected, dropped, group_payloads, metrics
+
+
+def _segment_debug_features(candidates: list[dict[str, Any]], *, status: str, stage: str) -> list[tuple[LineString, dict[str, Any]]]:
     out: list[tuple[LineString, dict[str, Any]]] = []
     for candidate in candidates:
         out.append(
             (
                 candidate["line"],
-                {
-                    "candidate_id": str(candidate["candidate_id"]),
-                    "source": str(candidate["source"]),
-                    "src_nodeid": int(candidate["src_nodeid"]),
-                    "dst_nodeid": int(candidate["dst_nodeid"]),
-                    "status": str(status),
-                    "reason": str(candidate.get("reason", "")),
-                    "drivezone_ratio": float(candidate.get("drivezone_ratio", 0.0)),
-                    "other_xsec_crossing_count": int(candidate.get("other_xsec_crossing_count", 0)),
-                    "crosses_divstrip": bool(candidate.get("crosses_divstrip", False)),
-                },
+                _candidate_feature_properties(candidate, stage=stage, status=status, reason=str(candidate.get("reason", ""))),
             )
         )
     return out
 
 
-def _segment_features(segments: list[Segment]) -> list[tuple[LineString, dict[str, Any]]]:
+def _segment_features(segments: list[Segment], *, status: str = "selected") -> list[tuple[LineString, dict[str, Any]]]:
     out: list[tuple[LineString, dict[str, Any]]] = []
     for segment in segments:
         out.append(
             (
                 segment.geometry_metric(),
-                {
-                    "segment_id": str(segment.segment_id),
-                    "src_nodeid": int(segment.src_nodeid),
-                    "dst_nodeid": int(segment.dst_nodeid),
-                    "support_count": int(segment.support_count),
-                    "dedup_count": int(segment.dedup_count),
-                    "source_modes": list(segment.source_modes),
-                    "prior_supported": bool(segment.prior_supported),
-                    "other_xsec_crossing_count": int(segment.other_xsec_crossing_count),
-                    "formation_reason": str(segment.formation_reason),
-                },
+                _segment_feature_properties(segment, status=status, reason=segment.kept_reason),
             )
         )
     return out
@@ -1011,6 +1261,7 @@ def _write_road_outputs(
     roads: list[FinalRoad],
     road_results: list[dict[str, Any]],
     inputs: PatchInputs,
+    step2_metrics: dict[str, Any] | None = None,
 ) -> None:
     patch_dir = patch_root(out_root, run_id, patch_id)
     dbg_dir = debug_dir(out_root, run_id, patch_id)
@@ -1078,6 +1329,10 @@ def _write_road_outputs(
             "segment_established": True,
             "src_nodeid": int(segment.src_nodeid),
             "dst_nodeid": int(segment.dst_nodeid),
+            "support_count": int(segment.support_count),
+            "same_pair_rank": None if segment.same_pair_rank is None else int(segment.same_pair_rank),
+            "segment_kept_reason": str(segment.kept_reason),
+            "other_xsec_crossing_count": int(segment.other_xsec_crossing_count),
             "corridor_identity": str(identity.state),
             "corridor_reason": str(identity.reason),
             "has_exclusive_interval": bool(witness.exclusive_interval) if witness is not None else False,
@@ -1095,11 +1350,72 @@ def _write_road_outputs(
             hard_breakpoints.append({"segment_id": str(segment.segment_id), "reason": str(unresolved_reason or "no_geometry_candidate"), "severity": "hard"})
         elif identity.state == "prior_based":
             soft_breakpoints.append({"segment_id": str(segment.segment_id), "reason": "prior_based_fallback", "severity": "soft"})
+    witness_selected_total = int(sum(1 for witness in witnesses.values() if str(witness.status) == "selected"))
+    witness_selected_cross0 = int(
+        sum(
+            1
+            for segment in segments
+            if str(witnesses.get(str(segment.segment_id), CorridorWitness(
+                segment_id=str(segment.segment_id),
+                status="insufficient",
+                reason="witness_missing",
+                line_coords=segment.geometry_coords,
+                sample_s_norm=0.5,
+                intervals=tuple(),
+                selected_interval_rank=None,
+                selected_interval_start_s=None,
+                selected_interval_end_s=None,
+                exclusive_interval=False,
+                stability_score=0.0,
+                neighbor_match_count=0,
+                axis_vector=(0.0, 1.0),
+            )).status)
+            == "selected"
+            and int(segment.other_xsec_crossing_count) == 0
+        )
+    )
+    witness_selected_cross1 = int(
+        sum(
+            1
+            for segment in segments
+            if str(witnesses.get(str(segment.segment_id), CorridorWitness(
+                segment_id=str(segment.segment_id),
+                status="insufficient",
+                reason="witness_missing",
+                line_coords=segment.geometry_coords,
+                sample_s_norm=0.5,
+                intervals=tuple(),
+                selected_interval_rank=None,
+                selected_interval_start_s=None,
+                selected_interval_end_s=None,
+                exclusive_interval=False,
+                stability_score=0.0,
+                neighbor_match_count=0,
+                axis_vector=(0.0, 1.0),
+            )).status)
+            == "selected"
+            and int(segment.other_xsec_crossing_count) == 1
+        )
+    )
+    root_step2_metrics = dict(step2_metrics or {})
     metrics = {
         "patch_id": str(patch_id),
         "segment_count": int(len(segments)),
         "road_count": int(len(roads)),
         "unresolved_segment_count": int(sum(1 for entry in metrics_segments if entry["unresolved_reason"])),
+        "raw_candidate_count": int(root_step2_metrics.get("raw_candidate_count", 0)),
+        "candidate_count_after_pairing": int(root_step2_metrics.get("candidate_count_after_pairing", 0)),
+        "candidate_count_after_cross_filter": int(root_step2_metrics.get("candidate_count_after_cross_filter", 0)),
+        "candidate_count_after_same_pair_topk": int(root_step2_metrics.get("candidate_count_after_same_pair_topk", len(segments))),
+        "crossing_dist_hist_raw": dict(root_step2_metrics.get("crossing_dist_hist_raw", {})),
+        "crossing_dist_hist_selected": dict(root_step2_metrics.get("crossing_dist_hist_selected", {})),
+        "same_pair_hist": dict(root_step2_metrics.get("same_pair_hist", {})),
+        "pair_count": int(root_step2_metrics.get("pair_count", 0)),
+        "pairs_with_multi_segments": int(root_step2_metrics.get("pairs_with_multi_segments", 0)),
+        "max_segments_per_pair": int(root_step2_metrics.get("max_segments_per_pair", 0)),
+        "witness_selected_count_total": int(witness_selected_total),
+        "witness_selected_count_cross0": int(witness_selected_cross0),
+        "witness_selected_count_cross1": int(witness_selected_cross1),
         "segments": metrics_segments,
     }
     if not hard_breakpoints and len(roads) == 0:
@@ -1181,10 +1497,21 @@ def _stage2_segment(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     inputs, frame, prior_roads = load_inputs_and_frame(data_root, patch_id, params=params)
-    accepted, rejected = _segment_candidates(inputs, frame, prior_roads, params)
-    segments = _cluster_segments(accepted, frame, params)
+    candidate_bundle = _segment_candidates(inputs, frame, prior_roads, params)
+    accepted = list(candidate_bundle["accepted_candidates"])
+    rejected = list(candidate_bundle["rejected_candidates"])
+    clustered_segments = _cluster_segments(accepted, frame, params)
+    segments, dropped_segments, same_pair_groups, step2_metrics = _select_segments_same_pair(clustered_segments, frame, params)
     artifact = {
         "segments": [segment.to_dict() for segment in segments],
+        "dropped_segments": [
+            {
+                "segment": item["segment"].to_dict(),
+                "dropped_reason": str(item["dropped_reason"]),
+                "length_ratio": float(item["length_ratio"]),
+            }
+            for item in dropped_segments
+        ],
         "accepted_candidate_count": int(len(accepted)),
         "rejected_candidate_count": int(len(rejected)),
         "excluded_candidates": [
@@ -1194,15 +1521,35 @@ def _stage2_segment(
                 "src_nodeid": int(item["src_nodeid"]),
                 "dst_nodeid": int(item["dst_nodeid"]),
                 "reason": str(item.get("reason", "")),
+                "stage": str(item.get("dropped_stage", "")),
+                "pairing_mode": str(item.get("pairing_mode", "")),
+                "support_count": int(_candidate_support_count(item)),
+                "drivezone_ratio": float(item.get("drivezone_ratio", 0.0)),
+                "other_xsec_crossing_count": int(item.get("other_xsec_crossing_count", 0)),
                 "other_xsec_nodes": [int(v) for v in item.get("other_xsec_nodes", [])],
             }
             for item in rejected
         ],
+        "same_pair_groups": same_pair_groups,
+        "step2_metrics": {**candidate_bundle["stats"], **step2_metrics},
     }
     dbg_dir = debug_dir(out_root, run_id, patch_id)
     write_json(_artifact_path(out_root, run_id, patch_id, "step2_segment"), artifact)
-    write_lines_geojson(dbg_dir / "segment_candidates.geojson", [*_segment_debug_features(accepted, status="accepted"), *_segment_debug_features(rejected, status="rejected")])
-    write_lines_geojson(dbg_dir / "segment_selected.geojson", _segment_features(segments))
+    all_candidate_features = list(candidate_bundle["candidate_debug_features"])
+    dropped_segment_features = [
+        (
+            item["segment"].geometry_metric(),
+            _segment_feature_properties(item["segment"], status="dropped", dropped_reason=str(item["dropped_reason"])),
+        )
+        for item in dropped_segments
+    ]
+    selected_segment_features = _segment_features(segments, status="selected")
+    write_lines_geojson(dbg_dir / "step2_segment_candidates_all.geojson", all_candidate_features)
+    write_lines_geojson(dbg_dir / "segment_candidates.geojson", all_candidate_features)
+    write_lines_geojson(dbg_dir / "step2_segment_selected.geojson", selected_segment_features)
+    write_lines_geojson(dbg_dir / "segment_selected.geojson", selected_segment_features)
+    write_lines_geojson(dbg_dir / "step2_segment_dropped.geojson", dropped_segment_features)
+    write_json(dbg_dir / "step2_same_pair_groups.json", {"pairs": same_pair_groups, "metrics": {**candidate_bundle["stats"], **step2_metrics}})
     return {
         "artifact": artifact,
         "inputs": inputs,
@@ -1223,10 +1570,12 @@ def _stage3_witness(
     inputs, frame, _prior_roads = load_inputs_and_frame(data_root, patch_id, params=params)
     segments_payload = _load_stage_payload(out_root, run_id, patch_id, "step2_segment")
     segments = [Segment.from_dict(item) for item in segments_payload.get("segments", [])]
+    segment_map = {str(segment.segment_id): segment for segment in segments}
     witnesses = [_build_witness_for_segment(segment, inputs, params) for segment in segments]
     artifact = {"witnesses": [witness.to_dict() for witness in witnesses]}
     dbg_dir = debug_dir(out_root, run_id, patch_id)
     write_json(_artifact_path(out_root, run_id, patch_id, "step3_witness"), artifact)
+    write_lines_geojson(dbg_dir / "step3_witness_input_segments.geojson", _segment_features(segments, status="witness_input"))
     write_lines_geojson(
         dbg_dir / "corridor_witness_candidates.geojson",
         [
@@ -1238,6 +1587,10 @@ def _stage3_witness(
                     "reason": str(witness.reason),
                     "stability_score": float(witness.stability_score),
                     "selected_interval_rank": witness.selected_interval_rank,
+                    "crossing_dist": int(segment_map[str(witness.segment_id)].other_xsec_crossing_count),
+                    "support_count": int(segment_map[str(witness.segment_id)].support_count),
+                    "same_pair_rank": segment_map[str(witness.segment_id)].same_pair_rank,
+                    "kept_reason": str(segment_map[str(witness.segment_id)].kept_reason),
                 },
             )
             for witness in witnesses
@@ -1253,6 +1606,10 @@ def _stage3_witness(
                     "status": str(witness.status),
                     "stability_score": float(witness.stability_score),
                     "exclusive_interval": bool(witness.exclusive_interval),
+                    "crossing_dist": int(segment_map[str(witness.segment_id)].other_xsec_crossing_count),
+                    "support_count": int(segment_map[str(witness.segment_id)].support_count),
+                    "same_pair_rank": segment_map[str(witness.segment_id)].same_pair_rank,
+                    "kept_reason": str(segment_map[str(witness.segment_id)].kept_reason),
                 },
             )
             for witness in witnesses
@@ -1399,6 +1756,7 @@ def _stage6_build_road(
 ) -> dict[str, Any]:
     inputs, frame, _prior_roads = load_inputs_and_frame(data_root, patch_id, params=params)
     segments_payload = _load_stage_payload(out_root, run_id, patch_id, "step2_segment")
+    step2_metrics = dict(segments_payload.get("step2_metrics") or {})
     witnesses_payload = _load_stage_payload(out_root, run_id, patch_id, "step3_witness")
     identities_payload = _load_stage_payload(out_root, run_id, patch_id, "step4_corridor_identity")
     slots_payload = _load_stage_payload(out_root, run_id, patch_id, "step5_slot_mapping")
@@ -1437,6 +1795,7 @@ def _stage6_build_road(
         roads=roads,
         road_results=road_results,
         inputs=inputs,
+        step2_metrics=step2_metrics,
     )
     return {"artifact": artifact, "roads": roads, "reason": "road_ready" if roads else "no_geometry_candidate"}
 

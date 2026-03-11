@@ -124,6 +124,11 @@ class Segment:
     tolerated_other_xsec_crossings: int
     prior_supported: bool
     formation_reason: str
+    length_m: float
+    drivezone_ratio: float
+    crosses_divstrip: bool
+    same_pair_rank: int | None = None
+    kept_reason: str = ""
 
     def geometry_metric(self) -> LineString:
         return coords_to_line(self.geometry_coords)
@@ -145,6 +150,11 @@ class Segment:
             "tolerated_other_xsec_crossings": int(self.tolerated_other_xsec_crossings),
             "prior_supported": bool(self.prior_supported),
             "formation_reason": str(self.formation_reason),
+            "length_m": float(self.length_m),
+            "drivezone_ratio": float(self.drivezone_ratio),
+            "crosses_divstrip": bool(self.crosses_divstrip),
+            "same_pair_rank": None if self.same_pair_rank is None else int(self.same_pair_rank),
+            "kept_reason": str(self.kept_reason),
         }
 
     @classmethod
@@ -166,6 +176,11 @@ class Segment:
             tolerated_other_xsec_crossings=int(payload.get("tolerated_other_xsec_crossings", 1)),
             prior_supported=bool(payload.get("prior_supported", False)),
             formation_reason=str(payload.get("formation_reason", "")),
+            length_m=float(payload.get("length_m", 0.0)),
+            drivezone_ratio=float(payload.get("drivezone_ratio", 0.0)),
+            crosses_divstrip=bool(payload.get("crosses_divstrip", False)),
+            same_pair_rank=(None if payload.get("same_pair_rank") is None else int(payload.get("same_pair_rank"))),
+            kept_reason=str(payload.get("kept_reason", "")),
         )
 
 

@@ -12,6 +12,7 @@ RUN_ID=""
 OUT_ROOT="$(t05v2_default_out_root "$REPO_ROOT")"
 DEBUG=0
 FORCE=0
+EXTRA_ARGS=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -21,7 +22,14 @@ while [ $# -gt 0 ]; do
     --out_root) OUT_ROOT="$2"; shift 2 ;;
     --debug) DEBUG=1; shift ;;
     --force) FORCE=1; shift ;;
-    *) echo "ERROR: unknown arg: $1" >&2; exit 2 ;;
+    *)
+      EXTRA_ARGS+=("$1")
+      shift
+      if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+        EXTRA_ARGS+=("$1")
+        shift
+      fi
+      ;;
   esac
 done
 
@@ -45,5 +53,8 @@ if [ "$DEBUG" = "1" ]; then
 fi
 if [ "$FORCE" = "1" ]; then
   CMD+=(--force)
+fi
+if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
+  CMD+=("${EXTRA_ARGS[@]}")
 fi
 "${CMD[@]}"

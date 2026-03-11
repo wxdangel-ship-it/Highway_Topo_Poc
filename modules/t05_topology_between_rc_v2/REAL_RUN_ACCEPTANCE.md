@@ -1,10 +1,13 @@
 # T05 v2 Real-Run Acceptance
 
 ## 目的
-- 这份文档用于你在内网 WSL 上做 `t05_topology_between_rc_v2` 的首轮真实 patch 验收。
-- 当前版本目标是“可运行、可接续、可验收”，不是“已通过真实数据验证”。
+这份文档用于内网 WSL 首轮真实 patch 验收。
+当前版本重点不是最终 Road 完美，而是确认：
+- `Step2 Segment` 是否收敛
+- `witness` 是否跟着下降
+- debug / metrics 是否足够解释
 
-## 环境变量模板
+## 环境变量
 ```bash
 REPO_ROOT=/mnt/d/Work/Highway_Topo_Poc
 DATA_ROOT=/mnt/d/TestData/highway_topo_poc_data/normal
@@ -13,8 +16,6 @@ RUN_ID=t05v2_real_$(date +%Y%m%d_%H%M%S)
 ```
 
 ## 一键全流程
-在 WSL 中执行：
-
 ```bash
 cd "$REPO_ROOT" && \
 bash scripts/run_t05v2_full_wsl.sh \
@@ -24,7 +25,7 @@ bash scripts/run_t05v2_full_wsl.sh \
   --debug
 ```
 
-输出目录固定为：
+输出目录：
 ```bash
 $REPO_ROOT/outputs/_work/t05_topology_between_rc_v2/$RUN_ID/patches/$PATCH_ID/
 ```
@@ -65,16 +66,33 @@ Resume:
 cd "$REPO_ROOT" && bash scripts/t05v2_resume.sh --data_root "$DATA_ROOT" --patch_id "$PATCH_ID" --run_id "$RUN_ID" --debug
 ```
 
-## 适合反复重跑的步骤
-- `Step2`: Segment 框架不对时，后面都不可信。
-- `Step3`: witness 证据位置常会先暴露真实 patch 的通路判定问题。
-- `Step4`: witness/prior 分流逻辑是否进入正确状态。
-- `Step5`: slot 是否回到正确横截线区间。
+## Step2 收敛参数
+默认已经是保守模式：
+- `--step2_strict_adjacent_pairing 1`
+- `--step2_allow_one_intermediate_xsec 0`
+- `--step2_same_pair_topk 1`
 
-局部重跑模板：
+如果需要做对比试验，可直接透传到现有脚本：
 ```bash
-cd "$REPO_ROOT" && bash scripts/t05v2_step3_witness.sh --data_root "$DATA_ROOT" --patch_id "$PATCH_ID" --run_id "$RUN_ID" --debug --force
+cd "$REPO_ROOT" && \
+bash scripts/t05v2_step2_segment.sh \
+  --data_root "$DATA_ROOT" \
+  --patch_id "$PATCH_ID" \
+  --run_id "$RUN_ID" \
+  --debug \
+  --force \
+  --step2_strict_adjacent_pairing 0 \
+  --step2_allow_one_intermediate_xsec 1 \
+  --step2_same_pair_topk 2 \
+  --step2_cross1_min_support 2 \
+  --step2_cross1_min_drivezone_ratio 0.98 \
+  --step2_cross1_max_length_ratio 1.35
 ```
+
+最适合反复重跑的步骤：
+- `Step2`
+- `Step3`
+- `Step4`
 
 ## 输出目录结构
 ```bash
@@ -92,86 +110,69 @@ outputs/_work/t05_topology_between_rc_v2/$RUN_ID/patches/$PATCH_ID/
   step6/
 ```
 
-每个 `stepN/` 下至少有：
-- 该步主产物 json
+每个 `stepN/` 至少包含：
+- 主产物 json
 - `step_state.json`
 
-## 文件验收顺序
-### 第一优先
+## 验收顺序
+第一优先：
 - `summary.txt`
 - `metrics.json`
 - `gate.json`
 
-先回答三个问题：
-- 这次 patch 有没有 road 输出。
-- 哪个 segment 进入了 `witness_based / prior_based / unresolved`。
-- 有没有硬失败 reason。
-
-### 第二优先
-- `debug/segment_selected.geojson`
-- `debug/corridor_witness_selected.geojson`
+第二优先：
+- `debug/step2_segment_selected.geojson`
+- `debug/step2_segment_dropped.geojson`
+- `debug/step2_same_pair_groups.json`
+- `debug/step3_witness_input_segments.geojson`
 - `debug/corridor_identity.json`
+
+第三优先：
+- `debug/corridor_witness_selected.geojson`
 - `debug/slot_src_dst.geojson`
-
-这是主业务验收层：
-- `segment_selected`: 当前 patch 内被选中的 Segment 框架。先确认框架对不对。
-- `corridor_witness_selected`: 当前 Segment 的 witness 证据位置。看中段独占通路是否合理。
-- `corridor_identity.json`: 当前 corridor 是 `witness_based / prior_based / unresolved`，以及进入该状态的理由。
-- `slot_src_dst.geojson`: 两端横截线上的端点区间。判断端点是否落在正确 slot，而不是只是“在线上”。
-
-### 第三优先
 - `debug/shape_ref_line.geojson`
 - `debug/road_final.geojson`
 
-这是几何输出层：
-- `shape_ref_line`: 成路前的参考线/Segment 线。
-- `road_final`: 最终输出几何。只有在前两层合理时，这一层才有业务意义。
-
-### 第四优先
-- `debug/segment_candidates.geojson`
-- `debug/corridor_witness_candidates.geojson`
+第四优先：
+- `debug/step2_segment_candidates_all.geojson`
 - `debug/reason_trace.json`
 - `debug/base_xsec_all.geojson`
 - `debug/probe_xsec_all.geojson`
 
-这是追问题层：
-- `segment_candidates`: 为什么形成当前 Segment，有没有其它候选被排除。
-- `corridor_witness_candidates`: witness 为何选在这里，没选中的候选是什么。
-- `reason_trace.json`: corridor/road 失败路径与最终 reason。
-- `base_xsec_all`: 基础横截线全集。
-- `probe_xsec_all`: 当前版本会产出占位文件，但 `ProbeCrossSection` 还未真正进入主判定。
+## 关键文件意义
+- `debug/step2_segment_candidates_all.geojson`
+  作用：查看 raw candidate、pairing 保留/淘汰、cross filter 保留/淘汰的全过程。
+- `debug/step2_segment_selected.geojson`
+  作用：当前真正进入后续主链路的 `Segment`。
+- `debug/step2_segment_dropped.geojson`
+  作用：查看 same-pair topK 或 cross1 例外规则丢掉了哪些段。
+- `debug/step2_same_pair_groups.json`
+  作用：查看每个 `(src,dst)` 下候选数、保留数、排序依据、淘汰理由。
+- `debug/step3_witness_input_segments.geojson`
+  作用：查看 witness 实际接收到的 `Segment`，判断 witness 多是 Step2 造成还是 Step3 自己膨胀。
+- `debug/corridor_witness_selected.geojson`
+  作用：查看被选中的 witness，并结合 `crossing_dist` / `support_count` / `same_pair_rank` 判断它是否来自高风险 Segment。
+- `debug/corridor_identity.json`
+  作用：确认 `witness_based / prior_based / unresolved` 的最终分流结果。
 
-## 典型判读规则
-- 如果 `segment_selected` 明显不对，后面的 witness / slot / road 不用继续深看。
-- 如果 `corridor_witness_selected` 不对，但 `road_final` 看起来“像是对的”，也不能算通过。
-- 如果 `corridor_identity=unresolved` 但仍然出了 road，要视为异常。
-- 如果 `slot_src_dst` 明显落错区间，即使 road 在线上也不通过。
-- 如果 `gate.json` 里是 hard fail，先看 `reason_trace.json`，再回到 candidates 层追根因。
+## Step2 收敛验收重点
+优先看这些指标：
+- `segment_count`
+- `crossing_dist_hist_selected`
+- `pairs_with_multi_segments`
+- `max_segments_per_pair`
+- `witness_selected_count_total`
+- `witness_selected_count_cross0`
+- `witness_selected_count_cross1`
 
-## 关键文件业务意义
-- `summary.txt`: 人工快速总览。先看总体成功/失败与 segment 数量。
-- `metrics.json`: 结构化验收入口。看每个 segment 的 corridor 状态、slot 是否 resolved、road 是否在 DriveZone 内。
-- `gate.json`: 最终是否通过以及 hard/soft breakpoints。
-- `debug/segment_selected.geojson`: 被选中的路段框架；它不等于最终 Road。
-- `debug/corridor_witness_selected.geojson`: 用来证明中段独占合法通道的 witness。
-- `debug/corridor_identity.json`: corridor 判定结果与原因。
-- `debug/slot_src_dst.geojson`: 两端横截线 slot 映射结果。
-- `debug/shape_ref_line.geojson`: FinalRoad 生成前的参考线。
-- `debug/road_final.geojson`: 最终输出的 Road geometry。
-- `debug/reason_trace.json`: 失败路径、fallback 路径、无几何原因。
+推荐判读：
+- 如果 `crossing_dist_hist_selected["1"]` 仍然很高，说明 Step2 还没有真正收敛。
+- 如果 `pairs_with_multi_segments` 仍然高，说明 same-pair 压缩还不够。
+- 如果 `witness_selected_count_total` 几乎等于 `segment_count`，说明 witness 仍然主要在“跟着放行”。
 
-## 当前版本已知限制
-- `ProbeCrossSection` 仍未真正进入主判定，只保留了占位与 debug 文件。
-- branch identity 仍未完整实现，复杂 branch 语义不要过度解读。
-- witness/prior 冲突仲裁仍是最小版，当前更偏保守。
-- `Segment` 仍是最小实现，复杂 same-pair 多 Segment 场景可能先在 Step2 暴露问题。
-- `probe_xsec_all.geojson` 当前为占位输出，不代表 branch 识别已上线。
-
-## 如何区分“已知限制”与“新发现问题”
-- 已知限制：文档已明确说明、当前版本尚未建模的能力缺口。
-- 新发现问题：在当前已实现能力范围内，出现了明显不一致，例如：
-  - Segment 明显穿错边界框架。
-  - witness 明显没有体现独占通路。
-  - slot 落错区间。
-  - `corridor_identity=unresolved` 却输出了 road。
-  - road 明显穿出 DriveZone 或穿越 DivStrip。
+## 当前已知限制
+- `ProbeCrossSection` 仍未真正进入主判定，只保留占位输出。
+- branch identity 仍未完整实现。
+- witness/prior 冲突仲裁仍是最小版。
+- 真实 same-pair 多路共存场景，当前 `STEP2_SAME_PAIR_TOPK=1` 可能偏保守。
+- `cross1` 现在默认关闭，主要目标是先收敛 Step2，不代表最终业务口径已定稿。

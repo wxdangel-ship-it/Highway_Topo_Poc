@@ -25,6 +25,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--segment_max_other_xsec_crossings", type=int, default=int(DEFAULT_PARAMS["SEGMENT_MAX_OTHER_XSEC_CROSSINGS"]))
     parser.add_argument("--segment_cluster_offset_m", type=float, default=float(DEFAULT_PARAMS["SEGMENT_CLUSTER_OFFSET_M"]))
     parser.add_argument("--segment_cluster_line_dist_m", type=float, default=float(DEFAULT_PARAMS["SEGMENT_CLUSTER_LINE_DIST_M"]))
+    parser.add_argument("--step2_strict_adjacent_pairing", type=int, default=int(DEFAULT_PARAMS["STEP2_STRICT_ADJACENT_PAIRING"]))
+    parser.add_argument("--step2_allow_one_intermediate_xsec", type=int, default=int(DEFAULT_PARAMS["STEP2_ALLOW_ONE_INTERMEDIATE_XSEC"]))
+    parser.add_argument("--step2_same_pair_topk", type=int, default=int(DEFAULT_PARAMS["STEP2_SAME_PAIR_TOPK"]))
+    parser.add_argument("--step2_cross1_min_support", type=int, default=int(DEFAULT_PARAMS["STEP2_CROSS1_MIN_SUPPORT"]))
+    parser.add_argument("--step2_cross1_min_drivezone_ratio", type=float, default=float(DEFAULT_PARAMS["STEP2_CROSS1_MIN_DRIVEZONE_RATIO"]))
+    parser.add_argument("--step2_cross1_max_length_ratio", type=float, default=float(DEFAULT_PARAMS["STEP2_CROSS1_MAX_LENGTH_RATIO"]))
+    parser.add_argument("--step2_cross1_require_no_cross0_better", type=int, default=int(DEFAULT_PARAMS["STEP2_CROSS1_REQUIRE_NO_CROSS0_BETTER"]))
     parser.add_argument("--prior_endpoint_anchor_m", type=float, default=float(DEFAULT_PARAMS["PRIOR_ENDPOINT_ANCHOR_M"]))
     parser.add_argument("--divstrip_buffer_m", type=float, default=float(DEFAULT_PARAMS["DIVSTRIP_BUFFER_M"]))
     parser.add_argument("--witness_half_length_m", type=float, default=float(DEFAULT_PARAMS["WITNESS_HALF_LENGTH_M"]))
@@ -45,6 +52,13 @@ def _params_from_args(args: argparse.Namespace) -> dict[str, float | int]:
         "SEGMENT_MAX_OTHER_XSEC_CROSSINGS": int(args.segment_max_other_xsec_crossings),
         "SEGMENT_CLUSTER_OFFSET_M": float(args.segment_cluster_offset_m),
         "SEGMENT_CLUSTER_LINE_DIST_M": float(args.segment_cluster_line_dist_m),
+        "STEP2_STRICT_ADJACENT_PAIRING": int(args.step2_strict_adjacent_pairing),
+        "STEP2_ALLOW_ONE_INTERMEDIATE_XSEC": int(args.step2_allow_one_intermediate_xsec),
+        "STEP2_SAME_PAIR_TOPK": int(args.step2_same_pair_topk),
+        "STEP2_CROSS1_MIN_SUPPORT": int(args.step2_cross1_min_support),
+        "STEP2_CROSS1_MIN_DRIVEZONE_RATIO": float(args.step2_cross1_min_drivezone_ratio),
+        "STEP2_CROSS1_MAX_LENGTH_RATIO": float(args.step2_cross1_max_length_ratio),
+        "STEP2_CROSS1_REQUIRE_NO_CROSS0_BETTER": int(args.step2_cross1_require_no_cross0_better),
         "PRIOR_ENDPOINT_ANCHOR_M": float(args.prior_endpoint_anchor_m),
         "DIVSTRIP_BUFFER_M": float(args.divstrip_buffer_m),
         "WITNESS_HALF_LENGTH_M": float(args.witness_half_length_m),

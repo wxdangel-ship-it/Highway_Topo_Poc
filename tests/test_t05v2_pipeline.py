@@ -170,10 +170,99 @@ def test_t05v2_segment_rejects_candidates_crossing_too_many_other_xsecs(tmp_path
     _write_patch(data_root, patch_id=patch_id, intersection_fc=intersection_fc, drivezone_fc=drivezone_fc, traj_tracks=[[(0.0, 0.0), (30.0, 0.0), (60.0, 0.0), (90.0, 0.0)]])
     out_root = tmp_path / "out"
     run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run2", out_root=out_root)
-    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run2", out_root=out_root)
+    run_stage(
+        stage="step2_segment",
+        data_root=data_root,
+        patch_id=patch_id,
+        run_id="run2",
+        out_root=out_root,
+        params={"STEP2_STRICT_ADJACENT_PAIRING": 0},
+    )
     segments_payload = _read_json(out_root / "run2" / "patches" / patch_id / "step2" / "segments.json")
     reasons = {item["reason"] for item in segments_payload["excluded_candidates"]}
     assert "segment_crosses_too_many_other_xsecs" in reasons
+
+
+def test_t05v2_step2_default_strict_adjacent_pairing_reduces_long_span_pairs(tmp_path: Path) -> None:
+    patch_id = "strict_adjacent"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -10.0), (0.0, 10.0)], {"nodeid": 1}),
+            _line_feature([(30.0, -10.0), (30.0, 10.0)], {"nodeid": 2}),
+            _line_feature([(60.0, -10.0), (60.0, 10.0)], {"nodeid": 3}),
+            _line_feature([(90.0, -10.0), (90.0, 10.0)], {"nodeid": 4}),
+        ],
+        "EPSG:3857",
+    )
+    drivezone_fc = _fc([_poly_feature([(-5.0, -4.0), (95.0, -4.0), (95.0, 4.0), (-5.0, 4.0)])], "EPSG:3857")
+    _write_patch(data_root, patch_id=patch_id, intersection_fc=intersection_fc, drivezone_fc=drivezone_fc, traj_tracks=[[(0.0, 0.0), (30.0, 0.0), (60.0, 0.0), (90.0, 0.0)]])
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_adj", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_adj", out_root=out_root)
+    segments_payload = _read_json(out_root / "run_adj" / "patches" / patch_id / "step2" / "segments.json")
+    step2_metrics = segments_payload["step2_metrics"]
+    assert int(step2_metrics["raw_candidate_count"]) == 6
+    assert int(step2_metrics["candidate_count_after_pairing"]) == 3
+    assert int(step2_metrics["candidate_count_after_same_pair_topk"]) == 3
+    assert step2_metrics["crossing_dist_hist_selected"] == {"0": 3}
+
+
+def test_t05v2_step2_cross1_requires_explicit_exception_and_support(tmp_path: Path) -> None:
+    patch_id = "cross1_exception"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -10.0), (0.0, 10.0)], {"nodeid": 1}),
+            _line_feature([(30.0, -10.0), (30.0, 10.0)], {"nodeid": 2}),
+            _line_feature([(60.0, -10.0), (60.0, 10.0)], {"nodeid": 3}),
+        ],
+        "EPSG:3857",
+    )
+    drivezone_fc = _fc([_poly_feature([(-5.0, -4.0), (65.0, -4.0), (65.0, 4.0), (-5.0, 4.0)])], "EPSG:3857")
+    tracks = [
+        [(0.0, 0.0), (30.0, 0.0), (60.0, 0.0)],
+        [(0.0, 0.0), (30.0, 0.0), (60.0, 0.0)],
+    ]
+    _write_patch(data_root, patch_id=patch_id, intersection_fc=intersection_fc, drivezone_fc=drivezone_fc, traj_tracks=tracks)
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_cross1", out_root=out_root)
+    run_stage(
+        stage="step2_segment",
+        data_root=data_root,
+        patch_id=patch_id,
+        run_id="run_cross1",
+        out_root=out_root,
+        params={
+            "STEP2_STRICT_ADJACENT_PAIRING": 0,
+            "STEP2_ALLOW_ONE_INTERMEDIATE_XSEC": 1,
+            "STEP2_CROSS1_MIN_SUPPORT": 2,
+        },
+    )
+    segments_payload = _read_json(out_root / "run_cross1" / "patches" / patch_id / "step2" / "segments.json")
+    kept = [item for item in segments_payload["segments"] if int(item["src_nodeid"]) == 1 and int(item["dst_nodeid"]) == 3]
+    assert len(kept) == 1
+    assert int(kept[0]["other_xsec_crossing_count"]) == 1
+    assert str(kept[0]["kept_reason"]).startswith("cross1_exception:")
+
+
+def test_t05v2_step2_same_pair_topk_prefers_stronger_cluster(tmp_path: Path) -> None:
+    patch_id = "same_pair_topk"
+    data_root = tmp_path / "data"
+    drivezone_fc = _fc([_poly_feature([(-5.0, -12.0), (105.0, -12.0), (105.0, 12.0), (-5.0, 12.0)])], "EPSG:3857")
+    tracks = [
+        [(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)],
+        [(0.0, 0.2), (50.0, 0.2), (100.0, 0.2)],
+        [(0.0, 8.0), (50.0, 8.0), (100.0, 8.0)],
+    ]
+    _write_patch(data_root, patch_id=patch_id, intersection_fc=_simple_intersections(), drivezone_fc=drivezone_fc, traj_tracks=tracks)
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_topk", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_topk", out_root=out_root)
+    segments_payload = _read_json(out_root / "run_topk" / "patches" / patch_id / "step2" / "segments.json")
+    assert len(segments_payload["segments"]) == 1
+    assert int(segments_payload["segments"][0]["support_count"]) == 2
+    assert any(item["dropped_reason"] == "same_pair_topk_exceeded" for item in segments_payload["dropped_segments"])
 
 
 def test_t05v2_missing_previous_stage_reports_expected_paths(tmp_path: Path) -> None:
@@ -207,6 +296,10 @@ def test_t05v2_unique_witness_based_full_pipeline(tmp_path: Path) -> None:
     gate = _read_json(out_root / "run3" / "patches" / patch_id / "gate.json")
     roads = _read_json(out_root / "run3" / "patches" / patch_id / "Road.geojson")
     assert int(metrics["road_count"]) == 1
+    assert int(metrics["raw_candidate_count"]) >= 1
+    assert int(metrics["witness_selected_count_total"]) == 1
+    assert int(metrics["witness_selected_count_cross0"]) == 1
+    assert int(metrics["witness_selected_count_cross1"]) == 0
     assert metrics["segments"][0]["corridor_identity"] == "witness_based"
     assert bool(gate["overall_pass"]) is True
     assert len(roads["features"]) == 1
