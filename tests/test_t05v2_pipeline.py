@@ -342,6 +342,10 @@ def test_t05v2_step2_pair_scoped_cross1_exception_restores_only_allowlisted_pair
     assert int(metrics["pair_scoped_cross1_exception_hit_count"]) == 1
     assert int(metrics["selected_cross1_exception_count"]) == 1
     assert metrics["crossing_dist_hist_selected"] == {"0": 3, "1": 1}
+    assert int(metrics["pair_scoped_exception_audit_count"]) == 2
+    assert metrics["pair_scoped_exception_selected_pair_ids"] == ["1:3"]
+    assert metrics["pair_scoped_exception_rejected_pair_ids"] == ["2:4"]
+    assert metrics["pair_scoped_exception_non_allowlisted_cross1_pair_ids"] == ["2:4"]
     excluded = segments_payload["excluded_candidates"]
     blocked_pairs = {
         (int(item["src_nodeid"]), int(item["dst_nodeid"])): str(item["reason"])
@@ -349,6 +353,12 @@ def test_t05v2_step2_pair_scoped_cross1_exception_restores_only_allowlisted_pair
         if str(item.get("reason")) == "cross1_pair_not_allowlisted"
     }
     assert blocked_pairs[(2, 4)] == "cross1_pair_not_allowlisted"
+    audit = _read_json(patch_dir / "debug" / "step2_pair_scoped_exception_audit.json")
+    audit_rows = {str(item["pair_id"]): item for item in audit["pairs"]}
+    assert audit_rows["1:3"]["final_decision"] == "selected"
+    assert bool(audit_rows["1:3"]["selected_by_exception"]) is True
+    assert audit_rows["2:4"]["final_decision"] == "rejected_before_exception"
+    assert audit_rows["2:4"]["rejected_reason"] == "cross1_pair_not_allowlisted"
 
 
 def test_t05v2_step2_same_pair_topk_prefers_stronger_cluster(tmp_path: Path) -> None:
@@ -400,14 +410,20 @@ def test_t05v2_unique_witness_based_full_pipeline(tmp_path: Path) -> None:
     metrics = _read_json(out_root / "run3" / "patches" / patch_id / "metrics.json")
     gate = _read_json(out_root / "run3" / "patches" / patch_id / "gate.json")
     roads = _read_json(out_root / "run3" / "patches" / patch_id / "Road.geojson")
+    summary = (out_root / "run3" / "patches" / patch_id / "summary.txt").read_text(encoding="utf-8")
     assert int(metrics["road_count"]) == 1
     assert int(metrics["raw_candidate_count"]) >= 1
     assert int(metrics["witness_selected_count_total"]) == 1
     assert int(metrics["witness_selected_count_cross0"]) == 1
     assert int(metrics["witness_selected_count_cross1"]) == 0
+    assert int(metrics["pair_scoped_exception_audit_count"]) == 0
+    assert metrics["pair_scoped_exception_selected_pair_ids"] == []
+    assert metrics["pair_scoped_exception_rejected_pair_ids"] == []
+    assert metrics["pair_scoped_exception_non_allowlisted_cross1_pair_ids"] == []
     assert metrics["segments"][0]["corridor_identity"] == "witness_based"
     assert bool(gate["overall_pass"]) is True
     assert len(roads["features"]) == 1
+    assert "pair_scoped_exception: selected=0 rejected=0 non_allowlisted_cross1=0" in summary
 
 
 def test_t05v2_prior_based_for_short_prior_segment(tmp_path: Path) -> None:

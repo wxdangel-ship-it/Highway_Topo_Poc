@@ -1014,6 +1014,180 @@ def _segment_features(segments: list[Segment], *, status: str = "selected") -> l
     return out
 
 
+def _best_audit_rejected_reason(entries: list[dict[str, Any]]) -> str:
+    if not entries:
+        return ""
+    preferred = (
+        "cross1_pair_not_allowlisted",
+        "cross1_has_cross0_alternative",
+        "cross1_length_ratio_too_high",
+        "cross1_gore_conflict",
+        "cross1_drivezone_ratio_too_low",
+        "cross1_support_too_low",
+        "cross1_support_zero",
+        "cross1_pair_scoped_not_best_rank",
+        "cross1_disabled",
+        "non_adjacent_pair_blocked",
+    )
+    by_reason = {str(item.get("reason", item.get("dropped_reason", ""))): item for item in entries}
+    for reason in preferred:
+        if reason in by_reason:
+            return str(reason)
+    first = entries[0]
+    return str(first.get("reason", first.get("dropped_reason", "")))
+
+
+def _build_pair_scoped_exception_audit(
+    *,
+    same_pair_groups: list[dict[str, Any]],
+    zero_selected_pairs: list[dict[str, Any]],
+    rejected_candidates: list[dict[str, Any]],
+    params: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    allowlist = _parse_pair_scoped_allowlist(params.get("STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST", ""))
+    group_map = {
+        (int(item["src_nodeid"]), int(item["dst_nodeid"])): item
+        for item in same_pair_groups
+    }
+    zero_map = {
+        (int(item["src_nodeid"]), int(item["dst_nodeid"])): item
+        for item in zero_selected_pairs
+    }
+    rejected_by_pair: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for item in rejected_candidates:
+        pair = (int(item.get("src_nodeid", 0)), int(item.get("dst_nodeid", 0)))
+        rejected_by_pair.setdefault(pair, []).append(item)
+
+    pairs_to_audit: set[tuple[int, int]] = set(allowlist)
+    for pair, group in group_map.items():
+        if any(int(seg.get("other_xsec_crossing_count", seg.get("crossing_dist", 0))) == 1 for seg in group.get("segments", [])):
+            pairs_to_audit.add(pair)
+    for pair, entries in rejected_by_pair.items():
+        if any(int(item.get("other_xsec_crossing_count", 0)) == 1 for item in entries):
+            pairs_to_audit.add(pair)
+    pairs_to_audit.update(zero_map.keys())
+
+    audit_rows: list[dict[str, Any]] = []
+    selected_pair_ids: list[str] = []
+    rejected_pair_ids: list[str] = []
+    non_allowlisted_cross1_pair_ids: list[str] = []
+    for src_nodeid, dst_nodeid in sorted(pairs_to_audit):
+        pair = (int(src_nodeid), int(dst_nodeid))
+        pair_id = _pair_id_text(src_nodeid, dst_nodeid)
+        pair_in_allowlist = bool(pair in allowlist)
+        group = group_map.get(pair)
+        zero_item = zero_map.get(pair)
+        rejected_items = list(rejected_by_pair.get(pair, []))
+        grouped_segments = list(group.get("segments", [])) if group is not None else []
+        cross1_grouped = [
+            item for item in grouped_segments if int(item.get("other_xsec_crossing_count", item.get("crossing_dist", 0))) == 1
+        ]
+        cross1_rejected = [item for item in rejected_items if int(item.get("other_xsec_crossing_count", 0)) == 1]
+        has_cross0_alternative = bool(group is not None and bool(group.get("has_cross0_candidate")))
+        best_grouped = cross1_grouped[0] if cross1_grouped else (grouped_segments[0] if grouped_segments else None)
+        best_rejected = None
+        if cross1_rejected:
+            reason_priority = {
+                "cross1_pair_not_allowlisted": 0,
+                "cross1_has_cross0_alternative": 1,
+                "cross1_length_ratio_too_high": 2,
+                "cross1_gore_conflict": 3,
+                "cross1_drivezone_ratio_too_low": 4,
+                "cross1_support_too_low": 5,
+                "cross1_disabled": 6,
+                "non_adjacent_pair_blocked": 7,
+            }
+            best_rejected = sorted(
+                cross1_rejected,
+                key=lambda item: (
+                    int(reason_priority.get(str(item.get("reason", "")), 99)),
+                    -int(item.get("support_count", 0)),
+                    -float(item.get("drivezone_ratio", 0.0)),
+                ),
+            )[0]
+
+        selected_by_exception = False
+        selected_segment_id = ""
+        kept_reason = ""
+        if best_grouped is not None and "pair_scoped_cross1_exception" in str(best_grouped.get("kept_reason", "")):
+            selected_by_exception = True
+            selected_segment_id = str(best_grouped.get("segment_id", ""))
+            kept_reason = str(best_grouped.get("kept_reason", ""))
+
+        if selected_by_exception:
+            final_decision = "selected"
+        elif best_grouped is not None or zero_item is not None:
+            final_decision = "rejected"
+        else:
+            final_decision = "rejected_before_exception"
+
+        if best_grouped is not None:
+            support_count = int(best_grouped.get("support_count", 0))
+            inside_ratio = float(best_grouped.get("inside_ratio", best_grouped.get("drivezone_ratio", 0.0)))
+            gore_conflict = bool(best_grouped.get("gore_conflict", False))
+            same_pair_rank = int(best_grouped.get("same_pair_rank", best_grouped.get("sort_rank", 0)))
+        elif best_rejected is not None:
+            support_count = int(best_rejected.get("support_count", 0))
+            inside_ratio = float(best_rejected.get("drivezone_ratio", 0.0))
+            gore_conflict = bool(best_rejected.get("crosses_divstrip", False))
+            same_pair_rank = 0
+        else:
+            support_count = 0
+            inside_ratio = 0.0
+            gore_conflict = False
+            same_pair_rank = 0
+
+        crossing_values: list[int] = []
+        for item in grouped_segments:
+            crossing_values.append(int(item.get("other_xsec_crossing_count", item.get("crossing_dist", 0))))
+        for item in rejected_items:
+            crossing_values.append(int(item.get("other_xsec_crossing_count", 0)))
+        best_candidate_crossing_dist = int(min(crossing_values)) if crossing_values else 0
+
+        rejected_reason = ""
+        if final_decision != "selected":
+            if zero_item is not None and str(zero_item.get("dropped_reason", "")):
+                rejected_reason = str(zero_item.get("dropped_reason", ""))
+            elif best_grouped is not None and str(best_grouped.get("dropped_reason", "")):
+                rejected_reason = str(best_grouped.get("dropped_reason", ""))
+            else:
+                rejected_reason = _best_audit_rejected_reason(rejected_items)
+
+        if not pair_in_allowlist and any(value == 1 for value in crossing_values):
+            non_allowlisted_cross1_pair_ids.append(pair_id)
+
+        row = {
+            "src_nodeid": int(src_nodeid),
+            "dst_nodeid": int(dst_nodeid),
+            "pair_id": str(pair_id),
+            "pair_in_allowlist": bool(pair_in_allowlist),
+            "has_cross0_alternative": bool(has_cross0_alternative),
+            "best_candidate_crossing_dist": int(best_candidate_crossing_dist),
+            "selected_by_exception": bool(selected_by_exception),
+            "selected_segment_id": str(selected_segment_id),
+            "kept_reason": str(kept_reason),
+            "rejected_reason": str(rejected_reason),
+            "support_count": int(support_count),
+            "inside_ratio": float(inside_ratio),
+            "gore_conflict": bool(gore_conflict),
+            "same_pair_rank": int(same_pair_rank),
+            "final_decision": str(final_decision),
+        }
+        audit_rows.append(row)
+        if final_decision == "selected":
+            selected_pair_ids.append(pair_id)
+        else:
+            rejected_pair_ids.append(pair_id)
+
+    metrics = {
+        "pair_scoped_exception_audit_count": int(len(audit_rows)),
+        "pair_scoped_exception_selected_pair_ids": list(selected_pair_ids),
+        "pair_scoped_exception_rejected_pair_ids": list(rejected_pair_ids),
+        "pair_scoped_exception_non_allowlisted_cross1_pair_ids": list(non_allowlisted_cross1_pair_ids),
+    }
+    return audit_rows, metrics
+
+
 def _drivable_surface(inputs: PatchInputs, params: dict[str, Any]) -> BaseGeometry | None:
     if inputs.drivezone_zone_metric is None or inputs.drivezone_zone_metric.is_empty:
         return None
@@ -1522,6 +1696,16 @@ def _write_road_outputs(
         "selected_cross1_exception_count": int(root_step2_metrics.get("selected_cross1_exception_count", 0)),
         "zero_selected_pair_count": int(root_step2_metrics.get("zero_selected_pair_count", 0)),
         "zero_selected_pair_ids": [str(v) for v in root_step2_metrics.get("zero_selected_pair_ids", [])],
+        "pair_scoped_exception_audit_count": int(root_step2_metrics.get("pair_scoped_exception_audit_count", 0)),
+        "pair_scoped_exception_selected_pair_ids": [
+            str(v) for v in root_step2_metrics.get("pair_scoped_exception_selected_pair_ids", [])
+        ],
+        "pair_scoped_exception_rejected_pair_ids": [
+            str(v) for v in root_step2_metrics.get("pair_scoped_exception_rejected_pair_ids", [])
+        ],
+        "pair_scoped_exception_non_allowlisted_cross1_pair_ids": [
+            str(v) for v in root_step2_metrics.get("pair_scoped_exception_non_allowlisted_cross1_pair_ids", [])
+        ],
         "witness_selected_count_total": int(witness_selected_total),
         "witness_selected_count_cross0": int(witness_selected_cross0),
         "witness_selected_count_cross1": int(witness_selected_cross1),
@@ -1546,6 +1730,12 @@ def _write_road_outputs(
         f"segment_count={len(segments)}",
         f"road_count={len(roads)}",
         f"overall_pass={str(gate['overall_pass']).lower()}",
+        (
+            "pair_scoped_exception: "
+            f"selected={len(metrics['pair_scoped_exception_selected_pair_ids'])} "
+            f"rejected={len(metrics['pair_scoped_exception_rejected_pair_ids'])} "
+            f"non_allowlisted_cross1={len(metrics['pair_scoped_exception_non_allowlisted_cross1_pair_ids'])}"
+        ),
     ]
     for entry in metrics_segments:
         summary_lines.append(
@@ -1615,6 +1805,12 @@ def _stage2_segment(
         frame,
         params,
     )
+    pair_scoped_exception_audit, pair_scoped_exception_metrics = _build_pair_scoped_exception_audit(
+        same_pair_groups=same_pair_groups,
+        zero_selected_pairs=zero_selected_pairs,
+        rejected_candidates=rejected,
+        params=params,
+    )
     artifact = {
         "segments": [segment.to_dict() for segment in segments],
         "dropped_segments": [
@@ -1645,7 +1841,8 @@ def _stage2_segment(
         ],
         "same_pair_groups": same_pair_groups,
         "zero_selected_pairs": zero_selected_pairs,
-        "step2_metrics": {**candidate_bundle["stats"], **step2_metrics},
+        "pair_scoped_exception_audit": pair_scoped_exception_audit,
+        "step2_metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics},
     }
     dbg_dir = debug_dir(out_root, run_id, patch_id)
     write_json(_artifact_path(out_root, run_id, patch_id, "step2_segment"), artifact)
@@ -1663,8 +1860,18 @@ def _stage2_segment(
     write_lines_geojson(dbg_dir / "step2_segment_selected.geojson", selected_segment_features)
     write_lines_geojson(dbg_dir / "segment_selected.geojson", selected_segment_features)
     write_lines_geojson(dbg_dir / "step2_segment_dropped.geojson", dropped_segment_features)
-    write_json(dbg_dir / "step2_same_pair_groups.json", {"pairs": same_pair_groups, "metrics": {**candidate_bundle["stats"], **step2_metrics}})
-    write_json(dbg_dir / "step2_zero_selected_pairs.json", {"pairs": zero_selected_pairs, "metrics": {**candidate_bundle["stats"], **step2_metrics}})
+    write_json(
+        dbg_dir / "step2_same_pair_groups.json",
+        {"pairs": same_pair_groups, "metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics}},
+    )
+    write_json(
+        dbg_dir / "step2_zero_selected_pairs.json",
+        {"pairs": zero_selected_pairs, "metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics}},
+    )
+    write_json(
+        dbg_dir / "step2_pair_scoped_exception_audit.json",
+        {"pairs": pair_scoped_exception_audit, "metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics}},
+    )
     return {
         "artifact": artifact,
         "inputs": inputs,
