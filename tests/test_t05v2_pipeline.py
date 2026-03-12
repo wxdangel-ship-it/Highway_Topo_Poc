@@ -452,6 +452,58 @@ def test_t05v2_step2_topology_gate_rejects_wrong_terminal_pairs_and_reverse_dire
     assert reasons[(41, 31)] == "directionally_invalid_segment"
 
 
+def test_t05v2_step2_topology_gate_allows_traced_rcsdroad_pairs(tmp_path: Path) -> None:
+    patch_id = "topology_trace_chain"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -5.0), (0.0, 5.0)], {"nodeid": 10}),
+            _line_feature([(25.0, -5.0), (25.0, 5.0)], {"nodeid": 20}),
+            _line_feature([(50.0, -5.0), (50.0, 5.0)], {"nodeid": 30}),
+            _line_feature([(75.0, -5.0), (75.0, 5.0)], {"nodeid": 40}),
+            _line_feature([(100.0, -5.0), (100.0, 5.0)], {"nodeid": 50}),
+        ],
+        "EPSG:3857",
+    )
+    drivezone_fc = _fc([_poly_feature([(-5.0, -6.0), (105.0, -6.0), (105.0, 6.0), (-5.0, 6.0)])], "EPSG:3857")
+    road_fc = _fc(
+        [
+            _line_feature([(0.0, 0.0), (10.0, 0.0)], {"snodeid": 10, "enodeid": 101}),
+            _line_feature([(10.0, 0.0), (25.0, 0.0)], {"snodeid": 101, "enodeid": 20}),
+            _line_feature([(25.0, 0.0), (35.0, 0.0)], {"snodeid": 20, "enodeid": 102}),
+            _line_feature([(35.0, 0.0), (50.0, 0.0)], {"snodeid": 102, "enodeid": 30}),
+            _line_feature([(50.0, 0.0), (60.0, 0.0)], {"snodeid": 30, "enodeid": 103}),
+            _line_feature([(60.0, 0.0), (75.0, 0.0)], {"snodeid": 103, "enodeid": 40}),
+            _line_feature([(75.0, 0.0), (85.0, 0.0)], {"snodeid": 40, "enodeid": 104}),
+            _line_feature([(85.0, 0.0), (100.0, 0.0)], {"snodeid": 104, "enodeid": 50}),
+        ],
+        "EPSG:3857",
+    )
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=intersection_fc,
+        drivezone_fc=drivezone_fc,
+        traj_tracks=[[(0.0, 0.0), (25.0, 0.0), (50.0, 0.0), (75.0, 0.0), (100.0, 0.0)]],
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_trace", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_trace", out_root=out_root)
+    patch_dir = out_root / "run_trace" / "patches" / patch_id
+    segments_payload = _read_json(patch_dir / "step2" / "segments.json")
+    kept_pairs = {(int(item["src_nodeid"]), int(item["dst_nodeid"])) for item in segments_payload["segments"]}
+    assert kept_pairs == {(10, 20), (20, 30), (30, 40), (40, 50)}
+    topology_debug = _read_json(patch_dir / "debug" / "step2_topology_pairs.json")
+    pair_map = {str(item["pair_id"]): item for item in topology_debug["pairs"]}
+    assert "10:20" in pair_map
+    assert pair_map["10:20"]["topology_sources"] == ["rcsdroad_trace"]
+    assert pair_map["10:20"]["topology_paths"][0]["node_path"] == [10, 101, 20]
+    step2_metrics = segments_payload["step2_metrics"]
+    assert int(step2_metrics["segment_selected_count_after_topology_gate"]) == 4
+    assert int(step2_metrics["topology_invalid_segment_count"]) == 0
+
+
 def test_t05v2_step2_writes_traj_crossing_and_support_audits(tmp_path: Path) -> None:
     patch_id = "traj_audit"
     data_root = tmp_path / "data"
