@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import math
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, mapping
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import nearest_points
 
@@ -206,7 +206,32 @@ def _xsec_hit_index(points_xy: list[tuple[float, float]], line: LineString, xsec
     return best_idx
 
 
-def _trajectory_events(traj: Any, frame: InputFrame, hit_buffer_m: float) -> list[dict[str, Any]]:
+def _local_traj_window_line(pts: list[tuple[float, float]], center_idx: int, *, half_window: int = 2) -> LineString | None:
+    lo = max(0, int(center_idx) - int(half_window))
+    hi = min(len(pts) - 1, int(center_idx) + int(half_window))
+    if hi - lo < 1:
+        return None
+    return _unique_line(pts[lo : hi + 1])
+
+
+def _local_heading_deg(line: LineString | None) -> float | None:
+    if not isinstance(line, LineString) or line.is_empty or len(line.coords) < 2:
+        return None
+    x0, y0 = line.coords[0][:2]
+    x1, y1 = line.coords[-1][:2]
+    if math.hypot(float(x1 - x0), float(y1 - y0)) <= 1e-6:
+        return None
+    return float(math.degrees(math.atan2(float(y1 - y0), float(x1 - x0))))
+
+
+def _trajectory_events(
+    traj: Any,
+    frame: InputFrame,
+    hit_buffer_m: float,
+    *,
+    drivezone: BaseGeometry | None = None,
+    divstrip_buffer: BaseGeometry | None = None,
+) -> list[dict[str, Any]]:
     xyz = getattr(traj, "xyz_metric", None)
     line = _trajectory_line(traj)
     if xyz is None or line is None:
@@ -218,13 +243,34 @@ def _trajectory_events(traj: Any, frame: InputFrame, hit_buffer_m: float) -> lis
         if idx is None:
             continue
         px, py = pts[int(idx)]
-        events.append({"nodeid": int(xsec.nodeid), "index": int(idx), "point": Point(float(px), float(py))})
+        local_line = _local_traj_window_line(pts, int(idx))
+        events.append(
+            {
+                "event_id": f"{traj.traj_id}:{int(xsec.nodeid)}:{int(idx)}",
+                "traj_id": str(traj.traj_id),
+                "nodeid": int(xsec.nodeid),
+                "index": int(idx),
+                "point": Point(float(px), float(py)),
+                "local_heading": _local_heading_deg(local_line),
+                "in_drivezone_ratio_local": _drivezone_ratio(local_line, drivezone) if local_line is not None else 0.0,
+                "crosses_divstrip_local": bool(
+                    local_line is not None
+                    and divstrip_buffer is not None
+                    and not divstrip_buffer.is_empty
+                    and local_line.intersects(divstrip_buffer)
+                ),
+            }
+        )
     events.sort(key=lambda item: (int(item["index"]), int(item["nodeid"])))
     deduped: list[dict[str, Any]] = []
     for event in events:
         if deduped and int(deduped[-1]["nodeid"]) == int(event["nodeid"]) and abs(int(deduped[-1]["index"]) - int(event["index"])) <= 2:
             continue
         deduped.append(event)
+    for order, event in enumerate(deduped):
+        event["crossing_order_on_traj"] = int(order)
+        event["from_nodeid"] = None if order == 0 else int(deduped[order - 1]["nodeid"])
+        event["to_nodeid"] = None if order >= len(deduped) - 1 else int(deduped[order + 1]["nodeid"])
     return deduped
 
 
@@ -546,6 +592,85 @@ def _pair_id_text(src_nodeid: int, dst_nodeid: int) -> str:
     return f"{int(src_nodeid)}:{int(dst_nodeid)}"
 
 
+_SEGMENT_TOPOLOGY_INVALID_REASONS = {
+    "segment_not_in_rcsdroad_topology",
+    "directionally_invalid_segment",
+    "terminal_node_not_owned_by_src",
+}
+
+
+def _build_directed_topology(
+    *,
+    frame: InputFrame,
+    inputs: PatchInputs,
+    prior_roads: list[Any],
+) -> dict[str, Any]:
+    xsec_ids = {int(xsec.nodeid) for xsec in frame.base_cross_sections}
+    allowed_pairs: set[tuple[int, int]] = set()
+    incoming: dict[int, set[int]] = defaultdict(set)
+    outgoing: dict[int, set[int]] = defaultdict(set)
+    pair_prior_ids: dict[tuple[int, int], list[str]] = defaultdict(list)
+    for idx, road in enumerate(prior_roads):
+        try:
+            src_nodeid = int(getattr(road, "snodeid", 0))
+            dst_nodeid = int(getattr(road, "enodeid", 0))
+        except Exception:
+            continue
+        if src_nodeid <= 0 or dst_nodeid <= 0 or src_nodeid == dst_nodeid:
+            continue
+        if xsec_ids and (src_nodeid not in xsec_ids or dst_nodeid not in xsec_ids):
+            continue
+        allowed_pairs.add((src_nodeid, dst_nodeid))
+        outgoing[src_nodeid].add(dst_nodeid)
+        incoming[dst_nodeid].add(src_nodeid)
+        pair_prior_ids[(src_nodeid, dst_nodeid)].append(f"prior_{idx}")
+    node_kind_map: dict[int, int | None] = {}
+    for node in getattr(inputs, "node_records", ()) or ():
+        try:
+            nodeid = int(getattr(node, "nodeid", 0))
+        except Exception:
+            continue
+        if nodeid <= 0:
+            continue
+        node_kind_map[nodeid] = getattr(node, "kind", None)
+    terminal_nodes = {
+        int(nodeid)
+        for nodeid, srcs in incoming.items()
+        if srcs and not outgoing.get(int(nodeid))
+    }
+    return {
+        "enabled": bool(allowed_pairs),
+        "allowed_pairs": allowed_pairs,
+        "incoming": {int(k): {int(v) for v in vals} for k, vals in incoming.items()},
+        "outgoing": {int(k): {int(v) for v in vals} for k, vals in outgoing.items()},
+        "pair_prior_ids": {pair: list(vals) for pair, vals in pair_prior_ids.items()},
+        "terminal_nodes": {int(v) for v in terminal_nodes},
+        "node_kind_map": dict(node_kind_map),
+    }
+
+
+def _topology_gate_reason(
+    *,
+    src_nodeid: int,
+    dst_nodeid: int,
+    topology: dict[str, Any],
+) -> str | None:
+    if not bool(topology.get("enabled")):
+        return None
+    allowed_pairs: set[tuple[int, int]] = topology["allowed_pairs"]
+    pair = (int(src_nodeid), int(dst_nodeid))
+    if pair in allowed_pairs:
+        return None
+    if (int(dst_nodeid), int(src_nodeid)) in allowed_pairs:
+        return "directionally_invalid_segment"
+    incoming = topology.get("incoming", {})
+    terminal_nodes = topology.get("terminal_nodes", set())
+    allowed_srcs = {int(v) for v in incoming.get(int(dst_nodeid), set())}
+    if int(dst_nodeid) in terminal_nodes and allowed_srcs and int(src_nodeid) not in allowed_srcs:
+        return "terminal_node_not_owned_by_src"
+    return "segment_not_in_rcsdroad_topology"
+
+
 def _candidate_support_count(candidate: dict[str, Any]) -> int:
     return int(max(1, len({str(v) for v in candidate.get("support_traj_ids", set())})))
 
@@ -580,6 +705,9 @@ def _candidate_feature_properties(
         "pair_index_gap": int(candidate.get("pair_index_gap", 0)),
         "pairing_mode": str(candidate.get("pairing_mode", "")),
         "prior_supported": bool(candidate.get("prior_supported", False)),
+        "traj_id": str(candidate.get("traj_id", "")),
+        "topology_allowed": bool(candidate.get("topology_allowed", False)),
+        "topology_reason": str(candidate.get("topology_reason", "")),
     }
 
 
@@ -625,11 +753,17 @@ def _segment_candidates(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     xsec_map = _xsec_map(frame)
+    topology = _build_directed_topology(frame=frame, inputs=inputs, prior_roads=prior_roads)
     raw_candidates: list[dict[str, Any]] = []
     pairing_candidates: list[dict[str, Any]] = []
+    accepted_before_topology_gate: list[dict[str, Any]] = []
+    topology_kept_candidates: list[dict[str, Any]] = []
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     debug_features: list[tuple[LineString, dict[str, Any]]] = []
+    raw_crossing_features: list[dict[str, Any]] = []
+    filtered_crossing_features: list[dict[str, Any]] = []
+    crossing_audit: dict[str, dict[str, Any]] = {}
     hit_buffer = float(params["TRAJ_XSEC_HIT_BUFFER_M"])
     max_other = int(params["SEGMENT_MAX_OTHER_XSEC_CROSSINGS"])
     min_len = float(params["SEGMENT_MIN_LENGTH_M"])
@@ -639,6 +773,63 @@ def _segment_candidates(
     pair_scoped_cross1_enabled = bool(int(params.get("STEP2_PAIR_SCOPED_CROSS1_EXCEPTION_ENABLE", 0)))
     pair_scoped_cross1_allowlist = _parse_pair_scoped_allowlist(params.get("STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST", ""))
     divstrip_buffer = load_divstrip_buffer(inputs.divstrip_zone_metric, float(params["DIVSTRIP_BUFFER_M"]))
+    topology_invalid_counter: Counter[str] = Counter()
+
+    def crossing_props(event: dict[str, Any]) -> dict[str, Any]:
+        nodeid = int(event.get("nodeid", event.get("crossing_nodeid", 0)))
+        return {
+            "event_id": str(event.get("event_id", "")),
+            "traj_id": str(event.get("traj_id", "")),
+            "nodeid": int(nodeid),
+            "crossing_nodeid": int(nodeid),
+            "from_nodeid": event.get("from_nodeid"),
+            "to_nodeid": event.get("to_nodeid"),
+            "crossing_order_on_traj": int(event.get("crossing_order_on_traj", 0)),
+            "local_heading": event.get("local_heading"),
+            "in_drivezone_ratio_local": float(event.get("in_drivezone_ratio_local", 0.0)),
+            "crosses_divstrip_local": bool(event.get("crosses_divstrip_local", False)),
+        }
+
+    def ensure_crossing_audit(event: dict[str, Any]) -> None:
+        event_id = str(event.get("event_id", ""))
+        if not event_id or event_id in crossing_audit:
+            return
+        crossing_audit[event_id] = {
+            **crossing_props(event),
+            "point": event["point"],
+            "candidate_ids": set(),
+            "pair_ids": set(),
+            "topology_kept_candidate_ids": set(),
+            "selected_candidate_ids": set(),
+            "dropped_reasons": [],
+            "kept_reasons": set(),
+        }
+        raw_crossing_features.append(
+            {
+                "type": "Feature",
+                "geometry": mapping(event["point"]),
+                "properties": crossing_props(event),
+            }
+        )
+
+    def note_candidate_events(candidate: dict[str, Any], *, phase: str, reason: str = "") -> None:
+        for key in ("start_event_id", "end_event_id"):
+            event_id = str(candidate.get(key, ""))
+            if not event_id or event_id not in crossing_audit:
+                continue
+            entry = crossing_audit[event_id]
+            entry["candidate_ids"].add(str(candidate.get("candidate_id", "")))
+            entry["pair_ids"].add(_pair_id_text(int(candidate.get("src_nodeid", 0)), int(candidate.get("dst_nodeid", 0))))
+            if phase == "topology_kept":
+                entry["topology_kept_candidate_ids"].add(str(candidate.get("candidate_id", "")))
+                if reason:
+                    entry["kept_reasons"].add(str(reason))
+            elif phase == "selected":
+                entry["selected_candidate_ids"].add(str(candidate.get("candidate_id", "")))
+                if reason:
+                    entry["kept_reasons"].add(str(reason))
+            elif phase == "dropped" and reason:
+                entry["dropped_reasons"].append(str(reason))
 
     def record(candidate: dict[str, Any], *, stage: str, status: str, reason: str) -> None:
         line = candidate.get("line")
@@ -671,15 +862,19 @@ def _segment_candidates(
             "pairing_mode": str(pairing_mode),
             "line_length_m": float(line.length),
             "pair_midpoint_distance_m": float(_pair_midpoint_distance_for_nodes(xsec_map, int(src_nodeid), int(dst_nodeid))),
+            "traj_id": "" if str(source) != "traj" else next(iter({str(v) for v in support_traj_ids}), ""),
         }
 
     def reject(candidate: dict[str, Any], *, stage: str, reason: str) -> None:
         candidate["reason"] = str(reason)
         candidate["dropped_stage"] = str(stage)
         rejected.append(candidate)
+        note_candidate_events(candidate, phase="dropped", reason=reason)
+        if str(reason) in _SEGMENT_TOPOLOGY_INVALID_REASONS:
+            topology_invalid_counter[str(reason)] += 1
         record(candidate, stage=stage, status="dropped", reason=reason)
 
-    def evaluate_candidate(candidate: dict[str, Any]) -> None:
+    def cross_filter_reason(candidate: dict[str, Any]) -> str | None:
         line = candidate["line"]
         src_nodeid = int(candidate["src_nodeid"])
         dst_nodeid = int(candidate["dst_nodeid"])
@@ -691,36 +886,43 @@ def _segment_candidates(
         candidate["other_xsec_crossing_count"] = int(len(other_nodes))
         candidate["crosses_divstrip"] = bool(divstrip_cross)
         if float(line.length) < min_len:
-            reject(candidate, stage="cross_filter", reason="segment_too_short")
-            return
+            return "segment_too_short"
         if inside_ratio < min_drivezone:
-            reject(candidate, stage="cross_filter", reason="segment_outside_drivezone")
-            return
+            return "segment_outside_drivezone"
         if divstrip_cross:
-            reject(candidate, stage="cross_filter", reason="segment_crosses_divstrip")
-            return
+            return "segment_crosses_divstrip"
         if len(other_nodes) > max_other:
-            reject(candidate, stage="cross_filter", reason="segment_crosses_too_many_other_xsecs")
-            return
+            return "segment_crosses_too_many_other_xsecs"
         if (
             len(other_nodes) == 1
             and not allow_cross1
             and pair_scoped_cross1_enabled
             and (int(src_nodeid), int(dst_nodeid)) not in pair_scoped_cross1_allowlist
         ):
-            reject(candidate, stage="cross_filter", reason="cross1_pair_not_allowlisted")
-            return
+            return "cross1_pair_not_allowlisted"
+        return None
+
+    def accept_candidate(candidate: dict[str, Any]) -> None:
         candidate["reason"] = "candidate_survives_cross_filter"
         accepted.append(candidate)
+        note_candidate_events(candidate, phase="selected", reason="candidate_survives_cross_filter")
         record(candidate, stage="cross_filter", status="selected", reason="candidate_survives_cross_filter")
 
     for traj in inputs.trajectories:
         traj_line = _trajectory_line(traj)
         if traj_line is None:
             continue
-        events = _trajectory_events(traj, frame, hit_buffer)
+        events = _trajectory_events(
+            traj,
+            frame,
+            hit_buffer,
+            drivezone=inputs.drivezone_zone_metric,
+            divstrip_buffer=divstrip_buffer,
+        )
         if len(events) < 2:
             continue
+        for event in events:
+            ensure_crossing_audit(event)
         for i in range(len(events) - 1):
             for j in range(i + 1, len(events)):
                 src_nodeid = int(events[i]["nodeid"])
@@ -749,6 +951,8 @@ def _segment_candidates(
                     pair_index_gap=int(j - i),
                     pairing_mode="adjacent" if int(j - i) == 1 else "skip_pair",
                 )
+                candidate["start_event_id"] = str(events[i]["event_id"])
+                candidate["end_event_id"] = str(events[j]["event_id"])
                 raw_candidates.append(candidate)
                 record(candidate, stage="raw_generated", status="generated", reason="raw_candidate_generated")
     for idx, road in enumerate(prior_roads):
@@ -805,18 +1009,76 @@ def _segment_candidates(
         reason = "adjacent_pair_retained" if int(candidate.get("pair_index_gap", 0)) <= 1 else "non_adjacent_pair_retained"
         record(candidate, stage="pairing_filter", status="selected", reason=reason)
     for candidate in pairing_candidates:
-        evaluate_candidate(candidate)
+        geometry_probe = dict(candidate)
+        pre_reason = cross_filter_reason(geometry_probe)
+        if pre_reason is None:
+            accepted_before_topology_gate.append(geometry_probe)
+        topology_reason = _topology_gate_reason(
+            src_nodeid=int(candidate["src_nodeid"]),
+            dst_nodeid=int(candidate["dst_nodeid"]),
+            topology=topology,
+        )
+        candidate["topology_allowed"] = bool(topology_reason is None)
+        candidate["topology_reason"] = "" if topology_reason is None else str(topology_reason)
+        if topology_reason is not None:
+            reject(candidate, stage="topology_gate", reason=str(topology_reason))
+            continue
+        topology_kept_candidates.append(candidate)
+        note_candidate_events(candidate, phase="topology_kept", reason="topology_legal_candidate")
+        cross_reason = cross_filter_reason(candidate)
+        if cross_reason is not None:
+            reject(candidate, stage="cross_filter", reason=str(cross_reason))
+            continue
+        accept_candidate(candidate)
+    for event_id in sorted(crossing_audit.keys()):
+        entry = crossing_audit[event_id]
+        dropped_reason = ""
+        if entry["dropped_reasons"]:
+            counts = Counter(str(v) for v in entry["dropped_reasons"])
+            dropped_reason = str(sorted(counts.items(), key=lambda item: (-int(item[1]), str(item[0])))[0][0])
+        kept_reason = ""
+        if entry["kept_reasons"]:
+            kept_reason = "|".join(sorted(str(v) for v in entry["kept_reasons"]))
+        filtered_crossing_features.append(
+            {
+                "type": "Feature",
+                "geometry": mapping(entry["point"]),
+                "properties": {
+                    **crossing_props(entry),
+                    "candidate_count": int(len(entry["candidate_ids"])),
+                    "pair_count": int(len(entry["pair_ids"])),
+                    "topology_kept_candidate_count": int(len(entry["topology_kept_candidate_ids"])),
+                    "selected_candidate_count": int(len(entry["selected_candidate_ids"])),
+                    "kept_reason": str(kept_reason),
+                    "dropped_reason": str(dropped_reason),
+                    "status": "kept" if entry["topology_kept_candidate_ids"] else "dropped",
+                },
+            }
+        )
     return {
         "raw_candidates": raw_candidates,
         "paired_candidates": pairing_candidates,
+        "accepted_candidates_before_topology_gate": accepted_before_topology_gate,
+        "topology_kept_candidates": topology_kept_candidates,
         "accepted_candidates": accepted,
         "rejected_candidates": rejected,
         "candidate_debug_features": debug_features,
+        "raw_crossing_features": raw_crossing_features,
+        "filtered_crossing_features": filtered_crossing_features,
+        "topology": topology,
         "stats": {
             "raw_candidate_count": int(len(raw_candidates)),
             "candidate_count_after_pairing": int(len(pairing_candidates)),
+            "candidate_count_after_topology_gate": int(len(topology_kept_candidates)),
             "candidate_count_after_cross_filter": int(len(accepted)),
             "crossing_dist_hist_raw": _histogram([int(item.get("other_xsec_crossing_count", 0)) for item in pairing_candidates]),
+            "traj_crossing_raw_count": int(len(raw_crossing_features)),
+            "traj_crossing_filtered_count": int(
+                sum(1 for feat in filtered_crossing_features if int(feat["properties"].get("topology_kept_candidate_count", 0)) > 0)
+            ),
+            "directionally_invalid_segment_count": int(topology_invalid_counter.get("directionally_invalid_segment", 0)),
+            "topology_invalid_segment_count": int(topology_invalid_counter.get("segment_not_in_rcsdroad_topology", 0)),
+            "terminal_node_invalid_segment_count": int(topology_invalid_counter.get("terminal_node_not_owned_by_src", 0)),
         },
     }
 
@@ -1104,6 +1366,9 @@ def _best_audit_rejected_reason(entries: list[dict[str, Any]]) -> str:
     if not entries:
         return ""
     preferred = (
+        "terminal_node_not_owned_by_src",
+        "directionally_invalid_segment",
+        "segment_not_in_rcsdroad_topology",
         "cross1_pair_not_allowlisted",
         "cross1_has_cross0_alternative",
         "cross1_length_ratio_too_high",
@@ -1272,6 +1537,181 @@ def _build_pair_scoped_exception_audit(
         "pair_scoped_exception_non_allowlisted_cross1_pair_ids": list(non_allowlisted_cross1_pair_ids),
     }
     return audit_rows, metrics
+
+
+def _make_feature_collection(features: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "type": "FeatureCollection",
+        "features": list(features),
+        "crs": {"type": "name", "properties": {"name": "EPSG:3857"}},
+    }
+
+
+def _build_segment_support_traj_features(
+    *,
+    clustered_segments: list[Segment],
+    selected_segments: list[Segment],
+    accepted_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    accepted_by_id = {str(item.get("candidate_id", "")): item for item in accepted_candidates}
+    selected_ids = {str(segment.segment_id) for segment in selected_segments}
+    features: list[dict[str, Any]] = []
+    for segment in clustered_segments:
+        traj_candidates = [
+            accepted_by_id[str(candidate_id)]
+            for candidate_id in segment.candidate_ids
+            if str(candidate_id) in accepted_by_id and str(accepted_by_id[str(candidate_id)].get("source", "")) == "traj"
+        ]
+        for support_rank, candidate in enumerate(
+            sorted(
+                traj_candidates,
+                key=lambda item: (
+                    -float(item.get("drivezone_ratio", 0.0)),
+                    -float(item.get("line_length_m", getattr(item.get("line"), "length", 0.0))),
+                    str(item.get("candidate_id", "")),
+                ),
+            ),
+            start=1,
+        ):
+            line = candidate.get("line")
+            if not isinstance(line, LineString) or line.is_empty:
+                continue
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": mapping(line),
+                    "properties": {
+                        "segment_id": str(segment.segment_id),
+                        "src_nodeid": int(segment.src_nodeid),
+                        "dst_nodeid": int(segment.dst_nodeid),
+                        "traj_id": str(candidate.get("traj_id", "")),
+                        "candidate_id": str(candidate.get("candidate_id", "")),
+                        "support_rank": int(support_rank),
+                        "support_length": float(line.length),
+                        "support_direction_ok": bool(candidate.get("topology_allowed", False)),
+                        "support_inside_ratio": float(candidate.get("drivezone_ratio", 0.0)),
+                        "support_crossing_count": int(candidate.get("other_xsec_crossing_count", 0)),
+                        "segment_selected": bool(str(segment.segment_id) in selected_ids),
+                    },
+                }
+            )
+    return features
+
+
+def _build_segment_should_not_exist(
+    rejected_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_pair: dict[tuple[int, int], dict[str, Any]] = {}
+    for item in rejected_candidates:
+        reason = str(item.get("reason", ""))
+        if reason not in _SEGMENT_TOPOLOGY_INVALID_REASONS:
+            continue
+        pair = (int(item.get("src_nodeid", 0)), int(item.get("dst_nodeid", 0)))
+        row = by_pair.setdefault(
+            pair,
+            {
+                "src_nodeid": int(pair[0]),
+                "dst_nodeid": int(pair[1]),
+                "reason": str(reason),
+                "related_traj_ids": set(),
+                "related_candidate_ids": set(),
+            },
+        )
+        if not row["reason"]:
+            row["reason"] = str(reason)
+        row["related_candidate_ids"].add(str(item.get("candidate_id", "")))
+        for traj_id in item.get("support_traj_ids", set()) or []:
+            row["related_traj_ids"].add(str(traj_id))
+    out: list[dict[str, Any]] = []
+    for pair in sorted(by_pair.keys()):
+        row = by_pair[pair]
+        out.append(
+            {
+                "src_nodeid": int(row["src_nodeid"]),
+                "dst_nodeid": int(row["dst_nodeid"]),
+                "reason": str(row["reason"]),
+                "related_traj_ids": sorted(str(v) for v in row["related_traj_ids"]),
+                "related_candidate_ids": sorted(str(v) for v in row["related_candidate_ids"]),
+            }
+        )
+    return out
+
+
+def _build_terminal_node_audit(
+    *,
+    topology: dict[str, Any],
+    selected_segments: list[Segment],
+    paired_candidates: list[dict[str, Any]],
+    rejected_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not bool(topology.get("enabled")):
+        return []
+    selected_pairs = {
+        (int(segment.src_nodeid), int(segment.dst_nodeid)): segment
+        for segment in selected_segments
+    }
+    rejected_by_pair: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    for item in rejected_candidates:
+        rejected_by_pair[(int(item.get("src_nodeid", 0)), int(item.get("dst_nodeid", 0)))].append(item)
+    candidate_by_pair: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    for item in paired_candidates:
+        pair = (int(item.get("src_nodeid", 0)), int(item.get("dst_nodeid", 0)))
+        candidate_by_pair[pair].append(item)
+    node_ids = set(int(v) for v in topology.get("terminal_nodes", set()))
+    for pair in candidate_by_pair.keys():
+        src_nodeid, dst_nodeid = pair
+        if int(src_nodeid) in node_ids or int(dst_nodeid) in node_ids:
+            continue
+        if rejected_by_pair.get(pair):
+            reasons = {str(item.get("reason", "")) for item in rejected_by_pair[pair]}
+            if reasons & _SEGMENT_TOPOLOGY_INVALID_REASONS:
+                if int(src_nodeid) in topology.get("incoming", {}) or int(dst_nodeid) in topology.get("incoming", {}):
+                    node_ids.add(int(src_nodeid))
+                    node_ids.add(int(dst_nodeid))
+    audits: list[dict[str, Any]] = []
+    allowed_pairs: set[tuple[int, int]] = topology["allowed_pairs"]
+    incoming: dict[int, set[int]] = topology.get("incoming", {})
+    outgoing: dict[int, set[int]] = topology.get("outgoing", {})
+    node_kind_map: dict[int, Any] = topology.get("node_kind_map", {})
+    for nodeid in sorted(node_ids):
+        pair_rows: list[dict[str, Any]] = []
+        for pair, items in sorted(candidate_by_pair.items()):
+            src_nodeid, dst_nodeid = pair
+            if int(src_nodeid) != int(nodeid) and int(dst_nodeid) != int(nodeid):
+                continue
+            rejected_items = rejected_by_pair.get(pair, [])
+            segment = selected_pairs.get(pair)
+            reasons = [str(item.get("reason", "")) for item in rejected_items if str(item.get("reason", ""))]
+            pair_rows.append(
+                {
+                    "src_nodeid": int(src_nodeid),
+                    "dst_nodeid": int(dst_nodeid),
+                    "pair_id": _pair_id_text(src_nodeid, dst_nodeid),
+                    "traj_support_count": int(len({str(tid) for item in items for tid in item.get("support_traj_ids", set())})),
+                    "candidate_ids": sorted(str(item.get("candidate_id", "")) for item in items),
+                    "related_traj_ids": sorted({str(tid) for item in items for tid in item.get("support_traj_ids", set())}),
+                    "topology_allowed": bool(pair in allowed_pairs),
+                    "direction_allowed": bool(pair in allowed_pairs),
+                    "selected": bool(segment is not None),
+                    "selected_segment_id": "" if segment is None else str(segment.segment_id),
+                    "selected_reason": "" if segment is None else str(segment.kept_reason),
+                    "rejected_reason": "" if segment is not None else _best_audit_rejected_reason(rejected_items),
+                    "rejected_reasons": sorted(set(reasons)),
+                }
+            )
+        if not pair_rows:
+            continue
+        audits.append(
+            {
+                "nodeid": int(nodeid),
+                "node_kind": node_kind_map.get(int(nodeid)),
+                "terminal_by_topology": bool(int(nodeid) in topology.get("terminal_nodes", set())),
+                "allowed_incoming_src_nodeids": sorted(int(v) for v in incoming.get(int(nodeid), set())),
+                "allowed_outgoing_dst_nodeids": sorted(int(v) for v in outgoing.get(int(nodeid), set())),
+                "pairs": pair_rows,
+            }
+        )
+    return audits
 
 
 def _drivable_surface(inputs: PatchInputs, params: dict[str, Any]) -> BaseGeometry | None:
@@ -1923,10 +2363,18 @@ def _write_road_outputs(
         "failure_classification_hist": failure_classification_hist,
         "raw_candidate_count": int(root_step2_metrics.get("raw_candidate_count", 0)),
         "candidate_count_after_pairing": int(root_step2_metrics.get("candidate_count_after_pairing", 0)),
+        "candidate_count_after_topology_gate": int(root_step2_metrics.get("candidate_count_after_topology_gate", 0)),
         "candidate_count_after_cross_filter": int(root_step2_metrics.get("candidate_count_after_cross_filter", 0)),
         "candidate_count_after_same_pair_topk": int(root_step2_metrics.get("candidate_count_after_same_pair_topk", len(segments))),
+        "segment_selected_count_before_topology_gate": int(root_step2_metrics.get("segment_selected_count_before_topology_gate", 0)),
+        "segment_selected_count_after_topology_gate": int(root_step2_metrics.get("segment_selected_count_after_topology_gate", 0)),
         "crossing_dist_hist_raw": dict(root_step2_metrics.get("crossing_dist_hist_raw", {})),
         "crossing_dist_hist_selected": dict(root_step2_metrics.get("crossing_dist_hist_selected", {})),
+        "traj_crossing_raw_count": int(root_step2_metrics.get("traj_crossing_raw_count", 0)),
+        "traj_crossing_filtered_count": int(root_step2_metrics.get("traj_crossing_filtered_count", 0)),
+        "directionally_invalid_segment_count": int(root_step2_metrics.get("directionally_invalid_segment_count", 0)),
+        "topology_invalid_segment_count": int(root_step2_metrics.get("topology_invalid_segment_count", 0)),
+        "terminal_node_invalid_segment_count": int(root_step2_metrics.get("terminal_node_invalid_segment_count", 0)),
         "same_pair_hist": dict(root_step2_metrics.get("same_pair_hist", {})),
         "pair_count": int(root_step2_metrics.get("pair_count", 0)),
         "pairs_with_multi_segments": int(root_step2_metrics.get("pairs_with_multi_segments", 0)),
@@ -1975,6 +2423,22 @@ def _write_road_outputs(
             f"selected={len(metrics['pair_scoped_exception_selected_pair_ids'])} "
             f"rejected={len(metrics['pair_scoped_exception_rejected_pair_ids'])} "
             f"non_allowlisted_cross1={len(metrics['pair_scoped_exception_non_allowlisted_cross1_pair_ids'])}"
+        ),
+        (
+            "segment_topology_gate: "
+            f"before={int(metrics['segment_selected_count_before_topology_gate'])} "
+            f"after={int(metrics['segment_selected_count_after_topology_gate'])}"
+        ),
+        (
+            "traj_crossings: "
+            f"raw={int(metrics['traj_crossing_raw_count'])} "
+            f"filtered={int(metrics['traj_crossing_filtered_count'])}"
+        ),
+        (
+            "invalid_segment: "
+            f"direction={int(metrics['directionally_invalid_segment_count'])} "
+            f"topology={int(metrics['topology_invalid_segment_count'])} "
+            f"terminal={int(metrics['terminal_node_invalid_segment_count'])}"
         ),
         (
             "road_summary: "
@@ -2058,6 +2522,7 @@ def _stage2_segment(
 ) -> dict[str, Any]:
     inputs, frame, prior_roads = load_inputs_and_frame(data_root, patch_id, params=params)
     candidate_bundle = _segment_candidates(inputs, frame, prior_roads, params)
+    pre_topology_segments = _cluster_segments(list(candidate_bundle.get("accepted_candidates_before_topology_gate", [])), frame, params)
     accepted = list(candidate_bundle["accepted_candidates"])
     rejected = list(candidate_bundle["rejected_candidates"])
     clustered_segments = _cluster_segments(accepted, frame, params)
@@ -2072,6 +2537,18 @@ def _stage2_segment(
         rejected_candidates=rejected,
         params=params,
     )
+    terminal_node_audit = _build_terminal_node_audit(
+        topology=dict(candidate_bundle.get("topology", {})),
+        selected_segments=segments,
+        paired_candidates=list(candidate_bundle.get("paired_candidates", [])),
+        rejected_candidates=rejected,
+    )
+    segment_should_not_exist = _build_segment_should_not_exist(rejected)
+    step2_metrics = {
+        **step2_metrics,
+        "segment_selected_count_before_topology_gate": int(len(pre_topology_segments)),
+        "segment_selected_count_after_topology_gate": int(len(clustered_segments)),
+    }
     artifact = {
         "segments": [segment.to_dict() for segment in segments],
         "dropped_segments": [
@@ -2090,19 +2567,27 @@ def _stage2_segment(
                 "source": str(item["source"]),
                 "src_nodeid": int(item["src_nodeid"]),
                 "dst_nodeid": int(item["dst_nodeid"]),
+                "traj_id": str(item.get("traj_id", "")),
+                "support_traj_ids": sorted(str(v) for v in item.get("support_traj_ids", set())),
                 "reason": str(item.get("reason", "")),
                 "stage": str(item.get("dropped_stage", "")),
                 "pairing_mode": str(item.get("pairing_mode", "")),
                 "support_count": int(_candidate_support_count(item)),
+                "prior_supported": bool(item.get("prior_supported", False)),
                 "drivezone_ratio": float(item.get("drivezone_ratio", 0.0)),
                 "other_xsec_crossing_count": int(item.get("other_xsec_crossing_count", 0)),
                 "other_xsec_nodes": [int(v) for v in item.get("other_xsec_nodes", [])],
+                "topology_reason": str(item.get("topology_reason", "")),
+                "start_event_id": str(item.get("start_event_id", "")),
+                "end_event_id": str(item.get("end_event_id", "")),
             }
             for item in rejected
         ],
         "same_pair_groups": same_pair_groups,
         "zero_selected_pairs": zero_selected_pairs,
         "pair_scoped_exception_audit": pair_scoped_exception_audit,
+        "terminal_node_audit": terminal_node_audit,
+        "segment_should_not_exist": segment_should_not_exist,
         "step2_metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics},
     }
     dbg_dir = debug_dir(out_root, run_id, patch_id)
@@ -2116,11 +2601,22 @@ def _stage2_segment(
         for item in dropped_segments
     ]
     selected_segment_features = _segment_features(segments, status="selected")
+    support_traj_features = _build_segment_support_traj_features(
+        clustered_segments=clustered_segments,
+        selected_segments=segments,
+        accepted_candidates=accepted,
+    )
     write_lines_geojson(dbg_dir / "step2_segment_candidates_all.geojson", all_candidate_features)
     write_lines_geojson(dbg_dir / "segment_candidates.geojson", all_candidate_features)
     write_lines_geojson(dbg_dir / "step2_segment_selected.geojson", selected_segment_features)
     write_lines_geojson(dbg_dir / "segment_selected.geojson", selected_segment_features)
     write_lines_geojson(dbg_dir / "step2_segment_dropped.geojson", dropped_segment_features)
+    write_json(dbg_dir / "step2_traj_crossings_raw.geojson", _make_feature_collection(list(candidate_bundle.get("raw_crossing_features", []))))
+    write_json(
+        dbg_dir / "step2_traj_crossings_filtered.geojson",
+        _make_feature_collection(list(candidate_bundle.get("filtered_crossing_features", []))),
+    )
+    write_json(dbg_dir / "step2_segment_support_trajs.geojson", _make_feature_collection(support_traj_features))
     write_json(
         dbg_dir / "step2_same_pair_groups.json",
         {"pairs": same_pair_groups, "metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics}},
@@ -2132,6 +2628,14 @@ def _stage2_segment(
     write_json(
         dbg_dir / "step2_pair_scoped_exception_audit.json",
         {"pairs": pair_scoped_exception_audit, "metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics}},
+    )
+    write_json(
+        dbg_dir / "step2_terminal_node_audit.json",
+        {"nodes": terminal_node_audit, "metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics}},
+    )
+    write_json(
+        dbg_dir / "step2_segment_should_not_exist.json",
+        {"pairs": segment_should_not_exist, "metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics}},
     )
     return {
         "artifact": artifact,

@@ -394,6 +394,101 @@ def test_t05v2_step2_same_pair_topk_prefers_stronger_cluster(tmp_path: Path) -> 
     assert any(item["dropped_reason"] == "same_pair_topk_exceeded" for item in segments_payload["dropped_segments"])
 
 
+def test_t05v2_step2_topology_gate_rejects_wrong_terminal_pairs_and_reverse_direction(tmp_path: Path) -> None:
+    patch_id = "topology_gate_terminal"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -5.0), (0.0, 5.0)], {"nodeid": 11}),
+            _line_feature([(0.0, 15.0), (0.0, 25.0)], {"nodeid": 21}),
+            _line_feature([(70.0, 5.0), (70.0, 15.0)], {"nodeid": 31}),
+            _line_feature([(100.0, -5.0), (100.0, 25.0)], {"nodeid": 41}),
+        ],
+        "EPSG:3857",
+    )
+    drivezone_fc = _fc([_poly_feature([(-5.0, -10.0), (105.0, -10.0), (105.0, 30.0), (-5.0, 30.0)])], "EPSG:3857")
+    road_fc = _fc([_line_feature([(70.0, 10.0), (100.0, 10.0)], {"snodeid": 31, "enodeid": 41})], "EPSG:3857")
+    tracks = [
+        [(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)],
+        [(0.0, 20.0), (50.0, 20.0), (100.0, 20.0)],
+        [(70.0, 10.0), (85.0, 10.0), (100.0, 10.0)],
+        [(100.0, 10.0), (85.0, 10.0), (70.0, 10.0)],
+    ]
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=intersection_fc,
+        drivezone_fc=drivezone_fc,
+        traj_tracks=tracks,
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_topology", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_topology", out_root=out_root)
+    patch_dir = out_root / "run_topology" / "patches" / patch_id
+    segments_payload = _read_json(patch_dir / "step2" / "segments.json")
+    kept_pairs = {(int(item["src_nodeid"]), int(item["dst_nodeid"])) for item in segments_payload["segments"]}
+    assert kept_pairs == {(31, 41)}
+    excluded = segments_payload["excluded_candidates"]
+    excluded_by_pair = {(int(item["src_nodeid"]), int(item["dst_nodeid"])): str(item["reason"]) for item in excluded}
+    assert excluded_by_pair[(11, 41)] == "terminal_node_not_owned_by_src"
+    assert excluded_by_pair[(21, 41)] == "terminal_node_not_owned_by_src"
+    assert excluded_by_pair[(41, 31)] == "directionally_invalid_segment"
+    step2_metrics = segments_payload["step2_metrics"]
+    assert int(step2_metrics["segment_selected_count_before_topology_gate"]) == 4
+    assert int(step2_metrics["segment_selected_count_after_topology_gate"]) == 1
+    assert int(step2_metrics["directionally_invalid_segment_count"]) == 1
+    assert int(step2_metrics["terminal_node_invalid_segment_count"]) == 2
+    audit = _read_json(patch_dir / "debug" / "step2_terminal_node_audit.json")
+    node_41 = next(item for item in audit["nodes"] if int(item["nodeid"]) == 41)
+    pair_map = {str(item["pair_id"]): item for item in node_41["pairs"]}
+    assert bool(pair_map["31:41"]["selected"]) is True
+    assert pair_map["11:41"]["rejected_reason"] == "terminal_node_not_owned_by_src"
+    assert pair_map["21:41"]["rejected_reason"] == "terminal_node_not_owned_by_src"
+    should_not_exist = _read_json(patch_dir / "debug" / "step2_segment_should_not_exist.json")
+    reasons = { (int(item["src_nodeid"]), int(item["dst_nodeid"])): str(item["reason"]) for item in should_not_exist["pairs"] }
+    assert reasons[(11, 41)] == "terminal_node_not_owned_by_src"
+    assert reasons[(21, 41)] == "terminal_node_not_owned_by_src"
+    assert reasons[(41, 31)] == "directionally_invalid_segment"
+
+
+def test_t05v2_step2_writes_traj_crossing_and_support_audits(tmp_path: Path) -> None:
+    patch_id = "traj_audit"
+    data_root = tmp_path / "data"
+    road_fc = _fc([_line_feature([(0.0, 0.0), (100.0, 0.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=_simple_intersections(),
+        drivezone_fc=_fc([_poly_feature([(-5.0, -4.0), (105.0, -4.0), (105.0, 4.0), (-5.0, 4.0)])], "EPSG:3857"),
+        traj_tracks=[[(0.0, 0.0), (30.0, 0.0), (70.0, 0.0), (100.0, 0.0)]],
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_audit", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_audit", out_root=out_root)
+    patch_dir = out_root / "run_audit" / "patches" / patch_id
+    raw_crossings = _read_json(patch_dir / "debug" / "step2_traj_crossings_raw.geojson")
+    filtered_crossings = _read_json(patch_dir / "debug" / "step2_traj_crossings_filtered.geojson")
+    support_trajs = _read_json(patch_dir / "debug" / "step2_segment_support_trajs.geojson")
+    metrics = _read_json(patch_dir / "step2" / "segments.json")["step2_metrics"]
+    assert raw_crossings["features"]
+    assert filtered_crossings["features"]
+    assert support_trajs["features"]
+    raw_props = raw_crossings["features"][0]["properties"]
+    filtered_props = filtered_crossings["features"][0]["properties"]
+    support_props = support_trajs["features"][0]["properties"]
+    assert "traj_id" in raw_props
+    assert "crossing_order_on_traj" in raw_props
+    assert "local_heading" in raw_props
+    assert "dropped_reason" in filtered_props
+    assert "kept_reason" in filtered_props
+    assert "segment_id" in support_props
+    assert "support_direction_ok" in support_props
+    assert int(metrics["traj_crossing_raw_count"]) >= 2
+    assert int(metrics["traj_crossing_filtered_count"]) >= 2
+
+
 def test_t05v2_missing_previous_stage_reports_expected_paths(tmp_path: Path) -> None:
     patch_id = "missing_prev"
     data_root = tmp_path / "data"

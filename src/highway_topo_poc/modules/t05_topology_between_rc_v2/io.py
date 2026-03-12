@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,7 +16,7 @@ from highway_topo_poc.modules.t04_rc_sw_anchor.crs_norm import (
     load_geojson_and_reproject,
     normalize_epsg_name,
 )
-from highway_topo_poc.modules.t04_rc_sw_anchor.io_geojson import load_roads
+from highway_topo_poc.modules.t04_rc_sw_anchor.io_geojson import load_nodes, load_roads
 
 from .models import BaseCrossSection, line_to_coords
 
@@ -24,6 +24,8 @@ from .models import BaseCrossSection, line_to_coords
 _TRAJ_FILE_NAME = "raw_dat_pose.geojson"
 _ROAD_PRIMARY_NAME = "RCSDRoad.geojson"
 _ROAD_FALLBACK_NAME = "Road.geojson"
+_NODE_PRIMARY_NAME = "RCSDNode.geojson"
+_NODE_FALLBACK_NAME = "Node.geojson"
 
 
 class InputDataError(ValueError):
@@ -56,7 +58,8 @@ class PatchInputs:
     drivezone_zone_metric: BaseGeometry | None
     divstrip_zone_metric: BaseGeometry | None
     road_prior_path: Path | None
-    input_summary: dict[str, Any]
+    node_records: tuple[Any, ...] = ()
+    input_summary: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,7 @@ class InputFrame:
     lane_boundary_count: int
     trajectory_count: int
     road_prior_count: int
+    node_count: int
     input_summary: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
@@ -83,6 +87,7 @@ class InputFrame:
             "lane_boundary_count": int(self.lane_boundary_count),
             "trajectory_count": int(self.trajectory_count),
             "road_prior_count": int(self.road_prior_count),
+            "node_count": int(self.node_count),
             "input_summary": dict(self.input_summary),
         }
 
@@ -98,6 +103,7 @@ class InputFrame:
             lane_boundary_count=int(payload.get("lane_boundary_count", 0)),
             trajectory_count=int(payload.get("trajectory_count", 0)),
             road_prior_count=int(payload.get("road_prior_count", 0)),
+            node_count=int(payload.get("node_count", 0)),
             input_summary=dict(payload.get("input_summary") or {}),
         )
 
@@ -319,9 +325,13 @@ def load_inputs_and_frame(
     lane_path = vector_dir / "LaneBoundary.geojson"
     divstrip_path = vector_dir / "DivStripZone.geojson"
     road_prior_path = vector_dir / _ROAD_PRIMARY_NAME
+    node_path = vector_dir / _NODE_PRIMARY_NAME
     if not road_prior_path.is_file():
         fallback = vector_dir / _ROAD_FALLBACK_NAME
         road_prior_path = fallback if fallback.is_file() else None
+    if not node_path.is_file():
+        fallback = vector_dir / _NODE_FALLBACK_NAME
+        node_path = fallback if fallback.is_file() else None
     if not intersection_path.is_file():
         raise InputDataError(f"intersection_l_missing:{intersection_path}")
     if not drivezone_path.is_file():
@@ -347,6 +357,12 @@ def load_inputs_and_frame(
             prior_roads, _meta, _errors = load_roads(path=road_prior_path, src_crs_override="auto", dst_crs="EPSG:3857", aoi=None)
         except Exception:
             prior_roads = []
+    node_records: list[Any] = []
+    if node_path is not None and node_path.is_file():
+        try:
+            node_records, _meta, _errors = load_nodes(path=node_path, src_crs_override="auto", dst_crs="EPSG:3857", aoi=None)
+        except Exception:
+            node_records = []
     inputs = PatchInputs(
         patch_id=str(patch_id),
         patch_dir=patch_dir,
@@ -357,12 +373,14 @@ def load_inputs_and_frame(
         drivezone_zone_metric=drivezone,
         divstrip_zone_metric=divstrip,
         road_prior_path=road_prior_path,
+        node_records=tuple(node_records),
         input_summary={
             "dst_crs": "EPSG:3857",
             "lane_boundary_fix": lane_fix,
             "divstrip_fix": div_fix,
             "trajectory_count": int(len(trajectories)),
             "road_prior_count": int(len(prior_roads)),
+            "node_count": int(len(node_records)),
         },
     )
     frame = InputFrame(
@@ -378,6 +396,7 @@ def load_inputs_and_frame(
         lane_boundary_count=int(len(lane_lines)),
         trajectory_count=int(len(trajectories)),
         road_prior_count=int(len(prior_roads)),
+        node_count=int(len(node_records)),
         input_summary=dict(inputs.input_summary),
     )
     return inputs, frame, prior_roads
