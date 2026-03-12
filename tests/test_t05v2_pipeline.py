@@ -410,19 +410,27 @@ def test_t05v2_unique_witness_based_full_pipeline(tmp_path: Path) -> None:
     metrics = _read_json(out_root / "run3" / "patches" / patch_id / "metrics.json")
     gate = _read_json(out_root / "run3" / "patches" / patch_id / "gate.json")
     roads = _read_json(out_root / "run3" / "patches" / patch_id / "Road.geojson")
+    shape_ref = _read_json(out_root / "run3" / "patches" / patch_id / "debug" / "shape_ref_line.geojson")
     summary = (out_root / "run3" / "patches" / patch_id / "summary.txt").read_text(encoding="utf-8")
     assert int(metrics["road_count"]) == 1
     assert int(metrics["raw_candidate_count"]) >= 1
     assert int(metrics["witness_selected_count_total"]) == 1
     assert int(metrics["witness_selected_count_cross0"]) == 1
     assert int(metrics["witness_selected_count_cross1"]) == 0
+    assert int(metrics["no_geometry_candidate_count"]) == 0
     assert int(metrics["pair_scoped_exception_audit_count"]) == 0
     assert metrics["pair_scoped_exception_selected_pair_ids"] == []
     assert metrics["pair_scoped_exception_rejected_pair_ids"] == []
     assert metrics["pair_scoped_exception_non_allowlisted_cross1_pair_ids"] == []
     assert metrics["segments"][0]["corridor_identity"] == "witness_based"
+    assert metrics["segments"][0]["corridor_identity_state"] == "witness_based"
+    assert metrics["segments"][0]["slot_src_status"] == "resolved"
+    assert metrics["segments"][0]["slot_dst_status"] == "resolved"
+    assert float(metrics["segments"][0]["road_in_drivezone_ratio"]) >= 0.99
+    assert metrics["segments"][0]["shape_ref_mode"] == "witness_centerline"
     assert bool(gate["overall_pass"]) is True
     assert len(roads["features"]) == 1
+    assert len(shape_ref["features"]) == 1
     assert "pair_scoped_exception: selected=0 rejected=0 non_allowlisted_cross1=0" in summary
 
 
@@ -450,7 +458,10 @@ def test_t05v2_prior_based_for_short_prior_segment(tmp_path: Path) -> None:
     run_full_pipeline(data_root=data_root, patch_id=patch_id, run_id="run4", out_root=out_root)
     metrics = _read_json(out_root / "run4" / "patches" / patch_id / "metrics.json")
     gate = _read_json(out_root / "run4" / "patches" / patch_id / "gate.json")
+    roads = _read_json(out_root / "run4" / "patches" / patch_id / "Road.geojson")
     assert metrics["segments"][0]["corridor_identity"] == "prior_based"
+    assert metrics["segments"][0]["shape_ref_mode"] == "prior_reference_slot_anchored"
+    assert roads["features"][0]["properties"]["corridor_state"] == "prior_based"
     assert bool(gate["overall_pass"]) is True
     assert any(bp["reason"] == "prior_based_fallback" for bp in gate["soft_breakpoints"])
 
@@ -479,6 +490,10 @@ def test_t05v2_unresolved_when_short_segment_has_no_prior(tmp_path: Path) -> Non
     gate = _read_json(out_root / "run5" / "patches" / patch_id / "gate.json")
     roads = _read_json(out_root / "run5" / "patches" / patch_id / "Road.geojson")
     assert metrics["segments"][0]["corridor_identity"] == "unresolved"
+    assert int(metrics["no_geometry_candidate_count"]) == 1
+    assert str(metrics["no_geometry_candidate_reason"]) != ""
+    assert bool(metrics["segments"][0]["no_geometry_candidate"]) is True
+    assert str(metrics["segments"][0]["no_geometry_candidate_reason"]) != ""
     assert len(roads["features"]) == 0
     assert bool(gate["overall_pass"]) is False
     assert gate["hard_breakpoints"]

@@ -28,6 +28,7 @@ from .models import (
     FinalRoad,
     Segment,
     SlotInterval,
+    coords_to_line,
     line_to_coords,
 )
 
@@ -364,6 +365,10 @@ def _midpoint_of_interval(interval: CorridorInterval) -> Point:
     return interval.geometry_metric().interpolate(0.5, normalized=True)
 
 
+def _reverse_line(line: LineString) -> LineString:
+    return LineString(list(reversed(list(line.coords))))
+
+
 def _replace_endpoints(line: LineString, start_pt: Point, end_pt: Point) -> LineString:
     coords = list(line.coords)
     mid: list[tuple[float, float]] = []
@@ -379,6 +384,87 @@ def _replace_endpoints(line: LineString, start_pt: Point, end_pt: Point) -> Line
     if len(deduped) < 2:
         deduped = [(float(start_pt.x), float(start_pt.y)), (float(end_pt.x), float(end_pt.y))]
     return LineString(deduped)
+
+
+def _find_prior_reference_line(segment: Segment, prior_roads: list[Any]) -> LineString | None:
+    best_line: LineString | None = None
+    best_cost = float("inf")
+    segment_line = segment.geometry_metric()
+    seg_start = Point(float(segment_line.coords[0][0]), float(segment_line.coords[0][1]))
+    seg_end = Point(float(segment_line.coords[-1][0]), float(segment_line.coords[-1][1]))
+    for road in prior_roads:
+        line = getattr(road, "line", None)
+        if not isinstance(line, LineString) or line.is_empty or line.length <= 1e-6:
+            continue
+        snodeid = int(getattr(road, "snodeid", 0))
+        enodeid = int(getattr(road, "enodeid", 0))
+        candidate_line: LineString | None = None
+        if snodeid == int(segment.src_nodeid) and enodeid == int(segment.dst_nodeid):
+            candidate_line = line
+        elif snodeid == int(segment.dst_nodeid) and enodeid == int(segment.src_nodeid):
+            candidate_line = _reverse_line(line)
+        if candidate_line is None:
+            continue
+        road_start = Point(float(candidate_line.coords[0][0]), float(candidate_line.coords[0][1]))
+        road_end = Point(float(candidate_line.coords[-1][0]), float(candidate_line.coords[-1][1]))
+        cost = float(seg_start.distance(road_start) + seg_end.distance(road_end))
+        if cost < best_cost:
+            best_cost = cost
+            best_line = candidate_line
+    return best_line
+
+
+def _selected_witness_interval(witness: CorridorWitness | None) -> CorridorInterval | None:
+    if witness is None or witness.selected_interval_rank is None:
+        return None
+    for interval in witness.intervals:
+        if int(interval.rank) == int(witness.selected_interval_rank):
+            return interval
+    return None
+
+
+def _slot_reference_line(
+    *,
+    segment: Segment,
+    identity: CorridorIdentity,
+    prior_roads: list[Any],
+) -> tuple[LineString, str]:
+    if str(identity.state) == "prior_based":
+        prior_line = _find_prior_reference_line(segment, prior_roads)
+        if prior_line is not None:
+            return prior_line, "prior_reference"
+    return segment.geometry_metric(), "segment_support"
+
+
+def _shape_ref_line(
+    *,
+    segment: Segment,
+    identity: CorridorIdentity,
+    witness: CorridorWitness | None,
+    src_slot: SlotInterval,
+    dst_slot: SlotInterval,
+    prior_roads: list[Any],
+) -> tuple[LineString, str]:
+    base_line, mode = _slot_reference_line(segment=segment, identity=identity, prior_roads=prior_roads)
+    if src_slot.interval is None or dst_slot.interval is None:
+        return base_line, str(mode)
+    start_pt = _midpoint_of_interval(src_slot.interval)
+    end_pt = _midpoint_of_interval(dst_slot.interval)
+    if str(identity.state) == "witness_based":
+        selected = _selected_witness_interval(witness)
+        if selected is not None:
+            mid_pt = _midpoint_of_interval(selected)
+            return (
+                LineString(
+                    [
+                        (float(start_pt.x), float(start_pt.y)),
+                        (float(mid_pt.x), float(mid_pt.y)),
+                        (float(end_pt.x), float(end_pt.y)),
+                    ]
+                ),
+                "witness_centerline",
+            )
+    return _replace_endpoints(base_line, start_pt, end_pt), f"{mode}_slot_anchored"
 
 
 def _load_previous_state(out_root: Path | str, run_id: str, patch_id: str, stage: str) -> dict[str, Any] | None:
@@ -1474,40 +1560,46 @@ def _build_final_road(
     src_slot: SlotInterval,
     dst_slot: SlotInterval,
     inputs: PatchInputs,
+    prior_roads: list[Any],
     params: dict[str, Any],
 ) -> tuple[FinalRoad | None, dict[str, Any]]:
-    result = {"segment_id": str(segment.segment_id), "corridor_state": str(identity.state), "reason": ""}
+    result = {
+        "segment_id": str(segment.segment_id),
+        "corridor_state": str(identity.state),
+        "shape_ref_mode": "",
+        "shape_ref_coords": [],
+        "drivezone_ratio": 0.0,
+        "road_intersects_divstrip": False,
+        "reason": "",
+    }
     if str(identity.state) == "unresolved":
         result["reason"] = str(identity.reason)
         return None, result
+    shape_ref_line, shape_ref_mode = _shape_ref_line(
+        segment=segment,
+        identity=identity,
+        witness=witness,
+        src_slot=src_slot,
+        dst_slot=dst_slot,
+        prior_roads=prior_roads,
+    )
+    result["shape_ref_mode"] = str(shape_ref_mode)
+    result["shape_ref_coords"] = [[float(x), float(y)] for x, y in line_to_coords(shape_ref_line)]
     if src_slot.interval is None or dst_slot.interval is None:
         result["reason"] = "slot_unresolved"
         return None, result
-    start_pt = _midpoint_of_interval(src_slot.interval)
-    end_pt = _midpoint_of_interval(dst_slot.interval)
-    support_line = segment.geometry_metric()
-    road_line = _replace_endpoints(support_line, start_pt, end_pt)
-    if str(identity.state) == "witness_based" and witness is not None and witness.selected_interval_rank is not None:
-        selected = None
-        for interval in witness.intervals:
-            if int(interval.rank) == int(witness.selected_interval_rank):
-                selected = interval
-                break
-        if selected is not None:
-            mid_pt = _midpoint_of_interval(selected)
-            road_line = LineString(
-                [
-                    (float(start_pt.x), float(start_pt.y)),
-                    (float(mid_pt.x), float(mid_pt.y)),
-                    (float(end_pt.x), float(end_pt.y)),
-                ]
-            )
+    road_line = shape_ref_line
     drivezone_ratio = _drivezone_ratio(road_line, inputs.drivezone_zone_metric)
     divstrip_buffer = load_divstrip_buffer(inputs.divstrip_zone_metric, float(params["DIVSTRIP_BUFFER_M"]))
+    road_intersects_divstrip = bool(
+        divstrip_buffer is not None and (not divstrip_buffer.is_empty) and road_line.intersects(divstrip_buffer)
+    )
+    result["drivezone_ratio"] = float(drivezone_ratio)
+    result["road_intersects_divstrip"] = bool(road_intersects_divstrip)
     if drivezone_ratio < float(params["ROAD_MIN_DRIVEZONE_RATIO"]):
         result["reason"] = "road_outside_drivezone"
         return None, result
-    if divstrip_buffer is not None and (not divstrip_buffer.is_empty) and road_line.intersects(divstrip_buffer):
+    if road_intersects_divstrip:
         result["reason"] = "road_crosses_divstrip"
         return None, result
     road = FinalRoad(
@@ -1523,7 +1615,6 @@ def _build_final_road(
         risk_flags=tuple(str(v) for v in identity.risk_flags),
     )
     result["reason"] = "built"
-    result["drivezone_ratio"] = float(drivezone_ratio)
     return road, result
 
 
@@ -1555,26 +1646,33 @@ def _write_road_outputs(
         witness = witnesses.get(str(segment.segment_id))
         src_slot = slots[str(segment.segment_id)]["src"]
         dst_slot = slots[str(segment.segment_id)]["dst"]
+        build_result = result_map.get(str(segment.segment_id), {})
+        shape_ref_coords = build_result.get("shape_ref_coords") or [[float(x), float(y)] for x, y in segment.geometry_coords]
+        shape_ref_line = coords_to_line(tuple((float(x), float(y)) for x, y in shape_ref_coords))
         shape_ref_features.append(
             (
-                segment.geometry_metric(),
+                shape_ref_line,
                 {
                     "segment_id": str(segment.segment_id),
                     "src_nodeid": int(segment.src_nodeid),
                     "dst_nodeid": int(segment.dst_nodeid),
                     "corridor_state": str(identity.state),
+                    "shape_ref_mode": str(build_result.get("shape_ref_mode", "segment_support")),
+                    "no_geometry_candidate": bool(str(build_result.get("reason", "")) != "built"),
+                    "no_geometry_reason": str(build_result.get("reason", "")),
                 },
             )
         )
         road = road_map.get(str(segment.segment_id))
-        build_result = result_map.get(str(segment.segment_id), {})
         endpoint_dist_to_slot = {"src": None, "dst": None}
         endpoint_dist_to_xsec = {"src": None, "dst": None}
         road_in_drivezone = False
-        road_crosses_divstrip = False
+        road_in_drivezone_ratio = float(build_result.get("drivezone_ratio", 0.0) or 0.0)
+        road_crosses_divstrip = bool(build_result.get("road_intersects_divstrip", False))
         if road is not None:
             road_line = road.geometry_metric()
-            road_in_drivezone = _drivezone_ratio(road_line, inputs.drivezone_zone_metric) >= 0.999
+            road_in_drivezone_ratio = float(_drivezone_ratio(road_line, inputs.drivezone_zone_metric))
+            road_in_drivezone = road_in_drivezone_ratio >= 0.999
             divstrip_buffer = load_divstrip_buffer(inputs.divstrip_zone_metric, float(DEFAULT_PARAMS["DIVSTRIP_BUFFER_M"]))
             road_crosses_divstrip = bool(divstrip_buffer is not None and (not divstrip_buffer.is_empty) and road_line.intersects(divstrip_buffer))
             if src_slot.interval is not None:
@@ -1596,6 +1694,8 @@ def _write_road_outputs(
                         "support_traj_count": int(road.support_traj_count),
                         "dedup_count": int(road.dedup_count),
                         "risk_flags": list(road.risk_flags),
+                        "road_in_drivezone_ratio": float(road_in_drivezone_ratio),
+                        "road_intersects_divstrip": bool(road_crosses_divstrip),
                     },
                 )
             )
@@ -1612,15 +1712,27 @@ def _write_road_outputs(
             "segment_kept_reason": str(segment.kept_reason),
             "other_xsec_crossing_count": int(segment.other_xsec_crossing_count),
             "corridor_identity": str(identity.state),
+            "corridor_identity_state": str(identity.state),
             "corridor_reason": str(identity.reason),
             "has_exclusive_interval": bool(witness.exclusive_interval) if witness is not None else False,
             "witness_stability_score": 0.0 if witness is None else float(witness.stability_score),
             "src_slot_resolved": bool(src_slot.resolved),
             "dst_slot_resolved": bool(dst_slot.resolved),
+            "slot_src_status": "resolved" if bool(src_slot.resolved) else "unresolved",
+            "slot_dst_status": "resolved" if bool(dst_slot.resolved) else "unresolved",
+            "slot_src_reason": str(src_slot.reason),
+            "slot_dst_reason": str(dst_slot.reason),
             "endpoint_dist_to_slot": endpoint_dist_to_slot,
             "endpoint_dist_to_xsec": endpoint_dist_to_xsec,
+            "endpoint_dist_to_slot_src": endpoint_dist_to_slot["src"],
+            "endpoint_dist_to_slot_dst": endpoint_dist_to_slot["dst"],
             "road_in_drivezone": bool(road_in_drivezone),
+            "road_in_drivezone_ratio": float(road_in_drivezone_ratio),
             "road_crosses_divstrip": bool(road_crosses_divstrip),
+            "road_intersects_divstrip": bool(road_crosses_divstrip),
+            "shape_ref_mode": str(build_result.get("shape_ref_mode", "")),
+            "no_geometry_candidate": bool(road is None),
+            "no_geometry_candidate_reason": str(unresolved_reason),
             "unresolved_reason": str(unresolved_reason),
         }
         metrics_segments.append(metrics_entry)
@@ -1676,11 +1788,24 @@ def _write_road_outputs(
         )
     )
     root_step2_metrics = dict(step2_metrics or {})
+    no_geometry_entries = [entry for entry in metrics_segments if bool(entry["no_geometry_candidate"])]
+    no_geometry_reason_hist = dict(
+        Counter(str(entry["no_geometry_candidate_reason"] or "unknown") for entry in no_geometry_entries)
+    )
+    no_geometry_reason = ""
+    if no_geometry_reason_hist:
+        if len(no_geometry_reason_hist) == 1:
+            no_geometry_reason = next(iter(no_geometry_reason_hist.keys()))
+        else:
+            no_geometry_reason = "multiple"
     metrics = {
         "patch_id": str(patch_id),
         "segment_count": int(len(segments)),
         "road_count": int(len(roads)),
         "unresolved_segment_count": int(sum(1 for entry in metrics_segments if entry["unresolved_reason"])),
+        "no_geometry_candidate_count": int(len(no_geometry_entries)),
+        "no_geometry_candidate_reason": str(no_geometry_reason),
+        "no_geometry_candidate_reasons": no_geometry_reason_hist,
         "raw_candidate_count": int(root_step2_metrics.get("raw_candidate_count", 0)),
         "candidate_count_after_pairing": int(root_step2_metrics.get("candidate_count_after_pairing", 0)),
         "candidate_count_after_cross_filter": int(root_step2_metrics.get("candidate_count_after_cross_filter", 0)),
@@ -1759,6 +1884,10 @@ def _write_road_outputs(
         dbg_dir / "reason_trace.json",
         {
             "corridor_identities": [identities[key].to_dict() for key in sorted(identities.keys())],
+            "slot_mapping": {
+                str(segment_id): {"src": slots[str(segment_id)]["src"].to_dict(), "dst": slots[str(segment_id)]["dst"].to_dict()}
+                for segment_id in sorted(slots.keys())
+            },
             "road_build": road_results,
         },
     )
@@ -1985,7 +2114,7 @@ def _stage5_slot_mapping(
     out_root: Path | str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    inputs, frame, _prior_roads = load_inputs_and_frame(data_root, patch_id, params=params)
+    inputs, frame, prior_roads = load_inputs_and_frame(data_root, patch_id, params=params)
     xsec_map = _xsec_map(frame)
     segments_payload = _load_stage_payload(out_root, run_id, patch_id, "step2_segment")
     witnesses_payload = _load_stage_payload(out_root, run_id, patch_id, "step3_witness")
@@ -1998,7 +2127,7 @@ def _stage5_slot_mapping(
     for segment in segments:
         witness = witnesses.get(str(segment.segment_id))
         identity = identities[str(segment.segment_id)]
-        line = segment.geometry_metric()
+        line, line_mode = _slot_reference_line(segment=segment, identity=identity, prior_roads=prior_roads)
         src_slot = _build_slot(
             segment=segment,
             witness=witness,
@@ -2032,6 +2161,8 @@ def _stage5_slot_mapping(
                             "resolved": bool(slot.resolved),
                             "method": str(slot.method),
                             "reason": str(slot.reason),
+                            "corridor_state": str(identity.state),
+                            "line_mode": str(line_mode),
                         },
                     )
                 )
@@ -2044,6 +2175,8 @@ def _stage5_slot_mapping(
                         "xsec_nodeid": int(slot.xsec_nodeid),
                         "resolved": bool(slot.resolved),
                         "role": "base_xsec",
+                        "corridor_state": str(identity.state),
+                        "line_mode": str(line_mode),
                     },
                 )
             )
@@ -2076,7 +2209,7 @@ def _stage6_build_road(
     out_root: Path | str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    inputs, frame, _prior_roads = load_inputs_and_frame(data_root, patch_id, params=params)
+    inputs, frame, prior_roads = load_inputs_and_frame(data_root, patch_id, params=params)
     segments_payload = _load_stage_payload(out_root, run_id, patch_id, "step2_segment")
     step2_metrics = dict(segments_payload.get("step2_metrics") or {})
     witnesses_payload = _load_stage_payload(out_root, run_id, patch_id, "step3_witness")
@@ -2099,6 +2232,7 @@ def _stage6_build_road(
             src_slot=slot_map[str(segment.segment_id)]["src"],
             dst_slot=slot_map[str(segment.segment_id)]["dst"],
             inputs=inputs,
+            prior_roads=prior_roads,
             params=params,
         )
         road_results.append(dict(build_meta))

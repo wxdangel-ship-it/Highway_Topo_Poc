@@ -1,12 +1,15 @@
 # T05 v2 Real-Run Acceptance
 
-## 目的
-这份文档用于内网 WSL 真实 patch 首轮验收。
+## 目标
+当前版本的目标不是继续打磨 `Step2`，而是基于冻结的 `Step2` baseline，尽快验证：
+- `Step3 corridor_identity` 是否真正进入主链路
+- `Step4 slot` 是否能把端点稳定落回 `base_xsec`
+- `Step5/6` 是否能在简单真实 patch 上输出非空 `Road`
 
-当前版本的重点不是让最终 `Road` 完美，而是确认：
-- `Step2 Segment` 是否已经收敛
-- 单点 `cross=1` 例外是否受控
-- debug / metrics 是否足够解释
+建议验收顺序：
+1. 先找 1~2 个简单真实 patch，优先看“能否先出非空 Road”
+2. 再用复杂 patch `5417632623039346` 做回归和压力测试
+3. 当前复杂 patch 不是本轮“第一优先出 Road”的对象
 
 ## 环境变量
 ```bash
@@ -67,29 +70,15 @@ Resume:
 cd "$REPO_ROOT" && bash scripts/t05v2_resume.sh --data_root "$DATA_ROOT" --patch_id "$PATCH_ID" --run_id "$RUN_ID" --debug
 ```
 
-## Step2 默认保守参数
-当前默认就是保守口径：
+## Step2 基线参数
+当前仍然保持冻结：
 - `--step2_strict_adjacent_pairing 1`
 - `--step2_allow_one_intermediate_xsec 0`
 - `--step2_same_pair_topk 1`
 
-## Step2 单点 cross1 例外参数
-默认关闭：
+单点 `cross=1` 例外仍然默认关闭，只在明确需要时启用：
 - `--step2_pair_scoped_cross1_exception_enable 0`
 - `--step2_pair_scoped_cross1_allowlist ""`
-
-如果只验证单个 pair 的 `cross=1` 例外，可透传：
-```bash
-cd "$REPO_ROOT" && \
-bash scripts/t05v2_step2_segment.sh \
-  --data_root "$DATA_ROOT" \
-  --patch_id "$PATCH_ID" \
-  --run_id "$RUN_ID" \
-  --debug \
-  --force \
-  --step2_pair_scoped_cross1_exception_enable 1 \
-  --step2_pair_scoped_cross1_allowlist 55353246:37687913
-```
 
 ## 输出目录结构
 ```bash
@@ -111,65 +100,100 @@ outputs/_work/t05_topology_between_rc_v2/$RUN_ID/patches/$PATCH_ID/
 - 主产物 `json`
 - `step_state.json`
 
-## 验收顺序
+## 先看什么
 第一优先：
 - `summary.txt`
 - `metrics.json`
 - `gate.json`
 
 第二优先：
-- `debug/step2_segment_selected.geojson`
-- `debug/step2_segment_dropped.geojson`
-- `debug/step2_same_pair_groups.json`
-- `debug/step2_zero_selected_pairs.json`
-- `debug/step3_witness_input_segments.geojson`
-
-第三优先：
-- `debug/corridor_witness_selected.geojson`
 - `debug/corridor_identity.json`
 - `debug/slot_src_dst.geojson`
 - `debug/shape_ref_line.geojson`
 - `debug/road_final.geojson`
 
-第四优先：
-- `debug/step2_segment_candidates_all.geojson`
+第三优先：
+- `debug/segment_selected.geojson`
+- `debug/corridor_witness_selected.geojson`
 - `debug/reason_trace.json`
-- `debug/base_xsec_all.geojson`
-- `debug/probe_xsec_all.geojson`
 
-## 关键文件意义
-- `debug/step2_segment_selected.geojson`
-  作用：当前真正进入后续主链路的 `Segment`
-- `debug/step2_segment_dropped.geojson`
-  作用：same-pair 压缩或 `cross=1` 例外规则丢掉了哪些 `Segment`
+第四优先：
+- `debug/step2_pair_scoped_exception_audit.json`
 - `debug/step2_same_pair_groups.json`
-  作用：查看每个 `(src,dst)` 下候选数、保留数、排序依据、淘汰原因
-- `debug/step2_zero_selected_pairs.json`
-  作用：查看哪些 `(src,dst)` 最终一个 `Segment` 都没留下，以及是否满足 pair-scoped `cross=1` 例外条件
-- `debug/step3_witness_input_segments.geojson`
-  作用：确认 witness 实际收到的 `Segment` 输入，判断 witness 数量是 Step2 造成还是 Step3 自己膨胀
+- `debug/step2_segment_dropped.geojson`
 
-## Step2 验收重点
-优先看这些字段：
+## 关键文件怎么读
+- `debug/corridor_identity.json`
+  先确认每个 `Segment` 是 `witness_based / prior_based / unresolved` 哪一种。
+  如果这里就已经 `unresolved`，后面没有 `Road` 是正常结果。
+
+- `debug/slot_src_dst.geojson`
+  先看 `src` 和 `dst` 是否都落回了对应的 `base_xsec`。
+  重点看：
+  - `resolved`
+  - `method`
+  - `reason`
+  - `corridor_state`
+
+- `debug/shape_ref_line.geojson`
+  这是当前真正用于成路的参考通路趋势，不再只是单纯 `Segment`。
+  重点看：
+  - `shape_ref_mode`
+  - `no_geometry_candidate`
+  - `no_geometry_reason`
+
+- `debug/road_final.geojson`
+  这是最终输出的 `Road`。
+  重点先看端点是否回到了正确 `slot`，再看中段是否大体沿正确通路。
+
+- `debug/reason_trace.json`
+  如果没有 `Road`，这里最适合查“卡在了哪一层”：
+  - `corridor_identity`
+  - `slot_mapping`
+  - `road_build`
+
+## metrics 重点字段
+优先看这些：
 - `segment_count`
-- `crossing_dist_hist_selected`
-- `pairs_with_multi_segments`
-- `max_segments_per_pair`
-- `pair_scoped_cross1_exception_enabled`
-- `pair_scoped_cross1_exception_hit_count`
-- `selected_cross1_exception_count`
-- `zero_selected_pair_count`
-- `zero_selected_pair_ids`
+- `road_count`
+- `no_geometry_candidate_count`
+- `no_geometry_candidate_reason`
+- `segments[*].corridor_identity_state`
+- `segments[*].slot_src_status`
+- `segments[*].slot_dst_status`
+- `segments[*].endpoint_dist_to_slot_src`
+- `segments[*].endpoint_dist_to_slot_dst`
+- `segments[*].road_in_drivezone_ratio`
+- `segments[*].road_intersects_divstrip`
+- `segments[*].shape_ref_mode`
 
 建议判读：
-- 如果 `crossing_dist_hist_selected["1"]` 重新大面积出现，说明全局 `cross=1` 回潮
-- 如果 `pairs_with_multi_segments` 重新升高，说明 same-pair 压缩退化
-- 如果开启 pair-scoped 例外后，只有 allowlist pair 出现 `cross=1 selected`，说明例外仍然受控
-- 如果 `step2_zero_selected_pairs.json` 里的 pair 依旧很多，要先回看 `step2_segment_dropped.geojson` 和 `excluded_candidates`
+- 如果 `corridor_identity_state = unresolved`
+  先不要看 `Road`，直接去看 `corridor_identity.json` 和 `reason_trace.json`
+
+- 如果 `slot_src_status / slot_dst_status = unresolved`
+  先不要判断最终几何对不对，说明是 slot 层卡住
+
+- 如果 `shape_ref_line` 看起来合理，但 `road_final` 空
+  大概率是 `DriveZone / DivStrip / slot` 约束把几何拦下来了
+
+- 如果 `road_in_drivezone_ratio` 很低或 `road_intersects_divstrip = true`
+  当前输出不应视为可通过结果
+
+## 真实 patch 验收策略
+推荐顺序：
+1. 先用简单真实 patch 验证：
+   - `road_count > 0`
+   - `slot_src_dst` 与 `road_final` 大体一致
+   - `prior_based / witness_based` 都能给出可解释结果
+2. 再用复杂 patch `5417632623039346` 做回归：
+   - `Step2` baseline 不退化
+   - `Step3/4/5` 不反向污染 `Step2`
+   - 如果失败，必须能解释是卡在 `corridor_identity / slot / final_road` 哪一层
 
 ## 当前已知限制
-- `ProbeCrossSection` 仍未进入主判定，只保留占位输出
+- `ProbeCrossSection` 仍未进入主判定
 - branch identity 仍未完整实现
-- witness/prior 冲突仲裁仍是最小版
-- `STEP2_SAME_PAIR_TOPK=1` 对真实 same-pair 多路共存场景可能偏保守
-- pair-scoped `cross=1` 例外当前只适合做单点验证，不适合直接扩成全局业务口径
+- `STEP2_SAME_PAIR_TOPK=1` 对真实 same-pair 多路共存仍可能偏保守
+- 复杂 patch 上，`prior_based / unresolved` 的比例可能仍偏高
+- 当前版本优先保证“先有可解释的 Road”，而不是“先有最平滑的几何”
