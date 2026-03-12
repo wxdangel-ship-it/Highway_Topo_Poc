@@ -7,8 +7,22 @@ import sys
 from pathlib import Path
 
 import pytest
+from shapely.geometry import Polygon
 
-from highway_topo_poc.modules.t05_topology_between_rc_v2.pipeline import run_full_pipeline, run_stage
+from highway_topo_poc.modules.t05_topology_between_rc_v2.io import PatchInputs
+from highway_topo_poc.modules.t05_topology_between_rc_v2.models import (
+    CorridorIdentity,
+    CorridorInterval,
+    CorridorWitness,
+    Segment,
+    SlotInterval,
+)
+from highway_topo_poc.modules.t05_topology_between_rc_v2.pipeline import (
+    DEFAULT_PARAMS,
+    _build_final_road,
+    run_full_pipeline,
+    run_stage,
+)
 
 
 def _fc(features: list[dict], crs_name: str | None = "EPSG:3857") -> dict:
@@ -547,6 +561,132 @@ def test_t05v2_divstrip_blocks_final_road(tmp_path: Path) -> None:
     assert bool(gate["overall_pass"]) is False
     assert gate["hard_breakpoints"]
     assert int(metrics["road_count"]) == 0
+
+
+def test_t05v2_build_final_road_falls_back_to_segment_support_when_witness_centerline_leaves_drivezone() -> None:
+    segment = Segment(
+        segment_id="seg_fallback",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 1.0), (50.0, 1.0), (100.0, 1.0)),
+        candidate_ids=("cand_1",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_1",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="traj_supported_cluster",
+        length_m=100.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        same_pair_rank=1,
+        kept_reason="",
+    )
+    witness_interval = CorridorInterval(
+        start_s=3.5,
+        end_s=4.5,
+        center_s=4.0,
+        length_m=1.0,
+        rank=0,
+        geometry_coords=((50.0, -6.5), (50.0, -5.5)),
+    )
+    witness = CorridorWitness(
+        segment_id="seg_fallback",
+        status="selected",
+        reason="witness_interval_selected",
+        line_coords=((50.0, -10.0), (50.0, 10.0)),
+        sample_s_norm=0.5,
+        intervals=(witness_interval,),
+        selected_interval_rank=0,
+        selected_interval_start_s=3.5,
+        selected_interval_end_s=4.5,
+        exclusive_interval=True,
+        stability_score=1.0,
+        neighbor_match_count=2,
+        axis_vector=(0.0, 1.0),
+    )
+    identity = CorridorIdentity(
+        segment_id="seg_fallback",
+        state="witness_based",
+        reason="witness_selected",
+        risk_flags=tuple(),
+        witness_interval_rank=0,
+        prior_supported=False,
+    )
+    src_slot = SlotInterval(
+        segment_id="seg_fallback",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, -10.0), (0.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=10.8,
+            end_s=11.2,
+            center_s=11.0,
+            length_m=0.4,
+            rank=0,
+            geometry_coords=((0.0, 0.8), (0.0, 1.2)),
+        ),
+        resolved=True,
+        method="rank",
+        reason="synthetic",
+        interval_count=1,
+    )
+    dst_slot = SlotInterval(
+        segment_id="seg_fallback",
+        endpoint_tag="dst",
+        xsec_nodeid=20,
+        xsec_coords=((100.0, -10.0), (100.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=10.8,
+            end_s=11.2,
+            center_s=11.0,
+            length_m=0.4,
+            rank=0,
+            geometry_coords=((100.0, 0.8), (100.0, 1.2)),
+        ),
+        resolved=True,
+        method="rank",
+        reason="synthetic",
+        interval_count=1,
+    )
+    inputs = PatchInputs(
+        patch_id="synthetic_fallback",
+        patch_dir=Path("synthetic_fallback"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, 0.0), (105.0, 0.0), (105.0, 2.0), (-5.0, 2.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+
+    road, result = _build_final_road(
+        patch_id="synthetic_fallback",
+        segment=segment,
+        identity=identity,
+        witness=witness,
+        src_slot=src_slot,
+        dst_slot=dst_slot,
+        inputs=inputs,
+        prior_roads=[],
+        params=dict(DEFAULT_PARAMS),
+    )
+
+    assert road is not None
+    assert result["reason"] == "built"
+    assert result["shape_ref_mode"] == "segment_support_slot_anchored"
+    assert len(result["candidate_attempts"]) == 2
+    assert result["candidate_attempts"][0]["mode"] == "witness_centerline"
+    assert float(result["candidate_attempts"][0]["drivezone_ratio"]) < float(DEFAULT_PARAMS["ROAD_MIN_DRIVEZONE_RATIO"])
+    assert result["candidate_attempts"][1]["mode"] == "segment_support_slot_anchored"
+    assert float(result["candidate_attempts"][1]["drivezone_ratio"]) >= float(DEFAULT_PARAMS["ROAD_MIN_DRIVEZONE_RATIO"])
+    assert road.line_coords == ((0.0, 1.0), (50.0, 1.0), (100.0, 1.0))
 
 
 def test_t05v2_scripts_stepwise_state_resume(tmp_path: Path) -> None:

@@ -1575,7 +1575,22 @@ def _build_final_road(
     if str(identity.state) == "unresolved":
         result["reason"] = str(identity.reason)
         return None, result
-    shape_ref_line, shape_ref_mode = _shape_ref_line(
+    if src_slot.interval is None or dst_slot.interval is None:
+        fallback_shape_ref, fallback_mode = _shape_ref_line(
+            segment=segment,
+            identity=identity,
+            witness=witness,
+            src_slot=src_slot,
+            dst_slot=dst_slot,
+            prior_roads=prior_roads,
+        )
+        result["shape_ref_mode"] = str(fallback_mode)
+        result["shape_ref_coords"] = [[float(x), float(y)] for x, y in line_to_coords(fallback_shape_ref)]
+        result["reason"] = "slot_unresolved"
+        return None, result
+    start_pt = _midpoint_of_interval(src_slot.interval)
+    end_pt = _midpoint_of_interval(dst_slot.interval)
+    preferred_line, preferred_mode = _shape_ref_line(
         segment=segment,
         identity=identity,
         witness=witness,
@@ -1583,24 +1598,62 @@ def _build_final_road(
         dst_slot=dst_slot,
         prior_roads=prior_roads,
     )
-    result["shape_ref_mode"] = str(shape_ref_mode)
-    result["shape_ref_coords"] = [[float(x), float(y)] for x, y in line_to_coords(shape_ref_line)]
-    if src_slot.interval is None or dst_slot.interval is None:
-        result["reason"] = "slot_unresolved"
-        return None, result
-    road_line = shape_ref_line
-    drivezone_ratio = _drivezone_ratio(road_line, inputs.drivezone_zone_metric)
+    candidate_lines: list[tuple[LineString, str]] = [(preferred_line, str(preferred_mode))]
+    segment_anchor = _replace_endpoints(segment.geometry_metric(), start_pt, end_pt)
+    if not segment_anchor.equals(preferred_line):
+        candidate_lines.append((segment_anchor, "segment_support_slot_anchored"))
+    prior_line = _find_prior_reference_line(segment, prior_roads)
+    if prior_line is not None:
+        prior_anchor = _replace_endpoints(prior_line, start_pt, end_pt)
+        if not any(prior_anchor.equals(item[0]) for item in candidate_lines):
+            if str(identity.state) == "prior_based":
+                candidate_lines.insert(1, (prior_anchor, "prior_reference_slot_anchored"))
+            else:
+                candidate_lines.append((prior_anchor, "prior_reference_slot_anchored"))
     divstrip_buffer = load_divstrip_buffer(inputs.divstrip_zone_metric, float(params["DIVSTRIP_BUFFER_M"]))
-    road_intersects_divstrip = bool(
-        divstrip_buffer is not None and (not divstrip_buffer.is_empty) and road_line.intersects(divstrip_buffer)
+    attempts: list[dict[str, Any]] = []
+    selected_candidate: tuple[LineString, str, float, bool] | None = None
+    best_candidate: tuple[LineString, str, float, bool] | None = None
+    for line, mode in candidate_lines:
+        drivezone_ratio = _drivezone_ratio(line, inputs.drivezone_zone_metric)
+        road_intersects_divstrip = bool(
+            divstrip_buffer is not None and (not divstrip_buffer.is_empty) and line.intersects(divstrip_buffer)
+        )
+        attempts.append(
+            {
+                "mode": str(mode),
+                "drivezone_ratio": float(drivezone_ratio),
+                "road_intersects_divstrip": bool(road_intersects_divstrip),
+            }
+        )
+        candidate = (line, str(mode), float(drivezone_ratio), bool(road_intersects_divstrip))
+        if best_candidate is None or (
+            int(not road_intersects_divstrip),
+            float(drivezone_ratio),
+        ) > (
+            int(not best_candidate[3]),
+            float(best_candidate[2]),
+        ):
+            best_candidate = candidate
+        if drivezone_ratio >= float(params["ROAD_MIN_DRIVEZONE_RATIO"]) and not road_intersects_divstrip:
+            selected_candidate = candidate
+            break
+    chosen_line, chosen_mode, drivezone_ratio, road_intersects_divstrip = selected_candidate or best_candidate or (
+        preferred_line,
+        str(preferred_mode),
+        0.0,
+        False,
     )
+    result["candidate_attempts"] = attempts
+    result["shape_ref_mode"] = str(chosen_mode)
+    result["shape_ref_coords"] = [[float(x), float(y)] for x, y in line_to_coords(chosen_line)]
     result["drivezone_ratio"] = float(drivezone_ratio)
     result["road_intersects_divstrip"] = bool(road_intersects_divstrip)
-    if drivezone_ratio < float(params["ROAD_MIN_DRIVEZONE_RATIO"]):
-        result["reason"] = "road_outside_drivezone"
-        return None, result
-    if road_intersects_divstrip:
-        result["reason"] = "road_crosses_divstrip"
+    if selected_candidate is None:
+        if road_intersects_divstrip:
+            result["reason"] = "road_crosses_divstrip"
+        else:
+            result["reason"] = "road_outside_drivezone"
         return None, result
     road = FinalRoad(
         road_id=f"{patch_id}_{segment.segment_id}",
@@ -1608,8 +1661,8 @@ def _build_final_road(
         src_nodeid=int(segment.src_nodeid),
         dst_nodeid=int(segment.dst_nodeid),
         corridor_state=str(identity.state),
-        line_coords=line_to_coords(road_line),
-        length_m=float(road_line.length),
+        line_coords=line_to_coords(chosen_line),
+        length_m=float(chosen_line.length),
         support_traj_count=int(len(segment.support_traj_ids)),
         dedup_count=int(segment.dedup_count),
         risk_flags=tuple(str(v) for v in identity.risk_flags),
