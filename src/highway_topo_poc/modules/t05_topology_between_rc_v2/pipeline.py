@@ -67,6 +67,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP2_CROSS1_MIN_DRIVEZONE_RATIO": 0.98,
     "STEP2_CROSS1_MAX_LENGTH_RATIO": 1.35,
     "STEP2_CROSS1_REQUIRE_NO_CROSS0_BETTER": 1,
+    "STEP2_PAIR_SCOPED_CROSS1_EXCEPTION_ENABLE": 0,
+    "STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST": "",
     "PRIOR_ENDPOINT_ANCHOR_M": 20.0,
     "DIVSTRIP_BUFFER_M": 0.5,
     "WITNESS_HALF_LENGTH_M": 30.0,
@@ -432,6 +434,32 @@ def _histogram(values: list[int]) -> dict[str, int]:
     return {str(int(key)): int(value) for key, value in sorted(counts.items(), key=lambda item: int(item[0]))}
 
 
+def _parse_pair_scoped_allowlist(value: Any) -> set[tuple[int, int]]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        tokens = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        tokens = [str(part).strip() for part in value if str(part).strip()]
+    else:
+        tokens = [str(value).strip()]
+    out: set[tuple[int, int]] = set()
+    for token in tokens:
+        text = str(token).strip()
+        if ":" not in text:
+            continue
+        src_text, dst_text = text.split(":", 1)
+        try:
+            out.add((int(src_text), int(dst_text)))
+        except Exception:
+            continue
+    return out
+
+
+def _pair_id_text(src_nodeid: int, dst_nodeid: int) -> str:
+    return f"{int(src_nodeid)}:{int(dst_nodeid)}"
+
+
 def _candidate_support_count(candidate: dict[str, Any]) -> int:
     return int(max(1, len({str(v) for v in candidate.get("support_traj_ids", set())})))
 
@@ -521,6 +549,9 @@ def _segment_candidates(
     min_len = float(params["SEGMENT_MIN_LENGTH_M"])
     min_drivezone = float(params["SEGMENT_MIN_DRIVEZONE_RATIO"])
     strict_adjacent = bool(int(params["STEP2_STRICT_ADJACENT_PAIRING"]))
+    allow_cross1 = bool(int(params["STEP2_ALLOW_ONE_INTERMEDIATE_XSEC"]))
+    pair_scoped_cross1_enabled = bool(int(params.get("STEP2_PAIR_SCOPED_CROSS1_EXCEPTION_ENABLE", 0)))
+    pair_scoped_cross1_allowlist = _parse_pair_scoped_allowlist(params.get("STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST", ""))
     divstrip_buffer = load_divstrip_buffer(inputs.divstrip_zone_metric, float(params["DIVSTRIP_BUFFER_M"]))
 
     def record(candidate: dict[str, Any], *, stage: str, status: str, reason: str) -> None:
@@ -584,6 +615,14 @@ def _segment_candidates(
             return
         if len(other_nodes) > max_other:
             reject(candidate, stage="cross_filter", reason="segment_crosses_too_many_other_xsecs")
+            return
+        if (
+            len(other_nodes) == 1
+            and not allow_cross1
+            and pair_scoped_cross1_enabled
+            and (int(src_nodeid), int(dst_nodeid)) not in pair_scoped_cross1_allowlist
+        ):
+            reject(candidate, stage="cross_filter", reason="cross1_pair_not_allowlisted")
             return
         candidate["reason"] = "candidate_survives_cross_filter"
         accepted.append(candidate)
@@ -779,7 +818,7 @@ def _select_segments_same_pair(
     segments: list[Segment],
     frame: InputFrame,
     params: dict[str, Any],
-) -> tuple[list[Segment], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[Segment], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     xsec_map = _xsec_map(frame)
     topk = max(1, int(params["STEP2_SAME_PAIR_TOPK"]))
     allow_cross1 = bool(int(params["STEP2_ALLOW_ONE_INTERMEDIATE_XSEC"]))
@@ -787,6 +826,8 @@ def _select_segments_same_pair(
     cross1_min_drivezone = float(params["STEP2_CROSS1_MIN_DRIVEZONE_RATIO"])
     cross1_max_length_ratio = float(params["STEP2_CROSS1_MAX_LENGTH_RATIO"])
     cross1_require_no_cross0 = bool(int(params["STEP2_CROSS1_REQUIRE_NO_CROSS0_BETTER"]))
+    pair_scoped_cross1_enabled = bool(int(params.get("STEP2_PAIR_SCOPED_CROSS1_EXCEPTION_ENABLE", 0)))
+    pair_scoped_cross1_allowlist = _parse_pair_scoped_allowlist(params.get("STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST", ""))
     by_pair: dict[tuple[int, int], list[Segment]] = {}
     for segment in segments:
         by_pair.setdefault((int(segment.src_nodeid), int(segment.dst_nodeid)), []).append(segment)
@@ -806,36 +847,67 @@ def _select_segments_same_pair(
     selected: list[Segment] = []
     dropped: list[dict[str, Any]] = []
     group_payloads: list[dict[str, Any]] = []
+    zero_selected_pairs: list[dict[str, Any]] = []
+    pair_scoped_exception_hits: set[tuple[int, int]] = set()
+    selected_cross1_exception_count = 0
     for (src_nodeid, dst_nodeid), pair_segments in sorted(by_pair.items()):
         ordered = sorted(pair_segments, key=sort_key)
         has_cross0 = any(int(segment.other_xsec_crossing_count) == 0 for segment in ordered)
+        pair_scoped_exception_applicable = bool(
+            pair_scoped_cross1_enabled and (int(src_nodeid), int(dst_nodeid)) in pair_scoped_cross1_allowlist
+        )
         kept_count = 0
         segment_payloads: list[dict[str, Any]] = []
         for rank, segment in enumerate(ordered, start=1):
             length_ratio = float(_segment_length_ratio(segment, xsec_map))
             dropped_reason = ""
             kept_reason = ""
+            selected_via_pair_scoped_exception = False
             if int(segment.other_xsec_crossing_count) == 0:
                 kept_reason = "cross0_primary"
             else:
-                if not allow_cross1:
-                    dropped_reason = "cross1_disabled"
-                elif int(segment.support_count) < cross1_min_support:
-                    dropped_reason = "cross1_support_too_low"
-                elif float(segment.drivezone_ratio) < cross1_min_drivezone:
-                    dropped_reason = "cross1_drivezone_ratio_too_low"
-                elif bool(segment.crosses_divstrip):
-                    dropped_reason = "cross1_gore_conflict"
-                elif float(length_ratio) > cross1_max_length_ratio:
-                    dropped_reason = "cross1_length_ratio_too_high"
-                elif cross1_require_no_cross0 and has_cross0:
-                    dropped_reason = "cross1_has_cross0_alternative"
+                if allow_cross1:
+                    if int(segment.support_count) < cross1_min_support:
+                        dropped_reason = "cross1_support_too_low"
+                    elif float(segment.drivezone_ratio) < cross1_min_drivezone:
+                        dropped_reason = "cross1_drivezone_ratio_too_low"
+                    elif bool(segment.crosses_divstrip):
+                        dropped_reason = "cross1_gore_conflict"
+                    elif float(length_ratio) > cross1_max_length_ratio:
+                        dropped_reason = "cross1_length_ratio_too_high"
+                    elif cross1_require_no_cross0 and has_cross0:
+                        dropped_reason = "cross1_has_cross0_alternative"
+                    else:
+                        kept_reason = (
+                            f"cross1_exception:support={int(segment.support_count)}:"
+                            f"drivezone_ratio={float(segment.drivezone_ratio):.3f}:"
+                            f"length_ratio={float(length_ratio):.3f}"
+                        )
+                elif pair_scoped_exception_applicable:
+                    if int(rank) != 1:
+                        dropped_reason = "cross1_pair_scoped_not_best_rank"
+                    elif int(segment.support_count) <= 0:
+                        dropped_reason = "cross1_support_zero"
+                    elif float(segment.drivezone_ratio) < cross1_min_drivezone:
+                        dropped_reason = "cross1_drivezone_ratio_too_low"
+                    elif bool(segment.crosses_divstrip):
+                        dropped_reason = "cross1_gore_conflict"
+                    elif float(length_ratio) > cross1_max_length_ratio:
+                        dropped_reason = "cross1_length_ratio_too_high"
+                    elif has_cross0:
+                        dropped_reason = "cross1_has_cross0_alternative"
+                    else:
+                        kept_reason = (
+                            "pair_scoped_cross1_exception:"
+                            "no_cross0_alternative:"
+                            "business_prior_confirmed:"
+                            f"support={int(segment.support_count)}:"
+                            f"drivezone_ratio={float(segment.drivezone_ratio):.3f}:"
+                            f"length_ratio={float(length_ratio):.3f}"
+                        )
+                        selected_via_pair_scoped_exception = True
                 else:
-                    kept_reason = (
-                        f"cross1_exception:support={int(segment.support_count)}:"
-                        f"drivezone_ratio={float(segment.drivezone_ratio):.3f}:"
-                        f"length_ratio={float(length_ratio):.3f}"
-                    )
+                    dropped_reason = "cross1_disabled"
             if not dropped_reason and kept_count >= topk:
                 dropped_reason = "same_pair_topk_exceeded"
             if dropped_reason:
@@ -849,32 +921,59 @@ def _select_segments_same_pair(
             else:
                 kept_count += 1
                 selected.append(replace(segment, same_pair_rank=int(rank), kept_reason=str(kept_reason)))
+                if selected_via_pair_scoped_exception:
+                    selected_cross1_exception_count += 1
+                    pair_scoped_exception_hits.add((int(src_nodeid), int(dst_nodeid)))
             segment_payloads.append(
                 {
                     "segment_id": str(segment.segment_id),
                     "sort_rank": int(rank),
+                    "same_pair_rank": int(rank),
                     "support_count": int(segment.support_count),
                     "crossing_dist": int(segment.other_xsec_crossing_count),
+                    "other_xsec_crossing_count": int(segment.other_xsec_crossing_count),
                     "drivezone_ratio": float(segment.drivezone_ratio),
+                    "inside_ratio": float(segment.drivezone_ratio),
                     "gore_conflict": bool(segment.crosses_divstrip),
                     "length_m": float(segment.length_m),
                     "length_ratio": float(length_ratio),
                     "selected": bool(not dropped_reason),
                     "kept_reason": str(kept_reason),
                     "dropped_reason": str(dropped_reason),
+                    "whether_pair_scoped_exception_applicable": bool(pair_scoped_exception_applicable),
                 }
             )
+        selected_segment_count = int(sum(1 for item in segment_payloads if bool(item["selected"])))
         group_payloads.append(
             {
                 "src_nodeid": int(src_nodeid),
                 "dst_nodeid": int(dst_nodeid),
                 "candidate_segment_count": int(len(pair_segments)),
-                "selected_segment_count": int(sum(1 for item in segment_payloads if bool(item["selected"]))),
+                "selected_segment_count": int(selected_segment_count),
                 "same_pair_topk": int(topk),
                 "has_cross0_candidate": bool(has_cross0),
+                "whether_pair_scoped_exception_applicable": bool(pair_scoped_exception_applicable),
                 "segments": segment_payloads,
             }
         )
+        if selected_segment_count == 0 and segment_payloads:
+            best = dict(segment_payloads[0])
+            zero_selected_pairs.append(
+                {
+                    "src_nodeid": int(src_nodeid),
+                    "dst_nodeid": int(dst_nodeid),
+                    "pair_id": _pair_id_text(src_nodeid, dst_nodeid),
+                    "candidate_count": int(len(pair_segments)),
+                    "support_count": int(best.get("support_count", 0)),
+                    "other_xsec_crossing_count": int(best.get("other_xsec_crossing_count", 0)),
+                    "inside_ratio": float(best.get("inside_ratio", 0.0)),
+                    "gore_conflict": bool(best.get("gore_conflict", False)),
+                    "dropped_reason": str(best.get("dropped_reason", "")),
+                    "whether_pair_scoped_exception_applicable": bool(pair_scoped_exception_applicable),
+                    "kept_reason": str(best.get("kept_reason", "")),
+                    "segments": segment_payloads,
+                }
+            )
     metrics = {
         "candidate_count_after_same_pair_topk": int(len(selected)),
         "crossing_dist_hist_selected": _histogram([int(item.other_xsec_crossing_count) for item in selected]),
@@ -882,8 +981,13 @@ def _select_segments_same_pair(
         "same_pair_hist": _histogram([int(item["selected_segment_count"]) for item in group_payloads]),
         "pairs_with_multi_segments": int(sum(1 for item in group_payloads if int(item["selected_segment_count"]) > 1)),
         "max_segments_per_pair": int(max((int(item["selected_segment_count"]) for item in group_payloads), default=0)),
+        "pair_scoped_cross1_exception_enabled": bool(pair_scoped_cross1_enabled),
+        "pair_scoped_cross1_exception_hit_count": int(len(pair_scoped_exception_hits)),
+        "selected_cross1_exception_count": int(selected_cross1_exception_count),
+        "zero_selected_pair_count": int(len(zero_selected_pairs)),
+        "zero_selected_pair_ids": [str(item["pair_id"]) for item in zero_selected_pairs],
     }
-    return selected, dropped, group_payloads, metrics
+    return selected, dropped, group_payloads, zero_selected_pairs, metrics
 
 
 def _segment_debug_features(candidates: list[dict[str, Any]], *, status: str, stage: str) -> list[tuple[LineString, dict[str, Any]]]:
@@ -1413,6 +1517,11 @@ def _write_road_outputs(
         "pair_count": int(root_step2_metrics.get("pair_count", 0)),
         "pairs_with_multi_segments": int(root_step2_metrics.get("pairs_with_multi_segments", 0)),
         "max_segments_per_pair": int(root_step2_metrics.get("max_segments_per_pair", 0)),
+        "pair_scoped_cross1_exception_enabled": bool(root_step2_metrics.get("pair_scoped_cross1_exception_enabled", False)),
+        "pair_scoped_cross1_exception_hit_count": int(root_step2_metrics.get("pair_scoped_cross1_exception_hit_count", 0)),
+        "selected_cross1_exception_count": int(root_step2_metrics.get("selected_cross1_exception_count", 0)),
+        "zero_selected_pair_count": int(root_step2_metrics.get("zero_selected_pair_count", 0)),
+        "zero_selected_pair_ids": [str(v) for v in root_step2_metrics.get("zero_selected_pair_ids", [])],
         "witness_selected_count_total": int(witness_selected_total),
         "witness_selected_count_cross0": int(witness_selected_cross0),
         "witness_selected_count_cross1": int(witness_selected_cross1),
@@ -1501,7 +1610,11 @@ def _stage2_segment(
     accepted = list(candidate_bundle["accepted_candidates"])
     rejected = list(candidate_bundle["rejected_candidates"])
     clustered_segments = _cluster_segments(accepted, frame, params)
-    segments, dropped_segments, same_pair_groups, step2_metrics = _select_segments_same_pair(clustered_segments, frame, params)
+    segments, dropped_segments, same_pair_groups, zero_selected_pairs, step2_metrics = _select_segments_same_pair(
+        clustered_segments,
+        frame,
+        params,
+    )
     artifact = {
         "segments": [segment.to_dict() for segment in segments],
         "dropped_segments": [
@@ -1531,6 +1644,7 @@ def _stage2_segment(
             for item in rejected
         ],
         "same_pair_groups": same_pair_groups,
+        "zero_selected_pairs": zero_selected_pairs,
         "step2_metrics": {**candidate_bundle["stats"], **step2_metrics},
     }
     dbg_dir = debug_dir(out_root, run_id, patch_id)
@@ -1550,6 +1664,7 @@ def _stage2_segment(
     write_lines_geojson(dbg_dir / "segment_selected.geojson", selected_segment_features)
     write_lines_geojson(dbg_dir / "step2_segment_dropped.geojson", dropped_segment_features)
     write_json(dbg_dir / "step2_same_pair_groups.json", {"pairs": same_pair_groups, "metrics": {**candidate_bundle["stats"], **step2_metrics}})
+    write_json(dbg_dir / "step2_zero_selected_pairs.json", {"pairs": zero_selected_pairs, "metrics": {**candidate_bundle["stats"], **step2_metrics}})
     return {
         "artifact": artifact,
         "inputs": inputs,

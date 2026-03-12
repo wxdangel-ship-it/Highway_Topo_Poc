@@ -246,6 +246,111 @@ def test_t05v2_step2_cross1_requires_explicit_exception_and_support(tmp_path: Pa
     assert str(kept[0]["kept_reason"]).startswith("cross1_exception:")
 
 
+def test_t05v2_step2_pair_scoped_cross1_default_off_keeps_baseline_and_writes_zero_selected_pairs(tmp_path: Path) -> None:
+    patch_id = "pair_scoped_default_off"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -10.0), (0.0, 10.0)], {"nodeid": 1}),
+            _line_feature([(30.0, -10.0), (30.0, 10.0)], {"nodeid": 2}),
+            _line_feature([(60.0, -10.0), (60.0, 10.0)], {"nodeid": 3}),
+            _line_feature([(90.0, -10.0), (90.0, 10.0)], {"nodeid": 4}),
+        ],
+        "EPSG:3857",
+    )
+    drivezone_fc = _fc([_poly_feature([(-5.0, -4.0), (95.0, -4.0), (95.0, 4.0), (-5.0, 4.0)])], "EPSG:3857")
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=intersection_fc,
+        drivezone_fc=drivezone_fc,
+        traj_tracks=[[(0.0, 0.0), (30.0, 0.0), (60.0, 0.0), (90.0, 0.0)]],
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_pair_off", out_root=out_root)
+    run_stage(
+        stage="step2_segment",
+        data_root=data_root,
+        patch_id=patch_id,
+        run_id="run_pair_off",
+        out_root=out_root,
+        params={
+            "STEP2_STRICT_ADJACENT_PAIRING": 0,
+            "STEP2_PAIR_SCOPED_CROSS1_EXCEPTION_ENABLE": 0,
+            "STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST": "1:3",
+        },
+    )
+    patch_dir = out_root / "run_pair_off" / "patches" / patch_id
+    segments_payload = _read_json(patch_dir / "step2" / "segments.json")
+    metrics = segments_payload["step2_metrics"]
+    kept_pairs = {(int(item["src_nodeid"]), int(item["dst_nodeid"])) for item in segments_payload["segments"]}
+    assert (1, 3) not in kept_pairs
+    assert metrics["crossing_dist_hist_selected"] == {"0": 3}
+    assert bool(metrics["pair_scoped_cross1_exception_enabled"]) is False
+    assert int(metrics["selected_cross1_exception_count"]) == 0
+    assert "1:3" in set(metrics["zero_selected_pair_ids"])
+    zero_debug = _read_json(patch_dir / "debug" / "step2_zero_selected_pairs.json")
+    target = next(item for item in zero_debug["pairs"] if str(item["pair_id"]) == "1:3")
+    assert bool(target["whether_pair_scoped_exception_applicable"]) is False
+    assert str(target["dropped_reason"]) == "cross1_disabled"
+
+
+def test_t05v2_step2_pair_scoped_cross1_exception_restores_only_allowlisted_pair(tmp_path: Path) -> None:
+    patch_id = "pair_scoped_restore"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -10.0), (0.0, 10.0)], {"nodeid": 1}),
+            _line_feature([(30.0, -10.0), (30.0, 10.0)], {"nodeid": 2}),
+            _line_feature([(60.0, -10.0), (60.0, 10.0)], {"nodeid": 3}),
+            _line_feature([(90.0, -10.0), (90.0, 10.0)], {"nodeid": 4}),
+        ],
+        "EPSG:3857",
+    )
+    drivezone_fc = _fc([_poly_feature([(-5.0, -4.0), (95.0, -4.0), (95.0, 4.0), (-5.0, 4.0)])], "EPSG:3857")
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=intersection_fc,
+        drivezone_fc=drivezone_fc,
+        traj_tracks=[[(0.0, 0.0), (30.0, 0.0), (60.0, 0.0), (90.0, 0.0)]],
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_pair_on", out_root=out_root)
+    run_stage(
+        stage="step2_segment",
+        data_root=data_root,
+        patch_id=patch_id,
+        run_id="run_pair_on",
+        out_root=out_root,
+        params={
+            "STEP2_STRICT_ADJACENT_PAIRING": 0,
+            "STEP2_PAIR_SCOPED_CROSS1_EXCEPTION_ENABLE": 1,
+            "STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST": "1:3",
+        },
+    )
+    patch_dir = out_root / "run_pair_on" / "patches" / patch_id
+    segments_payload = _read_json(patch_dir / "step2" / "segments.json")
+    kept = {(int(item["src_nodeid"]), int(item["dst_nodeid"])): item for item in segments_payload["segments"]}
+    assert (1, 3) in kept
+    assert (2, 4) not in kept
+    assert "pair_scoped_cross1_exception" in str(kept[(1, 3)]["kept_reason"])
+    assert "no_cross0_alternative" in str(kept[(1, 3)]["kept_reason"])
+    assert "business_prior_confirmed" in str(kept[(1, 3)]["kept_reason"])
+    metrics = segments_payload["step2_metrics"]
+    assert bool(metrics["pair_scoped_cross1_exception_enabled"]) is True
+    assert int(metrics["pair_scoped_cross1_exception_hit_count"]) == 1
+    assert int(metrics["selected_cross1_exception_count"]) == 1
+    assert metrics["crossing_dist_hist_selected"] == {"0": 3, "1": 1}
+    excluded = segments_payload["excluded_candidates"]
+    blocked_pairs = {
+        (int(item["src_nodeid"]), int(item["dst_nodeid"])): str(item["reason"])
+        for item in excluded
+        if str(item.get("reason")) == "cross1_pair_not_allowlisted"
+    }
+    assert blocked_pairs[(2, 4)] == "cross1_pair_not_allowlisted"
+
+
 def test_t05v2_step2_same_pair_topk_prefers_stronger_cluster(tmp_path: Path) -> None:
     patch_id = "same_pair_topk"
     data_root = tmp_path / "data"

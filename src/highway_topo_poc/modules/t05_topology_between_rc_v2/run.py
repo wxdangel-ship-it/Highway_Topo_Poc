@@ -32,6 +32,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--step2_cross1_min_drivezone_ratio", type=float, default=float(DEFAULT_PARAMS["STEP2_CROSS1_MIN_DRIVEZONE_RATIO"]))
     parser.add_argument("--step2_cross1_max_length_ratio", type=float, default=float(DEFAULT_PARAMS["STEP2_CROSS1_MAX_LENGTH_RATIO"]))
     parser.add_argument("--step2_cross1_require_no_cross0_better", type=int, default=int(DEFAULT_PARAMS["STEP2_CROSS1_REQUIRE_NO_CROSS0_BETTER"]))
+    parser.add_argument(
+        "--step2_pair_scoped_cross1_exception_enable",
+        type=int,
+        default=int(DEFAULT_PARAMS["STEP2_PAIR_SCOPED_CROSS1_EXCEPTION_ENABLE"]),
+    )
+    parser.add_argument(
+        "--step2_pair_scoped_cross1_allowlist",
+        default=str(DEFAULT_PARAMS["STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST"]),
+    )
     parser.add_argument("--prior_endpoint_anchor_m", type=float, default=float(DEFAULT_PARAMS["PRIOR_ENDPOINT_ANCHOR_M"]))
     parser.add_argument("--divstrip_buffer_m", type=float, default=float(DEFAULT_PARAMS["DIVSTRIP_BUFFER_M"]))
     parser.add_argument("--witness_half_length_m", type=float, default=float(DEFAULT_PARAMS["WITNESS_HALF_LENGTH_M"]))
@@ -59,6 +68,8 @@ def _params_from_args(args: argparse.Namespace) -> dict[str, float | int]:
         "STEP2_CROSS1_MIN_DRIVEZONE_RATIO": float(args.step2_cross1_min_drivezone_ratio),
         "STEP2_CROSS1_MAX_LENGTH_RATIO": float(args.step2_cross1_max_length_ratio),
         "STEP2_CROSS1_REQUIRE_NO_CROSS0_BETTER": int(args.step2_cross1_require_no_cross0_better),
+        "STEP2_PAIR_SCOPED_CROSS1_EXCEPTION_ENABLE": int(args.step2_pair_scoped_cross1_exception_enable),
+        "STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST": str(args.step2_pair_scoped_cross1_allowlist),
         "PRIOR_ENDPOINT_ANCHOR_M": float(args.prior_endpoint_anchor_m),
         "DIVSTRIP_BUFFER_M": float(args.divstrip_buffer_m),
         "WITNESS_HALF_LENGTH_M": float(args.witness_half_length_m),
