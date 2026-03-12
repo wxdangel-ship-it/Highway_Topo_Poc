@@ -1568,6 +1568,7 @@ def _build_final_road(
         "corridor_state": str(identity.state),
         "shape_ref_mode": "",
         "shape_ref_coords": [],
+        "candidate_attempts": [],
         "drivezone_ratio": 0.0,
         "road_intersects_divstrip": False,
         "reason": "",
@@ -1671,6 +1672,25 @@ def _build_final_road(
     return road, result
 
 
+def _classify_segment_outcome(
+    *,
+    identity: CorridorIdentity,
+    src_slot: SlotInterval,
+    dst_slot: SlotInterval,
+    build_result: dict[str, Any],
+    road: FinalRoad | None,
+) -> str:
+    if road is not None or str(build_result.get("reason", "")) == "built":
+        return "built"
+    if str(identity.state) == "unresolved":
+        return "unresolved_corridor"
+    if (not bool(src_slot.resolved)) or (not bool(dst_slot.resolved)) or str(build_result.get("reason", "")) == "slot_unresolved":
+        return "slot_mapping_failed"
+    if str(build_result.get("reason", "")) in {"road_outside_drivezone", "road_crosses_divstrip"}:
+        return "final_geometry_invalid"
+    return "should_be_no_geometry_candidate"
+
+
 def _write_road_outputs(
     *,
     out_root: Path | str,
@@ -1692,6 +1712,7 @@ def _write_road_outputs(
     metrics_segments: list[dict[str, Any]] = []
     hard_breakpoints: list[dict[str, Any]] = []
     soft_breakpoints: list[dict[str, Any]] = []
+    road_trace_entries: list[dict[str, Any]] = []
     road_map = {str(road.segment_id): road for road in roads}
     result_map = {str(item["segment_id"]): item for item in road_results}
     for segment in segments:
@@ -1713,6 +1734,15 @@ def _write_road_outputs(
                     "shape_ref_mode": str(build_result.get("shape_ref_mode", "segment_support")),
                     "no_geometry_candidate": bool(str(build_result.get("reason", "")) != "built"),
                     "no_geometry_reason": str(build_result.get("reason", "")),
+                    "failure_classification": str(
+                        _classify_segment_outcome(
+                            identity=identity,
+                            src_slot=src_slot,
+                            dst_slot=dst_slot,
+                            build_result=build_result,
+                            road=road_map.get(str(segment.segment_id)),
+                        )
+                    ),
                 },
             )
         )
@@ -1749,12 +1779,35 @@ def _write_road_outputs(
                         "risk_flags": list(road.risk_flags),
                         "road_in_drivezone_ratio": float(road_in_drivezone_ratio),
                         "road_intersects_divstrip": bool(road_crosses_divstrip),
+                        "failure_classification": "built",
                     },
                 )
             )
         unresolved_reason = ""
         if road is None:
             unresolved_reason = str(build_result.get("reason") or identity.reason)
+        failure_classification = _classify_segment_outcome(
+            identity=identity,
+            src_slot=src_slot,
+            dst_slot=dst_slot,
+            build_result=build_result,
+            road=road,
+        )
+        road_trace_entries.append(
+            {
+                "segment_id": str(segment.segment_id),
+                "corridor_identity_state": str(identity.state),
+                "src_slot_status": "resolved" if bool(src_slot.resolved) else "unresolved",
+                "dst_slot_status": "resolved" if bool(dst_slot.resolved) else "unresolved",
+                "chosen_shape_ref_mode": str(build_result.get("shape_ref_mode", "")),
+                "candidate_attempts": list(build_result.get("candidate_attempts") or []),
+                "drivezone_ratio": float(build_result.get("drivezone_ratio", 0.0) or 0.0),
+                "road_intersects_divstrip": bool(build_result.get("road_intersects_divstrip", False)),
+                "final_reason": str(build_result.get("reason", "")),
+                "final_decision": "selected" if road is not None else "rejected",
+                "failure_classification": str(failure_classification),
+            }
+        )
         metrics_entry = {
             "segment_id": str(segment.segment_id),
             "segment_established": True,
@@ -1787,6 +1840,7 @@ def _write_road_outputs(
             "no_geometry_candidate": bool(road is None),
             "no_geometry_candidate_reason": str(unresolved_reason),
             "unresolved_reason": str(unresolved_reason),
+            "failure_classification": str(failure_classification),
         }
         metrics_segments.append(metrics_entry)
         if road is None:
@@ -1845,6 +1899,13 @@ def _write_road_outputs(
     no_geometry_reason_hist = dict(
         Counter(str(entry["no_geometry_candidate_reason"] or "unknown") for entry in no_geometry_entries)
     )
+    failure_classification_hist = dict(
+        Counter(
+            str(entry["failure_classification"])
+            for entry in metrics_segments
+            if str(entry["failure_classification"]) != "built"
+        )
+    )
     no_geometry_reason = ""
     if no_geometry_reason_hist:
         if len(no_geometry_reason_hist) == 1:
@@ -1859,6 +1920,7 @@ def _write_road_outputs(
         "no_geometry_candidate_count": int(len(no_geometry_entries)),
         "no_geometry_candidate_reason": str(no_geometry_reason),
         "no_geometry_candidate_reasons": no_geometry_reason_hist,
+        "failure_classification_hist": failure_classification_hist,
         "raw_candidate_count": int(root_step2_metrics.get("raw_candidate_count", 0)),
         "candidate_count_after_pairing": int(root_step2_metrics.get("candidate_count_after_pairing", 0)),
         "candidate_count_after_cross_filter": int(root_step2_metrics.get("candidate_count_after_cross_filter", 0)),
@@ -1914,6 +1976,15 @@ def _write_road_outputs(
             f"rejected={len(metrics['pair_scoped_exception_rejected_pair_ids'])} "
             f"non_allowlisted_cross1={len(metrics['pair_scoped_exception_non_allowlisted_cross1_pair_ids'])}"
         ),
+        (
+            "road_summary: "
+            f"built={len(roads)} "
+            f"failed={len(no_geometry_entries)} "
+            f"final_geometry_invalid={int(failure_classification_hist.get('final_geometry_invalid', 0))} "
+            f"slot_mapping_failed={int(failure_classification_hist.get('slot_mapping_failed', 0))} "
+            f"unresolved_corridor={int(failure_classification_hist.get('unresolved_corridor', 0))} "
+            f"should_be_no_geometry_candidate={int(failure_classification_hist.get('should_be_no_geometry_candidate', 0))}"
+        ),
     ]
     for entry in metrics_segments:
         summary_lines.append(
@@ -1923,6 +1994,8 @@ def _write_road_outputs(
                     f"corridor={entry['corridor_identity']}",
                     f"src_slot={str(entry['src_slot_resolved']).lower()}",
                     f"dst_slot={str(entry['dst_slot_resolved']).lower()}",
+                    f"shape_ref={entry['shape_ref_mode']}",
+                    f"failure_class={entry['failure_classification']}",
                     f"reason={entry['unresolved_reason'] or entry['corridor_reason']}",
                 ]
             )
@@ -1941,7 +2014,13 @@ def _write_road_outputs(
                 str(segment_id): {"src": slots[str(segment_id)]["src"].to_dict(), "dst": slots[str(segment_id)]["dst"].to_dict()}
                 for segment_id in sorted(slots.keys())
             },
-            "road_build": road_results,
+            "road_build": road_trace_entries,
+            "road_results": road_trace_entries,
+            "summary": {
+                "road_count": int(len(roads)),
+                "no_geometry_candidate_count": int(len(no_geometry_entries)),
+                "failure_classification_hist": failure_classification_hist,
+            },
         },
     )
 

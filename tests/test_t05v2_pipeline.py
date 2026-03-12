@@ -440,12 +440,14 @@ def test_t05v2_unique_witness_based_full_pipeline(tmp_path: Path) -> None:
     assert metrics["segments"][0]["corridor_identity_state"] == "witness_based"
     assert metrics["segments"][0]["slot_src_status"] == "resolved"
     assert metrics["segments"][0]["slot_dst_status"] == "resolved"
+    assert metrics["segments"][0]["failure_classification"] == "built"
     assert float(metrics["segments"][0]["road_in_drivezone_ratio"]) >= 0.99
     assert metrics["segments"][0]["shape_ref_mode"] == "witness_centerline"
     assert bool(gate["overall_pass"]) is True
     assert len(roads["features"]) == 1
     assert len(shape_ref["features"]) == 1
     assert "pair_scoped_exception: selected=0 rejected=0 non_allowlisted_cross1=0" in summary
+    assert "road_summary: built=1 failed=0" in summary
 
 
 def test_t05v2_prior_based_for_short_prior_segment(tmp_path: Path) -> None:
@@ -474,6 +476,7 @@ def test_t05v2_prior_based_for_short_prior_segment(tmp_path: Path) -> None:
     gate = _read_json(out_root / "run4" / "patches" / patch_id / "gate.json")
     roads = _read_json(out_root / "run4" / "patches" / patch_id / "Road.geojson")
     assert metrics["segments"][0]["corridor_identity"] == "prior_based"
+    assert metrics["segments"][0]["failure_classification"] == "built"
     assert metrics["segments"][0]["shape_ref_mode"] == "prior_reference_slot_anchored"
     assert roads["features"][0]["properties"]["corridor_state"] == "prior_based"
     assert bool(gate["overall_pass"]) is True
@@ -503,11 +506,14 @@ def test_t05v2_unresolved_when_short_segment_has_no_prior(tmp_path: Path) -> Non
     metrics = _read_json(out_root / "run5" / "patches" / patch_id / "metrics.json")
     gate = _read_json(out_root / "run5" / "patches" / patch_id / "gate.json")
     roads = _read_json(out_root / "run5" / "patches" / patch_id / "Road.geojson")
+    reason_trace = _read_json(out_root / "run5" / "patches" / patch_id / "debug" / "reason_trace.json")
     assert metrics["segments"][0]["corridor_identity"] == "unresolved"
     assert int(metrics["no_geometry_candidate_count"]) == 1
     assert str(metrics["no_geometry_candidate_reason"]) != ""
     assert bool(metrics["segments"][0]["no_geometry_candidate"]) is True
     assert str(metrics["segments"][0]["no_geometry_candidate_reason"]) != ""
+    assert metrics["segments"][0]["failure_classification"] == "unresolved_corridor"
+    assert reason_trace["road_results"][0]["failure_classification"] == "unresolved_corridor"
     assert len(roads["features"]) == 0
     assert bool(gate["overall_pass"]) is False
     assert gate["hard_breakpoints"]
@@ -558,9 +564,18 @@ def test_t05v2_divstrip_blocks_final_road(tmp_path: Path) -> None:
     run_full_pipeline(data_root=data_root, patch_id=patch_id, run_id="run7", out_root=out_root)
     gate = _read_json(out_root / "run7" / "patches" / patch_id / "gate.json")
     metrics = _read_json(out_root / "run7" / "patches" / patch_id / "metrics.json")
+    reason_trace = _read_json(out_root / "run7" / "patches" / patch_id / "debug" / "reason_trace.json")
     assert bool(gate["overall_pass"]) is False
     assert gate["hard_breakpoints"]
     assert int(metrics["road_count"]) == 0
+    if metrics["segments"]:
+        assert metrics["segments"][0]["failure_classification"] == "final_geometry_invalid"
+        assert metrics["failure_classification_hist"] == {"final_geometry_invalid": 1}
+        assert reason_trace["road_results"][0]["failure_classification"] == "final_geometry_invalid"
+        assert reason_trace["road_results"][0]["candidate_attempts"]
+    else:
+        assert metrics["failure_classification_hist"] == {}
+        assert reason_trace["road_results"] == []
 
 
 def test_t05v2_build_final_road_falls_back_to_segment_support_when_witness_centerline_leaves_drivezone() -> None:
