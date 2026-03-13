@@ -70,6 +70,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP2_CROSS1_REQUIRE_NO_CROSS0_BETTER": 1,
     "STEP2_PAIR_SCOPED_CROSS1_EXCEPTION_ENABLE": 0,
     "STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST": "",
+    "STEP2_PAIR_SCOPED_BRIDGE_RETAIN_ENABLE": 1,
+    "STEP2_PAIR_SCOPED_BRIDGE_RETAIN_PAIR_IDS": "5395717732638194:37687913",
     "STEP2_ENABLE_PSEUDO_RCS_NODE_XSECS": 1,
     "STEP2_PSEUDO_XSEC_HALF_LENGTH_M": 6.0,
     "STEP2_ENABLE_TERMINAL_TRACE_TOPOLOGY": 0,
@@ -619,6 +621,27 @@ _SEGMENT_TOPOLOGY_INVALID_REASONS = {
 _DIRECT_TOPOLOGY_ARC_SOURCE = "direct_topology_arc"
 _TRACE_ONLY_TOPOLOGY_SOURCE = "rcsdroad_trace"
 _TERMINAL_TRACE_TOPOLOGY_SOURCE = "rcsdroad_terminal_trace"
+_BRIDGE_CHAIN_TOPOLOGY_SOURCE = "bridge_chain_topology"
+
+
+def _bridge_retain_pair_ids(params: dict[str, Any]) -> set[tuple[int, int]]:
+    return _parse_pair_scoped_allowlist(params.get("STEP2_PAIR_SCOPED_BRIDGE_RETAIN_PAIR_IDS", ""))
+
+
+def _bridge_chain_arc_id(node_path: list[int] | tuple[int, ...]) -> str:
+    nodes = [str(int(v)) for v in node_path if v is not None]
+    return f"bridge_chain:{'->'.join(nodes)}"
+
+
+def _is_bridge_retain_candidate_enabled(
+    *,
+    src_nodeid: int,
+    dst_nodeid: int,
+    params: dict[str, Any],
+) -> bool:
+    if not bool(int(params.get("STEP2_PAIR_SCOPED_BRIDGE_RETAIN_ENABLE", 0))):
+        return False
+    return (int(src_nodeid), int(dst_nodeid)) in _bridge_retain_pair_ids(params)
 
 
 def _build_direct_terminal_ownership(
@@ -1493,6 +1516,79 @@ def _assign_topology_arc(
     return chosen
 
 
+def _bridge_retain_decision(
+    *,
+    candidate: dict[str, Any],
+    topology: dict[str, Any],
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    src_nodeid = int(candidate.get("src_nodeid", 0))
+    dst_nodeid = int(candidate.get("dst_nodeid", 0))
+    if not _is_bridge_retain_candidate_enabled(src_nodeid=src_nodeid, dst_nodeid=dst_nodeid, params=params):
+        return None
+    classification = _classify_blocked_pair_bridge(
+        src_nodeid=int(src_nodeid),
+        dst_nodeid=int(dst_nodeid),
+        topology=topology,
+    )
+    bridge_classification = str(classification.get("bridge_classification", ""))
+    bridge_nodes = [int(v) for v in classification.get("direct_bridge_nodeids", []) if v is not None]
+    if bridge_classification != "unique_directed_bridge_candidate" or len(bridge_nodes) != 1:
+        reason = {
+            "multi_bridge_ambiguous": "bridge_candidate_ambiguous",
+            "topology_gap_unresolved": "bridge_topology_gap_unresolved",
+            "truly_non_adjacent_reject": "bridge_truly_non_adjacent_reject",
+        }.get(bridge_classification, "bridge_unique_candidate_not_confirmed")
+        return {
+            "handled": True,
+            "retained": False,
+            "stage": "bridge_retain_gate",
+            "reason": str(reason),
+            "bridge_classification": str(bridge_classification),
+            "bridge_nodes": bridge_nodes,
+        }
+    bridge_nodeid = int(bridge_nodes[0])
+    hop_conflicts: list[str] = []
+    for hop_src, hop_dst in ((src_nodeid, bridge_nodeid), (bridge_nodeid, dst_nodeid)):
+        hop_reason = _topology_gate_reason(
+            src_nodeid=int(hop_src),
+            dst_nodeid=int(hop_dst),
+            topology=topology,
+        )
+        if hop_reason is not None:
+            hop_conflicts.append(str(hop_reason))
+    if hop_conflicts:
+        return {
+            "handled": True,
+            "retained": False,
+            "stage": "bridge_retain_gate",
+            "reason": "bridge_terminal_semantics_conflict",
+            "bridge_classification": str(bridge_classification),
+            "bridge_nodes": bridge_nodes,
+            "hop_conflicts": sorted(set(hop_conflicts)),
+        }
+    bridge_chain_nodes = [int(src_nodeid), int(bridge_nodeid), int(dst_nodeid)]
+    candidate["bridge_candidate_retained"] = True
+    candidate["bridge_chain_nodes"] = list(bridge_chain_nodes)
+    candidate["bridge_chain_source"] = str(bridge_classification)
+    candidate["bridge_decision_stage"] = "bridge_retain"
+    candidate["bridge_decision_reason"] = "bridge_pair_scoped_retained"
+    candidate["bridge_classification"] = str(bridge_classification)
+    candidate["topology_arc_id"] = _bridge_chain_arc_id(bridge_chain_nodes)
+    candidate["topology_arc_source_type"] = _BRIDGE_CHAIN_TOPOLOGY_SOURCE
+    candidate["topology_arc_edge_ids"] = []
+    candidate["topology_arc_node_path"] = list(bridge_chain_nodes)
+    candidate["arc_source_type"] = _BRIDGE_CHAIN_TOPOLOGY_SOURCE
+    return {
+        "handled": True,
+        "retained": True,
+        "stage": "bridge_retain",
+        "reason": "bridge_pair_scoped_retained",
+        "bridge_classification": str(bridge_classification),
+        "bridge_nodes": bridge_nodes,
+    }
+
+
 def _candidate_support_count(candidate: dict[str, Any]) -> int:
     return int(max(1, len({str(v) for v in candidate.get("support_traj_ids", set())})))
 
@@ -1533,6 +1629,11 @@ def _candidate_feature_properties(
         "topology_arc_id": str(candidate.get("topology_arc_id", "")),
         "topology_arc_source_type": str(candidate.get("topology_arc_source_type", candidate.get("arc_source_type", ""))),
         "topology_arc_distance_m": candidate.get("topology_arc_distance_m"),
+        "bridge_candidate_retained": bool(candidate.get("bridge_candidate_retained", False)),
+        "bridge_chain_nodes": [int(v) for v in candidate.get("bridge_chain_nodes", []) if v is not None],
+        "bridge_chain_source": str(candidate.get("bridge_chain_source", "")),
+        "bridge_decision_stage": str(candidate.get("bridge_decision_stage", "")),
+        "bridge_decision_reason": str(candidate.get("bridge_decision_reason", "")),
     }
 
 
@@ -1564,6 +1665,11 @@ def _segment_feature_properties(segment: Segment, *, status: str, reason: str = 
         "topology_arc_source_type": str(segment.topology_arc_source_type),
         "topology_arc_edge_ids": [str(v) for v in segment.topology_arc_edge_ids],
         "topology_arc_node_path": [int(v) for v in segment.topology_arc_node_path],
+        "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
+        "bridge_chain_nodes": [int(v) for v in segment.bridge_chain_nodes],
+        "bridge_chain_source": str(segment.bridge_chain_source),
+        "bridge_decision_stage": str(segment.bridge_decision_stage),
+        "bridge_decision_reason": str(segment.bridge_decision_reason),
         "same_pair_rank": None if segment.same_pair_rank is None else int(segment.same_pair_rank),
         "kept_reason": str(segment.kept_reason),
         "status": str(status),
@@ -1604,6 +1710,7 @@ def _segment_candidates(
     pair_scoped_cross1_allowlist = _parse_pair_scoped_allowlist(params.get("STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST", ""))
     divstrip_buffer = load_divstrip_buffer(inputs.divstrip_zone_metric, float(params["DIVSTRIP_BUFFER_M"]))
     topology_invalid_counter: Counter[str] = Counter()
+    bridge_retain_counter: Counter[str] = Counter()
 
     def crossing_props(event: dict[str, Any]) -> dict[str, Any]:
         nodeid = int(event.get("nodeid", event.get("crossing_nodeid", 0)))
@@ -1696,6 +1803,12 @@ def _segment_candidates(
             "topology_arc_edge_ids": [],
             "topology_arc_node_path": [],
             "arc_source_type": "",
+            "bridge_candidate_retained": False,
+            "bridge_chain_nodes": [],
+            "bridge_chain_source": "",
+            "bridge_decision_stage": "",
+            "bridge_decision_reason": "",
+            "bridge_classification": "",
         }
 
     def reject(candidate: dict[str, Any], *, stage: str, reason: str) -> None:
@@ -1848,10 +1961,32 @@ def _segment_candidates(
         if str(candidate["source"]) != "traj":
             continue
         if strict_adjacent and int(candidate.get("pair_index_gap", 0)) > 1:
-            reject(candidate, stage="pairing_filter", reason="non_adjacent_pair_blocked")
+            bridge_decision = _bridge_retain_decision(candidate=candidate, topology=topology, params=params)
+            if bridge_decision is None:
+                reject(candidate, stage="pairing_filter", reason="non_adjacent_pair_blocked")
+                continue
+            bridge_retain_counter[f"{str(bridge_decision.get('stage', 'bridge_retain_gate'))}:{str(bridge_decision.get('reason', 'unknown'))}"] += 1
+            if not bool(bridge_decision.get("retained")):
+                if str(bridge_decision.get("reason", "")) not in _SEGMENT_TOPOLOGY_INVALID_REASONS:
+                    candidate["topology_reason"] = str(bridge_decision.get("reason", ""))
+                reject(
+                    candidate,
+                    stage=str(bridge_decision.get("stage", "bridge_retain_gate")),
+                    reason=str(bridge_decision.get("reason", "bridge_unique_candidate_not_confirmed")),
+                )
+                continue
+            pairing_candidates.append(candidate)
+            record(
+                candidate,
+                stage=str(bridge_decision.get("stage", "bridge_retain")),
+                status="selected",
+                reason=str(bridge_decision.get("reason", "bridge_pair_scoped_retained")),
+            )
             continue
         pairing_candidates.append(candidate)
         reason = "adjacent_pair_retained" if int(candidate.get("pair_index_gap", 0)) <= 1 else "non_adjacent_pair_retained"
+        if bool(candidate.get("bridge_candidate_retained", False)):
+            reason = str(candidate.get("bridge_decision_reason", "bridge_pair_scoped_retained"))
         record(candidate, stage="pairing_filter", status="selected", reason=reason)
     topology_ready_candidates: list[dict[str, Any]] = []
     for candidate in pairing_candidates:
@@ -1864,11 +1999,13 @@ def _segment_candidates(
             dst_nodeid=int(candidate["dst_nodeid"]),
             topology=topology,
         )
-        topology_reason = _topology_gate_reason(
-            src_nodeid=int(candidate["src_nodeid"]),
-            dst_nodeid=int(candidate["dst_nodeid"]),
-            topology=topology,
-        )
+        topology_reason = None
+        if not bool(candidate.get("bridge_candidate_retained", False)):
+            topology_reason = _topology_gate_reason(
+                src_nodeid=int(candidate["src_nodeid"]),
+                dst_nodeid=int(candidate["dst_nodeid"]),
+                topology=topology,
+            )
         reverse_owner = (
             topology.get("terminal_direct_ownership", {}).get(int(candidate["dst_nodeid"]))
             or topology.get("terminal_reverse_ownership", {}).get(int(candidate["dst_nodeid"]), {})
@@ -1881,13 +2018,15 @@ def _segment_candidates(
         candidate["topology_pair_paths"] = list(topology_semantics.get("pair_paths", []))
         candidate["topology_trace_only_paths"] = list(topology_semantics.get("trace_only_paths", []))
         candidate["topology_terminal_trace_paths"] = list(topology_semantics.get("terminal_trace_paths", []))
-        candidate["arc_source_type"] = str(topology_semantics.get("arc_source_type", ""))
+        if not bool(candidate.get("bridge_candidate_retained", False)):
+            candidate["arc_source_type"] = str(topology_semantics.get("arc_source_type", ""))
         candidate["topology_allowed"] = bool(topology_reason is None)
         candidate["topology_reason"] = "" if topology_reason is None else str(topology_reason)
         if topology_reason is not None:
             reject(candidate, stage="semantic_hard_gate", reason=str(topology_reason))
             continue
-        _assign_topology_arc(candidate, topology=topology)
+        if not bool(candidate.get("bridge_candidate_retained", False)):
+            _assign_topology_arc(candidate, topology=topology)
         topology_ready_candidates.append(candidate)
 
     arc_has_prior_candidate: set[tuple[int, int, str]] = set()
@@ -2042,6 +2181,14 @@ def _segment_candidates(
             "trace_only_reachability_segment_count": int(topology_invalid_counter.get("trace_only_reachability", 0)),
             "terminal_owner_mismatch_segment_count": int(topology_invalid_counter.get("terminal_owner_mismatch", 0)),
             "ambiguous_terminal_owner_segment_count": int(topology_invalid_counter.get("ambiguous_terminal_owner", 0)),
+            "bridge_retain_attempt_count": int(sum(int(v) for v in bridge_retain_counter.values())),
+            "bridge_retain_success_count": int(
+                sum(int(v) for key, v in bridge_retain_counter.items() if str(key) == "bridge_retain:bridge_pair_scoped_retained")
+            ),
+            "bridge_retain_rejected_count": int(
+                sum(int(v) for key, v in bridge_retain_counter.items() if str(key).startswith("bridge_retain_gate:"))
+            ),
+            "bridge_retain_reason_hist": {str(key): int(value) for key, value in sorted(bridge_retain_counter.items())},
             "directionally_invalid_segment_count": int(topology_invalid_counter.get("directed_path_not_supported", 0)),
             "topology_invalid_segment_count": int(
                 topology_invalid_counter.get("directed_path_not_supported", 0)
@@ -2138,6 +2285,11 @@ def _cluster_segments(candidates: list[dict[str, Any]], frame: InputFrame, param
                     topology_arc_source_type=str(representative.get("topology_arc_source_type", representative.get("arc_source_type", ""))),
                     topology_arc_edge_ids=tuple(str(v) for v in representative.get("topology_arc_edge_ids", [])),
                     topology_arc_node_path=tuple(int(v) for v in representative.get("topology_arc_node_path", [])),
+                    bridge_candidate_retained=bool(any(bool(item.get("bridge_candidate_retained", False)) for item in cluster)),
+                    bridge_chain_nodes=tuple(int(v) for v in representative.get("bridge_chain_nodes", [])),
+                    bridge_chain_source=str(representative.get("bridge_chain_source", "")),
+                    bridge_decision_stage=str(representative.get("bridge_decision_stage", "")),
+                    bridge_decision_reason=str(representative.get("bridge_decision_reason", "")),
                 )
             )
     return out
@@ -2186,6 +2338,8 @@ def _select_segments_same_pair(
     zero_selected_pairs: list[dict[str, Any]] = []
     pair_scoped_exception_hits: set[tuple[int, int]] = set()
     selected_cross1_exception_count = 0
+    bridge_retained_pair_ids: set[str] = set()
+    bridge_retained_segment_count = 0
     for (src_nodeid, dst_nodeid, topology_arc_id), pair_segments in sorted(by_pair.items()):
         ordered = sorted(pair_segments, key=sort_key)
         has_cross0 = any(int(segment.other_xsec_crossing_count) == 0 for segment in ordered)
@@ -2201,6 +2355,21 @@ def _select_segments_same_pair(
             selected_via_pair_scoped_exception = False
             if int(segment.other_xsec_crossing_count) == 0:
                 kept_reason = "cross0_primary"
+            elif bool(segment.bridge_candidate_retained):
+                if int(rank) != 1:
+                    dropped_reason = "bridge_pair_scoped_not_best_rank"
+                elif int(segment.support_count) <= 0:
+                    dropped_reason = "bridge_support_zero"
+                elif bool(segment.crosses_divstrip):
+                    dropped_reason = "bridge_divstrip_conflict"
+                elif has_cross0:
+                    dropped_reason = "bridge_has_cross0_alternative"
+                else:
+                    kept_reason = (
+                        "bridge_pair_scoped_retain:"
+                        f"{str(segment.bridge_chain_source or 'unique_directed_bridge_candidate')}:"
+                        f"bridge_nodes={'-'.join(str(int(v)) for v in segment.bridge_chain_nodes)}"
+                    )
             else:
                 if allow_cross1:
                     if int(segment.support_count) < cross1_min_support:
@@ -2260,6 +2429,9 @@ def _select_segments_same_pair(
                 if selected_via_pair_scoped_exception:
                     selected_cross1_exception_count += 1
                     pair_scoped_exception_hits.add((int(src_nodeid), int(dst_nodeid)))
+                if bool(segment.bridge_candidate_retained):
+                    bridge_retained_segment_count += 1
+                    bridge_retained_pair_ids.add(_pair_id_text(int(src_nodeid), int(dst_nodeid)))
             segment_payloads.append(
                 {
                     "segment_id": str(segment.segment_id),
@@ -2322,6 +2494,8 @@ def _select_segments_same_pair(
         "pair_scoped_cross1_exception_enabled": bool(pair_scoped_cross1_enabled),
         "pair_scoped_cross1_exception_hit_count": int(len(pair_scoped_exception_hits)),
         "selected_cross1_exception_count": int(selected_cross1_exception_count),
+        "bridge_retained_segment_count": int(bridge_retained_segment_count),
+        "bridge_retained_pair_ids": sorted(str(v) for v in bridge_retained_pair_ids),
         "zero_selected_pair_count": int(len(zero_selected_pairs)),
         "zero_selected_pair_ids": [str(item["pair_id"]) for item in zero_selected_pairs],
     }
@@ -3296,6 +3470,7 @@ def _build_final_road(
     prior_roads: list[Any],
     params: dict[str, Any],
 ) -> tuple[FinalRoad | None, dict[str, Any]]:
+    bridge_retained = bool(segment.bridge_candidate_retained)
     result = {
         "segment_id": str(segment.segment_id),
         "corridor_state": str(identity.state),
@@ -3305,9 +3480,18 @@ def _build_final_road(
         "drivezone_ratio": 0.0,
         "road_intersects_divstrip": False,
         "reason": "",
+        "bridge_candidate_retained": bool(bridge_retained),
+        "bridge_chain_nodes": [int(v) for v in segment.bridge_chain_nodes],
+        "bridge_chain_source": str(segment.bridge_chain_source),
+        "bridge_decision_stage": str(segment.bridge_decision_stage),
+        "bridge_decision_reason": str(segment.bridge_decision_reason),
     }
     if str(identity.state) == "unresolved":
-        result["reason"] = str(identity.reason)
+        result["bridge_decision_stage"] = "bridge_final_decision" if bridge_retained else str(result["bridge_decision_stage"])
+        result["bridge_decision_reason"] = (
+            "bridge_corridor_insufficient" if bridge_retained else str(result["bridge_decision_reason"])
+        )
+        result["reason"] = "bridge_corridor_insufficient" if bridge_retained else str(identity.reason)
         return None, result
     if src_slot.interval is None or dst_slot.interval is None:
         fallback_shape_ref, fallback_mode = _shape_ref_line(
@@ -3320,7 +3504,11 @@ def _build_final_road(
         )
         result["shape_ref_mode"] = str(fallback_mode)
         result["shape_ref_coords"] = [[float(x), float(y)] for x, y in line_to_coords(fallback_shape_ref)]
-        result["reason"] = "slot_unresolved"
+        result["bridge_decision_stage"] = "bridge_final_decision" if bridge_retained else str(result["bridge_decision_stage"])
+        result["bridge_decision_reason"] = (
+            "bridge_slot_not_established" if bridge_retained else str(result["bridge_decision_reason"])
+        )
+        result["reason"] = "bridge_slot_not_established" if bridge_retained else "slot_unresolved"
         return None, result
     start_pt = _midpoint_of_interval(src_slot.interval)
     end_pt = _midpoint_of_interval(dst_slot.interval)
@@ -3385,9 +3573,18 @@ def _build_final_road(
     result["road_intersects_divstrip"] = bool(road_intersects_divstrip)
     if selected_candidate is None:
         if road_intersects_divstrip:
-            result["reason"] = "road_crosses_divstrip"
+            result["reason"] = "bridge_divstrip_conflict" if bridge_retained else "road_crosses_divstrip"
+            if bridge_retained:
+                result["bridge_decision_stage"] = "bridge_final_decision"
+                result["bridge_decision_reason"] = "bridge_divstrip_conflict"
         else:
-            result["reason"] = "road_outside_drivezone"
+            unresolved_reason = "bridge_prior_discontinuous" if bridge_retained and str(identity.state) == "prior_based" else (
+                "bridge_corridor_insufficient" if bridge_retained else "road_outside_drivezone"
+            )
+            result["reason"] = str(unresolved_reason)
+            if bridge_retained:
+                result["bridge_decision_stage"] = "bridge_final_decision"
+                result["bridge_decision_reason"] = str(unresolved_reason)
         return None, result
     road = FinalRoad(
         road_id=f"{patch_id}_{segment.segment_id}",
@@ -3402,6 +3599,9 @@ def _build_final_road(
         risk_flags=tuple(str(v) for v in identity.risk_flags),
     )
     result["reason"] = "built"
+    if bridge_retained:
+        result["bridge_decision_stage"] = "bridge_final_decision"
+        result["bridge_decision_reason"] = "built"
     return road, result
 
 
@@ -3415,6 +3615,8 @@ def _classify_segment_outcome(
 ) -> str:
     if road is not None or str(build_result.get("reason", "")) == "built":
         return "built"
+    if bool(build_result.get("bridge_candidate_retained", False)) and str(build_result.get("reason", "")).startswith("bridge_"):
+        return "bridge_aware_unresolved"
     if str(identity.state) == "unresolved":
         return "unresolved_corridor"
     if (not bool(src_slot.resolved)) or (not bool(dst_slot.resolved)) or str(build_result.get("reason", "")) == "slot_unresolved":
@@ -3446,6 +3648,7 @@ def _write_road_outputs(
     hard_breakpoints: list[dict[str, Any]] = []
     soft_breakpoints: list[dict[str, Any]] = []
     road_trace_entries: list[dict[str, Any]] = []
+    bridge_trial_entries: list[dict[str, Any]] = []
     road_map = {str(road.segment_id): road for road in roads}
     result_map = {str(item["segment_id"]): item for item in road_results}
     for segment in segments:
@@ -3467,6 +3670,11 @@ def _write_road_outputs(
                     "shape_ref_mode": str(build_result.get("shape_ref_mode", "segment_support")),
                     "no_geometry_candidate": bool(str(build_result.get("reason", "")) != "built"),
                     "no_geometry_reason": str(build_result.get("reason", "")),
+                    "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
+                    "bridge_chain_nodes": [int(v) for v in segment.bridge_chain_nodes],
+                    "bridge_chain_source": str(segment.bridge_chain_source),
+                    "bridge_decision_stage": str(build_result.get("bridge_decision_stage", segment.bridge_decision_stage)),
+                    "bridge_decision_reason": str(build_result.get("bridge_decision_reason", segment.bridge_decision_reason)),
                     "failure_classification": str(
                         _classify_segment_outcome(
                             identity=identity,
@@ -3512,6 +3720,11 @@ def _write_road_outputs(
                         "risk_flags": list(road.risk_flags),
                         "road_in_drivezone_ratio": float(road_in_drivezone_ratio),
                         "road_intersects_divstrip": bool(road_crosses_divstrip),
+                        "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
+                        "bridge_chain_nodes": [int(v) for v in segment.bridge_chain_nodes],
+                        "bridge_chain_source": str(segment.bridge_chain_source),
+                        "bridge_decision_stage": str(build_result.get("bridge_decision_stage", segment.bridge_decision_stage)),
+                        "bridge_decision_reason": str(build_result.get("bridge_decision_reason", segment.bridge_decision_reason)),
                         "failure_classification": "built",
                     },
                 )
@@ -3538,6 +3751,11 @@ def _write_road_outputs(
                 "road_intersects_divstrip": bool(build_result.get("road_intersects_divstrip", False)),
                 "final_reason": str(build_result.get("reason", "")),
                 "final_decision": "selected" if road is not None else "rejected",
+                "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
+                "bridge_chain_nodes": [int(v) for v in segment.bridge_chain_nodes],
+                "bridge_chain_source": str(segment.bridge_chain_source),
+                "bridge_decision_stage": str(build_result.get("bridge_decision_stage", segment.bridge_decision_stage)),
+                "bridge_decision_reason": str(build_result.get("bridge_decision_reason", segment.bridge_decision_reason)),
                 "failure_classification": str(failure_classification),
             }
         )
@@ -3573,9 +3791,35 @@ def _write_road_outputs(
             "no_geometry_candidate": bool(road is None),
             "no_geometry_candidate_reason": str(unresolved_reason),
             "unresolved_reason": str(unresolved_reason),
+            "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
+            "bridge_chain_nodes": [int(v) for v in segment.bridge_chain_nodes],
+            "bridge_chain_source": str(segment.bridge_chain_source),
+            "bridge_decision_stage": str(build_result.get("bridge_decision_stage", segment.bridge_decision_stage)),
+            "bridge_decision_reason": str(build_result.get("bridge_decision_reason", segment.bridge_decision_reason)),
             "failure_classification": str(failure_classification),
         }
         metrics_segments.append(metrics_entry)
+        if bool(segment.bridge_candidate_retained):
+            bridge_trial_entries.append(
+                {
+                    "segment_id": str(segment.segment_id),
+                    "src_nodeid": int(segment.src_nodeid),
+                    "dst_nodeid": int(segment.dst_nodeid),
+                    "pair_id": _pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                    "bridge_candidate_retained": True,
+                    "bridge_chain_nodes": [int(v) for v in segment.bridge_chain_nodes],
+                    "bridge_chain_source": str(segment.bridge_chain_source),
+                    "bridge_decision_stage": str(build_result.get("bridge_decision_stage", segment.bridge_decision_stage)),
+                    "bridge_decision_reason": str(build_result.get("bridge_decision_reason", segment.bridge_decision_reason)),
+                    "corridor_identity_state": str(identity.state),
+                    "src_slot_resolved": bool(src_slot.resolved),
+                    "dst_slot_resolved": bool(dst_slot.resolved),
+                    "shape_ref_mode": str(build_result.get("shape_ref_mode", "")),
+                    "built_final_road": bool(road is not None),
+                    "failure_classification": str(failure_classification),
+                    "final_reason": str(build_result.get("reason", "")),
+                }
+            )
         if road is None:
             hard_breakpoints.append({"segment_id": str(segment.segment_id), "reason": str(unresolved_reason or "no_geometry_candidate"), "severity": "hard"})
         elif identity.state == "prior_based":
@@ -3680,6 +3924,8 @@ def _write_road_outputs(
         "pair_scoped_cross1_exception_enabled": bool(root_step2_metrics.get("pair_scoped_cross1_exception_enabled", False)),
         "pair_scoped_cross1_exception_hit_count": int(root_step2_metrics.get("pair_scoped_cross1_exception_hit_count", 0)),
         "selected_cross1_exception_count": int(root_step2_metrics.get("selected_cross1_exception_count", 0)),
+        "bridge_retained_segment_count": int(root_step2_metrics.get("bridge_retained_segment_count", 0)),
+        "bridge_retained_pair_ids": [str(v) for v in root_step2_metrics.get("bridge_retained_pair_ids", [])],
         "zero_selected_pair_count": int(root_step2_metrics.get("zero_selected_pair_count", 0)),
         "zero_selected_pair_ids": [str(v) for v in root_step2_metrics.get("zero_selected_pair_ids", [])],
         "pair_scoped_exception_audit_count": int(root_step2_metrics.get("pair_scoped_exception_audit_count", 0)),
@@ -3785,6 +4031,17 @@ def _write_road_outputs(
                 "road_count": int(len(roads)),
                 "no_geometry_candidate_count": int(len(no_geometry_entries)),
                 "failure_classification_hist": failure_classification_hist,
+            },
+        },
+    )
+    write_json(
+        dbg_dir / "step6_bridge_trial_decisions.json",
+        {
+            "pairs": bridge_trial_entries,
+            "summary": {
+                "bridge_trial_count": int(len(bridge_trial_entries)),
+                "built_count": int(sum(1 for item in bridge_trial_entries if bool(item["built_final_road"]))),
+                "unresolved_count": int(sum(1 for item in bridge_trial_entries if not bool(item["built_final_road"]))),
             },
         },
     )
@@ -3911,6 +4168,12 @@ def _stage2_segment(
                 "topology_pair_paths": list(item.get("topology_pair_paths", [])),
                 "topology_trace_only_paths": list(item.get("topology_trace_only_paths", [])),
                 "topology_terminal_trace_paths": list(item.get("topology_terminal_trace_paths", [])),
+                "bridge_candidate_retained": bool(item.get("bridge_candidate_retained", False)),
+                "bridge_chain_nodes": [int(v) for v in item.get("bridge_chain_nodes", []) if v is not None],
+                "bridge_chain_source": str(item.get("bridge_chain_source", "")),
+                "bridge_decision_stage": str(item.get("bridge_decision_stage", "")),
+                "bridge_decision_reason": str(item.get("bridge_decision_reason", "")),
+                "bridge_classification": str(item.get("bridge_classification", "")),
                 "prior_anchor_cost_m": item.get("prior_anchor_cost_m"),
                 "prior_anchor_best_pair": item.get("prior_anchor_best_pair"),
                 "competing_prior_pair_ids": [str(v) for v in item.get("competing_prior_pair_ids", [])],
