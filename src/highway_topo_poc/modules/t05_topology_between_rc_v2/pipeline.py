@@ -1097,18 +1097,18 @@ def _topology_gate_reason(
 ) -> str | None:
     if not bool(topology.get("enabled")):
         return None
-    terminal_reverse_ownership = topology.get("terminal_reverse_ownership", {})
-    owner_info = terminal_reverse_ownership.get(int(dst_nodeid))
-    if isinstance(owner_info, dict) and str(owner_info.get("status", "")) == "unique_owner":
-        owner_src_nodeid = owner_info.get("src_nodeid")
-        if owner_src_nodeid is not None and int(owner_src_nodeid) != int(src_nodeid):
-            return "terminal_node_not_owned_by_src"
     allowed_pairs: set[tuple[int, int]] = topology["allowed_pairs"]
     pair = (int(src_nodeid), int(dst_nodeid))
     if pair in allowed_pairs:
         return None
     if (int(dst_nodeid), int(src_nodeid)) in allowed_pairs:
         return "directionally_invalid_segment"
+    terminal_reverse_ownership = topology.get("terminal_reverse_ownership", {})
+    owner_info = terminal_reverse_ownership.get(int(dst_nodeid))
+    if isinstance(owner_info, dict) and str(owner_info.get("status", "")) == "unique_owner":
+        owner_src_nodeid = owner_info.get("src_nodeid")
+        if owner_src_nodeid is not None and int(owner_src_nodeid) != int(src_nodeid):
+            return "terminal_node_not_owned_by_src"
     incoming = topology.get("incoming", {})
     terminal_nodes = topology.get("terminal_nodes", set())
     allowed_srcs = {int(v) for v in incoming.get(int(dst_nodeid), set())}

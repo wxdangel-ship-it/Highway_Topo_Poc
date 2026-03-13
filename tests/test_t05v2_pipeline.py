@@ -460,7 +460,7 @@ def test_t05v2_step2_topology_gate_rejects_wrong_terminal_pairs_and_reverse_dire
     assert int(invalid_11_41["topology_reverse_owner_src_nodeid"]) == 31
 
 
-def test_t05v2_topology_gate_prefers_unique_reverse_terminal_owner() -> None:
+def test_t05v2_topology_gate_keeps_explicit_allowed_pair_even_when_reverse_owner_prefers_other_src() -> None:
     topology = {
         "enabled": True,
         "allowed_pairs": {(5384367610468452, 765141), (23287538, 765141)},
@@ -481,7 +481,7 @@ def test_t05v2_topology_gate_prefers_unique_reverse_terminal_owner() -> None:
             dst_nodeid=765141,
             topology=topology,
         )
-        == "terminal_node_not_owned_by_src"
+        is None
     )
     assert (
         _topology_gate_reason(
@@ -490,6 +490,14 @@ def test_t05v2_topology_gate_prefers_unique_reverse_terminal_owner() -> None:
             topology=topology,
         )
         is None
+    )
+    assert (
+        _topology_gate_reason(
+            src_nodeid=999999,
+            dst_nodeid=765141,
+            topology=topology,
+        )
+        == "terminal_node_not_owned_by_src"
     )
 
 
