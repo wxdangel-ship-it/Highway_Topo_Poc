@@ -70,6 +70,9 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP2_CROSS1_REQUIRE_NO_CROSS0_BETTER": 1,
     "STEP2_PAIR_SCOPED_CROSS1_EXCEPTION_ENABLE": 0,
     "STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST": "",
+    "STEP2_ENABLE_PSEUDO_RCS_NODE_XSECS": 1,
+    "STEP2_PSEUDO_XSEC_HALF_LENGTH_M": 6.0,
+    "STEP2_ENABLE_TERMINAL_TRACE_TOPOLOGY": 0,
     "PRIOR_ENDPOINT_ANCHOR_M": 20.0,
     "DIVSTRIP_BUFFER_M": 0.5,
     "WITNESS_HALF_LENGTH_M": 30.0,
@@ -175,6 +178,18 @@ def _unique_line(points_xy: list[tuple[float, float]]) -> LineString | None:
     if line.is_empty or line.length <= 1e-6:
         return None
     return line
+
+
+def _merge_line_coords(*coord_groups: Any) -> tuple[tuple[float, float], ...]:
+    merged: list[tuple[float, float]] = []
+    for group in coord_groups:
+        if group is None:
+            continue
+        for coord in group:
+            xy = (float(coord[0]), float(coord[1]))
+            if not merged or xy != merged[-1]:
+                merged.append(xy)
+    return tuple(merged)
 
 
 def _trajectory_line(traj: Any) -> LineString | None:
@@ -625,12 +640,22 @@ def _build_topology_adjacency_edges(
         pair = _directed_road_pair(road)
         if pair is None:
             continue
+        line = getattr(road, "line", None)
+        if not isinstance(line, LineString) or line.is_empty or len(line.coords) < 2:
+            continue
+        try:
+            direction = int(getattr(road, "direction", 2))
+        except Exception:
+            direction = 2
+        if int(direction) == 3:
+            line = _reverse_line(line)
         src_nodeid, dst_nodeid = pair
         adjacency_edges[int(src_nodeid)].append(
             {
                 "to": int(dst_nodeid),
                 "edge_id": f"prior_{idx}",
                 "path_nodes": [int(src_nodeid), int(dst_nodeid)],
+                "line_coords": [list(coord) for coord in line_to_coords(line)],
             }
         )
     for src, vals in adjacency_edges.items():
@@ -682,6 +707,7 @@ def _compress_topology_graph(
         for first_edge in src_edges:
             chain_edge_ids: list[str] = []
             path_nodes: list[int] = [int(src)]
+            line_coords: tuple[tuple[float, float], ...] = tuple()
             visited: set[int] = set()
             edge_cur = dict(first_edge)
             for _ in range(100000):
@@ -689,6 +715,7 @@ def _compress_topology_graph(
                 edge_id = str(edge_cur.get("edge_id") or "")
                 chain_edge_ids.append(edge_id)
                 path_nodes.append(int(dst))
+                line_coords = _merge_line_coords(line_coords, edge_cur.get("line_coords", []))
                 if int(dst) in keep_nodes:
                     break
                 if int(dst) in visited:
@@ -711,6 +738,7 @@ def _compress_topology_graph(
                     "to": int(dst_keep),
                     "edge_ids": [str(v) for v in chain_edge_ids],
                     "path_nodes": [int(v) for v in path_nodes],
+                    "line_coords": [[float(x), float(y)] for x, y in line_coords],
                 }
             )
 
@@ -748,19 +776,24 @@ def _reverse_compressed_graph(
             dst_i = int(to_raw)
             edge_ids = [str(v) for v in edge.get("edge_ids", [])]
             path_nodes = [int(v) for v in edge.get("path_nodes", []) if v is not None]
+            line_coords = [tuple((float(x), float(y))) for x, y, *_ in edge.get("line_coords", [])]
             if not path_nodes:
                 path_nodes = [int(src_i), int(dst_i)]
             if int(path_nodes[0]) != int(src_i):
                 path_nodes = [int(src_i)] + path_nodes
             if int(path_nodes[-1]) != int(dst_i):
                 path_nodes.append(int(dst_i))
+            if not line_coords:
+                line_coords = [(float(path_nodes[0]), 0.0), (float(path_nodes[-1]), 0.0)]
             rev_edge_ids = [f"rev:{str(v)}" for v in reversed(edge_ids)] if edge_ids else [f"rev_edge_{src_i}_{dst_i}_{idx}"]
             rev_path_nodes = [int(v) for v in reversed(path_nodes)]
+            rev_line_coords = [list(coord) for coord in reversed(line_coords)]
             reversed_graph.setdefault(int(dst_i), []).append(
                 {
                     "to": int(src_i),
                     "edge_ids": [str(v) for v in rev_edge_ids],
                     "path_nodes": [int(v) for v in rev_path_nodes],
+                    "line_coords": rev_line_coords,
                 }
             )
     for src, vals in reversed_graph.items():
@@ -804,20 +837,22 @@ def _search_topology_next_nodes_from_anchor(
         init_node_path.append(int(start_to))
     init_edge_path = [str(v) for v in start_edge_ids]
 
-    stack: list[tuple[int, list[int], list[str]]] = [
-        (int(start_to), [int(v) for v in init_node_path], [str(v) for v in init_edge_path])
+    init_line_coords = _merge_line_coords(next((edge.get("line_coords", []) for edge in compressed_adj.get(int(src), []) if int(edge.get("to", -1)) == int(start_to) and [str(v) for v in edge.get("edge_ids", [])] == init_edge_path), []))
+    stack: list[tuple[int, list[int], list[str], tuple[tuple[float, float], ...]]] = [
+        (int(start_to), [int(v) for v in init_node_path], [str(v) for v in init_edge_path], init_line_coords)
     ]
     expansions = 1
     overflow = False
     dst_paths_raw: dict[int, list[dict[str, Any]]] = {}
 
     while stack:
-        node, node_path, edge_path = stack.pop()
+        node, node_path, edge_path, line_coords = stack.pop()
         if int(node) != int(src) and int(node) in cross_nodes:
             dst_paths_raw.setdefault(int(node), []).append(
                 {
                     "node_path": [int(v) for v in node_path],
                     "edge_ids": [str(v) for v in edge_path],
+                    "line_coords": [[float(x), float(y)] for x, y in line_coords],
                 }
             )
             continue
@@ -835,6 +870,7 @@ def _search_topology_next_nodes_from_anchor(
                     int(nxt),
                     [int(v) for v in node_path] + [int(nxt)],
                     [str(v) for v in edge_path] + edge_ids,
+                    _merge_line_coords(line_coords, edge.get("line_coords", [])),
                 )
             )
             expansions += 1
@@ -853,6 +889,7 @@ def _search_topology_next_nodes_from_anchor(
                 "edge_ids": edge_ids,
                 "signature": [str(v) for v in sig],
                 "chain_len": int(len(edge_ids)),
+                "line_coords": list(rec.get("line_coords", [])),
             }
         dst_paths[int(dst)] = list(uniq.values())
 
@@ -894,20 +931,22 @@ def _search_topology_terminal_nodes_from_anchor(
         init_node_path.append(int(start_to))
     init_edge_path = [str(v) for v in start_edge_ids]
 
-    stack: list[tuple[int, list[int], list[str]]] = [
-        (int(start_to), [int(v) for v in init_node_path], [str(v) for v in init_edge_path])
+    init_line_coords = _merge_line_coords(next((edge.get("line_coords", []) for edge in compressed_adj.get(int(src), []) if int(edge.get("to", -1)) == int(start_to) and [str(v) for v in edge.get("edge_ids", [])] == init_edge_path), []))
+    stack: list[tuple[int, list[int], list[str], tuple[tuple[float, float], ...]]] = [
+        (int(start_to), [int(v) for v in init_node_path], [str(v) for v in init_edge_path], init_line_coords)
     ]
     expansions = 1
     overflow = False
     dst_paths_raw: dict[int, list[dict[str, Any]]] = {}
 
     while stack:
-        node, node_path, edge_path = stack.pop()
+        node, node_path, edge_path, line_coords = stack.pop()
         if int(node) != int(src) and int(node) in terminal_nodes:
             dst_paths_raw.setdefault(int(node), []).append(
                 {
                     "node_path": [int(v) for v in node_path],
                     "edge_ids": [str(v) for v in edge_path],
+                    "line_coords": [[float(x), float(y)] for x, y in line_coords],
                 }
             )
             continue
@@ -925,6 +964,7 @@ def _search_topology_terminal_nodes_from_anchor(
                     int(nxt),
                     [int(v) for v in node_path] + [int(nxt)],
                     [str(v) for v in edge_path] + edge_ids,
+                    _merge_line_coords(line_coords, edge.get("line_coords", [])),
                 )
             )
             expansions += 1
@@ -943,6 +983,7 @@ def _search_topology_terminal_nodes_from_anchor(
                 "edge_ids": edge_ids,
                 "signature": [str(v) for v in sig],
                 "chain_len": int(len(edge_ids)),
+                "line_coords": list(rec.get("line_coords", [])),
             }
         dst_paths[int(dst)] = list(uniq.values())
 
@@ -1090,6 +1131,7 @@ def _build_directed_topology(
     frame: InputFrame,
     inputs: PatchInputs,
     prior_roads: list[Any],
+    params: dict[str, Any],
 ) -> dict[str, Any]:
     xsec_ids = {int(xsec.nodeid) for xsec in frame.base_cross_sections}
     allowed_pairs: set[tuple[int, int]] = set()
@@ -1098,6 +1140,8 @@ def _build_directed_topology(
     pair_prior_ids: dict[tuple[int, int], list[str]] = defaultdict(list)
     pair_sources: dict[tuple[int, int], set[str]] = defaultdict(set)
     pair_paths: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    pair_arcs: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    terminal_trace_paths: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
     adjacency_edges = _build_topology_adjacency_edges(prior_roads)
     compressed_adj, compress_stats = _compress_topology_graph(adjacency_edges, cross_nodes=xsec_ids)
     for src_nodeid in sorted(xsec_ids):
@@ -1131,17 +1175,34 @@ def _build_directed_topology(
             allowed_pairs.add((int(src_nodeid), int(dst_nodeid)))
             outgoing[int(src_nodeid)].add(int(dst_nodeid))
             incoming[int(dst_nodeid)].add(int(src_nodeid))
-            for rec in records:
+            pair_key = (int(src_nodeid), int(dst_nodeid))
+            for rec_idx, rec in enumerate(records, start=1):
                 edge_ids = [str(v) for v in rec.get("edge_ids", []) if str(v)]
-                pair_prior_ids[(int(src_nodeid), int(dst_nodeid))].extend(edge_ids)
+                pair_prior_ids[pair_key].extend(edge_ids)
                 source_tag = "prior_direct_edge" if int(len(rec.get("node_path", []))) <= 2 else "rcsdroad_trace"
-                pair_sources[(int(src_nodeid), int(dst_nodeid))].add(str(source_tag))
-                pair_paths[(int(src_nodeid), int(dst_nodeid))].append(
+                arc_rank = int(len(pair_arcs.get(pair_key, [])) + 1)
+                arc_id = f"arc_{int(src_nodeid)}_{int(dst_nodeid)}_{int(arc_rank)}"
+                pair_sources[pair_key].add(str(source_tag))
+                pair_paths[pair_key].append(
                     {
+                        "arc_id": str(arc_id),
                         "source": str(source_tag),
                         "node_path": [int(v) for v in rec.get("node_path", [])],
                         "edge_ids": edge_ids,
                         "chain_len": int(rec.get("chain_len", 0)),
+                        "line_coords": list(rec.get("line_coords", [])),
+                    }
+                )
+                pair_arcs[pair_key].append(
+                    {
+                        "arc_id": str(arc_id),
+                        "src_nodeid": int(src_nodeid),
+                        "dst_nodeid": int(dst_nodeid),
+                        "source": str(source_tag),
+                        "node_path": [int(v) for v in rec.get("node_path", [])],
+                        "edge_ids": edge_ids,
+                        "chain_len": int(rec.get("chain_len", 0)),
+                        "line_coords": list(rec.get("line_coords", [])),
                     }
                 )
     node_kind_map: dict[int, int | None] = {}
@@ -1158,55 +1219,84 @@ def _build_directed_topology(
         for nodeid, srcs in incoming.items()
         if srcs and not outgoing.get(int(nodeid))
     }
-    for src_nodeid in sorted(xsec_ids):
-        for edge in compressed_adj.get(int(src_nodeid), []):
-            start_to_raw = edge.get("to")
-            start_to = int(start_to_raw) if start_to_raw is not None else None
-            start_edge_ids = [str(v) for v in edge.get("edge_ids", [])]
-            start_path_nodes = [int(v) for v in edge.get("path_nodes", []) if v is not None]
-            search = _search_topology_terminal_nodes_from_anchor(
-                compressed_adj,
-                src_nodeid=int(src_nodeid),
-                start_to=start_to,
-                start_edge_ids=start_edge_ids,
-                start_path_nodes=start_path_nodes,
-                terminal_nodes=terminal_nodes,
-                max_expansions=2048,
-            )
-            for dst_nodeid, records in sorted(search.get("dst_paths", {}).items()):
-                pair = (int(src_nodeid), int(dst_nodeid))
-                if pair in allowed_pairs:
-                    continue
-                if int(src_nodeid) == int(dst_nodeid):
-                    continue
-                terminal_records = [
-                    rec
-                    for rec in records
-                    if int(len(rec.get("node_path", []))) >= 3
-                ]
-                if not terminal_records:
-                    continue
-                terminal_records.sort(
-                    key=lambda rec: (
-                        int(rec.get("chain_len", 0)),
-                        ",".join(str(v) for v in rec.get("edge_ids", [])),
-                    )
+    if bool(int(params.get("STEP2_ENABLE_TERMINAL_TRACE_TOPOLOGY", 0))):
+        for src_nodeid in sorted(xsec_ids):
+            for edge in compressed_adj.get(int(src_nodeid), []):
+                start_to_raw = edge.get("to")
+                start_to = int(start_to_raw) if start_to_raw is not None else None
+                start_edge_ids = [str(v) for v in edge.get("edge_ids", [])]
+                start_path_nodes = [int(v) for v in edge.get("path_nodes", []) if v is not None]
+                search = _search_topology_terminal_nodes_from_anchor(
+                    compressed_adj,
+                    src_nodeid=int(src_nodeid),
+                    start_to=start_to,
+                    start_edge_ids=start_edge_ids,
+                    start_path_nodes=start_path_nodes,
+                    terminal_nodes=terminal_nodes,
+                    max_expansions=2048,
                 )
-                allowed_pairs.add(pair)
-                outgoing[int(src_nodeid)].add(int(dst_nodeid))
-                incoming[int(dst_nodeid)].add(int(src_nodeid))
-                for rec in terminal_records:
-                    edge_ids = [str(v) for v in rec.get("edge_ids", []) if str(v)]
-                    pair_prior_ids[pair].extend(edge_ids)
-                    pair_sources[pair].add("rcsdroad_terminal_trace")
-                    pair_paths[pair].append(
-                        {
-                            "source": "rcsdroad_terminal_trace",
-                            "node_path": [int(v) for v in rec.get("node_path", [])],
-                            "edge_ids": edge_ids,
-                            "chain_len": int(rec.get("chain_len", 0)),
-                        }
+                for dst_nodeid, records in sorted(search.get("dst_paths", {}).items()):
+                    pair = (int(src_nodeid), int(dst_nodeid))
+                    if pair in allowed_pairs or int(src_nodeid) == int(dst_nodeid):
+                        continue
+                    terminal_records = [rec for rec in records if int(len(rec.get("node_path", []))) >= 3]
+                    if not terminal_records:
+                        continue
+                    terminal_records.sort(
+                        key=lambda rec: (
+                            int(rec.get("chain_len", 0)),
+                            ",".join(str(v) for v in rec.get("edge_ids", [])),
+                        )
                     )
+                    for rec in terminal_records:
+                        terminal_trace_paths[pair].append(
+                            {
+                                "source": "rcsdroad_terminal_trace",
+                                "node_path": [int(v) for v in rec.get("node_path", [])],
+                                "edge_ids": [str(v) for v in rec.get("edge_ids", []) if str(v)],
+                                "chain_len": int(rec.get("chain_len", 0)),
+                                "line_coords": list(rec.get("line_coords", [])),
+                            }
+                        )
+    else:
+        for src_nodeid in sorted(xsec_ids):
+            for edge in compressed_adj.get(int(src_nodeid), []):
+                start_to_raw = edge.get("to")
+                start_to = int(start_to_raw) if start_to_raw is not None else None
+                start_edge_ids = [str(v) for v in edge.get("edge_ids", [])]
+                start_path_nodes = [int(v) for v in edge.get("path_nodes", []) if v is not None]
+                search = _search_topology_terminal_nodes_from_anchor(
+                    compressed_adj,
+                    src_nodeid=int(src_nodeid),
+                    start_to=start_to,
+                    start_edge_ids=start_edge_ids,
+                    start_path_nodes=start_path_nodes,
+                    terminal_nodes=terminal_nodes,
+                    max_expansions=2048,
+                )
+                for dst_nodeid, records in sorted(search.get("dst_paths", {}).items()):
+                    pair = (int(src_nodeid), int(dst_nodeid))
+                    if int(src_nodeid) == int(dst_nodeid):
+                        continue
+                    terminal_records = [rec for rec in records if int(len(rec.get("node_path", []))) >= 3]
+                    if not terminal_records:
+                        continue
+                    terminal_records.sort(
+                        key=lambda rec: (
+                            int(rec.get("chain_len", 0)),
+                            ",".join(str(v) for v in rec.get("edge_ids", [])),
+                        )
+                    )
+                    for rec in terminal_records:
+                        terminal_trace_paths[pair].append(
+                            {
+                                "source": "rcsdroad_terminal_trace",
+                                "node_path": [int(v) for v in rec.get("node_path", [])],
+                                "edge_ids": [str(v) for v in rec.get("edge_ids", []) if str(v)],
+                                "chain_len": int(rec.get("chain_len", 0)),
+                                "line_coords": list(rec.get("line_coords", [])),
+                            }
+                        )
     terminal_reverse_ownership, reverse_owner_stats = _build_terminal_reverse_ownership(
         compressed_adj=compressed_adj,
         terminal_nodes={int(v) for v in terminal_nodes},
@@ -1221,6 +1311,8 @@ def _build_directed_topology(
         "pair_prior_ids": {pair: sorted(set(vals)) for pair, vals in pair_prior_ids.items()},
         "pair_sources": {pair: sorted(str(v) for v in vals) for pair, vals in pair_sources.items()},
         "pair_paths": {pair: list(vals) for pair, vals in pair_paths.items()},
+        "pair_arcs": {pair: list(vals) for pair, vals in pair_arcs.items()},
+        "terminal_trace_paths": {pair: list(vals) for pair, vals in terminal_trace_paths.items()},
         "terminal_nodes": {int(v) for v in terminal_nodes},
         "terminal_reverse_ownership": {int(k): dict(v) for k, v in terminal_reverse_ownership.items()},
         "node_kind_map": dict(node_kind_map),
@@ -1248,6 +1340,55 @@ def _topology_gate_reason(
     if int(dst_nodeid) in terminal_nodes and allowed_srcs and int(src_nodeid) not in allowed_srcs:
         return "terminal_node_not_owned_by_src"
     return "segment_not_in_rcsdroad_topology"
+
+
+def _assign_topology_arc(
+    candidate: dict[str, Any],
+    *,
+    topology: dict[str, Any],
+) -> dict[str, Any] | None:
+    pair = (int(candidate.get("src_nodeid", 0)), int(candidate.get("dst_nodeid", 0)))
+    arcs = list(topology.get("pair_arcs", {}).get(pair, []))
+    if not arcs:
+        return None
+    if len(arcs) == 1:
+        chosen = arcs[0]
+    else:
+        chosen = None
+        source = str(candidate.get("source", ""))
+        candidate_id = str(candidate.get("candidate_id", ""))
+        if source == "prior" and candidate_id:
+            exact = [arc for arc in arcs if candidate_id in {str(v) for v in arc.get("edge_ids", [])}]
+            if len(exact) == 1:
+                chosen = exact[0]
+            elif exact:
+                arcs = exact
+        if chosen is None:
+            candidate_line = candidate.get("line")
+            scored: list[tuple[float, int, str, dict[str, Any]]] = []
+            for arc in arcs:
+                arc_line = coords_to_line(
+                    tuple((float(x), float(y)) for x, y in arc.get("line_coords", []))
+                )
+                try:
+                    dist = float(candidate_line.distance(arc_line)) if isinstance(candidate_line, LineString) else float("inf")
+                except Exception:
+                    dist = float("inf")
+                scored.append(
+                    (
+                        dist,
+                        int(arc.get("chain_len", 0)),
+                        str(arc.get("arc_id", "")),
+                        arc,
+                    )
+                )
+            scored.sort(key=lambda item: (float(item[0]), int(item[1]), str(item[2])))
+            chosen = scored[0][3]
+            candidate["topology_arc_distance_m"] = None if not scored else float(scored[0][0])
+    candidate["topology_arc_id"] = str(chosen.get("arc_id", ""))
+    candidate["topology_arc_edge_ids"] = [str(v) for v in chosen.get("edge_ids", [])]
+    candidate["topology_arc_node_path"] = [int(v) for v in chosen.get("node_path", [])]
+    return chosen
 
 
 def _candidate_support_count(candidate: dict[str, Any]) -> int:
@@ -1287,6 +1428,8 @@ def _candidate_feature_properties(
         "traj_id": str(candidate.get("traj_id", "")),
         "topology_allowed": bool(candidate.get("topology_allowed", False)),
         "topology_reason": str(candidate.get("topology_reason", "")),
+        "topology_arc_id": str(candidate.get("topology_arc_id", "")),
+        "topology_arc_distance_m": candidate.get("topology_arc_distance_m"),
     }
 
 
@@ -1314,6 +1457,9 @@ def _segment_feature_properties(segment: Segment, *, status: str, reason: str = 
         "drivezone_ratio": float(segment.drivezone_ratio),
         "gore_conflict": bool(segment.crosses_divstrip),
         "crosses_divstrip": bool(segment.crosses_divstrip),
+        "topology_arc_id": str(segment.topology_arc_id),
+        "topology_arc_edge_ids": [str(v) for v in segment.topology_arc_edge_ids],
+        "topology_arc_node_path": [int(v) for v in segment.topology_arc_node_path],
         "same_pair_rank": None if segment.same_pair_rank is None else int(segment.same_pair_rank),
         "kept_reason": str(segment.kept_reason),
         "status": str(status),
@@ -1332,7 +1478,7 @@ def _segment_candidates(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     xsec_map = _xsec_map(frame)
-    topology = _build_directed_topology(frame=frame, inputs=inputs, prior_roads=prior_roads)
+    topology = _build_directed_topology(frame=frame, inputs=inputs, prior_roads=prior_roads, params=params)
     raw_candidates: list[dict[str, Any]] = []
     pairing_candidates: list[dict[str, Any]] = []
     accepted_before_topology_gate: list[dict[str, Any]] = []
@@ -1441,6 +1587,9 @@ def _segment_candidates(
             "line_length_m": float(line.length),
             "pair_midpoint_distance_m": float(_pair_midpoint_distance_for_nodes(xsec_map, int(src_nodeid), int(dst_nodeid))),
             "traj_id": "" if str(source) != "traj" else next(iter({str(v) for v in support_traj_ids}), ""),
+            "topology_arc_id": "",
+            "topology_arc_edge_ids": [],
+            "topology_arc_node_path": [],
         }
 
     def reject(candidate: dict[str, Any], *, stage: str, reason: str) -> None:
@@ -1681,6 +1830,7 @@ def _segment_candidates(
         if topology_reason is not None:
             reject(candidate, stage="topology_gate", reason=str(topology_reason))
             continue
+        _assign_topology_arc(candidate, topology=topology)
         topology_kept_candidates.append(candidate)
         note_candidate_events(candidate, phase="topology_kept", reason="topology_legal_candidate")
         cross_reason = cross_filter_reason(candidate)
@@ -1768,14 +1918,18 @@ def _segment_candidates(
 
 def _cluster_segments(candidates: list[dict[str, Any]], frame: InputFrame, params: dict[str, Any]) -> list[Segment]:
     xsec_map = _xsec_map(frame)
-    by_pair: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    by_pair: dict[tuple[int, int, str], list[dict[str, Any]]] = {}
     for candidate in candidates:
-        key = (int(candidate["src_nodeid"]), int(candidate["dst_nodeid"]))
+        key = (
+            int(candidate["src_nodeid"]),
+            int(candidate["dst_nodeid"]),
+            str(candidate.get("topology_arc_id", "") or ""),
+        )
         by_pair.setdefault(key, []).append(candidate)
     out: list[Segment] = []
     cluster_offset = float(params["SEGMENT_CLUSTER_OFFSET_M"])
     cluster_line_dist = float(params["SEGMENT_CLUSTER_LINE_DIST_M"])
-    for (src_nodeid, dst_nodeid), pair_candidates in sorted(by_pair.items()):
+    for (src_nodeid, dst_nodeid, topology_arc_id), pair_candidates in sorted(by_pair.items()):
         src_xsec = xsec_map[int(src_nodeid)]
         dst_xsec = xsec_map[int(dst_nodeid)]
         scored: list[dict[str, Any]] = []
@@ -1820,9 +1974,10 @@ def _cluster_segments(candidates: list[dict[str, Any]], frame: InputFrame, param
             elif source_modes == ("traj",):
                 formation_reason = "traj_supported_cluster"
             representative_offset = float(sum(float(item["offset_m"]) for item in cluster) / max(1, len(cluster)))
+            arc_token = str(topology_arc_id or "pair")
             out.append(
                 Segment(
-                    segment_id=f"seg_{src_nodeid}_{dst_nodeid}_{rank}",
+                    segment_id=f"seg_{src_nodeid}_{dst_nodeid}_{arc_token}_{rank}",
                     src_nodeid=int(src_nodeid),
                     dst_nodeid=int(dst_nodeid),
                     direction="src->dst",
@@ -1840,6 +1995,9 @@ def _cluster_segments(candidates: list[dict[str, Any]], frame: InputFrame, param
                     length_m=float(representative["line"].length),
                     drivezone_ratio=float(sum(float(item.get("drivezone_ratio", 0.0)) for item in cluster) / max(1, len(cluster))),
                     crosses_divstrip=bool(any(bool(item.get("crosses_divstrip", False)) for item in cluster)),
+                    topology_arc_id=str(topology_arc_id or ""),
+                    topology_arc_edge_ids=tuple(str(v) for v in representative.get("topology_arc_edge_ids", [])),
+                    topology_arc_node_path=tuple(int(v) for v in representative.get("topology_arc_node_path", [])),
                 )
             )
     return out
@@ -1859,9 +2017,16 @@ def _select_segments_same_pair(
     cross1_require_no_cross0 = bool(int(params["STEP2_CROSS1_REQUIRE_NO_CROSS0_BETTER"]))
     pair_scoped_cross1_enabled = bool(int(params.get("STEP2_PAIR_SCOPED_CROSS1_EXCEPTION_ENABLE", 0)))
     pair_scoped_cross1_allowlist = _parse_pair_scoped_allowlist(params.get("STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST", ""))
-    by_pair: dict[tuple[int, int], list[Segment]] = {}
+    by_pair: dict[tuple[int, int, str], list[Segment]] = {}
     for segment in segments:
-        by_pair.setdefault((int(segment.src_nodeid), int(segment.dst_nodeid)), []).append(segment)
+        by_pair.setdefault(
+            (
+                int(segment.src_nodeid),
+                int(segment.dst_nodeid),
+                str(segment.topology_arc_id or ""),
+            ),
+            [],
+        ).append(segment)
 
     def sort_key(segment: Segment) -> tuple[Any, ...]:
         return (
@@ -1881,7 +2046,7 @@ def _select_segments_same_pair(
     zero_selected_pairs: list[dict[str, Any]] = []
     pair_scoped_exception_hits: set[tuple[int, int]] = set()
     selected_cross1_exception_count = 0
-    for (src_nodeid, dst_nodeid), pair_segments in sorted(by_pair.items()):
+    for (src_nodeid, dst_nodeid, topology_arc_id), pair_segments in sorted(by_pair.items()):
         ordered = sorted(pair_segments, key=sort_key)
         has_cross0 = any(int(segment.other_xsec_crossing_count) == 0 for segment in ordered)
         pair_scoped_exception_applicable = bool(
@@ -1979,6 +2144,7 @@ def _select_segments_same_pair(
             {
                 "src_nodeid": int(src_nodeid),
                 "dst_nodeid": int(dst_nodeid),
+                "topology_arc_id": str(topology_arc_id),
                 "candidate_segment_count": int(len(pair_segments)),
                 "selected_segment_count": int(selected_segment_count),
                 "same_pair_topk": int(topk),
@@ -1993,6 +2159,7 @@ def _select_segments_same_pair(
                 {
                     "src_nodeid": int(src_nodeid),
                     "dst_nodeid": int(dst_nodeid),
+                    "topology_arc_id": str(topology_arc_id),
                     "pair_id": _pair_id_text(src_nodeid, dst_nodeid),
                     "candidate_count": int(len(pair_segments)),
                     "support_count": int(best.get("support_count", 0)),
@@ -2080,14 +2247,53 @@ def _build_pair_scoped_exception_audit(
     params: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     allowlist = _parse_pair_scoped_allowlist(params.get("STEP2_PAIR_SCOPED_CROSS1_ALLOWLIST", ""))
-    group_map = {
-        (int(item["src_nodeid"]), int(item["dst_nodeid"])): item
-        for item in same_pair_groups
-    }
-    zero_map = {
-        (int(item["src_nodeid"]), int(item["dst_nodeid"])): item
-        for item in zero_selected_pairs
-    }
+    group_map: dict[tuple[int, int], dict[str, Any]] = {}
+    for item in same_pair_groups:
+        pair = (int(item["src_nodeid"]), int(item["dst_nodeid"]))
+        row = group_map.setdefault(
+            pair,
+            {
+                "src_nodeid": int(item["src_nodeid"]),
+                "dst_nodeid": int(item["dst_nodeid"]),
+                "has_cross0_candidate": False,
+                "segments": [],
+            },
+        )
+        row["has_cross0_candidate"] = bool(row["has_cross0_candidate"] or item.get("has_cross0_candidate"))
+        row["segments"].extend(list(item.get("segments", [])))
+    zero_map: dict[tuple[int, int], dict[str, Any]] = {}
+    for item in zero_selected_pairs:
+        pair = (int(item["src_nodeid"]), int(item["dst_nodeid"]))
+        row = zero_map.setdefault(
+            pair,
+            {
+                "src_nodeid": int(item["src_nodeid"]),
+                "dst_nodeid": int(item["dst_nodeid"]),
+                "pair_id": str(item.get("pair_id", _pair_id_text(int(item["src_nodeid"]), int(item["dst_nodeid"])))),
+                "candidate_count": 0,
+                "support_count": 0,
+                "other_xsec_crossing_count": 0,
+                "inside_ratio": 0.0,
+                "gore_conflict": False,
+                "dropped_reason": "",
+                "whether_pair_scoped_exception_applicable": False,
+                "kept_reason": "",
+                "segments": [],
+            },
+        )
+        row["candidate_count"] += int(item.get("candidate_count", 0))
+        row["support_count"] = max(int(row["support_count"]), int(item.get("support_count", 0)))
+        row["other_xsec_crossing_count"] = int(item.get("other_xsec_crossing_count", row["other_xsec_crossing_count"]))
+        row["inside_ratio"] = max(float(row["inside_ratio"]), float(item.get("inside_ratio", 0.0)))
+        row["gore_conflict"] = bool(row["gore_conflict"] or item.get("gore_conflict", False))
+        if not row["dropped_reason"]:
+            row["dropped_reason"] = str(item.get("dropped_reason", ""))
+        row["whether_pair_scoped_exception_applicable"] = bool(
+            row["whether_pair_scoped_exception_applicable"] or item.get("whether_pair_scoped_exception_applicable")
+        )
+        if not row["kept_reason"]:
+            row["kept_reason"] = str(item.get("kept_reason", ""))
+        row["segments"].extend(list(item.get("segments", [])))
     rejected_by_pair: dict[tuple[int, int], list[dict[str, Any]]] = {}
     for item in rejected_candidates:
         pair = (int(item.get("src_nodeid", 0)), int(item.get("dst_nodeid", 0)))
@@ -2471,15 +2677,27 @@ def _build_topology_pairs_debug(
     allowed_pairs: set[tuple[int, int]] = topology.get("allowed_pairs", set())
     pair_sources: dict[tuple[int, int], list[str]] = topology.get("pair_sources", {})
     pair_paths: dict[tuple[int, int], list[dict[str, Any]]] = topology.get("pair_paths", {})
+    terminal_trace_paths: dict[tuple[int, int], list[dict[str, Any]]] = topology.get("terminal_trace_paths", {})
     out: list[dict[str, Any]] = []
-    for pair in sorted(allowed_pairs):
+    all_pairs = set(allowed_pairs) | set(terminal_trace_paths.keys())
+    for pair in sorted(all_pairs):
+        is_allowed = pair in allowed_pairs
+        sources = list(pair_sources.get(pair, []))
+        paths = list(pair_paths.get(pair, []))
+        if not is_allowed:
+            sources = sorted(set([*sources, "rcsdroad_terminal_trace"]))
+            paths = list(terminal_trace_paths.get(pair, []))
         out.append(
             {
                 "src_nodeid": int(pair[0]),
                 "dst_nodeid": int(pair[1]),
                 "pair_id": _pair_id_text(int(pair[0]), int(pair[1])),
-                "topology_sources": list(pair_sources.get(pair, [])),
-                "topology_paths": list(pair_paths.get(pair, [])),
+                "topology_allowed": True if is_allowed else None,
+                "direction_allowed": True if is_allowed else None,
+                "selected": None,
+                "rejected_reason": None,
+                "topology_sources": list(sources),
+                "topology_paths": list(paths),
             }
         )
     return out

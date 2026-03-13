@@ -76,6 +76,7 @@ def _write_patch(
     lane_fc: dict | None = None,
     divstrip_fc: dict | None = None,
     road_fc: dict | None = None,
+    node_fc: dict | None = None,
 ) -> Path:
     patch_dir = root / patch_id
     vector_dir = patch_dir / "Vector"
@@ -89,6 +90,8 @@ def _write_patch(
         _write_json(vector_dir / "DivStripZone.geojson", divstrip_fc)
     if road_fc is not None:
         _write_json(vector_dir / "RCSDRoad.geojson", road_fc)
+    if node_fc is not None:
+        _write_json(vector_dir / "RCSDNode.geojson", node_fc)
     for idx, track in enumerate(traj_tracks):
         features = []
         for seq, coord in enumerate(track):
@@ -685,8 +688,8 @@ def test_t05v2_step2_topology_gate_allows_traced_rcsdroad_pairs(tmp_path: Path) 
     assert int(step2_metrics["topology_invalid_segment_count"]) == 0
 
 
-def test_t05v2_step2_topology_gate_allows_terminal_trace_pairs(tmp_path: Path) -> None:
-    patch_id = "topology_terminal_trace"
+def test_t05v2_step2_terminal_trace_is_audit_only(tmp_path: Path) -> None:
+    patch_id = "topology_terminal_trace_audit_only"
     data_root = tmp_path / "data"
     intersection_fc = _fc(
         [
@@ -718,11 +721,110 @@ def test_t05v2_step2_topology_gate_allows_terminal_trace_pairs(tmp_path: Path) -
     patch_dir = out_root / "run_terminal_trace" / "patches" / patch_id
     segments_payload = _read_json(patch_dir / "step2" / "segments.json")
     kept_pairs = {(int(item["src_nodeid"]), int(item["dst_nodeid"])) for item in segments_payload["segments"]}
-    assert (10, 40) in kept_pairs
+    assert (10, 40) not in kept_pairs
     topology_debug = _read_json(patch_dir / "debug" / "step2_topology_pairs.json")
     pair_map = {str(item["pair_id"]): item for item in topology_debug["pairs"]}
+    assert pair_map["10:40"]["topology_allowed"] is None
     assert pair_map["10:40"]["topology_sources"] == ["rcsdroad_terminal_trace"]
     assert pair_map["10:40"]["topology_paths"][0]["node_path"] == [10, 20, 40]
+    excluded = [
+        item
+        for item in segments_payload["excluded_candidates"]
+        if int(item["src_nodeid"]) == 10 and int(item["dst_nodeid"]) == 40
+    ]
+    assert excluded
+    assert {str(item["reason"]) for item in excluded} <= {
+        "segment_not_in_rcsdroad_topology",
+        "non_adjacent_pair_blocked",
+        "terminal_node_not_owned_by_src",
+    }
+
+
+def test_t05v2_step2_promotes_missing_rcsd_node_to_pseudo_xsec_and_builds_direct_arcs(tmp_path: Path) -> None:
+    patch_id = "pseudo_xsec_direct_arcs"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -5.0), (0.0, 5.0)], {"nodeid": 10}),
+            _line_feature([(100.0, -5.0), (100.0, 5.0)], {"nodeid": 40}),
+        ],
+        "EPSG:3857",
+    )
+    drivezone_fc = _fc([_poly_feature([(-5.0, -6.0), (105.0, -6.0), (105.0, 6.0), (-5.0, 6.0)])], "EPSG:3857")
+    road_fc = _fc(
+        [
+            _line_feature([(0.0, 0.0), (50.0, 0.0)], {"snodeid": 10, "enodeid": 30}),
+            _line_feature([(50.0, 0.0), (100.0, 0.0)], {"snodeid": 30, "enodeid": 40}),
+        ],
+        "EPSG:3857",
+    )
+    node_fc = _fc(
+        [
+            _point_feature((50.0, 0.0), {"nodeid": 30, "kind": 2}),
+        ],
+        "EPSG:3857",
+    )
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=intersection_fc,
+        drivezone_fc=drivezone_fc,
+        traj_tracks=[[(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)]],
+        road_fc=road_fc,
+        node_fc=node_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_pseudo_xsec", out_root=out_root)
+    frame_payload = _read_json(out_root / "run_pseudo_xsec" / "patches" / patch_id / "step1" / "input_frame.json")
+    base_xsecs = frame_payload["input_frame"]["base_cross_sections"]
+    assert {int(item["nodeid"]) for item in base_xsecs} == {10, 30, 40}
+    pseudo_rows = [item for item in base_xsecs if str(item.get("properties", {}).get("source", "")) == "pseudo_rcsd_node"]
+    assert len(pseudo_rows) == 1
+    assert int(frame_payload["input_frame"]["input_summary"]["pseudo_xsec_count"]) == 1
+
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_pseudo_xsec", out_root=out_root)
+    segments_payload = _read_json(out_root / "run_pseudo_xsec" / "patches" / patch_id / "step2" / "segments.json")
+    kept_pairs = {(int(item["src_nodeid"]), int(item["dst_nodeid"])) for item in segments_payload["segments"]}
+    assert kept_pairs == {(10, 30), (30, 40)}
+
+
+def test_t05v2_step2_keeps_multi_arc_segments_for_same_pair(tmp_path: Path) -> None:
+    patch_id = "same_pair_multi_arc"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -10.0), (0.0, 10.0)], {"nodeid": 1}),
+            _line_feature([(100.0, -10.0), (100.0, 10.0)], {"nodeid": 2}),
+        ],
+        "EPSG:3857",
+    )
+    drivezone_fc = _fc([_poly_feature([(-5.0, -2.0), (105.0, -2.0), (105.0, 6.0), (-5.0, 6.0)])], "EPSG:3857")
+    road_fc = _fc(
+        [
+            _line_feature([(0.0, 0.0), (100.0, 0.0)], {"snodeid": 1, "enodeid": 2}),
+            _line_feature([(0.0, 4.0), (100.0, 4.0)], {"snodeid": 1, "enodeid": 2}),
+        ],
+        "EPSG:3857",
+    )
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=intersection_fc,
+        drivezone_fc=drivezone_fc,
+        traj_tracks=[[(0.0, 0.0), (100.0, 0.0)]],
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_multi_arc", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_multi_arc", out_root=out_root)
+    segments_payload = _read_json(out_root / "run_multi_arc" / "patches" / patch_id / "step2" / "segments.json")
+    pair_segments = [
+        item
+        for item in segments_payload["segments"]
+        if int(item["src_nodeid"]) == 1 and int(item["dst_nodeid"]) == 2
+    ]
+    assert len(pair_segments) == 2
+    assert len({str(item.get("topology_arc_id", "")) for item in pair_segments}) == 2
 
 
 def test_t05v2_step2_writes_traj_crossing_and_support_audits(tmp_path: Path) -> None:

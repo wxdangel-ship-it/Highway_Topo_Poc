@@ -127,6 +127,9 @@ class Segment:
     length_m: float
     drivezone_ratio: float
     crosses_divstrip: bool
+    topology_arc_id: str = ""
+    topology_arc_edge_ids: tuple[str, ...] = ()
+    topology_arc_node_path: tuple[int, ...] = ()
     same_pair_rank: int | None = None
     kept_reason: str = ""
 
@@ -139,6 +142,9 @@ class Segment:
             "src_nodeid": int(self.src_nodeid),
             "dst_nodeid": int(self.dst_nodeid),
             "direction": str(self.direction),
+            "topology_arc_id": str(self.topology_arc_id),
+            "topology_arc_edge_ids": [str(v) for v in self.topology_arc_edge_ids],
+            "topology_arc_node_path": [int(v) for v in self.topology_arc_node_path],
             "geometry_coords": [[float(x), float(y)] for x, y in self.geometry_coords],
             "candidate_ids": [str(v) for v in self.candidate_ids],
             "source_modes": [str(v) for v in self.source_modes],
@@ -165,6 +171,9 @@ class Segment:
             src_nodeid=int(payload.get("src_nodeid")),
             dst_nodeid=int(payload.get("dst_nodeid")),
             direction=str(payload.get("direction", "src->dst")),
+            topology_arc_id=str(payload.get("topology_arc_id", "")),
+            topology_arc_edge_ids=tuple(str(v) for v in payload.get("topology_arc_edge_ids", [])),
+            topology_arc_node_path=tuple(int(v) for v in payload.get("topology_arc_node_path", [])),
             geometry_coords=coords,
             candidate_ids=tuple(str(v) for v in payload.get("candidate_ids", [])),
             source_modes=tuple(str(v) for v in payload.get("source_modes", [])),

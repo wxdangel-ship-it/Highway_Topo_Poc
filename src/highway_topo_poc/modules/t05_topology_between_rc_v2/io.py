@@ -241,6 +241,135 @@ def _extract_cross_sections(payload: dict[str, Any]) -> tuple[InputCrossSection,
     return tuple(out)
 
 
+def _unit_vector(dx: float, dy: float) -> tuple[float, float]:
+    norm = math.hypot(float(dx), float(dy))
+    if norm <= 1e-9:
+        return (1.0, 0.0)
+    return (float(dx / norm), float(dy / norm))
+
+
+def _road_tangent_at_node(road: Any, *, nodeid: int) -> tuple[float, float] | None:
+    line = getattr(road, "line", None)
+    if not isinstance(line, LineString) or line.is_empty or len(line.coords) < 2:
+        return None
+    coords = list(line.coords)
+    try:
+        snodeid = int(getattr(road, "snodeid", 0))
+        enodeid = int(getattr(road, "enodeid", 0))
+    except Exception:
+        return None
+    if int(snodeid) == int(nodeid):
+        x0, y0 = coords[0][:2]
+        x1, y1 = coords[1][:2]
+        return _unit_vector(float(x1 - x0), float(y1 - y0))
+    if int(enodeid) == int(nodeid):
+        x0, y0 = coords[-2][:2]
+        x1, y1 = coords[-1][:2]
+        return _unit_vector(float(x1 - x0), float(y1 - y0))
+    return None
+
+
+def _pseudo_cross_section_from_node(
+    *,
+    node: Any,
+    tangent_xy: tuple[float, float],
+    half_length_m: float,
+) -> InputCrossSection:
+    ux, uy = _unit_vector(float(tangent_xy[0]), float(tangent_xy[1]))
+    px, py = (-float(uy), float(ux))
+    center = getattr(node, "point")
+    half_len = float(max(1.0, half_length_m))
+    line = LineString(
+        [
+            (float(center.x) - px * half_len, float(center.y) - py * half_len),
+            (float(center.x) + px * half_len, float(center.y) + py * half_len),
+        ]
+    )
+    return InputCrossSection(
+        nodeid=int(getattr(node, "nodeid")),
+        geometry_metric=line,
+        properties={
+            "nodeid": int(getattr(node, "nodeid")),
+            "source": "pseudo_rcsd_node",
+            "kind": getattr(node, "kind", None),
+        },
+    )
+
+
+def _augment_cross_sections_with_topology_nodes(
+    *,
+    xsecs: tuple[InputCrossSection, ...],
+    prior_roads: list[Any],
+    node_records: tuple[Any, ...],
+    params: dict[str, Any],
+) -> tuple[tuple[InputCrossSection, ...], int]:
+    if not bool(int(params.get("STEP2_ENABLE_PSEUDO_RCS_NODE_XSECS", 1))):
+        return xsecs, 0
+    existing_ids = {int(item.nodeid) for item in xsecs}
+    node_map = {
+        int(getattr(node, "nodeid", 0)): node
+        for node in node_records
+        if getattr(node, "point", None) is not None
+    }
+    roads_by_node: dict[int, list[Any]] = {}
+    for road in prior_roads:
+        try:
+            snodeid = int(getattr(road, "snodeid", 0))
+            enodeid = int(getattr(road, "enodeid", 0))
+        except Exception:
+            continue
+        if snodeid > 0:
+            roads_by_node.setdefault(int(snodeid), []).append(road)
+        if enodeid > 0:
+            roads_by_node.setdefault(int(enodeid), []).append(road)
+    pseudo_xsecs: list[InputCrossSection] = []
+    half_length_m = float(params.get("STEP2_PSEUDO_XSEC_HALF_LENGTH_M", 6.0))
+    endpoint_ids = {
+        int(getattr(road, "snodeid", 0))
+        for road in prior_roads
+        if int(getattr(road, "snodeid", 0)) > 0
+    } | {
+        int(getattr(road, "enodeid", 0))
+        for road in prior_roads
+        if int(getattr(road, "enodeid", 0)) > 0
+    }
+    for nodeid in sorted(endpoint_ids):
+        if int(nodeid) in existing_ids:
+            continue
+        node = node_map.get(int(nodeid))
+        if node is None:
+            continue
+        incident = sorted(
+            roads_by_node.get(int(nodeid), []),
+            key=lambda road: float(getattr(road, "length_m", 0.0)),
+            reverse=True,
+        )
+        tangent_xy = None
+        for road in incident:
+            tangent_xy = _road_tangent_at_node(road, nodeid=int(nodeid))
+            if tangent_xy is not None:
+                break
+        if tangent_xy is None:
+            tangent_xy = (1.0, 0.0)
+        pseudo_xsecs.append(
+            _pseudo_cross_section_from_node(
+                node=node,
+                tangent_xy=tangent_xy,
+                half_length_m=half_length_m,
+            )
+        )
+        existing_ids.add(int(nodeid))
+    if not pseudo_xsecs:
+        return xsecs, 0
+    merged = tuple(
+        sorted(
+            [*xsecs, *pseudo_xsecs],
+            key=lambda item: (int(item.nodeid), str(item.properties.get("source", "base_cross_section"))),
+        )
+    )
+    return merged, int(len(pseudo_xsecs))
+
+
 def _extract_line_strings(payload: dict[str, Any]) -> tuple[LineString, ...]:
     return tuple(geom for geom, _props in _extract_lines(payload))
 
@@ -363,6 +492,12 @@ def load_inputs_and_frame(
             node_records, _meta, _errors = load_nodes(path=node_path, src_crs_override="auto", dst_crs="EPSG:3857", aoi=None)
         except Exception:
             node_records = []
+    xsecs, pseudo_xsec_count = _augment_cross_sections_with_topology_nodes(
+        xsecs=xsecs,
+        prior_roads=prior_roads,
+        node_records=tuple(node_records),
+        params=params,
+    )
     inputs = PatchInputs(
         patch_id=str(patch_id),
         patch_dir=patch_dir,
@@ -381,6 +516,7 @@ def load_inputs_and_frame(
             "trajectory_count": int(len(trajectories)),
             "road_prior_count": int(len(prior_roads)),
             "node_count": int(len(node_records)),
+            "pseudo_xsec_count": int(pseudo_xsec_count),
         },
     )
     frame = InputFrame(
