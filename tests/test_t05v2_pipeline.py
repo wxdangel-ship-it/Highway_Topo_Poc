@@ -4,10 +4,11 @@ import json
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
 
 from highway_topo_poc.modules.t05_topology_between_rc_v2.io import PatchInputs
 from highway_topo_poc.modules.t05_topology_between_rc_v2.models import (
@@ -30,7 +31,9 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.pipeline import (
 from highway_topo_poc.modules.t05_topology_between_rc_v2.review import (
     evaluate_patch_acceptance,
     write_arc_legality_fix_review,
+    write_legal_arc_coverage_review,
 )
+from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_corridor_identity import build_corridor_identities
 
 
 def _fc(features: list[dict], crs_name: str | None = "EPSG:3857") -> dict:
@@ -1458,6 +1461,206 @@ def test_t05v2_build_final_road_rejects_synthetic_arc_before_geometry() -> None:
     )
 
 
+def test_t05v2_corridor_identity_aggregates_within_same_legal_arc() -> None:
+    segment_a = Segment(
+        segment_id="seg_arc_a",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 0.0), (20.0, 0.0)),
+        candidate_ids=("cand_a",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_a",),
+        support_count=2,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="traj_supported_cluster",
+        length_m=20.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_10_20_1",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+    )
+    segment_b = Segment(
+        segment_id="seg_arc_b",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 0.5), (20.0, 0.5)),
+        candidate_ids=("cand_b",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_b",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.5,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="traj_supported_cluster",
+        length_m=20.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_10_20_1",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+    )
+    selected_interval = CorridorInterval(
+        start_s=9.0,
+        end_s=11.0,
+        center_s=10.0,
+        length_m=2.0,
+        rank=0,
+        geometry_coords=((10.0, -1.0), (10.0, 1.0)),
+    )
+    witness_a = CorridorWitness(
+        segment_id="seg_arc_a",
+        status="selected",
+        reason="stable_exclusive_interval",
+        line_coords=((10.0, -3.0), (10.0, 3.0)),
+        sample_s_norm=0.5,
+        intervals=(selected_interval,),
+        selected_interval_rank=0,
+        selected_interval_start_s=9.0,
+        selected_interval_end_s=11.0,
+        exclusive_interval=True,
+        stability_score=1.0,
+        neighbor_match_count=2,
+        axis_vector=(0.0, 1.0),
+    )
+    witness_b = CorridorWitness(
+        segment_id="seg_arc_b",
+        status="insufficient",
+        reason="witness_missing",
+        line_coords=((10.0, -3.0), (10.0, 3.0)),
+        sample_s_norm=0.5,
+        intervals=tuple(),
+        selected_interval_rank=None,
+        selected_interval_start_s=None,
+        selected_interval_end_s=None,
+        exclusive_interval=False,
+        stability_score=0.0,
+        neighbor_match_count=0,
+        axis_vector=(0.0, 1.0),
+    )
+
+    identities, registry = build_corridor_identities(
+        segments=[segment_a, segment_b],
+        witnesses=[witness_a, witness_b],
+        prior_roads=[],
+    )
+
+    assert len(registry) == 1
+    assert registry[0]["corridor_identity"] == "witness_based"
+    assert int(registry[0]["segment_count"]) == 2
+    by_segment = {item.segment_id: item for item in identities}
+    assert by_segment["seg_arc_a"].state == "witness_based"
+    assert by_segment["seg_arc_b"].state == "witness_based"
+    assert by_segment["seg_arc_b"].reason == "stable_same_arc_witness"
+
+
+def test_t05v2_corridor_identity_prior_fallback_does_not_cross_arc() -> None:
+    segment_a = Segment(
+        segment_id="seg_prior_a",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 0.0), (20.0, 0.0)),
+        candidate_ids=("cand_a",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_a",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="traj_supported_cluster",
+        length_m=20.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_10_20_1",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+    )
+    segment_b = Segment(
+        segment_id="seg_prior_b",
+        src_nodeid=30,
+        dst_nodeid=40,
+        direction="src->dst",
+        geometry_coords=((0.0, 5.0), (20.0, 5.0)),
+        candidate_ids=("cand_b",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_b",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="traj_supported_cluster",
+        length_m=20.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_30_40_1",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+    )
+    witness_missing_a = CorridorWitness(
+        segment_id="seg_prior_a",
+        status="insufficient",
+        reason="no_witness_candidates",
+        line_coords=((10.0, -3.0), (10.0, 3.0)),
+        sample_s_norm=0.5,
+        intervals=tuple(),
+        selected_interval_rank=None,
+        selected_interval_start_s=None,
+        selected_interval_end_s=None,
+        exclusive_interval=False,
+        stability_score=0.0,
+        neighbor_match_count=0,
+        axis_vector=(0.0, 1.0),
+    )
+    witness_missing_b = CorridorWitness(
+        segment_id="seg_prior_b",
+        status="insufficient",
+        reason="no_witness_candidates",
+        line_coords=((10.0, 2.0), (10.0, 8.0)),
+        sample_s_norm=0.5,
+        intervals=tuple(),
+        selected_interval_rank=None,
+        selected_interval_start_s=None,
+        selected_interval_end_s=None,
+        exclusive_interval=False,
+        stability_score=0.0,
+        neighbor_match_count=0,
+        axis_vector=(0.0, 1.0),
+    )
+    prior_road = SimpleNamespace(line=LineString([(0.0, 0.0), (20.0, 0.0)]), snodeid=10, enodeid=20)
+
+    identities, registry = build_corridor_identities(
+        segments=[segment_a, segment_b],
+        witnesses=[witness_missing_a, witness_missing_b],
+        prior_roads=[prior_road],
+    )
+
+    assert len(registry) == 2
+    registry_by_arc = {item["topology_arc_id"]: item for item in registry}
+    assert registry_by_arc["arc_10_20_1"]["corridor_identity"] == "prior_based"
+    assert registry_by_arc["arc_30_40_1"]["corridor_identity"] == "unresolved"
+    by_segment = {item.segment_id: item for item in identities}
+    assert by_segment["seg_prior_a"].state == "prior_based"
+    assert by_segment["seg_prior_b"].state == "unresolved"
+    assert by_segment["seg_prior_b"].reason == "no_same_arc_prior"
+
+
 def test_t05v2_review_writes_arc_legality_bundle(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     simple_pairs = {
@@ -1712,9 +1915,12 @@ def test_t05v2_review_writes_arc_legality_bundle(tmp_path: Path) -> None:
     assert (output_root / "acceptance_5417632690143326.json").exists()
     assert (output_root / "pair_decisions.json").exists()
     assert (output_root / "arc_legality_audit.json").exists()
+    assert (output_root / "legal_arc_coverage.json").exists()
+    assert (output_root / "simple_patch_acceptance.json").exists()
     assert (output_root / "strong_constraint_status.json").exists()
     assert (output_root / "simple_patch_regression.json").exists()
     assert (output_root / "complex_patch_legality_review.json").exists()
+    assert (output_root / "complex_patch_coverage_review.json").exists()
     assert (output_root / "SUMMARY.md").exists()
     pair_decisions = _read_json(output_root / "pair_decisions.json")
     target = next(item for item in pair_decisions["pairs"] if str(item["pair"]) == "5395717732638194:37687913")
@@ -1724,8 +1930,79 @@ def test_t05v2_review_writes_arc_legality_bundle(tmp_path: Path) -> None:
     assert bool(reference["built_final_road"]) is True
     audit = _read_json(output_root / "arc_legality_audit.json")
     assert bool(audit["summary"]["all_built_roads_direct_unique"]) is True
+    assert int(audit["summary"]["bad_built_arc_count"]) == 0
+    assert bool(audit["summary"]["built_all_direct_unique"]) is True
+    assert bool(audit["summary"]["audit_summary_inconsistent"]) is False
     assert bool(audit["summary"]["synthetic_arc_in_production"]) is False
     assert bool(summary["complex_patch_legality_review"]["target_pair_correctly_blocked"]) is True
+    coverage = _read_json(output_root / "legal_arc_coverage.json")
+    complex_row = next(item for item in coverage["patches"] if str(item["patch_id"]) == "5417632623039346")
+    assert int(complex_row["legal_arc_total"]) == 1
+    assert int(complex_row["legal_arc_built"]) == 1
+
+
+def test_t05v2_write_legal_arc_coverage_review_outputs_new_bundle(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    patch_dir = run_root / "patches" / "5417632690143239"
+    _write_json(patch_dir / "metrics.json", {"patch_id": "5417632690143239", "unresolved_segment_count": 0, "segments": []})
+    _write_json(patch_dir / "gate.json", {"overall_pass": True, "hard_breakpoints": []})
+    _write_json(
+        patch_dir / "step2" / "segments.json",
+        {
+            "segments": [
+                {
+                    "segment_id": "seg_a",
+                    "src_nodeid": 10,
+                    "dst_nodeid": 20,
+                    "topology_arc_id": "arc_a",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "topology_arc_is_direct_legal": True,
+                    "topology_arc_is_unique": True,
+                }
+            ],
+            "excluded_candidates": [],
+        },
+    )
+    _write_json(
+        patch_dir / "step4" / "corridor_identity.json",
+        {
+            "legal_arc_registry": [
+                {
+                    "src": 10,
+                    "dst": 20,
+                    "pair": "10:20",
+                    "topology_arc_id": "arc_a",
+                    "topology_arc_is_direct_legal": True,
+                    "topology_arc_is_unique": True,
+                    "segment_ids": ["seg_a"],
+                    "segment_count": 1,
+                    "corridor_identity": "prior_based",
+                    "corridor_reason": "same_arc_prior_fallback",
+                }
+            ]
+        },
+    )
+    _write_json(
+        patch_dir / "step6" / "final_roads.json",
+        {"roads": [{"road_id": "road_a", "segment_id": "seg_a", "src_nodeid": 10, "dst_nodeid": 20}]},
+    )
+    for simple_patch_id in ("5417632690143326", "5417632623039346"):
+        simple_dir = run_root / "patches" / simple_patch_id
+        _write_json(simple_dir / "metrics.json", {"patch_id": simple_patch_id, "unresolved_segment_count": 0, "segments": []})
+        _write_json(simple_dir / "gate.json", {"overall_pass": True, "hard_breakpoints": []})
+        _write_json(simple_dir / "step2" / "segments.json", {"segments": [], "excluded_candidates": []})
+        _write_json(simple_dir / "step4" / "corridor_identity.json", {"legal_arc_registry": []})
+        _write_json(simple_dir / "step6" / "final_roads.json", {"roads": []})
+        _write_json(simple_dir / "debug" / "step2_segment_should_not_exist.json", {"pairs": []})
+        _write_json(simple_dir / "debug" / "step2_topology_pairs.json", {"pairs": []})
+        _write_json(simple_dir / "debug" / "step2_blocked_pair_bridge_audit.json", {"pairs": []})
+
+    output_root = tmp_path / "bundle_new"
+    summary = write_legal_arc_coverage_review(run_root=run_root, output_root=output_root)
+    assert (output_root / "legal_arc_coverage.json").exists()
+    assert (output_root / "simple_patch_acceptance.json").exists()
+    assert (output_root / "complex_patch_coverage_review.json").exists()
+    assert "legal_arc_coverage" in summary
 
 
 def test_t05v2_scripts_stepwise_state_resume(tmp_path: Path) -> None:
