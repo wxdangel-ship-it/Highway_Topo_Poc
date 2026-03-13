@@ -23,6 +23,7 @@ cd "${REPO_ROOT}"
 
 PYTHON_BIN=".venv/bin/python"
 PAIR_CHECK_SCRIPT="scripts/t05_pair_check.py"
+RESULT_DOC_SCRIPT="scripts/t05_build_result_doc.py"
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "missing_python:${REPO_ROOT}/${PYTHON_BIN}" >&2
@@ -31,6 +32,11 @@ fi
 
 if [[ ! -f "${PAIR_CHECK_SCRIPT}" ]]; then
   echo "missing_pair_check_script:${REPO_ROOT}/${PAIR_CHECK_SCRIPT}" >&2
+  exit 1
+fi
+
+if [[ ! -f "${RESULT_DOC_SCRIPT}" ]]; then
+  echo "missing_result_doc_script:${REPO_ROOT}/${RESULT_DOC_SCRIPT}" >&2
   exit 1
 fi
 
@@ -93,5 +99,13 @@ print_patch_summary "${SIMPLE_PATCH_PASS_ID}"
 run_patch "${SIMPLE_PATCH_EXPLAIN_ID}"
 print_patch_summary "${SIMPLE_PATCH_EXPLAIN_ID}"
 
+RESULT_DOC_PATH="$("${PYTHON_BIN}" "${RESULT_DOC_SCRIPT}" \
+  --out-root "${OUT_ROOT}" \
+  --run-id "${RUN_ID}" \
+  --complex-patch-id "${COMPLEX_PATCH_ID}" \
+  --simple-patch-id "${SIMPLE_PATCH_PASS_ID}" \
+  --simple-patch-id "${SIMPLE_PATCH_EXPLAIN_ID}")"
+
 echo "[DONE] run_id=${RUN_ID}"
 echo "[DONE] complex_patch_dir=${OUT_ROOT}/${RUN_ID}/patches/${COMPLEX_PATCH_ID}"
+echo "[DONE] result_doc=${RESULT_DOC_PATH}"
