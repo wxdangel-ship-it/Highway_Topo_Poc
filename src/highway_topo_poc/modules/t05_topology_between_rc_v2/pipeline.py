@@ -734,6 +734,46 @@ def _compress_topology_graph(
     return compressed, stats
 
 
+def _reverse_compressed_graph(
+    compressed_adj: dict[int, list[dict[str, Any]]],
+) -> dict[int, list[dict[str, Any]]]:
+    reversed_graph: dict[int, list[dict[str, Any]]] = {}
+    for src, edges in compressed_adj.items():
+        src_i = int(src)
+        for idx, edge in enumerate(edges):
+            to_raw = edge.get("to")
+            if to_raw is None:
+                continue
+            dst_i = int(to_raw)
+            edge_ids = [str(v) for v in edge.get("edge_ids", [])]
+            path_nodes = [int(v) for v in edge.get("path_nodes", []) if v is not None]
+            if not path_nodes:
+                path_nodes = [int(src_i), int(dst_i)]
+            if int(path_nodes[0]) != int(src_i):
+                path_nodes = [int(src_i)] + path_nodes
+            if int(path_nodes[-1]) != int(dst_i):
+                path_nodes.append(int(dst_i))
+            rev_edge_ids = [f"rev:{str(v)}" for v in reversed(edge_ids)] if edge_ids else [f"rev_edge_{src_i}_{dst_i}_{idx}"]
+            rev_path_nodes = [int(v) for v in reversed(path_nodes)]
+            reversed_graph.setdefault(int(dst_i), []).append(
+                {
+                    "to": int(src_i),
+                    "edge_ids": [str(v) for v in rev_edge_ids],
+                    "path_nodes": [int(v) for v in rev_path_nodes],
+                }
+            )
+    for src, vals in reversed_graph.items():
+        vals.sort(
+            key=lambda it: (
+                int(it.get("to", -1)),
+                int(len(it.get("edge_ids", []))),
+                ",".join(str(v) for v in it.get("edge_ids", [])),
+            )
+        )
+        reversed_graph[int(src)] = vals
+    return reversed_graph
+
+
 def _search_topology_next_nodes_from_anchor(
     compressed_adj: dict[int, list[dict[str, Any]]],
     *,
@@ -824,6 +864,136 @@ def _search_topology_next_nodes_from_anchor(
     }
 
 
+def _build_terminal_reverse_ownership(
+    *,
+    compressed_adj: dict[int, list[dict[str, Any]]],
+    terminal_nodes: set[int],
+    cross_nodes: set[int],
+    max_expansions: int,
+) -> tuple[dict[int, dict[str, Any]], dict[str, int]]:
+    reverse_adj = _reverse_compressed_graph(compressed_adj)
+    ownership: dict[int, dict[str, Any]] = {}
+    unique_owner_count = 0
+    multi_owner_count = 0
+    ambiguous_owner_count = 0
+    no_owner_count = 0
+    overflow_count = 0
+    for nodeid in sorted(int(v) for v in terminal_nodes):
+        reverse_edges = list(reverse_adj.get(int(nodeid), []))
+        anchor_rows: list[dict[str, Any]] = []
+        accepted_src_nodeids: list[int] = []
+        accepted_paths: list[dict[str, Any]] = []
+        multi_src_anchor_count = 0
+        multi_chain_anchor_count = 0
+        no_owner_anchor_count = 0
+        overflow_anchor_count = 0
+        for idx, edge in enumerate(reverse_edges):
+            start_to_raw = edge.get("to")
+            start_to = int(start_to_raw) if start_to_raw is not None else None
+            start_edge_ids = [str(v) for v in edge.get("edge_ids", [])]
+            start_path_nodes = [int(v) for v in edge.get("path_nodes", []) if v is not None]
+            search = _search_topology_next_nodes_from_anchor(
+                reverse_adj,
+                src_nodeid=int(nodeid),
+                start_to=start_to,
+                start_edge_ids=start_edge_ids,
+                start_path_nodes=start_path_nodes,
+                cross_nodes=cross_nodes,
+                max_expansions=int(max_expansions),
+            )
+            candidate_src_nodeids = [int(v) for v in search.get("dst_nodeids", [])]
+            overflow = bool(search.get("overflow", False))
+            if overflow:
+                overflow_anchor_count += 1
+            owner_src_nodeid: int | None = None
+            chain_count = 0
+            status = "no_owner"
+            if len(candidate_src_nodeids) >= 2:
+                status = "multi_src"
+                multi_src_anchor_count += 1
+            elif len(candidate_src_nodeids) == 1:
+                owner_src_nodeid = int(candidate_src_nodeids[0])
+                chain_count = int(len(search.get("dst_paths", {}).get(int(owner_src_nodeid), [])))
+                if chain_count >= 2:
+                    status = "multi_chain"
+                    multi_chain_anchor_count += 1
+                else:
+                    status = "accepted"
+                    accepted_src_nodeids.append(int(owner_src_nodeid))
+                    for rec in search.get("dst_paths", {}).get(int(owner_src_nodeid), [])[:3]:
+                        accepted_paths.append(
+                            {
+                                "src_nodeid": int(owner_src_nodeid),
+                                "node_path": [int(v) for v in rec.get("node_path", [])],
+                                "edge_ids": [str(v) for v in rec.get("edge_ids", [])],
+                                "chain_len": int(rec.get("chain_len", 0)),
+                                "anchor_id": f"{int(nodeid)}::REV::{int(idx)}",
+                            }
+                        )
+            else:
+                no_owner_anchor_count += 1
+            anchor_rows.append(
+                {
+                    "anchor_id": f"{int(nodeid)}::REV::{int(idx)}",
+                    "start_to": int(start_to) if start_to is not None else None,
+                    "status": str(status),
+                    "owner_src_nodeid": int(owner_src_nodeid) if owner_src_nodeid is not None else None,
+                    "owner_src_nodeids": [int(v) for v in candidate_src_nodeids],
+                    "chain_count": int(chain_count),
+                    "expansions": int(search.get("expansions", 0)),
+                    "overflow": bool(overflow),
+                    "paths": [
+                        {
+                            "node_path": [int(v) for v in rec.get("node_path", [])],
+                            "edge_ids": [str(v) for v in rec.get("edge_ids", [])],
+                            "chain_len": int(rec.get("chain_len", 0)),
+                        }
+                        for src in sorted(search.get("dst_paths", {}).keys())
+                        for rec in list(search.get("dst_paths", {}).get(int(src), []))[:3]
+                    ],
+                }
+            )
+        unique_src_nodeids = sorted(set(int(v) for v in accepted_src_nodeids))
+        ownership_status = "no_owner"
+        unique_owner_src_nodeid: int | None = None
+        if overflow_anchor_count > 0:
+            overflow_count += 1
+        if reverse_edges and unique_src_nodeids and len(unique_src_nodeids) == 1 and multi_src_anchor_count == 0 and multi_chain_anchor_count == 0 and no_owner_anchor_count == 0:
+            ownership_status = "unique_owner"
+            unique_owner_src_nodeid = int(unique_src_nodeids[0])
+            unique_owner_count += 1
+        elif multi_src_anchor_count > 0 or len(unique_src_nodeids) >= 2:
+            ownership_status = "multi_owner"
+            multi_owner_count += 1
+        elif multi_chain_anchor_count > 0 or overflow_anchor_count > 0:
+            ownership_status = "ambiguous_owner"
+            ambiguous_owner_count += 1
+        else:
+            no_owner_count += 1
+        ownership[int(nodeid)] = {
+            "nodeid": int(nodeid),
+            "status": str(ownership_status),
+            "src_nodeid": int(unique_owner_src_nodeid) if unique_owner_src_nodeid is not None else None,
+            "src_nodeids": [int(v) for v in unique_src_nodeids],
+            "anchor_count": int(len(reverse_edges)),
+            "accepted_anchor_count": int(sum(1 for row in anchor_rows if str(row.get("status")) == "accepted")),
+            "multi_src_anchor_count": int(multi_src_anchor_count),
+            "multi_chain_anchor_count": int(multi_chain_anchor_count),
+            "no_owner_anchor_count": int(no_owner_anchor_count),
+            "overflow_anchor_count": int(overflow_anchor_count),
+            "paths": list(accepted_paths[:10]),
+            "anchors": anchor_rows,
+        }
+    stats = {
+        "reverse_terminal_owner_unique_count": int(unique_owner_count),
+        "reverse_terminal_owner_multi_count": int(multi_owner_count),
+        "reverse_terminal_owner_ambiguous_count": int(ambiguous_owner_count),
+        "reverse_terminal_owner_none_count": int(no_owner_count),
+        "reverse_terminal_owner_overflow_count": int(overflow_count),
+    }
+    return ownership, stats
+
+
 def _build_directed_topology(
     *,
     frame: InputFrame,
@@ -897,6 +1067,12 @@ def _build_directed_topology(
         for nodeid, srcs in incoming.items()
         if srcs and not outgoing.get(int(nodeid))
     }
+    terminal_reverse_ownership, reverse_owner_stats = _build_terminal_reverse_ownership(
+        compressed_adj=compressed_adj,
+        terminal_nodes={int(v) for v in terminal_nodes},
+        cross_nodes=xsec_ids,
+        max_expansions=2048,
+    )
     return {
         "enabled": bool(allowed_pairs),
         "allowed_pairs": allowed_pairs,
@@ -906,8 +1082,9 @@ def _build_directed_topology(
         "pair_sources": {pair: sorted(str(v) for v in vals) for pair, vals in pair_sources.items()},
         "pair_paths": {pair: list(vals) for pair, vals in pair_paths.items()},
         "terminal_nodes": {int(v) for v in terminal_nodes},
+        "terminal_reverse_ownership": {int(k): dict(v) for k, v in terminal_reverse_ownership.items()},
         "node_kind_map": dict(node_kind_map),
-        "graph_stats": dict(compress_stats),
+        "graph_stats": {**dict(compress_stats), **dict(reverse_owner_stats)},
     }
 
 
@@ -919,6 +1096,12 @@ def _topology_gate_reason(
 ) -> str | None:
     if not bool(topology.get("enabled")):
         return None
+    terminal_reverse_ownership = topology.get("terminal_reverse_ownership", {})
+    owner_info = terminal_reverse_ownership.get(int(dst_nodeid))
+    if isinstance(owner_info, dict) and str(owner_info.get("status", "")) == "unique_owner":
+        owner_src_nodeid = owner_info.get("src_nodeid")
+        if owner_src_nodeid is not None and int(owner_src_nodeid) != int(src_nodeid):
+            return "terminal_node_not_owned_by_src"
     allowed_pairs: set[tuple[int, int]] = topology["allowed_pairs"]
     pair = (int(src_nodeid), int(dst_nodeid))
     if pair in allowed_pairs:
@@ -1061,33 +1244,31 @@ def _segment_candidates(
             "point": event["point"],
             "candidate_ids": set(),
             "pair_ids": set(),
+            "topology_kept_pair_ids": set(),
+            "selected_pair_ids": set(),
             "topology_kept_candidate_ids": set(),
             "selected_candidate_ids": set(),
             "dropped_reasons": [],
             "kept_reasons": set(),
         }
-        raw_crossing_features.append(
-            {
-                "type": "Feature",
-                "geometry": mapping(event["point"]),
-                "properties": crossing_props(event),
-            }
-        )
 
     def note_candidate_events(candidate: dict[str, Any], *, phase: str, reason: str = "") -> None:
+        pair_id = _pair_id_text(int(candidate.get("src_nodeid", 0)), int(candidate.get("dst_nodeid", 0)))
         for key in ("start_event_id", "end_event_id"):
             event_id = str(candidate.get(key, ""))
             if not event_id or event_id not in crossing_audit:
                 continue
             entry = crossing_audit[event_id]
             entry["candidate_ids"].add(str(candidate.get("candidate_id", "")))
-            entry["pair_ids"].add(_pair_id_text(int(candidate.get("src_nodeid", 0)), int(candidate.get("dst_nodeid", 0))))
+            entry["pair_ids"].add(str(pair_id))
             if phase == "topology_kept":
                 entry["topology_kept_candidate_ids"].add(str(candidate.get("candidate_id", "")))
+                entry["topology_kept_pair_ids"].add(str(pair_id))
                 if reason:
                     entry["kept_reasons"].add(str(reason))
             elif phase == "selected":
                 entry["selected_candidate_ids"].add(str(candidate.get("candidate_id", "")))
+                entry["selected_pair_ids"].add(str(pair_id))
                 if reason:
                     entry["kept_reasons"].add(str(reason))
             elif phase == "dropped" and reason:
@@ -1280,6 +1461,12 @@ def _segment_candidates(
             dst_nodeid=int(candidate["dst_nodeid"]),
             topology=topology,
         )
+        reverse_owner = topology.get("terminal_reverse_ownership", {}).get(int(candidate["dst_nodeid"]), {})
+        candidate["topology_reverse_owner_status"] = str(reverse_owner.get("status", ""))
+        candidate["topology_reverse_owner_src_nodeid"] = reverse_owner.get("src_nodeid")
+        candidate["topology_reverse_owner_src_nodeids"] = [
+            int(v) for v in reverse_owner.get("src_nodeids", []) if v is not None
+        ]
         candidate["topology_allowed"] = bool(topology_reason is None)
         candidate["topology_reason"] = "" if topology_reason is None else str(topology_reason)
         if topology_reason is not None:
@@ -1301,6 +1488,25 @@ def _segment_candidates(
         kept_reason = ""
         if entry["kept_reasons"]:
             kept_reason = "|".join(sorted(str(v) for v in entry["kept_reasons"]))
+        raw_crossing_features.append(
+            {
+                "type": "Feature",
+                "geometry": mapping(entry["point"]),
+                "properties": {
+                    **crossing_props(entry),
+                    "candidate_count": int(len(entry["candidate_ids"])),
+                    "pair_count": int(len(entry["pair_ids"])),
+                    "pair_ids": sorted(str(v) for v in entry["pair_ids"]),
+                    "topology_kept_pair_ids": sorted(str(v) for v in entry["topology_kept_pair_ids"]),
+                    "selected_pair_ids": sorted(str(v) for v in entry["selected_pair_ids"]),
+                    "topology_kept_candidate_count": int(len(entry["topology_kept_candidate_ids"])),
+                    "selected_candidate_count": int(len(entry["selected_candidate_ids"])),
+                    "kept_reason": str(kept_reason),
+                    "dropped_reason": str(dropped_reason),
+                    "status": "raw",
+                },
+            }
+        )
         filtered_crossing_features.append(
             {
                 "type": "Feature",
@@ -1309,6 +1515,9 @@ def _segment_candidates(
                     **crossing_props(entry),
                     "candidate_count": int(len(entry["candidate_ids"])),
                     "pair_count": int(len(entry["pair_ids"])),
+                    "pair_ids": sorted(str(v) for v in entry["pair_ids"]),
+                    "topology_kept_pair_ids": sorted(str(v) for v in entry["topology_kept_pair_ids"]),
+                    "selected_pair_ids": sorted(str(v) for v in entry["selected_pair_ids"]),
                     "topology_kept_candidate_count": int(len(entry["topology_kept_candidate_ids"])),
                     "selected_candidate_count": int(len(entry["selected_candidate_ids"])),
                     "kept_reason": str(kept_reason),
@@ -1848,11 +2057,18 @@ def _build_segment_support_traj_features(
                         "dst_nodeid": int(segment.dst_nodeid),
                         "traj_id": str(candidate.get("traj_id", "")),
                         "candidate_id": str(candidate.get("candidate_id", "")),
+                        "pair_id": _pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
                         "support_rank": int(support_rank),
                         "support_length": float(line.length),
                         "support_direction_ok": bool(candidate.get("topology_allowed", False)),
+                        "support_topology_reason": str(candidate.get("topology_reason", "")),
                         "support_inside_ratio": float(candidate.get("drivezone_ratio", 0.0)),
                         "support_crossing_count": int(candidate.get("other_xsec_crossing_count", 0)),
+                        "start_event_id": str(candidate.get("start_event_id", "")),
+                        "end_event_id": str(candidate.get("end_event_id", "")),
+                        "segment_support_count": int(segment.support_count),
+                        "segment_formation_reason": str(segment.formation_reason),
+                        "segment_single_traj_support": bool(int(segment.support_count) <= 1),
                         "segment_selected": bool(str(segment.segment_id) in selected_ids),
                     },
                 }
@@ -1867,12 +2083,14 @@ def _build_segment_should_not_exist(
 ) -> list[dict[str, Any]]:
     pair_sources = {} if topology is None else dict(topology.get("pair_sources", {}))
     pair_paths = {} if topology is None else dict(topology.get("pair_paths", {}))
+    terminal_reverse_ownership = {} if topology is None else dict(topology.get("terminal_reverse_ownership", {}))
     by_pair: dict[tuple[int, int], dict[str, Any]] = {}
     for item in rejected_candidates:
         reason = str(item.get("reason", ""))
         if reason not in _SEGMENT_TOPOLOGY_INVALID_REASONS:
             continue
         pair = (int(item.get("src_nodeid", 0)), int(item.get("dst_nodeid", 0)))
+        reverse_owner = terminal_reverse_ownership.get(int(pair[1]), {})
         row = by_pair.setdefault(
             pair,
             {
@@ -1883,6 +2101,9 @@ def _build_segment_should_not_exist(
                 "related_candidate_ids": set(),
                 "topology_sources": sorted(str(v) for v in pair_sources.get(pair, [])),
                 "topology_paths": list(pair_paths.get(pair, [])),
+                "topology_reverse_owner_status": str(reverse_owner.get("status", "")),
+                "topology_reverse_owner_src_nodeid": reverse_owner.get("src_nodeid"),
+                "topology_reverse_owner_src_nodeids": [int(v) for v in reverse_owner.get("src_nodeids", []) if v is not None],
             },
         )
         if not row["reason"]:
@@ -1899,9 +2120,13 @@ def _build_segment_should_not_exist(
                 "dst_nodeid": int(row["dst_nodeid"]),
                 "reason": str(row["reason"]),
                 "related_traj_ids": sorted(str(v) for v in row["related_traj_ids"]),
+                "related_traj_count": int(len(row["related_traj_ids"])),
                 "related_candidate_ids": sorted(str(v) for v in row["related_candidate_ids"]),
                 "topology_sources": list(row["topology_sources"]),
                 "topology_paths": list(row["topology_paths"]),
+                "topology_reverse_owner_status": str(row["topology_reverse_owner_status"]),
+                "topology_reverse_owner_src_nodeid": row["topology_reverse_owner_src_nodeid"],
+                "topology_reverse_owner_src_nodeids": list(row["topology_reverse_owner_src_nodeids"]),
             }
         )
     return out
@@ -1945,7 +2170,9 @@ def _build_terminal_node_audit(
     node_kind_map: dict[int, Any] = topology.get("node_kind_map", {})
     pair_sources: dict[tuple[int, int], list[str]] = topology.get("pair_sources", {})
     pair_paths: dict[tuple[int, int], list[dict[str, Any]]] = topology.get("pair_paths", {})
+    terminal_reverse_ownership: dict[int, dict[str, Any]] = topology.get("terminal_reverse_ownership", {})
     for nodeid in sorted(node_ids):
+        reverse_owner = terminal_reverse_ownership.get(int(nodeid), {})
         pair_rows: list[dict[str, Any]] = []
         for pair, items in sorted(candidate_by_pair.items()):
             src_nodeid, dst_nodeid = pair
@@ -1966,6 +2193,15 @@ def _build_terminal_node_audit(
                     "direction_allowed": bool(pair in allowed_pairs),
                     "topology_sources": list(pair_sources.get(pair, [])),
                     "topology_paths": list(pair_paths.get(pair, [])),
+                    "topology_reverse_owner_status": str(reverse_owner.get("status", "")),
+                    "topology_reverse_owner_src_nodeid": reverse_owner.get("src_nodeid"),
+                    "topology_reverse_owner_src_nodeids": [int(v) for v in reverse_owner.get("src_nodeids", []) if v is not None],
+                    "topology_reverse_owner_match": (
+                        None
+                        if str(reverse_owner.get("status", "")) != "unique_owner"
+                        else bool(int(src_nodeid) == int(reverse_owner.get("src_nodeid")))
+                    ),
+                    "weak_single_traj_support": bool(int(len({str(tid) for item in items for tid in item.get("support_traj_ids", set())})) <= 1),
                     "selected": bool(segment is not None),
                     "selected_segment_id": "" if segment is None else str(segment.segment_id),
                     "selected_reason": "" if segment is None else str(segment.kept_reason),
@@ -1982,6 +2218,12 @@ def _build_terminal_node_audit(
                 "terminal_by_topology": bool(int(nodeid) in topology.get("terminal_nodes", set())),
                 "allowed_incoming_src_nodeids": sorted(int(v) for v in incoming.get(int(nodeid), set())),
                 "allowed_outgoing_dst_nodeids": sorted(int(v) for v in outgoing.get(int(nodeid), set())),
+                "reverse_owner_status": str(reverse_owner.get("status", "")),
+                "reverse_owner_src_nodeid": reverse_owner.get("src_nodeid"),
+                "reverse_owner_src_nodeids": [int(v) for v in reverse_owner.get("src_nodeids", []) if v is not None],
+                "reverse_owner_anchor_count": int(reverse_owner.get("anchor_count", 0)),
+                "reverse_owner_paths": list(reverse_owner.get("paths", [])),
+                "reverse_owner_anchors": list(reverse_owner.get("anchors", [])),
                 "pairs": pair_rows,
             }
         )
@@ -2873,6 +3115,9 @@ def _stage2_segment(
                 "other_xsec_crossing_count": int(item.get("other_xsec_crossing_count", 0)),
                 "other_xsec_nodes": [int(v) for v in item.get("other_xsec_nodes", [])],
                 "topology_reason": str(item.get("topology_reason", "")),
+                "topology_reverse_owner_status": str(item.get("topology_reverse_owner_status", "")),
+                "topology_reverse_owner_src_nodeid": item.get("topology_reverse_owner_src_nodeid"),
+                "topology_reverse_owner_src_nodeids": [int(v) for v in item.get("topology_reverse_owner_src_nodeids", [])],
                 "start_event_id": str(item.get("start_event_id", "")),
                 "end_event_id": str(item.get("end_event_id", "")),
             }

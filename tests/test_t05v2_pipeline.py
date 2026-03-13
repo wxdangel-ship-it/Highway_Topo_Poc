@@ -20,6 +20,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.models import (
 from highway_topo_poc.modules.t05_topology_between_rc_v2.pipeline import (
     DEFAULT_PARAMS,
     _build_final_road,
+    _topology_gate_reason,
     run_full_pipeline,
     run_stage,
 )
@@ -441,15 +442,55 @@ def test_t05v2_step2_topology_gate_rejects_wrong_terminal_pairs_and_reverse_dire
     assert int(step2_metrics["terminal_node_invalid_segment_count"]) == 2
     audit = _read_json(patch_dir / "debug" / "step2_terminal_node_audit.json")
     node_41 = next(item for item in audit["nodes"] if int(item["nodeid"]) == 41)
+    assert node_41["reverse_owner_status"] == "unique_owner"
+    assert int(node_41["reverse_owner_src_nodeid"]) == 31
     pair_map = {str(item["pair_id"]): item for item in node_41["pairs"]}
     assert bool(pair_map["31:41"]["selected"]) is True
+    assert bool(pair_map["31:41"]["topology_reverse_owner_match"]) is True
     assert pair_map["11:41"]["rejected_reason"] == "terminal_node_not_owned_by_src"
     assert pair_map["21:41"]["rejected_reason"] == "terminal_node_not_owned_by_src"
+    assert bool(pair_map["11:41"]["topology_reverse_owner_match"]) is False
     should_not_exist = _read_json(patch_dir / "debug" / "step2_segment_should_not_exist.json")
     reasons = { (int(item["src_nodeid"]), int(item["dst_nodeid"])): str(item["reason"]) for item in should_not_exist["pairs"] }
     assert reasons[(11, 41)] == "terminal_node_not_owned_by_src"
     assert reasons[(21, 41)] == "terminal_node_not_owned_by_src"
     assert reasons[(41, 31)] == "directionally_invalid_segment"
+    invalid_11_41 = next(item for item in should_not_exist["pairs"] if int(item["src_nodeid"]) == 11 and int(item["dst_nodeid"]) == 41)
+    assert invalid_11_41["topology_reverse_owner_status"] == "unique_owner"
+    assert int(invalid_11_41["topology_reverse_owner_src_nodeid"]) == 31
+
+
+def test_t05v2_topology_gate_prefers_unique_reverse_terminal_owner() -> None:
+    topology = {
+        "enabled": True,
+        "allowed_pairs": {(5384367610468452, 765141), (23287538, 765141)},
+        "incoming": {765141: {5384367610468452, 23287538}},
+        "terminal_nodes": {765141},
+        "terminal_reverse_ownership": {
+            765141: {
+                "status": "unique_owner",
+                "src_nodeid": 23287538,
+                "src_nodeids": [23287538],
+            }
+        },
+    }
+
+    assert (
+        _topology_gate_reason(
+            src_nodeid=5384367610468452,
+            dst_nodeid=765141,
+            topology=topology,
+        )
+        == "terminal_node_not_owned_by_src"
+    )
+    assert (
+        _topology_gate_reason(
+            src_nodeid=23287538,
+            dst_nodeid=765141,
+            topology=topology,
+        )
+        is None
+    )
 
 
 def test_t05v2_step2_topology_gate_allows_traced_rcsdroad_pairs(tmp_path: Path) -> None:
@@ -535,8 +576,12 @@ def test_t05v2_step2_writes_traj_crossing_and_support_audits(tmp_path: Path) -> 
     assert "local_heading" in raw_props
     assert "dropped_reason" in filtered_props
     assert "kept_reason" in filtered_props
+    assert "pair_ids" in raw_props
+    assert "selected_pair_ids" in filtered_props
     assert "segment_id" in support_props
     assert "support_direction_ok" in support_props
+    assert "pair_id" in support_props
+    assert "segment_single_traj_support" in support_props
     assert int(metrics["traj_crossing_raw_count"]) >= 2
     assert int(metrics["traj_crossing_filtered_count"]) >= 2
 
