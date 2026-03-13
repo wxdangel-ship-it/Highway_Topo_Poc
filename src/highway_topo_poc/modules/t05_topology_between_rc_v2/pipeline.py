@@ -596,6 +596,7 @@ _SEGMENT_TOPOLOGY_INVALID_REASONS = {
     "segment_not_in_rcsdroad_topology",
     "directionally_invalid_segment",
     "terminal_node_not_owned_by_src",
+    "src_conflicts_with_unique_unanchored_prior_endpoint",
 }
 
 
@@ -1209,6 +1210,7 @@ def _segment_candidates(
     raw_crossing_features: list[dict[str, Any]] = []
     filtered_crossing_features: list[dict[str, Any]] = []
     crossing_audit: dict[str, dict[str, Any]] = {}
+    unanchored_prior_candidates_by_src: dict[int, list[dict[str, Any]]] = defaultdict(list)
     hit_buffer = float(params["TRAJ_XSEC_HIT_BUFFER_M"])
     max_other = int(params["SEGMENT_MAX_OTHER_XSEC_CROSSINGS"])
     min_len = float(params["SEGMENT_MIN_LENGTH_M"])
@@ -1436,6 +1438,18 @@ def _segment_candidates(
                         best_cost = cost_reverse
                         best_pair = (int(xsec_b.nodeid), int(xsec_a.nodeid))
             if best_pair is None or best_cost > float(params["PRIOR_ENDPOINT_ANCHOR_M"]) * 2.0:
+                candidate["prior_anchor_cost_m"] = None if not math.isfinite(best_cost) else float(best_cost)
+                candidate["prior_anchor_best_pair"] = None if best_pair is None else [int(best_pair[0]), int(best_pair[1])]
+                unanchored_prior_candidates_by_src[int(src_nodeid)].append(
+                    {
+                        "candidate_id": str(candidate["candidate_id"]),
+                        "src_nodeid": int(src_nodeid),
+                        "dst_nodeid": int(dst_nodeid),
+                        "pair_id": _pair_id_text(int(src_nodeid), int(dst_nodeid)),
+                        "prior_anchor_cost_m": None if not math.isfinite(best_cost) else float(best_cost),
+                        "prior_anchor_best_pair": None if best_pair is None else [int(best_pair[0]), int(best_pair[1])],
+                    }
+                )
                 reject(candidate, stage="pairing_filter", reason="prior_endpoints_not_anchored")
                 continue
             candidate["src_nodeid"], candidate["dst_nodeid"] = (int(best_pair[0]), int(best_pair[1]))
@@ -1451,7 +1465,51 @@ def _segment_candidates(
         pairing_candidates.append(candidate)
         reason = "adjacent_pair_retained" if int(candidate.get("pair_index_gap", 0)) <= 1 else "non_adjacent_pair_retained"
         record(candidate, stage="pairing_filter", status="selected", reason=reason)
+    pair_has_prior_candidate: set[tuple[int, int]] = set()
+    pair_traj_support_ids: dict[tuple[int, int], set[str]] = defaultdict(set)
     for candidate in pairing_candidates:
+        pair = (int(candidate["src_nodeid"]), int(candidate["dst_nodeid"]))
+        if str(candidate.get("source", "")) == "prior":
+            pair_has_prior_candidate.add(pair)
+            continue
+        for traj_id in candidate.get("support_traj_ids", set()) or []:
+            pair_traj_support_ids[pair].add(str(traj_id))
+
+    def ownership_gate_reason(candidate: dict[str, Any]) -> str | None:
+        if str(candidate.get("source", "")) != "traj":
+            return None
+        if str(candidate.get("pairing_mode", "")) != "adjacent":
+            return None
+        pair = (int(candidate["src_nodeid"]), int(candidate["dst_nodeid"]))
+        if pair in pair_has_prior_candidate:
+            return None
+        if int(len(pair_traj_support_ids.get(pair, set()))) > 1:
+            return None
+        competing_priors = list(unanchored_prior_candidates_by_src.get(int(candidate["src_nodeid"]), []))
+        competing_pairs = {
+            (int(item.get("src_nodeid", 0)), int(item.get("dst_nodeid", 0)))
+            for item in competing_priors
+        }
+        if len(competing_pairs) != 1:
+            return None
+        competing_pair = next(iter(competing_pairs))
+        if competing_pair == pair:
+            return None
+        candidate["competing_prior_pair_ids"] = sorted(
+            str(item.get("pair_id", "")) for item in competing_priors if str(item.get("pair_id", ""))
+        )
+        candidate["competing_prior_candidate_ids"] = sorted(
+            str(item.get("candidate_id", "")) for item in competing_priors if str(item.get("candidate_id", ""))
+        )
+        candidate["competing_prior_anchor_cost_m"] = [item.get("prior_anchor_cost_m") for item in competing_priors]
+        candidate["competing_prior_anchor_best_pairs"] = [item.get("prior_anchor_best_pair") for item in competing_priors]
+        return "src_conflicts_with_unique_unanchored_prior_endpoint"
+
+    for candidate in pairing_candidates:
+        ownership_reason = ownership_gate_reason(candidate)
+        if ownership_reason is not None:
+            reject(candidate, stage="ownership_gate", reason=str(ownership_reason))
+            continue
         geometry_probe = dict(candidate)
         pre_reason = cross_filter_reason(geometry_probe)
         if pre_reason is None:
@@ -1546,6 +1604,9 @@ def _segment_candidates(
             "traj_crossing_raw_count": int(len(raw_crossing_features)),
             "traj_crossing_filtered_count": int(
                 sum(1 for feat in filtered_crossing_features if int(feat["properties"].get("topology_kept_candidate_count", 0)) > 0)
+            ),
+            "unanchored_prior_conflict_segment_count": int(
+                topology_invalid_counter.get("src_conflicts_with_unique_unanchored_prior_endpoint", 0)
             ),
             "directionally_invalid_segment_count": int(topology_invalid_counter.get("directionally_invalid_segment", 0)),
             "topology_invalid_segment_count": int(topology_invalid_counter.get("segment_not_in_rcsdroad_topology", 0)),
@@ -1837,6 +1898,7 @@ def _best_audit_rejected_reason(entries: list[dict[str, Any]]) -> str:
     if not entries:
         return ""
     preferred = (
+        "src_conflicts_with_unique_unanchored_prior_endpoint",
         "terminal_node_not_owned_by_src",
         "directionally_invalid_segment",
         "segment_not_in_rcsdroad_topology",
@@ -2104,11 +2166,19 @@ def _build_segment_should_not_exist(
                 "topology_reverse_owner_status": str(reverse_owner.get("status", "")),
                 "topology_reverse_owner_src_nodeid": reverse_owner.get("src_nodeid"),
                 "topology_reverse_owner_src_nodeids": [int(v) for v in reverse_owner.get("src_nodeids", []) if v is not None],
+                "competing_prior_pair_ids": set(),
+                "competing_prior_candidate_ids": set(),
             },
         )
         if not row["reason"]:
             row["reason"] = str(reason)
         row["related_candidate_ids"].add(str(item.get("candidate_id", "")))
+        for pair_id in item.get("competing_prior_pair_ids", []) or []:
+            if str(pair_id):
+                row["competing_prior_pair_ids"].add(str(pair_id))
+        for candidate_id in item.get("competing_prior_candidate_ids", []) or []:
+            if str(candidate_id):
+                row["competing_prior_candidate_ids"].add(str(candidate_id))
         for traj_id in item.get("support_traj_ids", set()) or []:
             row["related_traj_ids"].add(str(traj_id))
     out: list[dict[str, Any]] = []
@@ -2127,6 +2197,8 @@ def _build_segment_should_not_exist(
                 "topology_reverse_owner_status": str(row["topology_reverse_owner_status"]),
                 "topology_reverse_owner_src_nodeid": row["topology_reverse_owner_src_nodeid"],
                 "topology_reverse_owner_src_nodeids": list(row["topology_reverse_owner_src_nodeids"]),
+                "competing_prior_pair_ids": sorted(str(v) for v in row["competing_prior_pair_ids"]),
+                "competing_prior_candidate_ids": sorted(str(v) for v in row["competing_prior_candidate_ids"]),
             }
         )
     return out
@@ -2908,6 +2980,7 @@ def _write_road_outputs(
         "crossing_dist_hist_selected": dict(root_step2_metrics.get("crossing_dist_hist_selected", {})),
         "traj_crossing_raw_count": int(root_step2_metrics.get("traj_crossing_raw_count", 0)),
         "traj_crossing_filtered_count": int(root_step2_metrics.get("traj_crossing_filtered_count", 0)),
+        "unanchored_prior_conflict_segment_count": int(root_step2_metrics.get("unanchored_prior_conflict_segment_count", 0)),
         "directionally_invalid_segment_count": int(root_step2_metrics.get("directionally_invalid_segment_count", 0)),
         "topology_invalid_segment_count": int(root_step2_metrics.get("topology_invalid_segment_count", 0)),
         "terminal_node_invalid_segment_count": int(root_step2_metrics.get("terminal_node_invalid_segment_count", 0)),
@@ -2972,6 +3045,7 @@ def _write_road_outputs(
         ),
         (
             "invalid_segment: "
+            f"prior_conflict={int(metrics['unanchored_prior_conflict_segment_count'])} "
             f"direction={int(metrics['directionally_invalid_segment_count'])} "
             f"topology={int(metrics['topology_invalid_segment_count'])} "
             f"terminal={int(metrics['terminal_node_invalid_segment_count'])}"
@@ -3118,6 +3192,12 @@ def _stage2_segment(
                 "topology_reverse_owner_status": str(item.get("topology_reverse_owner_status", "")),
                 "topology_reverse_owner_src_nodeid": item.get("topology_reverse_owner_src_nodeid"),
                 "topology_reverse_owner_src_nodeids": [int(v) for v in item.get("topology_reverse_owner_src_nodeids", [])],
+                "prior_anchor_cost_m": item.get("prior_anchor_cost_m"),
+                "prior_anchor_best_pair": item.get("prior_anchor_best_pair"),
+                "competing_prior_pair_ids": [str(v) for v in item.get("competing_prior_pair_ids", [])],
+                "competing_prior_candidate_ids": [str(v) for v in item.get("competing_prior_candidate_ids", [])],
+                "competing_prior_anchor_cost_m": list(item.get("competing_prior_anchor_cost_m", [])),
+                "competing_prior_anchor_best_pairs": list(item.get("competing_prior_anchor_best_pairs", [])),
                 "start_event_id": str(item.get("start_event_id", "")),
                 "end_event_id": str(item.get("end_event_id", "")),
             }

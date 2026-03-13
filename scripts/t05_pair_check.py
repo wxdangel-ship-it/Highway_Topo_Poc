@@ -124,6 +124,10 @@ def main(argv: list[str] | None = None) -> int:
                 "topology_reason": str(item.get("topology_reason", "")),
                 "topology_reverse_owner_status": str(item.get("topology_reverse_owner_status", "")),
                 "topology_reverse_owner_src_nodeid": item.get("topology_reverse_owner_src_nodeid"),
+                "prior_anchor_cost_m": item.get("prior_anchor_cost_m"),
+                "prior_anchor_best_pair": item.get("prior_anchor_best_pair"),
+                "competing_prior_pair_ids": list(item.get("competing_prior_pair_ids", [])),
+                "competing_prior_candidate_ids": list(item.get("competing_prior_candidate_ids", [])),
                 "support_traj_ids": list(item.get("support_traj_ids", [])),
             }
             for item in excluded_candidates
