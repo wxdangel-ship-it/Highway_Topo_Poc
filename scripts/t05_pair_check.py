@@ -39,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     should_not_exist = _read_json(root / "debug" / "step2_segment_should_not_exist.json")
     raw_crossings = _read_json(root / "debug" / "step2_traj_crossings_raw.geojson")
     filtered_crossings = _read_json(root / "debug" / "step2_traj_crossings_filtered.geojson")
+    topology_pairs = _read_json(root / "debug" / "step2_topology_pairs.json")
+    topology_arcs = _read_json(root / "debug" / "step2_topology_arcs.json")
 
     selected_segments = [
         item
@@ -95,6 +97,19 @@ def main(argv: list[str] | None = None) -> int:
         feat.get("properties", {})
         for feat in filtered_crossings.get("features", [])
         if f"{src_nodeid}:{dst_nodeid}" in set(feat.get("properties", {}).get("pair_ids", []))
+    ]
+    topology_pair_entry = next(
+        (
+            item
+            for item in topology_pairs.get("pairs", [])
+            if int(item.get("src_nodeid", -1)) == int(src_nodeid) and int(item.get("dst_nodeid", -1)) == int(dst_nodeid)
+        ),
+        None,
+    )
+    topology_arc_entries = [
+        item
+        for item in topology_arcs.get("arcs", [])
+        if int(item.get("src_nodeid", -1)) == int(src_nodeid) and int(item.get("dst_nodeid", -1)) == int(dst_nodeid)
     ]
 
     payload = {
@@ -155,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
             "pair_row": terminal_pair,
         },
         "segment_should_not_exist": should_not_exist_entry,
+        "topology_pair": topology_pair_entry,
+        "topology_arcs": topology_arc_entries,
         "support_trajs": support_entries[: max(0, int(args.support_limit))],
         "support_traj_count": int(len(support_entries)),
         "raw_crossings": raw_crossing_entries[: max(0, int(args.support_limit))],

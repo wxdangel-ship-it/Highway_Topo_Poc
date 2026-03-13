@@ -41,6 +41,19 @@ def _format_metric(metric: dict | None) -> str:
     return ", ".join(parts)
 
 
+def _format_topology_arcs(arcs: object) -> str:
+    if not isinstance(arcs, list) or not arcs:
+        return ""
+    parts: list[str] = []
+    for arc in arcs[:3]:
+        if not isinstance(arc, dict):
+            continue
+        parts.append(
+            f"{arc.get('arc_id')}:{arc.get('source')}:{arc.get('node_path')}"
+        )
+    return " | ".join(parts)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="t05_build_result_doc")
     parser.add_argument("--out-root", required=True)
@@ -83,6 +96,8 @@ def _pair_check_rows(pair_check_dir: Path) -> list[dict]:
                 "support_trajs": list(payload.get("support_trajs", [])),
                 "terminal_node_audit": payload.get("terminal_node_audit"),
                 "segment_should_not_exist": payload.get("segment_should_not_exist"),
+                "topology_pair": payload.get("topology_pair"),
+                "topology_arcs": list(payload.get("topology_arcs", [])),
                 "last_excluded": last_excluded,
             }
         )
@@ -161,6 +176,16 @@ def _render_pair_details(row: dict) -> list[str]:
             f"reason={segment_should_not_exist.get('reason')} "
             f"topology_sources={_format_json_inline(segment_should_not_exist.get('topology_sources', []))}"
         )
+    topology_pair = row.get("topology_pair")
+    if isinstance(topology_pair, dict):
+        lines.append(
+            "- `topology_pair`: "
+            f"sources={_format_json_inline(topology_pair.get('topology_sources', []))} "
+            f"paths={_format_json_inline(topology_pair.get('topology_paths', []))}"
+        )
+    topology_arcs = row.get("topology_arcs")
+    if isinstance(topology_arcs, list) and topology_arcs:
+        lines.append(f"- `topology_arcs`: `{_format_json_inline(topology_arcs[:3])}`")
     if row.get("support_traj_count", 0) > 0:
         support_trajs = row.get("support_trajs", [])
         top1 = support_trajs[0] if support_trajs else {}
@@ -225,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
                     "last_reason",
                     "metric",
                     "support_traj_count",
+                    "topology_arcs",
                 ],
                 [
                     [
@@ -234,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
                         row["last_reason"],
                         _format_metric(row["metric"]),
                         str(row["support_traj_count"]),
+                        _format_topology_arcs(row.get("topology_arcs")),
                     ]
                     for row in pair_rows
                 ],

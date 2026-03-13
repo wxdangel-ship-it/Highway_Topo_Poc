@@ -1747,69 +1747,8 @@ def _segment_candidates(
         pairing_candidates.append(candidate)
         reason = "adjacent_pair_retained" if int(candidate.get("pair_index_gap", 0)) <= 1 else "non_adjacent_pair_retained"
         record(candidate, stage="pairing_filter", status="selected", reason=reason)
-    pair_has_prior_candidate: set[tuple[int, int]] = set()
-    pair_traj_support_ids: dict[tuple[int, int], set[str]] = defaultdict(set)
+    topology_ready_candidates: list[dict[str, Any]] = []
     for candidate in pairing_candidates:
-        pair = (int(candidate["src_nodeid"]), int(candidate["dst_nodeid"]))
-        if str(candidate.get("source", "")) == "prior":
-            pair_has_prior_candidate.add(pair)
-            continue
-        for traj_id in candidate.get("support_traj_ids", set()) or []:
-            pair_traj_support_ids[pair].add(str(traj_id))
-
-    def ownership_gate_reason(candidate: dict[str, Any]) -> str | None:
-        if str(candidate.get("source", "")) != "traj":
-            return None
-        if str(candidate.get("pairing_mode", "")) != "adjacent":
-            return None
-        pair = (int(candidate["src_nodeid"]), int(candidate["dst_nodeid"]))
-        if pair in pair_has_prior_candidate:
-            return None
-        if int(len(pair_traj_support_ids.get(pair, set()))) > 1:
-            return None
-        competing_priors = list(unanchored_prior_candidates_by_src.get(int(candidate["src_nodeid"]), []))
-        competing_pairs = {
-            (int(item.get("src_nodeid", 0)), int(item.get("dst_nodeid", 0)))
-            for item in competing_priors
-        }
-        if len(competing_pairs) != 1:
-            return None
-        competing_pair = next(iter(competing_pairs))
-        if competing_pair == pair:
-            return None
-        competing_dst_nodeids = {int(item.get("dst_nodeid", 0)) for item in competing_priors}
-        if len(competing_dst_nodeids) != 1:
-            return None
-        competing_dst_nodeid = next(iter(competing_dst_nodeids))
-        matching_paths: list[list[int]] = []
-        for path in topology.get("pair_paths", {}).get(pair, []):
-            node_path = [int(v) for v in path.get("node_path", []) if v is not None]
-            if (
-                int(path.get("chain_len", 0)) == 2
-                and len(node_path) == 3
-                and int(node_path[0]) == int(candidate["src_nodeid"])
-                and int(node_path[1]) == int(competing_dst_nodeid)
-                and int(node_path[-1]) == int(candidate["dst_nodeid"])
-            ):
-                matching_paths.append(node_path)
-        if not matching_paths:
-            return None
-        candidate["competing_prior_pair_ids"] = sorted(
-            str(item.get("pair_id", "")) for item in competing_priors if str(item.get("pair_id", ""))
-        )
-        candidate["competing_prior_candidate_ids"] = sorted(
-            str(item.get("candidate_id", "")) for item in competing_priors if str(item.get("candidate_id", ""))
-        )
-        candidate["competing_prior_anchor_cost_m"] = [item.get("prior_anchor_cost_m") for item in competing_priors]
-        candidate["competing_prior_anchor_best_pairs"] = [item.get("prior_anchor_best_pair") for item in competing_priors]
-        candidate["competing_prior_trace_paths"] = [list(path) for path in matching_paths]
-        return "src_conflicts_with_unique_unanchored_prior_endpoint"
-
-    for candidate in pairing_candidates:
-        ownership_reason = ownership_gate_reason(candidate)
-        if ownership_reason is not None:
-            reject(candidate, stage="ownership_gate", reason=str(ownership_reason))
-            continue
         geometry_probe = dict(candidate)
         pre_reason = cross_filter_reason(geometry_probe)
         if pre_reason is None:
@@ -1831,6 +1770,78 @@ def _segment_candidates(
             reject(candidate, stage="topology_gate", reason=str(topology_reason))
             continue
         _assign_topology_arc(candidate, topology=topology)
+        topology_ready_candidates.append(candidate)
+
+    arc_has_prior_candidate: set[tuple[int, int, str]] = set()
+    arc_traj_support_ids: dict[tuple[int, int, str], set[str]] = defaultdict(set)
+    for candidate in topology_ready_candidates:
+        arc_key = (
+            int(candidate["src_nodeid"]),
+            int(candidate["dst_nodeid"]),
+            str(candidate.get("topology_arc_id", "") or ""),
+        )
+        if str(candidate.get("source", "")) == "prior":
+            arc_has_prior_candidate.add(arc_key)
+            continue
+        for traj_id in candidate.get("support_traj_ids", set()) or []:
+            arc_traj_support_ids[arc_key].add(str(traj_id))
+
+    def ownership_gate_reason(candidate: dict[str, Any]) -> str | None:
+        if str(candidate.get("source", "")) != "traj":
+            return None
+        if str(candidate.get("pairing_mode", "")) != "adjacent":
+            return None
+        pair = (int(candidate["src_nodeid"]), int(candidate["dst_nodeid"]))
+        arc_key = (
+            int(candidate["src_nodeid"]),
+            int(candidate["dst_nodeid"]),
+            str(candidate.get("topology_arc_id", "") or ""),
+        )
+        if arc_key in arc_has_prior_candidate:
+            return None
+        if int(len(arc_traj_support_ids.get(arc_key, set()))) > 1:
+            return None
+        competing_priors = list(unanchored_prior_candidates_by_src.get(int(candidate["src_nodeid"]), []))
+        competing_pairs = {
+            (int(item.get("src_nodeid", 0)), int(item.get("dst_nodeid", 0)))
+            for item in competing_priors
+        }
+        if len(competing_pairs) != 1:
+            return None
+        competing_pair = next(iter(competing_pairs))
+        if competing_pair == pair:
+            return None
+        competing_dst_nodeids = {int(item.get("dst_nodeid", 0)) for item in competing_priors}
+        if len(competing_dst_nodeids) != 1:
+            return None
+        competing_dst_nodeid = next(iter(competing_dst_nodeids))
+        node_path = [int(v) for v in candidate.get("topology_arc_node_path", []) if v is not None]
+        matching_paths: list[list[int]] = []
+        if (
+            len(node_path) == 3
+            and int(node_path[0]) == int(candidate["src_nodeid"])
+            and int(node_path[1]) == int(competing_dst_nodeid)
+            and int(node_path[-1]) == int(candidate["dst_nodeid"])
+        ):
+            matching_paths.append(list(node_path))
+        if not matching_paths:
+            return None
+        candidate["competing_prior_pair_ids"] = sorted(
+            str(item.get("pair_id", "")) for item in competing_priors if str(item.get("pair_id", ""))
+        )
+        candidate["competing_prior_candidate_ids"] = sorted(
+            str(item.get("candidate_id", "")) for item in competing_priors if str(item.get("candidate_id", ""))
+        )
+        candidate["competing_prior_anchor_cost_m"] = [item.get("prior_anchor_cost_m") for item in competing_priors]
+        candidate["competing_prior_anchor_best_pairs"] = [item.get("prior_anchor_best_pair") for item in competing_priors]
+        candidate["competing_prior_trace_paths"] = [list(path) for path in matching_paths]
+        return "src_conflicts_with_unique_unanchored_prior_endpoint"
+
+    for candidate in topology_ready_candidates:
+        ownership_reason = ownership_gate_reason(candidate)
+        if ownership_reason is not None:
+            reject(candidate, stage="ownership_gate", reason=str(ownership_reason))
+            continue
         topology_kept_candidates.append(candidate)
         note_candidate_events(candidate, phase="topology_kept", reason="topology_legal_candidate")
         cross_reason = cross_filter_reason(candidate)
@@ -2703,6 +2714,29 @@ def _build_topology_pairs_debug(
     return out
 
 
+def _build_topology_arcs_debug(
+    topology: dict[str, Any],
+) -> list[dict[str, Any]]:
+    pair_arcs: dict[tuple[int, int], list[dict[str, Any]]] = topology.get("pair_arcs", {})
+    out: list[dict[str, Any]] = []
+    for pair in sorted(pair_arcs.keys()):
+        for arc in pair_arcs.get(pair, []):
+            out.append(
+                {
+                    "arc_id": str(arc.get("arc_id", "")),
+                    "src_nodeid": int(arc.get("src_nodeid", pair[0])),
+                    "dst_nodeid": int(arc.get("dst_nodeid", pair[1])),
+                    "pair_id": _pair_id_text(int(pair[0]), int(pair[1])),
+                    "source": str(arc.get("source", "")),
+                    "edge_ids": [str(v) for v in arc.get("edge_ids", [])],
+                    "node_path": [int(v) for v in arc.get("node_path", []) if v is not None],
+                    "chain_len": int(arc.get("chain_len", 0)),
+                    "line_coords": list(arc.get("line_coords", [])),
+                }
+            )
+    return out
+
+
 def _drivable_surface(inputs: PatchInputs, params: dict[str, Any]) -> BaseGeometry | None:
     if inputs.drivezone_zone_metric is None or inputs.drivezone_zone_metric.is_empty:
         return None
@@ -3536,10 +3570,27 @@ def _stage2_segment(
     )
     segment_should_not_exist = _build_segment_should_not_exist(rejected, topology=dict(candidate_bundle.get("topology", {})))
     topology_pairs_debug = _build_topology_pairs_debug(dict(candidate_bundle.get("topology", {})))
+    topology_arcs_debug = _build_topology_arcs_debug(dict(candidate_bundle.get("topology", {})))
     step2_metrics = {
         **step2_metrics,
         "segment_selected_count_before_topology_gate": int(len(pre_topology_segments)),
         "segment_selected_count_after_topology_gate": int(len(clustered_segments)),
+        "topology_arc_count": int(len(topology_arcs_debug)),
+        "topology_multi_arc_pair_count": int(
+            sum(
+                1
+                for pair in {
+                    (int(item["src_nodeid"]), int(item["dst_nodeid"]))
+                    for item in topology_arcs_debug
+                }
+                if sum(
+                    1
+                    for item in topology_arcs_debug
+                    if int(item["src_nodeid"]) == int(pair[0]) and int(item["dst_nodeid"]) == int(pair[1])
+                )
+                > 1
+            )
+        ),
     }
     artifact = {
         "segments": [segment.to_dict() for segment in segments],
@@ -3591,6 +3642,7 @@ def _stage2_segment(
         "terminal_node_audit": terminal_node_audit,
         "segment_should_not_exist": segment_should_not_exist,
         "topology_pairs": topology_pairs_debug,
+        "topology_arcs": topology_arcs_debug,
         "step2_metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics},
     }
     dbg_dir = debug_dir(out_root, run_id, patch_id)
@@ -3643,6 +3695,10 @@ def _stage2_segment(
     write_json(
         dbg_dir / "step2_topology_pairs.json",
         {"pairs": topology_pairs_debug, "metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics}},
+    )
+    write_json(
+        dbg_dir / "step2_topology_arcs.json",
+        {"arcs": topology_arcs_debug, "metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics}},
     )
     return {
         "artifact": artifact,

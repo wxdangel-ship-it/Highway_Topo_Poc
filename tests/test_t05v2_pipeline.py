@@ -825,6 +825,13 @@ def test_t05v2_step2_keeps_multi_arc_segments_for_same_pair(tmp_path: Path) -> N
     ]
     assert len(pair_segments) == 2
     assert len({str(item.get("topology_arc_id", "")) for item in pair_segments}) == 2
+    topology_arcs_payload = _read_json(out_root / "run_multi_arc" / "patches" / patch_id / "debug" / "step2_topology_arcs.json")
+    arcs = [
+        item
+        for item in topology_arcs_payload["arcs"]
+        if int(item["src_nodeid"]) == 1 and int(item["dst_nodeid"]) == 2
+    ]
+    assert len(arcs) == 2
 
 
 def test_t05v2_step2_writes_traj_crossing_and_support_audits(tmp_path: Path) -> None:
