@@ -20,6 +20,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.models import (
 from highway_topo_poc.modules.t05_topology_between_rc_v2.pipeline import (
     DEFAULT_PARAMS,
     _build_final_road,
+    _classify_blocked_pair_bridge,
     _topology_gate_reason,
     run_full_pipeline,
     run_stage,
@@ -435,12 +436,14 @@ def test_t05v2_step2_topology_gate_rejects_wrong_terminal_pairs_and_reverse_dire
     assert kept_pairs == {(31, 41)}
     excluded = segments_payload["excluded_candidates"]
     excluded_by_pair = {(int(item["src_nodeid"]), int(item["dst_nodeid"])): str(item["reason"]) for item in excluded}
-    assert excluded_by_pair[(11, 41)] == "terminal_node_not_owned_by_src"
-    assert excluded_by_pair[(21, 41)] == "terminal_node_not_owned_by_src"
-    assert excluded_by_pair[(41, 31)] == "directionally_invalid_segment"
+    assert excluded_by_pair[(11, 41)] == "terminal_owner_mismatch"
+    assert excluded_by_pair[(21, 41)] == "terminal_owner_mismatch"
+    assert excluded_by_pair[(41, 31)] == "directed_path_not_supported"
     step2_metrics = segments_payload["step2_metrics"]
     assert int(step2_metrics["segment_selected_count_before_topology_gate"]) == 4
     assert int(step2_metrics["segment_selected_count_after_topology_gate"]) == 1
+    assert int(step2_metrics["directed_path_not_supported_count"]) == 1
+    assert int(step2_metrics["terminal_owner_mismatch_segment_count"]) == 2
     assert int(step2_metrics["directionally_invalid_segment_count"]) == 1
     assert int(step2_metrics["terminal_node_invalid_segment_count"]) == 2
     audit = _read_json(patch_dir / "debug" / "step2_terminal_node_audit.json")
@@ -450,14 +453,14 @@ def test_t05v2_step2_topology_gate_rejects_wrong_terminal_pairs_and_reverse_dire
     pair_map = {str(item["pair_id"]): item for item in node_41["pairs"]}
     assert bool(pair_map["31:41"]["selected"]) is True
     assert bool(pair_map["31:41"]["topology_reverse_owner_match"]) is True
-    assert pair_map["11:41"]["rejected_reason"] == "terminal_node_not_owned_by_src"
-    assert pair_map["21:41"]["rejected_reason"] == "terminal_node_not_owned_by_src"
+    assert pair_map["11:41"]["rejected_reason"] == "terminal_owner_mismatch"
+    assert pair_map["21:41"]["rejected_reason"] == "terminal_owner_mismatch"
     assert bool(pair_map["11:41"]["topology_reverse_owner_match"]) is False
     should_not_exist = _read_json(patch_dir / "debug" / "step2_segment_should_not_exist.json")
     reasons = { (int(item["src_nodeid"]), int(item["dst_nodeid"])): str(item["reason"]) for item in should_not_exist["pairs"] }
-    assert reasons[(11, 41)] == "terminal_node_not_owned_by_src"
-    assert reasons[(21, 41)] == "terminal_node_not_owned_by_src"
-    assert reasons[(41, 31)] == "directionally_invalid_segment"
+    assert reasons[(11, 41)] == "terminal_owner_mismatch"
+    assert reasons[(21, 41)] == "terminal_owner_mismatch"
+    assert reasons[(41, 31)] == "directed_path_not_supported"
     invalid_11_41 = next(item for item in should_not_exist["pairs"] if int(item["src_nodeid"]) == 11 and int(item["dst_nodeid"]) == 41)
     assert invalid_11_41["topology_reverse_owner_status"] == "unique_owner"
     assert int(invalid_11_41["topology_reverse_owner_src_nodeid"]) == 31
@@ -500,7 +503,7 @@ def test_t05v2_topology_gate_keeps_explicit_allowed_pair_even_when_reverse_owner
             dst_nodeid=765141,
             topology=topology,
         )
-        == "terminal_node_not_owned_by_src"
+        == "terminal_owner_mismatch"
     )
 
 
@@ -543,7 +546,9 @@ def test_t05v2_step2_rejects_single_traj_pair_when_src_has_unique_unanchored_pri
     ]
     assert excluded_by_pair
     assert excluded_by_pair[0]["reason"] == "src_conflicts_with_unique_unanchored_prior_endpoint"
-    assert excluded_by_pair[0]["stage"] == "ownership_gate"
+    assert excluded_by_pair[0]["stage"] == "semantic_hard_gate"
+    assert excluded_by_pair[0]["arc_source_type"] == "direct_topology_arc"
+    assert excluded_by_pair[0]["topology_arc_node_path"] == [10, 30, 40]
     assert excluded_by_pair[0]["competing_prior_pair_ids"] == ["10:30"]
     assert excluded_by_pair[0]["competing_prior_candidate_ids"] == ["prior_0"]
     assert excluded_by_pair[0]["competing_prior_trace_paths"] == [[10, 30, 40]]
@@ -551,8 +556,8 @@ def test_t05v2_step2_rejects_single_traj_pair_when_src_has_unique_unanchored_pri
     should_not_exist = _read_json(patch_dir / "debug" / "step2_segment_should_not_exist.json")
     row = next(item for item in should_not_exist["pairs"] if int(item["src_nodeid"]) == 10 and int(item["dst_nodeid"]) == 40)
     assert row["reason"] == "src_conflicts_with_unique_unanchored_prior_endpoint"
-    assert row["competing_prior_pair_ids"] == ["10:30"]
-    assert row["competing_prior_trace_paths"] == [[10, 30, 40]]
+    assert row["topology_sources"] == ["direct_topology_arc"]
+    assert row["topology_paths"][0]["node_path"] == [10, 30, 40]
 
 
 def test_t05v2_step2_keeps_multi_traj_pair_despite_unanchored_prior_endpoint(tmp_path: Path) -> None:
@@ -632,11 +637,11 @@ def test_t05v2_step2_keeps_single_traj_pair_when_unanchored_prior_only_matches_d
     assert int(segments_payload["step2_metrics"]["unanchored_prior_conflict_segment_count"]) == 0
     topology_debug = _read_json(patch_dir / "debug" / "step2_topology_pairs.json")
     pair_map = {str(item["pair_id"]): item for item in topology_debug["pairs"]}
-    assert pair_map["10:40"]["topology_sources"] == ["rcsdroad_trace"]
+    assert pair_map["10:40"]["topology_sources"] == ["direct_topology_arc"]
     assert pair_map["10:40"]["topology_paths"][0]["node_path"] == [10, 25, 26, 40]
 
 
-def test_t05v2_step2_topology_gate_allows_traced_rcsdroad_pairs(tmp_path: Path) -> None:
+def test_t05v2_step2_accepts_compressed_direct_arcs_and_keeps_trace_only_in_audit(tmp_path: Path) -> None:
     patch_id = "topology_trace_chain"
     data_root = tmp_path / "data"
     intersection_fc = _fc(
@@ -681,7 +686,8 @@ def test_t05v2_step2_topology_gate_allows_traced_rcsdroad_pairs(tmp_path: Path) 
     topology_debug = _read_json(patch_dir / "debug" / "step2_topology_pairs.json")
     pair_map = {str(item["pair_id"]): item for item in topology_debug["pairs"]}
     assert "10:20" in pair_map
-    assert pair_map["10:20"]["topology_sources"] == ["rcsdroad_trace"]
+    assert pair_map["10:20"]["topology_sources"] == ["direct_topology_arc"]
+    assert pair_map["10:20"]["arc_source_type"] == "direct_topology_arc"
     assert pair_map["10:20"]["topology_paths"][0]["node_path"] == [10, 101, 20]
     step2_metrics = segments_payload["step2_metrics"]
     assert int(step2_metrics["segment_selected_count_after_topology_gate"]) == 4
@@ -733,11 +739,82 @@ def test_t05v2_step2_terminal_trace_is_audit_only(tmp_path: Path) -> None:
         if int(item["src_nodeid"]) == 10 and int(item["dst_nodeid"]) == 40
     ]
     assert excluded
-    assert {str(item["reason"]) for item in excluded} <= {
-        "segment_not_in_rcsdroad_topology",
-        "non_adjacent_pair_blocked",
-        "terminal_node_not_owned_by_src",
-    }
+    assert {str(item["reason"]) for item in excluded} == {"trace_only_reachability"}
+    assert {str(item["stage"]) for item in excluded} == {"semantic_hard_gate"}
+
+
+def test_t05v2_blocked_pair_bridge_classification_categories() -> None:
+    unique = _classify_blocked_pair_bridge(
+        src_nodeid=10,
+        dst_nodeid=30,
+        topology={"outgoing": {10: {20}, 20: {30}}, "trace_only_pair_paths": {}, "terminal_trace_paths": {}},
+    )
+    assert unique["bridge_classification"] == "unique_directed_bridge_candidate"
+    assert unique["direct_bridge_nodeids"] == [20]
+
+    multi = _classify_blocked_pair_bridge(
+        src_nodeid=10,
+        dst_nodeid=40,
+        topology={"outgoing": {10: {20, 30}, 20: {40}, 30: {40}}, "trace_only_pair_paths": {}, "terminal_trace_paths": {}},
+    )
+    assert multi["bridge_classification"] == "multi_bridge_ambiguous"
+    assert multi["direct_bridge_nodeids"] == [20, 30]
+
+    gap = _classify_blocked_pair_bridge(
+        src_nodeid=10,
+        dst_nodeid=40,
+        topology={"outgoing": {10: {20}, 20: {30}, 30: {40}}, "trace_only_pair_paths": {}, "terminal_trace_paths": {}},
+    )
+    assert gap["bridge_classification"] == "topology_gap_unresolved"
+    assert gap["direct_bridge_paths"] == [[10, 20, 30, 40]]
+
+    reject = _classify_blocked_pair_bridge(
+        src_nodeid=10,
+        dst_nodeid=40,
+        topology={"outgoing": {10: {20}, 50: {60}}, "trace_only_pair_paths": {}, "terminal_trace_paths": {}},
+    )
+    assert reject["bridge_classification"] == "truly_non_adjacent_reject"
+    assert reject["direct_bridge_paths"] == []
+
+
+def test_t05v2_step2_writes_blocked_pair_bridge_audit(tmp_path: Path) -> None:
+    patch_id = "blocked_pair_bridge_audit"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -5.0), (0.0, 5.0)], {"nodeid": 10}),
+            _line_feature([(50.0, -5.0), (50.0, 5.0)], {"nodeid": 20}),
+            _line_feature([(100.0, -5.0), (100.0, 5.0)], {"nodeid": 30}),
+        ],
+        "EPSG:3857",
+    )
+    drivezone_fc = _fc([_poly_feature([(-5.0, -6.0), (105.0, -6.0), (105.0, 6.0), (-5.0, 6.0)])], "EPSG:3857")
+    road_fc = _fc(
+        [
+            _line_feature([(0.0, 0.0), (50.0, 0.0)], {"snodeid": 10, "enodeid": 20}),
+            _line_feature([(50.0, 0.0), (100.0, 0.0)], {"snodeid": 20, "enodeid": 30}),
+        ],
+        "EPSG:3857",
+    )
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=intersection_fc,
+        drivezone_fc=drivezone_fc,
+        traj_tracks=[[(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)]],
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_bridge", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_bridge", out_root=out_root)
+    patch_dir = out_root / "run_bridge" / "patches" / patch_id
+    bridge_audit = _read_json(patch_dir / "debug" / "step2_blocked_pair_bridge_audit.json")
+    row = next(item for item in bridge_audit["pairs"] if str(item["pair_id"]) == "10:30")
+    assert row["reject_stage"] == "pairing_filter"
+    assert row["reject_reason"] == "non_adjacent_pair_blocked"
+    assert row["bridge_classification"] == "unique_directed_bridge_candidate"
+    assert row["direct_bridge_nodeids"] == [20]
+    assert row["direct_bridge_paths"] == [[10, 20, 30]]
 
 
 def test_t05v2_step2_promotes_missing_rcsd_node_to_pseudo_xsec_and_builds_direct_arcs(tmp_path: Path) -> None:
