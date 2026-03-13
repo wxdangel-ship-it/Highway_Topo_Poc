@@ -615,6 +615,10 @@ _SEGMENT_TOPOLOGY_INVALID_REASONS = {
     "terminal_owner_mismatch",
     "ambiguous_terminal_owner",
     "src_conflicts_with_unique_unanchored_prior_endpoint",
+    "pair_not_direct_legal_arc",
+    "non_unique_direct_legal_arc",
+    "arc_unique_connectivity_violation",
+    "synthetic_arc_not_allowed",
 }
 
 
@@ -631,6 +635,101 @@ def _bridge_retain_pair_ids(params: dict[str, Any]) -> set[tuple[int, int]]:
 def _bridge_chain_arc_id(node_path: list[int] | tuple[int, ...]) -> str:
     nodes = [str(int(v)) for v in node_path if v is not None]
     return f"bridge_chain:{'->'.join(nodes)}"
+
+
+def _direct_arc_rows(
+    *,
+    src_nodeid: int,
+    dst_nodeid: int,
+    topology: dict[str, Any],
+) -> list[dict[str, Any]]:
+    pair = (int(src_nodeid), int(dst_nodeid))
+    return [
+        dict(item)
+        for item in list(topology.get("pair_arcs", {}).get(pair, []))
+        if str(item.get("source", "")) == _DIRECT_TOPOLOGY_ARC_SOURCE
+    ]
+
+
+def _arc_legality_diagnostics(
+    *,
+    src_nodeid: int,
+    dst_nodeid: int,
+    topology: dict[str, Any],
+) -> dict[str, Any]:
+    direct_arcs = _direct_arc_rows(src_nodeid=int(src_nodeid), dst_nodeid=int(dst_nodeid), topology=topology)
+    bridge_reason = ""
+    bridge_nodes: list[int] = []
+    bridge_chain_exists = False
+    if not direct_arcs:
+        bridge_classification = _classify_blocked_pair_bridge(
+            src_nodeid=int(src_nodeid),
+            dst_nodeid=int(dst_nodeid),
+            topology=topology,
+        )
+        bridge_reason = str(bridge_classification.get("bridge_classification", ""))
+        bridge_nodes = [int(v) for v in bridge_classification.get("direct_bridge_nodeids", []) if v is not None]
+        bridge_chain_exists = bool(
+            bridge_reason in {"unique_directed_bridge_candidate", "multi_bridge_ambiguous", "topology_gap_unresolved"}
+        )
+    return {
+        "topology_arc_is_direct_legal": bool(len(direct_arcs) > 0),
+        "topology_arc_is_unique": bool(len(direct_arcs) == 1),
+        "topology_arc_candidate_count": int(len(direct_arcs)),
+        "direct_arcs": direct_arcs,
+        "bridge_chain_exists": bool(bridge_chain_exists),
+        "bridge_chain_unique": bool(bridge_reason == "unique_directed_bridge_candidate"),
+        "bridge_chain_nodes": bridge_nodes,
+        "bridge_diagnostic_reason": bridge_reason if bridge_chain_exists else "",
+    }
+
+
+def _production_arc_gate_reason(
+    *,
+    candidate: dict[str, Any],
+    topology: dict[str, Any],
+) -> str | None:
+    if not bool(topology.get("enabled")):
+        candidate["topology_arc_is_direct_legal"] = False
+        candidate["topology_arc_is_unique"] = False
+        candidate["topology_arc_candidate_count"] = 0
+        candidate["bridge_chain_exists"] = False
+        candidate["bridge_chain_unique"] = False
+        candidate["bridge_chain_nodes"] = []
+        candidate["bridge_diagnostic_reason"] = ""
+        return None
+    src_nodeid = int(candidate.get("src_nodeid", 0))
+    dst_nodeid = int(candidate.get("dst_nodeid", 0))
+    topology_reason = _topology_gate_reason(
+        src_nodeid=int(src_nodeid),
+        dst_nodeid=int(dst_nodeid),
+        topology=topology,
+    )
+    diagnostics = _arc_legality_diagnostics(
+        src_nodeid=int(src_nodeid),
+        dst_nodeid=int(dst_nodeid),
+        topology=topology,
+    )
+    candidate["topology_arc_is_direct_legal"] = bool(diagnostics["topology_arc_is_direct_legal"])
+    candidate["topology_arc_is_unique"] = bool(diagnostics["topology_arc_is_unique"])
+    candidate["topology_arc_candidate_count"] = int(diagnostics["topology_arc_candidate_count"])
+    candidate["bridge_chain_exists"] = bool(diagnostics["bridge_chain_exists"])
+    candidate["bridge_chain_unique"] = bool(diagnostics["bridge_chain_unique"])
+    candidate["bridge_chain_nodes"] = [int(v) for v in diagnostics["bridge_chain_nodes"]]
+    candidate["bridge_diagnostic_reason"] = str(diagnostics["bridge_diagnostic_reason"])
+    if str(topology_reason) == "trace_only_reachability":
+        return "trace_only_reachability"
+    if not bool(diagnostics["topology_arc_is_direct_legal"]):
+        if bool(diagnostics["bridge_chain_exists"]):
+            return "synthetic_arc_not_allowed"
+        if str(topology_reason) in {"terminal_owner_mismatch", "ambiguous_terminal_owner"}:
+            return str(topology_reason)
+        return "pair_not_direct_legal_arc"
+    if not bool(diagnostics["topology_arc_is_unique"]):
+        if str(topology_reason) in {"terminal_owner_mismatch", "ambiguous_terminal_owner"}:
+            return str(topology_reason)
+        return "non_unique_direct_legal_arc"
+    return topology_reason
 
 
 def _is_bridge_retain_candidate_enabled(
@@ -1471,44 +1570,18 @@ def _assign_topology_arc(
     *,
     topology: dict[str, Any],
 ) -> dict[str, Any] | None:
-    pair = (int(candidate.get("src_nodeid", 0)), int(candidate.get("dst_nodeid", 0)))
-    arcs = list(topology.get("pair_arcs", {}).get(pair, []))
-    if not arcs:
+    arcs = _direct_arc_rows(
+        src_nodeid=int(candidate.get("src_nodeid", 0)),
+        dst_nodeid=int(candidate.get("dst_nodeid", 0)),
+        topology=topology,
+    )
+    candidate["topology_arc_is_direct_legal"] = bool(len(arcs) > 0)
+    candidate["topology_arc_is_unique"] = bool(len(arcs) == 1)
+    candidate["topology_arc_candidate_count"] = int(len(arcs))
+    if len(arcs) != 1:
         return None
-    if len(arcs) == 1:
-        chosen = arcs[0]
-    else:
-        chosen = None
-        source = str(candidate.get("source", ""))
-        candidate_id = str(candidate.get("candidate_id", ""))
-        if source == "prior" and candidate_id:
-            exact = [arc for arc in arcs if candidate_id in {str(v) for v in arc.get("edge_ids", [])}]
-            if len(exact) == 1:
-                chosen = exact[0]
-            elif exact:
-                arcs = exact
-        if chosen is None:
-            candidate_line = candidate.get("line")
-            scored: list[tuple[float, int, str, dict[str, Any]]] = []
-            for arc in arcs:
-                arc_line = coords_to_line(
-                    tuple((float(x), float(y)) for x, y in arc.get("line_coords", []))
-                )
-                try:
-                    dist = float(candidate_line.distance(arc_line)) if isinstance(candidate_line, LineString) else float("inf")
-                except Exception:
-                    dist = float("inf")
-                scored.append(
-                    (
-                        dist,
-                        int(arc.get("chain_len", 0)),
-                        str(arc.get("arc_id", "")),
-                        arc,
-                    )
-                )
-            scored.sort(key=lambda item: (float(item[0]), int(item[1]), str(item[2])))
-            chosen = scored[0][3]
-            candidate["topology_arc_distance_m"] = None if not scored else float(scored[0][0])
+    chosen = arcs[0]
+    candidate["topology_arc_distance_m"] = 0.0
     candidate["topology_arc_id"] = str(chosen.get("arc_id", ""))
     candidate["topology_arc_source_type"] = str(chosen.get("source", ""))
     candidate["topology_arc_edge_ids"] = [str(v) for v in chosen.get("edge_ids", [])]
@@ -1526,66 +1599,27 @@ def _bridge_retain_decision(
     dst_nodeid = int(candidate.get("dst_nodeid", 0))
     if not _is_bridge_retain_candidate_enabled(src_nodeid=src_nodeid, dst_nodeid=dst_nodeid, params=params):
         return None
-    classification = _classify_blocked_pair_bridge(
+    diagnostics = _arc_legality_diagnostics(
         src_nodeid=int(src_nodeid),
         dst_nodeid=int(dst_nodeid),
         topology=topology,
     )
-    bridge_classification = str(classification.get("bridge_classification", ""))
-    bridge_nodes = [int(v) for v in classification.get("direct_bridge_nodeids", []) if v is not None]
-    if bridge_classification != "unique_directed_bridge_candidate" or len(bridge_nodes) != 1:
-        reason = {
-            "multi_bridge_ambiguous": "bridge_candidate_ambiguous",
-            "topology_gap_unresolved": "bridge_topology_gap_unresolved",
-            "truly_non_adjacent_reject": "bridge_truly_non_adjacent_reject",
-        }.get(bridge_classification, "bridge_unique_candidate_not_confirmed")
-        return {
-            "handled": True,
-            "retained": False,
-            "stage": "bridge_retain_gate",
-            "reason": str(reason),
-            "bridge_classification": str(bridge_classification),
-            "bridge_nodes": bridge_nodes,
-        }
-    bridge_nodeid = int(bridge_nodes[0])
-    hop_conflicts: list[str] = []
-    for hop_src, hop_dst in ((src_nodeid, bridge_nodeid), (bridge_nodeid, dst_nodeid)):
-        hop_reason = _topology_gate_reason(
-            src_nodeid=int(hop_src),
-            dst_nodeid=int(hop_dst),
-            topology=topology,
-        )
-        if hop_reason is not None:
-            hop_conflicts.append(str(hop_reason))
-    if hop_conflicts:
-        return {
-            "handled": True,
-            "retained": False,
-            "stage": "bridge_retain_gate",
-            "reason": "bridge_terminal_semantics_conflict",
-            "bridge_classification": str(bridge_classification),
-            "bridge_nodes": bridge_nodes,
-            "hop_conflicts": sorted(set(hop_conflicts)),
-        }
-    bridge_chain_nodes = [int(src_nodeid), int(bridge_nodeid), int(dst_nodeid)]
-    candidate["bridge_candidate_retained"] = True
-    candidate["bridge_chain_nodes"] = list(bridge_chain_nodes)
-    candidate["bridge_chain_source"] = str(bridge_classification)
-    candidate["bridge_decision_stage"] = "bridge_retain"
-    candidate["bridge_decision_reason"] = "bridge_pair_scoped_retained"
-    candidate["bridge_classification"] = str(bridge_classification)
-    candidate["topology_arc_id"] = _bridge_chain_arc_id(bridge_chain_nodes)
-    candidate["topology_arc_source_type"] = _BRIDGE_CHAIN_TOPOLOGY_SOURCE
-    candidate["topology_arc_edge_ids"] = []
-    candidate["topology_arc_node_path"] = list(bridge_chain_nodes)
-    candidate["arc_source_type"] = _BRIDGE_CHAIN_TOPOLOGY_SOURCE
+    candidate["bridge_candidate_retained"] = False
+    candidate["bridge_chain_exists"] = bool(diagnostics["bridge_chain_exists"])
+    candidate["bridge_chain_unique"] = bool(diagnostics["bridge_chain_unique"])
+    candidate["bridge_chain_nodes"] = [int(v) for v in diagnostics["bridge_chain_nodes"]]
+    candidate["bridge_chain_source"] = "diagnostic_only"
+    candidate["bridge_diagnostic_reason"] = str(diagnostics["bridge_diagnostic_reason"])
+    candidate["bridge_decision_stage"] = "bridge_retain_gate"
+    candidate["bridge_decision_reason"] = "synthetic_arc_not_allowed" if bool(diagnostics["bridge_chain_exists"]) else "pair_not_direct_legal_arc"
+    candidate["bridge_classification"] = str(diagnostics["bridge_diagnostic_reason"])
     return {
         "handled": True,
-        "retained": True,
-        "stage": "bridge_retain",
-        "reason": "bridge_pair_scoped_retained",
-        "bridge_classification": str(bridge_classification),
-        "bridge_nodes": bridge_nodes,
+        "retained": False,
+        "stage": "bridge_retain_gate",
+        "reason": str(candidate["bridge_decision_reason"]),
+        "bridge_classification": str(candidate["bridge_classification"]),
+        "bridge_nodes": [int(v) for v in candidate["bridge_chain_nodes"]],
     }
 
 
@@ -1629,9 +1663,15 @@ def _candidate_feature_properties(
         "topology_arc_id": str(candidate.get("topology_arc_id", "")),
         "topology_arc_source_type": str(candidate.get("topology_arc_source_type", candidate.get("arc_source_type", ""))),
         "topology_arc_distance_m": candidate.get("topology_arc_distance_m"),
+        "topology_arc_is_direct_legal": bool(candidate.get("topology_arc_is_direct_legal", False)),
+        "topology_arc_is_unique": bool(candidate.get("topology_arc_is_unique", False)),
+        "topology_arc_candidate_count": int(candidate.get("topology_arc_candidate_count", 0)),
         "bridge_candidate_retained": bool(candidate.get("bridge_candidate_retained", False)),
+        "bridge_chain_exists": bool(candidate.get("bridge_chain_exists", False)),
+        "bridge_chain_unique": bool(candidate.get("bridge_chain_unique", False)),
         "bridge_chain_nodes": [int(v) for v in candidate.get("bridge_chain_nodes", []) if v is not None],
         "bridge_chain_source": str(candidate.get("bridge_chain_source", "")),
+        "bridge_diagnostic_reason": str(candidate.get("bridge_diagnostic_reason", "")),
         "bridge_decision_stage": str(candidate.get("bridge_decision_stage", "")),
         "bridge_decision_reason": str(candidate.get("bridge_decision_reason", "")),
     }
@@ -1665,9 +1705,14 @@ def _segment_feature_properties(segment: Segment, *, status: str, reason: str = 
         "topology_arc_source_type": str(segment.topology_arc_source_type),
         "topology_arc_edge_ids": [str(v) for v in segment.topology_arc_edge_ids],
         "topology_arc_node_path": [int(v) for v in segment.topology_arc_node_path],
+        "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
+        "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
         "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
+        "bridge_chain_exists": bool(segment.bridge_chain_exists),
+        "bridge_chain_unique": bool(segment.bridge_chain_unique),
         "bridge_chain_nodes": [int(v) for v in segment.bridge_chain_nodes],
         "bridge_chain_source": str(segment.bridge_chain_source),
+        "bridge_diagnostic_reason": str(segment.bridge_diagnostic_reason),
         "bridge_decision_stage": str(segment.bridge_decision_stage),
         "bridge_decision_reason": str(segment.bridge_decision_reason),
         "same_pair_rank": None if segment.same_pair_rank is None else int(segment.same_pair_rank),
@@ -1802,10 +1847,16 @@ def _segment_candidates(
             "topology_arc_source_type": "",
             "topology_arc_edge_ids": [],
             "topology_arc_node_path": [],
+            "topology_arc_is_direct_legal": False,
+            "topology_arc_is_unique": False,
+            "topology_arc_candidate_count": 0,
             "arc_source_type": "",
             "bridge_candidate_retained": False,
+            "bridge_chain_exists": False,
+            "bridge_chain_unique": False,
             "bridge_chain_nodes": [],
             "bridge_chain_source": "",
+            "bridge_diagnostic_reason": "",
             "bridge_decision_stage": "",
             "bridge_decision_reason": "",
             "bridge_classification": "",
@@ -1962,26 +2013,36 @@ def _segment_candidates(
             continue
         if strict_adjacent and int(candidate.get("pair_index_gap", 0)) > 1:
             bridge_decision = _bridge_retain_decision(candidate=candidate, topology=topology, params=params)
-            if bridge_decision is None:
-                reject(candidate, stage="pairing_filter", reason="non_adjacent_pair_blocked")
-                continue
-            bridge_retain_counter[f"{str(bridge_decision.get('stage', 'bridge_retain_gate'))}:{str(bridge_decision.get('reason', 'unknown'))}"] += 1
-            if not bool(bridge_decision.get("retained")):
-                if str(bridge_decision.get("reason", "")) not in _SEGMENT_TOPOLOGY_INVALID_REASONS:
-                    candidate["topology_reason"] = str(bridge_decision.get("reason", ""))
+            if bridge_decision is not None:
+                bridge_retain_counter[f"{str(bridge_decision.get('stage', 'bridge_retain_gate'))}:{str(bridge_decision.get('reason', 'unknown'))}"] += 1
                 reject(
                     candidate,
                     stage=str(bridge_decision.get("stage", "bridge_retain_gate")),
-                    reason=str(bridge_decision.get("reason", "bridge_unique_candidate_not_confirmed")),
+                    reason=str(bridge_decision.get("reason", "synthetic_arc_not_allowed")),
                 )
                 continue
-            pairing_candidates.append(candidate)
-            record(
-                candidate,
-                stage=str(bridge_decision.get("stage", "bridge_retain")),
-                status="selected",
-                reason=str(bridge_decision.get("reason", "bridge_pair_scoped_retained")),
+            topology_semantics = _topology_pair_semantics(
+                src_nodeid=int(candidate["src_nodeid"]),
+                dst_nodeid=int(candidate["dst_nodeid"]),
+                topology=topology,
             )
+            if bool(topology_semantics.get("trace_only_available")) or bool(topology_semantics.get("terminal_trace_available")):
+                candidate["topology_reason"] = "trace_only_reachability"
+                reject(
+                    candidate,
+                    stage="semantic_hard_gate",
+                    reason="trace_only_reachability",
+                )
+                continue
+            if bool(topology_semantics.get("reverse_direct_allowed")):
+                candidate["topology_reason"] = "directed_path_not_supported"
+                reject(
+                    candidate,
+                    stage="semantic_hard_gate",
+                    reason="directed_path_not_supported",
+                )
+                continue
+            reject(candidate, stage="pairing_filter", reason="non_adjacent_pair_blocked")
             continue
         pairing_candidates.append(candidate)
         reason = "adjacent_pair_retained" if int(candidate.get("pair_index_gap", 0)) <= 1 else "non_adjacent_pair_retained"
@@ -1999,13 +2060,6 @@ def _segment_candidates(
             dst_nodeid=int(candidate["dst_nodeid"]),
             topology=topology,
         )
-        topology_reason = None
-        if not bool(candidate.get("bridge_candidate_retained", False)):
-            topology_reason = _topology_gate_reason(
-                src_nodeid=int(candidate["src_nodeid"]),
-                dst_nodeid=int(candidate["dst_nodeid"]),
-                topology=topology,
-            )
         reverse_owner = (
             topology.get("terminal_direct_ownership", {}).get(int(candidate["dst_nodeid"]))
             or topology.get("terminal_reverse_ownership", {}).get(int(candidate["dst_nodeid"]), {})
@@ -2018,15 +2072,18 @@ def _segment_candidates(
         candidate["topology_pair_paths"] = list(topology_semantics.get("pair_paths", []))
         candidate["topology_trace_only_paths"] = list(topology_semantics.get("trace_only_paths", []))
         candidate["topology_terminal_trace_paths"] = list(topology_semantics.get("terminal_trace_paths", []))
-        if not bool(candidate.get("bridge_candidate_retained", False)):
-            candidate["arc_source_type"] = str(topology_semantics.get("arc_source_type", ""))
+        candidate["arc_source_type"] = str(topology_semantics.get("arc_source_type", ""))
+        topology_reason = _production_arc_gate_reason(candidate=candidate, topology=topology)
         candidate["topology_allowed"] = bool(topology_reason is None)
         candidate["topology_reason"] = "" if topology_reason is None else str(topology_reason)
         if topology_reason is not None:
             reject(candidate, stage="semantic_hard_gate", reason=str(topology_reason))
             continue
-        if not bool(candidate.get("bridge_candidate_retained", False)):
-            _assign_topology_arc(candidate, topology=topology)
+        if bool(topology.get("enabled")):
+            assigned_arc = _assign_topology_arc(candidate, topology=topology)
+            if assigned_arc is None:
+                reject(candidate, stage="semantic_hard_gate", reason="arc_unique_connectivity_violation")
+                continue
         topology_ready_candidates.append(candidate)
 
     arc_has_prior_candidate: set[tuple[int, int, str]] = set()
@@ -2181,6 +2238,12 @@ def _segment_candidates(
             "trace_only_reachability_segment_count": int(topology_invalid_counter.get("trace_only_reachability", 0)),
             "terminal_owner_mismatch_segment_count": int(topology_invalid_counter.get("terminal_owner_mismatch", 0)),
             "ambiguous_terminal_owner_segment_count": int(topology_invalid_counter.get("ambiguous_terminal_owner", 0)),
+            "pair_not_direct_legal_arc_count": int(topology_invalid_counter.get("pair_not_direct_legal_arc", 0)),
+            "non_unique_direct_legal_arc_count": int(topology_invalid_counter.get("non_unique_direct_legal_arc", 0)),
+            "arc_unique_connectivity_violation_count": int(
+                topology_invalid_counter.get("arc_unique_connectivity_violation", 0)
+            ),
+            "synthetic_arc_not_allowed_count": int(topology_invalid_counter.get("synthetic_arc_not_allowed", 0)),
             "bridge_retain_attempt_count": int(sum(int(v) for v in bridge_retain_counter.values())),
             "bridge_retain_success_count": int(
                 sum(int(v) for key, v in bridge_retain_counter.items() if str(key) == "bridge_retain:bridge_pair_scoped_retained")
@@ -2193,6 +2256,10 @@ def _segment_candidates(
             "topology_invalid_segment_count": int(
                 topology_invalid_counter.get("directed_path_not_supported", 0)
                 + topology_invalid_counter.get("trace_only_reachability", 0)
+                + topology_invalid_counter.get("pair_not_direct_legal_arc", 0)
+                + topology_invalid_counter.get("non_unique_direct_legal_arc", 0)
+                + topology_invalid_counter.get("arc_unique_connectivity_violation", 0)
+                + topology_invalid_counter.get("synthetic_arc_not_allowed", 0)
             ),
             "terminal_node_invalid_segment_count": int(
                 topology_invalid_counter.get("terminal_owner_mismatch", 0)
@@ -2285,9 +2352,14 @@ def _cluster_segments(candidates: list[dict[str, Any]], frame: InputFrame, param
                     topology_arc_source_type=str(representative.get("topology_arc_source_type", representative.get("arc_source_type", ""))),
                     topology_arc_edge_ids=tuple(str(v) for v in representative.get("topology_arc_edge_ids", [])),
                     topology_arc_node_path=tuple(int(v) for v in representative.get("topology_arc_node_path", [])),
+                    topology_arc_is_direct_legal=bool(representative.get("topology_arc_is_direct_legal", False)),
+                    topology_arc_is_unique=bool(representative.get("topology_arc_is_unique", False)),
                     bridge_candidate_retained=bool(any(bool(item.get("bridge_candidate_retained", False)) for item in cluster)),
+                    bridge_chain_exists=bool(any(bool(item.get("bridge_chain_exists", False)) for item in cluster)),
+                    bridge_chain_unique=bool(representative.get("bridge_chain_unique", False)),
                     bridge_chain_nodes=tuple(int(v) for v in representative.get("bridge_chain_nodes", [])),
                     bridge_chain_source=str(representative.get("bridge_chain_source", "")),
+                    bridge_diagnostic_reason=str(representative.get("bridge_diagnostic_reason", "")),
                     bridge_decision_stage=str(representative.get("bridge_decision_stage", "")),
                     bridge_decision_reason=str(representative.get("bridge_decision_reason", "")),
                 )
@@ -2356,20 +2428,7 @@ def _select_segments_same_pair(
             if int(segment.other_xsec_crossing_count) == 0:
                 kept_reason = "cross0_primary"
             elif bool(segment.bridge_candidate_retained):
-                if int(rank) != 1:
-                    dropped_reason = "bridge_pair_scoped_not_best_rank"
-                elif int(segment.support_count) <= 0:
-                    dropped_reason = "bridge_support_zero"
-                elif bool(segment.crosses_divstrip):
-                    dropped_reason = "bridge_divstrip_conflict"
-                elif has_cross0:
-                    dropped_reason = "bridge_has_cross0_alternative"
-                else:
-                    kept_reason = (
-                        "bridge_pair_scoped_retain:"
-                        f"{str(segment.bridge_chain_source or 'unique_directed_bridge_candidate')}:"
-                        f"bridge_nodes={'-'.join(str(int(v)) for v in segment.bridge_chain_nodes)}"
-                    )
+                dropped_reason = str(segment.bridge_decision_reason or "synthetic_arc_not_allowed")
             else:
                 if allow_cross1:
                     if int(segment.support_count) < cross1_min_support:
@@ -2835,6 +2894,11 @@ def _build_segment_should_not_exist(
                 "reason": str(reason),
                 "related_traj_ids": set(),
                 "related_candidate_ids": set(),
+                "topology_arc_is_direct_legal": bool(item.get("topology_arc_is_direct_legal", False)),
+                "topology_arc_is_unique": bool(item.get("topology_arc_is_unique", False)),
+                "bridge_chain_exists": bool(item.get("bridge_chain_exists", False)),
+                "bridge_chain_unique": bool(item.get("bridge_chain_unique", False)),
+                "bridge_chain_nodes": [int(v) for v in item.get("bridge_chain_nodes", []) if v is not None],
                 "topology_sources": sorted(
                     {
                         *[str(v) for v in pair_sources.get(pair, [])],
@@ -2857,6 +2921,16 @@ def _build_segment_should_not_exist(
         )
         if not row["reason"]:
             row["reason"] = str(reason)
+        row["topology_arc_is_direct_legal"] = bool(
+            row["topology_arc_is_direct_legal"] or bool(item.get("topology_arc_is_direct_legal", False))
+        )
+        row["topology_arc_is_unique"] = bool(
+            row["topology_arc_is_unique"] or bool(item.get("topology_arc_is_unique", False))
+        )
+        row["bridge_chain_exists"] = bool(row["bridge_chain_exists"] or bool(item.get("bridge_chain_exists", False)))
+        row["bridge_chain_unique"] = bool(row["bridge_chain_unique"] or bool(item.get("bridge_chain_unique", False)))
+        if not row["bridge_chain_nodes"]:
+            row["bridge_chain_nodes"] = [int(v) for v in item.get("bridge_chain_nodes", []) if v is not None]
         row["related_candidate_ids"].add(str(item.get("candidate_id", "")))
         for pair_id in item.get("competing_prior_pair_ids", []) or []:
             if str(pair_id):
@@ -2877,6 +2951,11 @@ def _build_segment_should_not_exist(
                 "related_traj_ids": sorted(str(v) for v in row["related_traj_ids"]),
                 "related_traj_count": int(len(row["related_traj_ids"])),
                 "related_candidate_ids": sorted(str(v) for v in row["related_candidate_ids"]),
+                "topology_arc_is_direct_legal": bool(row["topology_arc_is_direct_legal"]),
+                "topology_arc_is_unique": bool(row["topology_arc_is_unique"]),
+                "bridge_chain_exists": bool(row["bridge_chain_exists"]),
+                "bridge_chain_unique": bool(row["bridge_chain_unique"]),
+                "bridge_chain_nodes": [int(v) for v in row["bridge_chain_nodes"]],
                 "topology_sources": list(row["topology_sources"]),
                 "topology_paths": list(row["topology_paths"]),
                 "topology_reverse_owner_status": str(row["topology_reverse_owner_status"]),
@@ -3129,6 +3208,11 @@ def _build_topology_pairs_debug(
         is_allowed = pair in allowed_pairs
         sources = list(pair_sources.get(pair, []))
         paths = list(pair_paths.get(pair, []))
+        diagnostics = _arc_legality_diagnostics(
+            src_nodeid=int(pair[0]),
+            dst_nodeid=int(pair[1]),
+            topology=topology,
+        )
         if not is_allowed:
             sources = sorted(
                 {
@@ -3151,6 +3235,13 @@ def _build_topology_pairs_debug(
                 "selected": None,
                 "rejected_reason": None,
                 "arc_source_type": str(arc_source_type),
+                "topology_arc_is_direct_legal": bool(diagnostics["topology_arc_is_direct_legal"]),
+                "topology_arc_is_unique": bool(diagnostics["topology_arc_is_unique"]),
+                "topology_arc_candidate_count": int(diagnostics["topology_arc_candidate_count"]),
+                "bridge_chain_exists": bool(diagnostics["bridge_chain_exists"]),
+                "bridge_chain_unique": bool(diagnostics["bridge_chain_unique"]),
+                "bridge_chain_nodes": [int(v) for v in diagnostics["bridge_chain_nodes"]],
+                "bridge_diagnostic_reason": str(diagnostics["bridge_diagnostic_reason"]),
                 "topology_sources": list(sources),
                 "topology_paths": list(paths),
             }
@@ -3485,7 +3576,28 @@ def _build_final_road(
         "bridge_chain_source": str(segment.bridge_chain_source),
         "bridge_decision_stage": str(segment.bridge_decision_stage),
         "bridge_decision_reason": str(segment.bridge_decision_reason),
+        "topology_arc_id": str(segment.topology_arc_id),
+        "topology_arc_source_type": str(segment.topology_arc_source_type),
+        "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
+        "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
     }
+    arc_legality_reason = ""
+    has_topology_assignment = bool(
+        str(segment.topology_arc_id)
+        or str(segment.topology_arc_source_type)
+        or len(segment.topology_arc_node_path) > 0
+    )
+    if str(segment.topology_arc_source_type) == _BRIDGE_CHAIN_TOPOLOGY_SOURCE:
+        arc_legality_reason = "synthetic_arc_not_allowed"
+    elif has_topology_assignment and not bool(segment.topology_arc_is_direct_legal):
+        arc_legality_reason = "pair_not_direct_legal_arc"
+    elif has_topology_assignment and not bool(segment.topology_arc_is_unique):
+        arc_legality_reason = "non_unique_direct_legal_arc"
+    elif has_topology_assignment and not str(segment.topology_arc_id):
+        arc_legality_reason = "arc_unique_connectivity_violation"
+    if arc_legality_reason:
+        result["reason"] = str(arc_legality_reason)
+        return None, result
     if str(identity.state) == "unresolved":
         result["bridge_decision_stage"] = "bridge_final_decision" if bridge_retained else str(result["bridge_decision_stage"])
         result["bridge_decision_reason"] = (
@@ -3615,6 +3727,8 @@ def _classify_segment_outcome(
 ) -> str:
     if road is not None or str(build_result.get("reason", "")) == "built":
         return "built"
+    if str(build_result.get("reason", "")) in (_SEGMENT_TOPOLOGY_INVALID_REASONS | {"arc_unique_connectivity_violation"}):
+        return "arc_legality_rejected"
     if bool(build_result.get("bridge_candidate_retained", False)) and str(build_result.get("reason", "")).startswith("bridge_"):
         return "bridge_aware_unresolved"
     if str(identity.state) == "unresolved":
@@ -3670,9 +3784,16 @@ def _write_road_outputs(
                     "shape_ref_mode": str(build_result.get("shape_ref_mode", "segment_support")),
                     "no_geometry_candidate": bool(str(build_result.get("reason", "")) != "built"),
                     "no_geometry_reason": str(build_result.get("reason", "")),
+                    "topology_arc_id": str(segment.topology_arc_id),
+                    "topology_arc_source_type": str(segment.topology_arc_source_type),
+                    "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
+                    "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
                     "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
+                    "bridge_chain_exists": bool(segment.bridge_chain_exists),
+                    "bridge_chain_unique": bool(segment.bridge_chain_unique),
                     "bridge_chain_nodes": [int(v) for v in segment.bridge_chain_nodes],
                     "bridge_chain_source": str(segment.bridge_chain_source),
+                    "bridge_diagnostic_reason": str(segment.bridge_diagnostic_reason),
                     "bridge_decision_stage": str(build_result.get("bridge_decision_stage", segment.bridge_decision_stage)),
                     "bridge_decision_reason": str(build_result.get("bridge_decision_reason", segment.bridge_decision_reason)),
                     "failure_classification": str(
@@ -3720,9 +3841,16 @@ def _write_road_outputs(
                         "risk_flags": list(road.risk_flags),
                         "road_in_drivezone_ratio": float(road_in_drivezone_ratio),
                         "road_intersects_divstrip": bool(road_crosses_divstrip),
+                        "topology_arc_id": str(segment.topology_arc_id),
+                        "topology_arc_source_type": str(segment.topology_arc_source_type),
+                        "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
+                        "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
                         "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
+                        "bridge_chain_exists": bool(segment.bridge_chain_exists),
+                        "bridge_chain_unique": bool(segment.bridge_chain_unique),
                         "bridge_chain_nodes": [int(v) for v in segment.bridge_chain_nodes],
                         "bridge_chain_source": str(segment.bridge_chain_source),
+                        "bridge_diagnostic_reason": str(segment.bridge_diagnostic_reason),
                         "bridge_decision_stage": str(build_result.get("bridge_decision_stage", segment.bridge_decision_stage)),
                         "bridge_decision_reason": str(build_result.get("bridge_decision_reason", segment.bridge_decision_reason)),
                         "failure_classification": "built",
@@ -3751,9 +3879,16 @@ def _write_road_outputs(
                 "road_intersects_divstrip": bool(build_result.get("road_intersects_divstrip", False)),
                 "final_reason": str(build_result.get("reason", "")),
                 "final_decision": "selected" if road is not None else "rejected",
+                "topology_arc_id": str(segment.topology_arc_id),
+                "topology_arc_source_type": str(segment.topology_arc_source_type),
+                "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
+                "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
                 "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
+                "bridge_chain_exists": bool(segment.bridge_chain_exists),
+                "bridge_chain_unique": bool(segment.bridge_chain_unique),
                 "bridge_chain_nodes": [int(v) for v in segment.bridge_chain_nodes],
                 "bridge_chain_source": str(segment.bridge_chain_source),
+                "bridge_diagnostic_reason": str(segment.bridge_diagnostic_reason),
                 "bridge_decision_stage": str(build_result.get("bridge_decision_stage", segment.bridge_decision_stage)),
                 "bridge_decision_reason": str(build_result.get("bridge_decision_reason", segment.bridge_decision_reason)),
                 "failure_classification": str(failure_classification),
@@ -3791,9 +3926,16 @@ def _write_road_outputs(
             "no_geometry_candidate": bool(road is None),
             "no_geometry_candidate_reason": str(unresolved_reason),
             "unresolved_reason": str(unresolved_reason),
+            "topology_arc_id": str(segment.topology_arc_id),
+            "topology_arc_source_type": str(segment.topology_arc_source_type),
+            "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
+            "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
             "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
+            "bridge_chain_exists": bool(segment.bridge_chain_exists),
+            "bridge_chain_unique": bool(segment.bridge_chain_unique),
             "bridge_chain_nodes": [int(v) for v in segment.bridge_chain_nodes],
             "bridge_chain_source": str(segment.bridge_chain_source),
+            "bridge_diagnostic_reason": str(segment.bridge_diagnostic_reason),
             "bridge_decision_stage": str(build_result.get("bridge_decision_stage", segment.bridge_decision_stage)),
             "bridge_decision_reason": str(build_result.get("bridge_decision_reason", segment.bridge_decision_reason)),
             "failure_classification": str(failure_classification),
@@ -3889,6 +4031,19 @@ def _write_road_outputs(
             no_geometry_reason = next(iter(no_geometry_reason_hist.keys()))
         else:
             no_geometry_reason = "multiple"
+    production_arc_violation_entries = [
+        entry
+        for entry in metrics_segments
+        if (
+            bool(entry["topology_arc_id"] or entry["topology_arc_source_type"])
+            and ((not bool(entry["topology_arc_is_direct_legal"])) or (not bool(entry["topology_arc_is_unique"])))
+        )
+    ]
+    synthetic_production_arc_entries = [
+        entry
+        for entry in metrics_segments
+        if str(entry["topology_arc_source_type"]) == _BRIDGE_CHAIN_TOPOLOGY_SOURCE
+    ]
     metrics = {
         "patch_id": str(patch_id),
         "segment_count": int(len(segments)),
@@ -3939,6 +4094,16 @@ def _write_road_outputs(
             str(v) for v in root_step2_metrics.get("pair_scoped_exception_non_allowlisted_cross1_pair_ids", [])
         ],
         "blocked_pair_bridge_audit_count": int(root_step2_metrics.get("blocked_pair_bridge_audit_count", 0)),
+        "production_arc_direct_unique_violation_count": int(len(production_arc_violation_entries)),
+        "production_arc_direct_unique_violation_pair_ids": [
+            _pair_id_text(int(entry["src_nodeid"]), int(entry["dst_nodeid"]))
+            for entry in production_arc_violation_entries
+        ],
+        "production_synthetic_arc_count": int(len(synthetic_production_arc_entries)),
+        "production_synthetic_arc_pair_ids": [
+            _pair_id_text(int(entry["src_nodeid"]), int(entry["dst_nodeid"]))
+            for entry in synthetic_production_arc_entries
+        ],
         "witness_selected_count_total": int(witness_selected_total),
         "witness_selected_count_cross0": int(witness_selected_cross0),
         "witness_selected_count_cross1": int(witness_selected_cross1),
@@ -3981,11 +4146,19 @@ def _write_road_outputs(
         ),
         (
             "invalid_segment: "
-            f"prior_conflict={int(metrics['unanchored_prior_conflict_segment_count'])} "
-            f"directed_path={int(metrics['directed_path_not_supported_count'])} "
-            f"trace_only={int(metrics['trace_only_reachability_segment_count'])} "
-            f"terminal_mismatch={int(metrics['terminal_owner_mismatch_segment_count'])} "
-            f"terminal_ambiguous={int(metrics['ambiguous_terminal_owner_segment_count'])}"
+            f"prior_conflict={int(metrics.get('unanchored_prior_conflict_segment_count', 0))} "
+            f"directed_path={int(metrics.get('directed_path_not_supported_count', 0))} "
+            f"trace_only={int(metrics.get('trace_only_reachability_segment_count', 0))} "
+            f"terminal_mismatch={int(metrics.get('terminal_owner_mismatch_segment_count', 0))} "
+            f"terminal_ambiguous={int(metrics.get('ambiguous_terminal_owner_segment_count', 0))} "
+            f"pair_not_direct={int(metrics.get('pair_not_direct_legal_arc_count', 0))} "
+            f"non_unique_direct={int(metrics.get('non_unique_direct_legal_arc_count', 0))} "
+            f"synthetic_not_allowed={int(metrics.get('synthetic_arc_not_allowed_count', 0))}"
+        ),
+        (
+            "arc_legality: "
+            f"direct_unique_violation={int(metrics.get('production_arc_direct_unique_violation_count', 0))} "
+            f"synthetic_arc={int(metrics.get('production_synthetic_arc_count', 0))}"
         ),
         (
             "road_summary: "
@@ -4165,12 +4338,18 @@ def _stage2_segment(
                 "topology_arc_id": str(item.get("topology_arc_id", "")),
                 "arc_source_type": str(item.get("topology_arc_source_type", item.get("arc_source_type", ""))),
                 "topology_arc_node_path": [int(v) for v in item.get("topology_arc_node_path", [])],
+                "topology_arc_is_direct_legal": bool(item.get("topology_arc_is_direct_legal", False)),
+                "topology_arc_is_unique": bool(item.get("topology_arc_is_unique", False)),
+                "topology_arc_candidate_count": int(item.get("topology_arc_candidate_count", 0)),
                 "topology_pair_paths": list(item.get("topology_pair_paths", [])),
                 "topology_trace_only_paths": list(item.get("topology_trace_only_paths", [])),
                 "topology_terminal_trace_paths": list(item.get("topology_terminal_trace_paths", [])),
                 "bridge_candidate_retained": bool(item.get("bridge_candidate_retained", False)),
+                "bridge_chain_exists": bool(item.get("bridge_chain_exists", False)),
+                "bridge_chain_unique": bool(item.get("bridge_chain_unique", False)),
                 "bridge_chain_nodes": [int(v) for v in item.get("bridge_chain_nodes", []) if v is not None],
                 "bridge_chain_source": str(item.get("bridge_chain_source", "")),
+                "bridge_diagnostic_reason": str(item.get("bridge_diagnostic_reason", "")),
                 "bridge_decision_stage": str(item.get("bridge_decision_stage", "")),
                 "bridge_decision_reason": str(item.get("bridge_decision_reason", "")),
                 "bridge_classification": str(item.get("bridge_classification", "")),

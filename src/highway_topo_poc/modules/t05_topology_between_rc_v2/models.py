@@ -131,9 +131,14 @@ class Segment:
     topology_arc_source_type: str = ""
     topology_arc_edge_ids: tuple[str, ...] = ()
     topology_arc_node_path: tuple[int, ...] = ()
+    topology_arc_is_direct_legal: bool = False
+    topology_arc_is_unique: bool = False
     bridge_candidate_retained: bool = False
+    bridge_chain_exists: bool = False
+    bridge_chain_unique: bool = False
     bridge_chain_nodes: tuple[int, ...] = ()
     bridge_chain_source: str = ""
+    bridge_diagnostic_reason: str = ""
     bridge_decision_stage: str = ""
     bridge_decision_reason: str = ""
     same_pair_rank: int | None = None
@@ -152,9 +157,14 @@ class Segment:
             "topology_arc_source_type": str(self.topology_arc_source_type),
             "topology_arc_edge_ids": [str(v) for v in self.topology_arc_edge_ids],
             "topology_arc_node_path": [int(v) for v in self.topology_arc_node_path],
+            "topology_arc_is_direct_legal": bool(self.topology_arc_is_direct_legal),
+            "topology_arc_is_unique": bool(self.topology_arc_is_unique),
             "bridge_candidate_retained": bool(self.bridge_candidate_retained),
+            "bridge_chain_exists": bool(self.bridge_chain_exists),
+            "bridge_chain_unique": bool(self.bridge_chain_unique),
             "bridge_chain_nodes": [int(v) for v in self.bridge_chain_nodes],
             "bridge_chain_source": str(self.bridge_chain_source),
+            "bridge_diagnostic_reason": str(self.bridge_diagnostic_reason),
             "bridge_decision_stage": str(self.bridge_decision_stage),
             "bridge_decision_reason": str(self.bridge_decision_reason),
             "geometry_coords": [[float(x), float(y)] for x, y in self.geometry_coords],
@@ -187,9 +197,14 @@ class Segment:
             topology_arc_source_type=str(payload.get("topology_arc_source_type", "")),
             topology_arc_edge_ids=tuple(str(v) for v in payload.get("topology_arc_edge_ids", [])),
             topology_arc_node_path=tuple(int(v) for v in payload.get("topology_arc_node_path", [])),
+            topology_arc_is_direct_legal=bool(payload.get("topology_arc_is_direct_legal", False)),
+            topology_arc_is_unique=bool(payload.get("topology_arc_is_unique", False)),
             bridge_candidate_retained=bool(payload.get("bridge_candidate_retained", False)),
+            bridge_chain_exists=bool(payload.get("bridge_chain_exists", False)),
+            bridge_chain_unique=bool(payload.get("bridge_chain_unique", False)),
             bridge_chain_nodes=tuple(int(v) for v in payload.get("bridge_chain_nodes", [])),
             bridge_chain_source=str(payload.get("bridge_chain_source", "")),
+            bridge_diagnostic_reason=str(payload.get("bridge_diagnostic_reason", "")),
             bridge_decision_stage=str(payload.get("bridge_decision_stage", "")),
             bridge_decision_reason=str(payload.get("bridge_decision_reason", "")),
             geometry_coords=coords,

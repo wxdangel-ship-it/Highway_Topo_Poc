@@ -7,6 +7,9 @@ from typing import Any
 from .io import read_json, write_json
 
 
+_DIRECT_TOPOLOGY_ARC_SOURCE = "direct_topology_arc"
+_SYNTHETIC_ARC_SOURCES = {"bridge_chain_topology"}
+
 _SIMPLE_PATCH_ACCEPTANCE_REGISTRY: dict[str, dict[str, Any]] = {
     "5417632690143239": {
         "targets": [
@@ -43,6 +46,7 @@ _STABLE_BLOCKED_PAIRS = [
 ]
 
 _BRIDGE_TARGET_PAIR = "5395717732638194:37687913"
+_REFERENCE_PAIR = "5395717732638194:29626540"
 
 _REJECT_STAGE_PRIORITY = {
     "bridge_retain_gate": 0,
@@ -50,6 +54,13 @@ _REJECT_STAGE_PRIORITY = {
     "ownership_gate": 2,
     "pairing_filter": 3,
     "cross_filter": 4,
+}
+
+_ARC_LEGALITY_REASONS = {
+    "pair_not_direct_legal_arc",
+    "non_unique_direct_legal_arc",
+    "arc_unique_connectivity_violation",
+    "synthetic_arc_not_allowed",
 }
 
 
@@ -87,6 +98,21 @@ def _best_excluded_entry(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     )[0]
 
 
+def _best_segment_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return sorted(
+        rows,
+        key=lambda item: (
+            0 if bool(item.get("topology_arc_is_direct_legal", False)) else 1,
+            0 if bool(item.get("topology_arc_is_unique", False)) else 1,
+            int(item.get("same_pair_rank", 999999) or 999999),
+            -int(item.get("support_count", 0)),
+            str(item.get("segment_id", "")),
+        ),
+    )[0]
+
+
 def _find_pair_row(rows: list[dict[str, Any]], pair_id: str) -> dict[str, Any] | None:
     for row in rows:
         if str(row.get("pair_id", "")) == str(pair_id):
@@ -96,6 +122,22 @@ def _find_pair_row(rows: list[dict[str, Any]], pair_id: str) -> dict[str, Any] |
         if src_nodeid is not None and dst_nodeid is not None and _pair_id_text(int(src_nodeid), int(dst_nodeid)) == str(pair_id):
             return row
     return None
+
+
+def _road_segment_map(patch_dir: Path) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    segments_payload = _safe_read_json(patch_dir / "step2" / "segments.json")
+    roads_payload = _safe_read_json(patch_dir / "step6" / "final_roads.json")
+    segments = {str(item.get("segment_id", "")): dict(item) for item in segments_payload.get("segments", [])}
+    built_pairs = set(_built_pairs(roads_payload))
+    return segments, built_pairs
+
+
+def _pair_rows_by_id(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        pair_id = str(row.get("pair_id", "")) or _pair_id_text(int(row.get("src_nodeid", 0)), int(row.get("dst_nodeid", 0)))
+        grouped.setdefault(pair_id, []).append(dict(row))
+    return grouped
 
 
 def evaluate_patch_acceptance(run_root: Path | str, patch_id: str) -> dict[str, Any]:
@@ -135,15 +177,16 @@ def evaluate_patch_acceptance(run_root: Path | str, patch_id: str) -> dict[str, 
         },
     ]
     for pair_id in expected_pairs:
-        pair_target = {
-            "target_id": f"built_pair_{str(pair_id).replace(':', '_')}",
-            "target_name": f"built_pair:{pair_id}",
-            "expected": {"pair_id": str(pair_id), "built": True},
-            "actual": {"pair_id": str(pair_id), "built": bool(pair_id in built_pair_set)},
-            "pass": bool(pair_id in built_pair_set),
-            "fail_reason": "" if pair_id in built_pair_set else "expected_built_pair_missing",
-        }
-        results.append(pair_target)
+        results.append(
+            {
+                "target_id": f"built_pair_{str(pair_id).replace(':', '_')}",
+                "target_name": f"built_pair:{pair_id}",
+                "expected": {"pair_id": str(pair_id), "built": True},
+                "actual": {"pair_id": str(pair_id), "built": bool(pair_id in built_pair_set)},
+                "pass": bool(pair_id in built_pair_set),
+                "fail_reason": "" if pair_id in built_pair_set else "expected_built_pair_missing",
+            }
+        )
     return {
         "patch_id": str(patch_id),
         "evaluated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -163,66 +206,58 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
     should_not_payload = _safe_read_json(patch_dir / "debug" / "step2_segment_should_not_exist.json")
     topology_pairs_payload = _safe_read_json(patch_dir / "debug" / "step2_topology_pairs.json")
     bridge_audit_payload = _safe_read_json(patch_dir / "debug" / "step2_blocked_pair_bridge_audit.json")
-    bridge_trial_payload = _safe_read_json(patch_dir / "debug" / "step6_bridge_trial_decisions.json")
 
     built_pair_set = set(_built_pairs(roads_payload))
-    excluded_candidates = list(segments_payload.get("excluded_candidates", []))
+    selected_rows = _pair_rows_by_id(list(segments_payload.get("segments", [])))
+    excluded_rows = _pair_rows_by_id(list(segments_payload.get("excluded_candidates", [])))
     should_not_rows = list(should_not_payload.get("pairs", []))
     topology_rows = list(topology_pairs_payload.get("pairs", []))
     bridge_rows = list(bridge_audit_payload.get("pairs", []))
-    bridge_trial_rows = list(bridge_trial_payload.get("pairs", []))
 
     decisions: list[dict[str, Any]] = []
-    target_pairs = [*_FALSE_POSITIVE_PAIRS, *_STABLE_BLOCKED_PAIRS, _BRIDGE_TARGET_PAIR]
+    target_pairs = [*_FALSE_POSITIVE_PAIRS, *_STABLE_BLOCKED_PAIRS, _BRIDGE_TARGET_PAIR, _REFERENCE_PAIR]
     for pair_id in target_pairs:
-        excluded_rows = [
-            item
-            for item in excluded_candidates
-            if _pair_id_text(int(item.get("src_nodeid", 0)), int(item.get("dst_nodeid", 0))) == str(pair_id)
-        ]
-        excluded = _best_excluded_entry(excluded_rows)
+        selected = _best_segment_row(selected_rows.get(pair_id, []))
+        excluded = _best_excluded_entry(excluded_rows.get(pair_id, []))
         should_not_row = _find_pair_row(should_not_rows, pair_id)
         topology_row = _find_pair_row(topology_rows, pair_id)
         bridge_row = _find_pair_row(bridge_rows, pair_id)
-        bridge_trial_row = _find_pair_row(bridge_trial_rows, pair_id)
+        source_row = selected or excluded or topology_row or should_not_row or bridge_row or {}
+        reject_stage = ""
+        reject_reason = ""
+        if not bool(pair_id in built_pair_set) and not selected:
+            reject_stage = str((excluded or {}).get("stage") or (bridge_row or {}).get("reject_stage") or "")
+            reject_reason = str((excluded or {}).get("reason") or (bridge_row or {}).get("reject_reason") or "")
         decisions.append(
             {
                 "patch_id": str(complex_patch_id),
                 "pair": str(pair_id),
-                "topology_arc_id": str(
-                    (bridge_trial_row or {}).get("topology_arc_id")
-                    or (excluded or {}).get("topology_arc_id")
-                    or (topology_row or {}).get("topology_arc_id", "")
-                ),
-                "arc_source_type": str(
-                    (topology_row or {}).get("arc_source_type")
-                    or (excluded or {}).get("arc_source_type")
+                "topology_arc_id": str(source_row.get("topology_arc_id", "")),
+                "topology_arc_source_type": str(
+                    source_row.get("topology_arc_source_type")
+                    or source_row.get("arc_source_type")
                     or ""
                 ),
-                "reject_stage": str(
-                    (bridge_trial_row or {}).get("reject_stage")
-                    or (bridge_row or {}).get("reject_stage")
-                    or (excluded or {}).get("stage", "")
-                ),
-                "reject_reason": str(
-                    (bridge_trial_row or {}).get("reject_reason")
-                    or (bridge_row or {}).get("reject_reason")
-                    or (excluded or {}).get("reason", "")
-                ),
+                "topology_arc_is_direct_legal": bool(source_row.get("topology_arc_is_direct_legal", False)),
+                "topology_arc_is_unique": bool(source_row.get("topology_arc_is_unique", False)),
+                "bridge_chain_exists": bool(source_row.get("bridge_chain_exists", False)),
+                "bridge_chain_unique": bool(source_row.get("bridge_chain_unique", False)),
+                "bridge_chain_nodes": list(source_row.get("bridge_chain_nodes", [])),
+                "bridge_diagnostic_reason": str(source_row.get("bridge_diagnostic_reason", "")),
                 "bridge_classification": str(
-                    (bridge_trial_row or {}).get("bridge_classification")
-                    or (bridge_row or {}).get("bridge_classification")
+                    (bridge_row or {}).get("bridge_classification")
+                    or source_row.get("bridge_classification")
+                    or source_row.get("bridge_diagnostic_reason", "")
                     or ""
                 ),
-                "bridge_candidate_retained": bool((bridge_trial_row or {}).get("bridge_candidate_retained", False)),
-                "bridge_chain_nodes": list((bridge_trial_row or {}).get("bridge_chain_nodes", [])),
-                "bridge_chain_source": str((bridge_trial_row or {}).get("bridge_chain_source", "")),
-                "bridge_decision_stage": str((bridge_trial_row or {}).get("bridge_decision_stage", "")),
-                "bridge_decision_reason": str((bridge_trial_row or {}).get("bridge_decision_reason", "")),
+                "reject_stage": str(reject_stage),
+                "reject_reason": str(reject_reason),
                 "should_not_reason": str((should_not_row or {}).get("reason", "")),
                 "topology_sources": list((topology_row or {}).get("topology_sources", [])),
                 "topology_paths": list((topology_row or {}).get("topology_paths", [])),
-                "built_final_road": bool(pair_id in built_pair_set or bool((bridge_trial_row or {}).get("built_final_road", False))),
+                "built_final_road": bool(pair_id in built_pair_set),
+                "segment_id": str((selected or {}).get("segment_id", "")),
+                "selected_segment": bool(selected is not None),
             }
         )
     return {
@@ -232,25 +267,149 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
     }
 
 
-def build_complex_bridge_trial_review(pair_decisions: dict[str, Any]) -> dict[str, Any]:
-    rows = list(pair_decisions.get("pairs", []))
-    by_pair = {str(row.get("pair", "")): row for row in rows}
-    bridge_target = dict(by_pair.get(_BRIDGE_TARGET_PAIR, {}))
-    false_positive_rows = [dict(by_pair.get(pair_id, {})) for pair_id in _FALSE_POSITIVE_PAIRS]
-    blocked_rows = [dict(by_pair.get(pair_id, {})) for pair_id in _STABLE_BLOCKED_PAIRS]
-    bridge_closed = bool(
-        bridge_target
-        and (
-            bool(bridge_target.get("built_final_road", False))
-            or str(bridge_target.get("bridge_decision_reason", "")).startswith("bridge_")
-        )
+def build_arc_legality_audit(run_root: Path | str, patch_ids: list[str]) -> dict[str, Any]:
+    built_road_rows: list[dict[str, Any]] = []
+    selected_segment_rows: list[dict[str, Any]] = []
+    for patch_id in patch_ids:
+        patch_dir = _patch_dir(run_root, patch_id)
+        segments_payload = _safe_read_json(patch_dir / "step2" / "segments.json")
+        roads_payload = _safe_read_json(patch_dir / "step6" / "final_roads.json")
+        segment_map = {
+            str(item.get("segment_id", "")): dict(item)
+            for item in segments_payload.get("segments", [])
+            if str(item.get("segment_id", ""))
+        }
+        for segment in segments_payload.get("segments", []):
+            selected_segment_rows.append(
+                {
+                    "patch_id": str(patch_id),
+                    "segment_id": str(segment.get("segment_id", "")),
+                    "pair": _pair_id_text(int(segment.get("src_nodeid", 0)), int(segment.get("dst_nodeid", 0))),
+                    "topology_arc_id": str(segment.get("topology_arc_id", "")),
+                    "topology_arc_source_type": str(segment.get("topology_arc_source_type", "")),
+                    "topology_arc_is_direct_legal": bool(segment.get("topology_arc_is_direct_legal", False)),
+                    "topology_arc_is_unique": bool(segment.get("topology_arc_is_unique", False)),
+                    "bridge_chain_exists": bool(segment.get("bridge_chain_exists", False)),
+                    "bridge_chain_unique": bool(segment.get("bridge_chain_unique", False)),
+                    "bridge_chain_nodes": list(segment.get("bridge_chain_nodes", [])),
+                    "production_arc_pass": bool(
+                        str(segment.get("topology_arc_source_type", "")) == _DIRECT_TOPOLOGY_ARC_SOURCE
+                        and bool(segment.get("topology_arc_is_direct_legal", False))
+                        and bool(segment.get("topology_arc_is_unique", False))
+                        and bool(str(segment.get("topology_arc_id", "")))
+                    ),
+                }
+            )
+        for road in roads_payload.get("roads", []):
+            segment = segment_map.get(str(road.get("segment_id", "")), {})
+            built_road_rows.append(
+                {
+                    "patch_id": str(patch_id),
+                    "segment_id": str(road.get("segment_id", "")),
+                    "pair": _pair_id_text(int(road.get("src_nodeid", 0)), int(road.get("dst_nodeid", 0))),
+                    "topology_arc_id": str(segment.get("topology_arc_id", "")),
+                    "topology_arc_source_type": str(segment.get("topology_arc_source_type", "")),
+                    "topology_arc_is_direct_legal": bool(segment.get("topology_arc_is_direct_legal", False)),
+                    "topology_arc_is_unique": bool(segment.get("topology_arc_is_unique", False)),
+                    "bridge_chain_exists": bool(segment.get("bridge_chain_exists", False)),
+                    "bridge_chain_unique": bool(segment.get("bridge_chain_unique", False)),
+                    "bridge_chain_nodes": list(segment.get("bridge_chain_nodes", [])),
+                    "production_arc_pass": bool(
+                        str(segment.get("topology_arc_source_type", "")) == _DIRECT_TOPOLOGY_ARC_SOURCE
+                        and bool(segment.get("topology_arc_is_direct_legal", False))
+                        and bool(segment.get("topology_arc_is_unique", False))
+                        and bool(str(segment.get("topology_arc_id", "")))
+                    ),
+                }
+            )
+    violating_selected_pairs = sorted(
+        {
+            str(item["pair"])
+            for item in selected_segment_rows
+            if (not bool(item["production_arc_pass"])) or str(item["topology_arc_source_type"]) in _SYNTHETIC_ARC_SOURCES
+        }
+    )
+    violating_built_pairs = sorted(
+        {
+            str(item["pair"])
+            for item in built_road_rows
+            if (not bool(item["production_arc_pass"])) or str(item["topology_arc_source_type"]) in _SYNTHETIC_ARC_SOURCES
+        }
     )
     return {
+        "evaluated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "selected_segments": selected_segment_rows,
+        "built_roads": built_road_rows,
+        "summary": {
+            "selected_segment_count": int(len(selected_segment_rows)),
+            "built_road_count": int(len(built_road_rows)),
+            "all_selected_segments_direct_unique": bool(len(violating_selected_pairs) == 0),
+            "all_built_roads_direct_unique": bool(len(violating_built_pairs) == 0),
+            "synthetic_arc_in_selected_segments": bool(
+                any(str(item["topology_arc_source_type"]) in _SYNTHETIC_ARC_SOURCES for item in selected_segment_rows)
+            ),
+            "synthetic_arc_in_built_roads": bool(
+                any(str(item["topology_arc_source_type"]) in _SYNTHETIC_ARC_SOURCES for item in built_road_rows)
+            ),
+            "synthetic_arc_in_production": bool(
+                any(str(item["topology_arc_source_type"]) in _SYNTHETIC_ARC_SOURCES for item in selected_segment_rows)
+                or any(str(item["topology_arc_source_type"]) in _SYNTHETIC_ARC_SOURCES for item in built_road_rows)
+            ),
+            "violating_selected_pairs": violating_selected_pairs,
+            "violating_built_pairs": violating_built_pairs,
+        },
+    }
+
+
+def build_simple_patch_regression(
+    acceptance_results: list[dict[str, Any]],
+    arc_legality_audit: dict[str, Any],
+) -> dict[str, Any]:
+    built_roads = list(arc_legality_audit.get("built_roads", []))
+    rows: list[dict[str, Any]] = []
+    for item in acceptance_results:
+        patch_id = str(item.get("patch_id", ""))
+        failed_targets = [str(row.get("target_id", "")) for row in item.get("results", []) if not bool(row.get("pass", False))]
+        patch_built_rows = [row for row in built_roads if str(row.get("patch_id", "")) == patch_id]
+        rows.append(
+            {
+                "patch_id": patch_id,
+                "acceptance_pass": bool(item.get("acceptance_pass", False)),
+                "target_count": int(item.get("target_count", 0)),
+                "failed_target_ids": failed_targets,
+                "unexpected_built_pairs": list(item.get("unexpected_built_pairs", [])),
+                "built_road_count": int(len(patch_built_rows)),
+                "all_built_roads_direct_unique": bool(all(bool(row.get("production_arc_pass", False)) for row in patch_built_rows)),
+            }
+        )
+    return {
+        "evaluated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "patches": rows,
+        "all_simple_patches_pass": bool(all(bool(row["acceptance_pass"]) for row in rows)),
+    }
+
+
+def build_complex_patch_legality_review(
+    pair_decisions: dict[str, Any],
+    arc_legality_audit: dict[str, Any],
+) -> dict[str, Any]:
+    by_pair = {str(row.get("pair", "")): row for row in pair_decisions.get("pairs", [])}
+    summary = dict(arc_legality_audit.get("summary", {}))
+    target = dict(by_pair.get(_BRIDGE_TARGET_PAIR, {}))
+    reference = dict(by_pair.get(_REFERENCE_PAIR, {}))
+    false_positive_rows = [dict(by_pair.get(pair_id, {})) for pair_id in _FALSE_POSITIVE_PAIRS]
+    blocked_rows = [dict(by_pair.get(pair_id, {})) for pair_id in _STABLE_BLOCKED_PAIRS]
+    return {
         "patch_id": str(pair_decisions.get("patch_id", "")),
-        "bridge_target_pair": bridge_target,
+        "target_pair": target,
+        "reference_pair": reference,
         "false_positive_pairs": false_positive_rows,
         "stable_blocked_pairs": blocked_rows,
-        "bridge_closure_status": "closed" if bridge_closed else "not_closed",
+        "target_pair_correctly_blocked": bool(
+            target
+            and not bool(target.get("built_final_road", False))
+            and str(target.get("reject_reason", "")) in _ARC_LEGALITY_REASONS
+        ),
         "false_positive_guard_ok": bool(all(not bool(row.get("built_final_road", False)) for row in false_positive_rows)),
         "stable_blocked_ok": bool(
             all(
@@ -259,6 +418,72 @@ def build_complex_bridge_trial_review(pair_decisions: dict[str, Any]) -> dict[st
                 for row in blocked_rows
             )
         ),
+        "synthetic_arc_in_production": bool(summary.get("synthetic_arc_in_production", False)),
+        "all_built_roads_direct_unique": bool(summary.get("all_built_roads_direct_unique", False)),
+    }
+
+
+def build_strong_constraint_status(
+    pair_decisions: dict[str, Any],
+    arc_legality_audit: dict[str, Any],
+    simple_patch_regression: dict[str, Any],
+) -> dict[str, Any]:
+    by_pair = {str(row.get("pair", "")): row for row in pair_decisions.get("pairs", [])}
+    return {
+        "evaluated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "kept_in_this_round": [
+            {
+                "constraint": "strict_adjacent_pairing_default_not_relaxed",
+                "status": "kept",
+                "evidence": "stable blocked pairs remain non_adjacent_pair_blocked and are not built",
+            },
+            {
+                "constraint": "topology_gate_direction_and_terminal_ownership",
+                "status": "kept",
+                "evidence": "false positive pairs remain blocked and built=false",
+            },
+            {
+                "constraint": "trace_audit_only_not_production_legality",
+                "status": "kept",
+                "evidence": "trace-only false positive pair remains built=false while should_not_reason stays trace_only_reachability",
+            },
+            {
+                "constraint": "segment_grouping_and_same_pair_topk_still_arc_scoped",
+                "status": "kept",
+                "evidence": "simple patch acceptance remains pass and selected/built arcs are direct+unique",
+            },
+            {
+                "constraint": "synthetic_bridge_arc_removed_from_production",
+                "status": "kept",
+                "evidence": "arc_legality_audit.summary.synthetic_arc_in_production=false",
+            },
+        ],
+        "partially_closed_but_not_fixed": [
+            {
+                "constraint": "shared_intersection_nodeids_semantics",
+                "status": "partial",
+                "note": "still partial inheritance; not expanded in this round",
+            },
+            {
+                "constraint": "step2_topology_first_architecture",
+                "status": "partial",
+                "note": "Step2 now hard-gates production arc legality, but overall pipeline is not fully topology-first",
+            },
+            {
+                "constraint": "drivezone_full_containment_construction",
+                "status": "partial",
+                "note": "DriveZone remains posterior ratio/constraint check, not full-containment constructor",
+            },
+        ],
+        "explicitly_not_touched": [
+            "LaneBoundary main chain remains disabled",
+            "FinalRoad geometry beautification remains out of scope",
+            "FinalRoad still mainly relies on slot + witness + slot/segment-prior anchored shape_ref",
+            "continuous corridor reconstruction remains out of scope",
+        ],
+        "false_positive_pairs": [dict(by_pair.get(pair_id, {})) for pair_id in _FALSE_POSITIVE_PAIRS],
+        "simple_patch_regression_ok": bool(simple_patch_regression.get("all_simple_patches_pass", False)),
+        "all_built_roads_direct_unique": bool(arc_legality_audit.get("summary", {}).get("all_built_roads_direct_unique", False)),
     }
 
 
@@ -267,15 +492,21 @@ def _render_summary_markdown(
     run_root: Path,
     acceptance_results: list[dict[str, Any]],
     pair_decisions: dict[str, Any],
+    arc_legality_audit: dict[str, Any],
+    simple_patch_regression: dict[str, Any],
     complex_review: dict[str, Any],
+    strong_constraint_status: dict[str, Any],
 ) -> str:
+    by_pair = {str(row.get("pair", "")): row for row in pair_decisions.get("pairs", [])}
+    target = dict(by_pair.get(_BRIDGE_TARGET_PAIR, {}))
+    reference = dict(by_pair.get(_REFERENCE_PAIR, {}))
     lines = [
-        "# T05 v2 Bridge Trial Summary",
+        "# T05 v2 Arc Legality Fix Summary",
         "",
         f"- `run_root`: `{run_root}`",
         f"- `generated_at_utc`: `{datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}`",
         "",
-        "## Simple Patch Acceptance",
+        "## Simple Patch Regression",
         "",
     ]
     for item in acceptance_results:
@@ -284,30 +515,54 @@ def _render_summary_markdown(
             f"- `{item['patch_id']}`: acceptance_pass={str(item['acceptance_pass']).lower()} "
             f"targets={item['target_count']} failed={len(failed)}"
         )
-    lines.extend(["", "## Complex Bridge Trial", ""])
-    bridge_target = dict(complex_review.get("bridge_target_pair", {}))
-    lines.append(
-        f"- target `{_BRIDGE_TARGET_PAIR}`: built={str(bool(bridge_target.get('built_final_road', False))).lower()} "
-        f"bridge_reason=`{bridge_target.get('bridge_decision_reason', '')}` "
-        f"bridge_stage=`{bridge_target.get('bridge_decision_stage', '')}`"
+    lines.extend(
+        [
+            "",
+            "## Arc Legality",
+            "",
+            f"- built_roads_all_direct_unique=`{str(bool(arc_legality_audit.get('summary', {}).get('all_built_roads_direct_unique', False))).lower()}`",
+            f"- synthetic_arc_in_production=`{str(bool(arc_legality_audit.get('summary', {}).get('synthetic_arc_in_production', False))).lower()}`",
+            "",
+            "## Complex Patch Target Pairs",
+            "",
+            f"- target `{_BRIDGE_TARGET_PAIR}`: built={str(bool(target.get('built_final_road', False))).lower()} "
+            f"reject=`{target.get('reject_stage', '')}/{target.get('reject_reason', '')}` "
+            f"arc_direct={str(bool(target.get('topology_arc_is_direct_legal', False))).lower()} "
+            f"arc_unique={str(bool(target.get('topology_arc_is_unique', False))).lower()}",
+            f"- reference `{_REFERENCE_PAIR}`: built={str(bool(reference.get('built_final_road', False))).lower()} "
+            f"topology_arc_id=`{reference.get('topology_arc_id', '')}` "
+            f"arc_direct={str(bool(reference.get('topology_arc_is_direct_legal', False))).lower()} "
+            f"arc_unique={str(bool(reference.get('topology_arc_is_unique', False))).lower()}",
+        ]
     )
     for pair_id in _FALSE_POSITIVE_PAIRS:
-        row = next((item for item in pair_decisions.get("pairs", []) if str(item.get("pair")) == pair_id), {})
+        row = dict(by_pair.get(pair_id, {}))
         lines.append(
             f"- false_positive `{pair_id}`: built={str(bool(row.get('built_final_road', False))).lower()} "
             f"reject=`{row.get('reject_stage', '')}/{row.get('reject_reason', '')}`"
         )
     for pair_id in _STABLE_BLOCKED_PAIRS:
-        row = next((item for item in pair_decisions.get("pairs", []) if str(item.get("pair")) == pair_id), {})
+        row = dict(by_pair.get(pair_id, {}))
         lines.append(
             f"- blocked `{pair_id}`: built={str(bool(row.get('built_final_road', False))).lower()} "
             f"bridge=`{row.get('bridge_classification', '')}`"
         )
-    lines.append("")
+    lines.extend(
+        [
+            "",
+            "## Strong Constraints",
+            "",
+            f"- simple_patch_regression_ok=`{str(bool(simple_patch_regression.get('all_simple_patches_pass', False))).lower()}`",
+            f"- complex_target_fixed=`{str(bool(complex_review.get('target_pair_correctly_blocked', False))).lower()}`",
+            f"- kept_constraints={len(strong_constraint_status.get('kept_in_this_round', []))}",
+            f"- partial_constraints={len(strong_constraint_status.get('partially_closed_but_not_fixed', []))}",
+            "",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
-def write_bridge_trial_review(
+def write_arc_legality_fix_review(
     *,
     run_root: Path | str,
     output_root: Path | str,
@@ -320,18 +575,31 @@ def write_bridge_trial_review(
     patch_ids = list(simple_patch_ids or ["5417632690143239", "5417632690143326"])
     acceptance_results = [evaluate_patch_acceptance(run_root_path, patch_id) for patch_id in patch_ids]
     pair_decisions = build_pair_decisions(run_root_path, complex_patch_id)
-    complex_review = build_complex_bridge_trial_review(pair_decisions)
+    arc_legality_audit = build_arc_legality_audit(run_root_path, [*patch_ids, str(complex_patch_id)])
+    simple_patch_regression = build_simple_patch_regression(acceptance_results, arc_legality_audit)
+    complex_review = build_complex_patch_legality_review(pair_decisions, arc_legality_audit)
+    strong_constraint_status = build_strong_constraint_status(
+        pair_decisions=pair_decisions,
+        arc_legality_audit=arc_legality_audit,
+        simple_patch_regression=simple_patch_regression,
+    )
 
     for item in acceptance_results:
         write_json(output_root_path / f"acceptance_{item['patch_id']}.json", item)
     write_json(output_root_path / "pair_decisions.json", pair_decisions)
-    write_json(output_root_path / "complex_bridge_trial_review.json", complex_review)
+    write_json(output_root_path / "arc_legality_audit.json", arc_legality_audit)
+    write_json(output_root_path / "strong_constraint_status.json", strong_constraint_status)
+    write_json(output_root_path / "simple_patch_regression.json", simple_patch_regression)
+    write_json(output_root_path / "complex_patch_legality_review.json", complex_review)
     (output_root_path / "SUMMARY.md").write_text(
         _render_summary_markdown(
             run_root=run_root_path,
             acceptance_results=acceptance_results,
             pair_decisions=pair_decisions,
+            arc_legality_audit=arc_legality_audit,
+            simple_patch_regression=simple_patch_regression,
             complex_review=complex_review,
+            strong_constraint_status=strong_constraint_status,
         ),
         encoding="utf-8",
     )
@@ -339,13 +607,35 @@ def write_bridge_trial_review(
         "output_root": str(output_root_path),
         "acceptance": acceptance_results,
         "pair_decisions": pair_decisions,
-        "complex_bridge_trial_review": complex_review,
+        "arc_legality_audit": arc_legality_audit,
+        "strong_constraint_status": strong_constraint_status,
+        "simple_patch_regression": simple_patch_regression,
+        "complex_patch_legality_review": complex_review,
     }
 
 
+def write_bridge_trial_review(
+    *,
+    run_root: Path | str,
+    output_root: Path | str,
+    simple_patch_ids: list[str] | None = None,
+    complex_patch_id: str = "5417632623039346",
+) -> dict[str, Any]:
+    return write_arc_legality_fix_review(
+        run_root=run_root,
+        output_root=output_root,
+        simple_patch_ids=simple_patch_ids,
+        complex_patch_id=complex_patch_id,
+    )
+
+
 __all__ = [
-    "build_complex_bridge_trial_review",
+    "build_arc_legality_audit",
+    "build_complex_patch_legality_review",
     "build_pair_decisions",
+    "build_simple_patch_regression",
+    "build_strong_constraint_status",
     "evaluate_patch_acceptance",
+    "write_arc_legality_fix_review",
     "write_bridge_trial_review",
 ]

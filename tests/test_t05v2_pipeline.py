@@ -22,13 +22,14 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.pipeline import (
     _build_final_road,
     _classify_blocked_pair_bridge,
     _classify_segment_outcome,
+    _production_arc_gate_reason,
     _topology_gate_reason,
     run_full_pipeline,
     run_stage,
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.review import (
     evaluate_patch_acceptance,
-    write_bridge_trial_review,
+    write_arc_legality_fix_review,
 )
 
 
@@ -443,13 +444,14 @@ def test_t05v2_step2_topology_gate_rejects_wrong_terminal_pairs_and_reverse_dire
     excluded_by_pair = {(int(item["src_nodeid"]), int(item["dst_nodeid"])): str(item["reason"]) for item in excluded}
     assert excluded_by_pair[(11, 41)] == "terminal_owner_mismatch"
     assert excluded_by_pair[(21, 41)] == "terminal_owner_mismatch"
-    assert excluded_by_pair[(41, 31)] == "directed_path_not_supported"
+    assert excluded_by_pair[(41, 31)] == "pair_not_direct_legal_arc"
     step2_metrics = segments_payload["step2_metrics"]
     assert int(step2_metrics["segment_selected_count_before_topology_gate"]) == 4
     assert int(step2_metrics["segment_selected_count_after_topology_gate"]) == 1
-    assert int(step2_metrics["directed_path_not_supported_count"]) == 1
+    assert int(step2_metrics["directed_path_not_supported_count"]) == 0
+    assert int(step2_metrics["pair_not_direct_legal_arc_count"]) == 1
     assert int(step2_metrics["terminal_owner_mismatch_segment_count"]) == 2
-    assert int(step2_metrics["directionally_invalid_segment_count"]) == 1
+    assert int(step2_metrics["directionally_invalid_segment_count"]) == 0
     assert int(step2_metrics["terminal_node_invalid_segment_count"]) == 2
     audit = _read_json(patch_dir / "debug" / "step2_terminal_node_audit.json")
     node_41 = next(item for item in audit["nodes"] if int(item["nodeid"]) == 41)
@@ -465,7 +467,7 @@ def test_t05v2_step2_topology_gate_rejects_wrong_terminal_pairs_and_reverse_dire
     reasons = { (int(item["src_nodeid"]), int(item["dst_nodeid"])): str(item["reason"]) for item in should_not_exist["pairs"] }
     assert reasons[(11, 41)] == "terminal_owner_mismatch"
     assert reasons[(21, 41)] == "terminal_owner_mismatch"
-    assert reasons[(41, 31)] == "directed_path_not_supported"
+    assert reasons[(41, 31)] == "pair_not_direct_legal_arc"
     invalid_11_41 = next(item for item in should_not_exist["pairs"] if int(item["src_nodeid"]) == 11 and int(item["dst_nodeid"]) == 41)
     assert invalid_11_41["topology_reverse_owner_status"] == "unique_owner"
     assert int(invalid_11_41["topology_reverse_owner_src_nodeid"]) == 31
@@ -510,6 +512,32 @@ def test_t05v2_topology_gate_keeps_explicit_allowed_pair_even_when_reverse_owner
         )
         == "terminal_owner_mismatch"
     )
+
+
+def test_t05v2_production_arc_gate_requires_direct_legal_arc() -> None:
+    candidate = {
+        "src_nodeid": 10,
+        "dst_nodeid": 20,
+    }
+    topology = {
+        "enabled": True,
+        "allowed_pairs": set(),
+        "pair_arcs": {},
+        "trace_only_pair_paths": {},
+        "terminal_trace_paths": {},
+        "terminal_nodes": set(),
+        "terminal_direct_ownership": {},
+        "terminal_reverse_ownership": {},
+        "pair_sources": {},
+        "pair_paths": {},
+        "outgoing": {},
+    }
+
+    reason = _production_arc_gate_reason(candidate=candidate, topology=topology)
+
+    assert reason == "pair_not_direct_legal_arc"
+    assert bool(candidate["topology_arc_is_direct_legal"]) is False
+    assert bool(candidate["topology_arc_is_unique"]) is False
 
 
 def test_t05v2_step2_rejects_single_traj_pair_when_src_has_unique_unanchored_prior_endpoint(tmp_path: Path) -> None:
@@ -696,7 +724,8 @@ def test_t05v2_step2_accepts_compressed_direct_arcs_and_keeps_trace_only_in_audi
     assert pair_map["10:20"]["topology_paths"][0]["node_path"] == [10, 101, 20]
     step2_metrics = segments_payload["step2_metrics"]
     assert int(step2_metrics["segment_selected_count_after_topology_gate"]) == 4
-    assert int(step2_metrics["topology_invalid_segment_count"]) == 0
+    assert int(step2_metrics["trace_only_reachability_segment_count"]) == 3
+    assert int(step2_metrics["topology_invalid_segment_count"]) == 3
 
 
 def test_t05v2_step2_terminal_trace_is_audit_only(tmp_path: Path) -> None:
@@ -790,14 +819,16 @@ def test_t05v2_step2_writes_blocked_pair_bridge_audit(tmp_path: Path) -> None:
             _line_feature([(0.0, -5.0), (0.0, 5.0)], {"nodeid": 10}),
             _line_feature([(50.0, -5.0), (50.0, 5.0)], {"nodeid": 20}),
             _line_feature([(100.0, -5.0), (100.0, 5.0)], {"nodeid": 30}),
+            _line_feature([(150.0, -5.0), (150.0, 5.0)], {"nodeid": 40}),
         ],
         "EPSG:3857",
     )
-    drivezone_fc = _fc([_poly_feature([(-5.0, -6.0), (105.0, -6.0), (105.0, 6.0), (-5.0, 6.0)])], "EPSG:3857")
+    drivezone_fc = _fc([_poly_feature([(-5.0, -6.0), (155.0, -6.0), (155.0, 6.0), (-5.0, 6.0)])], "EPSG:3857")
     road_fc = _fc(
         [
             _line_feature([(0.0, 0.0), (50.0, 0.0)], {"snodeid": 10, "enodeid": 20}),
             _line_feature([(50.0, 0.0), (100.0, 0.0)], {"snodeid": 20, "enodeid": 30}),
+            _line_feature([(100.0, 0.0), (150.0, 0.0)], {"snodeid": 30, "enodeid": 40}),
         ],
         "EPSG:3857",
     )
@@ -806,7 +837,7 @@ def test_t05v2_step2_writes_blocked_pair_bridge_audit(tmp_path: Path) -> None:
         patch_id=patch_id,
         intersection_fc=intersection_fc,
         drivezone_fc=drivezone_fc,
-        traj_tracks=[[(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)]],
+        traj_tracks=[[(0.0, 0.0), (50.0, 0.0), (100.0, 0.0), (150.0, 0.0)]],
         road_fc=road_fc,
     )
     out_root = tmp_path / "out"
@@ -870,7 +901,7 @@ def test_t05v2_step2_promotes_missing_rcsd_node_to_pseudo_xsec_and_builds_direct
     assert kept_pairs == {(10, 30), (30, 40)}
 
 
-def test_t05v2_step2_keeps_multi_arc_segments_for_same_pair(tmp_path: Path) -> None:
+def test_t05v2_production_arc_rejects_non_unique_direct_legal_arc(tmp_path: Path) -> None:
     patch_id = "same_pair_multi_arc"
     data_root = tmp_path / "data"
     intersection_fc = _fc(
@@ -900,13 +931,16 @@ def test_t05v2_step2_keeps_multi_arc_segments_for_same_pair(tmp_path: Path) -> N
     run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_multi_arc", out_root=out_root)
     run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_multi_arc", out_root=out_root)
     segments_payload = _read_json(out_root / "run_multi_arc" / "patches" / patch_id / "step2" / "segments.json")
-    pair_segments = [
+    pair_segments = [item for item in segments_payload["segments"] if int(item["src_nodeid"]) == 1 and int(item["dst_nodeid"]) == 2]
+    assert pair_segments == []
+    excluded = [
         item
-        for item in segments_payload["segments"]
+        for item in segments_payload["excluded_candidates"]
         if int(item["src_nodeid"]) == 1 and int(item["dst_nodeid"]) == 2
     ]
-    assert len(pair_segments) == 2
-    assert len({str(item.get("topology_arc_id", "")) for item in pair_segments}) == 2
+    assert excluded
+    assert {str(item["reason"]) for item in excluded} == {"non_unique_direct_legal_arc"}
+    assert {str(item["stage"]) for item in excluded} == {"semantic_hard_gate"}
     topology_arcs_payload = _read_json(out_root / "run_multi_arc" / "patches" / patch_id / "debug" / "step2_topology_arcs.json")
     arcs = [
         item
@@ -1267,7 +1301,7 @@ def test_t05v2_build_final_road_falls_back_to_segment_support_when_witness_cente
     assert road.line_coords == ((0.0, 1.0), (50.0, 1.0), (100.0, 1.0))
 
 
-def test_t05v2_step2_pair_scoped_bridge_retain_advances_to_bridge_aware_decision(tmp_path: Path) -> None:
+def test_t05v2_step2_bridge_chain_cannot_become_production_arc(tmp_path: Path) -> None:
     patch_id = "bridge_pair_scoped_retain"
     data_root = tmp_path / "data"
     intersection_fc = _fc(
@@ -1295,7 +1329,9 @@ def test_t05v2_step2_pair_scoped_bridge_retain_advances_to_bridge_aware_decision
         road_fc=road_fc,
     )
     out_root = tmp_path / "out"
-    run_full_pipeline(
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_bridge_retain", out_root=out_root)
+    run_stage(
+        stage="step2_segment",
         data_root=data_root,
         patch_id=patch_id,
         run_id="run_bridge_retain",
@@ -1307,21 +1343,27 @@ def test_t05v2_step2_pair_scoped_bridge_retain_advances_to_bridge_aware_decision
     )
     patch_dir = out_root / "run_bridge_retain" / "patches" / patch_id
     segments_payload = _read_json(patch_dir / "step2" / "segments.json")
-    retained = next(item for item in segments_payload["segments"] if int(item["src_nodeid"]) == 10 and int(item["dst_nodeid"]) == 30)
-    assert bool(retained["bridge_candidate_retained"]) is True
-    assert retained["bridge_chain_nodes"] == [10, 20, 30]
-    assert str(retained["bridge_chain_source"]) == "unique_directed_bridge_candidate"
-    assert "bridge_pair_scoped_retain" in str(retained["kept_reason"])
-    bridge_trial = _read_json(patch_dir / "debug" / "step6_bridge_trial_decisions.json")
-    row = next(item for item in bridge_trial["pairs"] if str(item["pair_id"]) == "10:30")
-    assert bool(row["bridge_candidate_retained"]) is True
-    assert row["bridge_chain_nodes"] == [10, 20, 30]
-    assert str(row["bridge_decision_stage"]) == "bridge_final_decision"
-    assert bool(row["built_final_road"]) or str(row["bridge_decision_reason"]).startswith("bridge_")
-    assert not (bool(row["built_final_road"]) is False and str(row["bridge_decision_reason"]) == "")
+    assert not any(int(item["src_nodeid"]) == 10 and int(item["dst_nodeid"]) == 30 for item in segments_payload["segments"])
+    excluded = [
+        item
+        for item in segments_payload["excluded_candidates"]
+        if int(item["src_nodeid"]) == 10 and int(item["dst_nodeid"]) == 30
+    ]
+    assert excluded
+    assert {str(item["reason"]) for item in excluded} == {"synthetic_arc_not_allowed"}
+    assert {str(item["stage"]) for item in excluded} == {"bridge_retain_gate"}
+    assert {bool(item["bridge_chain_exists"]) for item in excluded} == {True}
+    assert {bool(item["bridge_chain_unique"]) for item in excluded} == {True}
+    assert {tuple(item["bridge_chain_nodes"]) for item in excluded} == {(20,)}
+    topology_debug = _read_json(patch_dir / "debug" / "step2_topology_pairs.json")
+    row = next(item for item in topology_debug["pairs"] if str(item["pair_id"]) == "10:30")
+    assert bool(row["bridge_chain_exists"]) is True
+    assert bool(row["bridge_chain_unique"]) is True
+    assert row["bridge_chain_nodes"] == [20]
+    assert row["bridge_diagnostic_reason"] == "unique_directed_bridge_candidate"
 
 
-def test_t05v2_build_final_road_maps_bridge_retained_unresolved_to_bridge_specific_reason() -> None:
+def test_t05v2_build_final_road_rejects_synthetic_arc_before_geometry() -> None:
     segment = Segment(
         segment_id="seg_bridge",
         src_nodeid=10,
@@ -1341,17 +1383,22 @@ def test_t05v2_build_final_road_maps_bridge_retained_unresolved_to_bridge_specif
         length_m=100.0,
         drivezone_ratio=1.0,
         crosses_divstrip=False,
+        topology_arc_is_direct_legal=False,
+        topology_arc_is_unique=False,
         topology_arc_id="bridge_chain:10->20->30",
         topology_arc_source_type="bridge_chain_topology",
         topology_arc_edge_ids=(),
         topology_arc_node_path=(10, 20, 30),
-        bridge_candidate_retained=True,
+        bridge_candidate_retained=False,
+        bridge_chain_exists=True,
+        bridge_chain_unique=True,
         bridge_chain_nodes=(10, 20, 30),
-        bridge_chain_source="unique_directed_bridge_candidate",
-        bridge_decision_stage="bridge_retain",
-        bridge_decision_reason="bridge_pair_scoped_retained",
+        bridge_chain_source="diagnostic_only",
+        bridge_diagnostic_reason="unique_directed_bridge_candidate",
+        bridge_decision_stage="bridge_retain_gate",
+        bridge_decision_reason="synthetic_arc_not_allowed",
         same_pair_rank=1,
-        kept_reason="bridge_pair_scoped_retain",
+        kept_reason="",
     )
     identity = CorridorIdentity(
         segment_id="seg_bridge",
@@ -1398,9 +1445,7 @@ def test_t05v2_build_final_road_maps_bridge_retained_unresolved_to_bridge_specif
     )
 
     assert road is None
-    assert result["reason"] == "bridge_corridor_insufficient"
-    assert result["bridge_decision_stage"] == "bridge_final_decision"
-    assert result["bridge_decision_reason"] == "bridge_corridor_insufficient"
+    assert result["reason"] == "synthetic_arc_not_allowed"
     assert (
         _classify_segment_outcome(
             identity=identity,
@@ -1409,11 +1454,11 @@ def test_t05v2_build_final_road_maps_bridge_retained_unresolved_to_bridge_specif
             build_result=result,
             road=road,
         )
-        == "bridge_aware_unresolved"
+        == "arc_legality_rejected"
     )
 
 
-def test_t05v2_review_writes_acceptance_and_bridge_trial_bundle(tmp_path: Path) -> None:
+def test_t05v2_review_writes_arc_legality_bundle(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     simple_pairs = {
         "5417632690143239": [
@@ -1440,6 +1485,27 @@ def test_t05v2_review_writes_acceptance_and_bridge_trial_bundle(tmp_path: Path) 
         _write_json(patch_dir / "metrics.json", {"patch_id": patch_id, "unresolved_segment_count": 0})
         _write_json(patch_dir / "gate.json", {"overall_pass": True, "hard_breakpoints": []})
         _write_json(
+            patch_dir / "step2" / "segments.json",
+            {
+                "segments": [
+                    {
+                        "segment_id": f"{patch_id}_{idx}",
+                        "src_nodeid": int(pair_id.split(":")[0]),
+                        "dst_nodeid": int(pair_id.split(":")[1]),
+                        "topology_arc_id": f"arc_{idx}",
+                        "topology_arc_source_type": "direct_topology_arc",
+                        "topology_arc_is_direct_legal": True,
+                        "topology_arc_is_unique": True,
+                        "bridge_chain_exists": False,
+                        "bridge_chain_unique": False,
+                        "bridge_chain_nodes": [],
+                    }
+                    for idx, pair_id in enumerate(pair_ids)
+                ],
+                "excluded_candidates": [],
+            },
+        )
+        _write_json(
             patch_dir / "step6" / "final_roads.json",
             {
                 "roads": [
@@ -1465,6 +1531,11 @@ def test_t05v2_review_writes_acceptance_and_bridge_trial_bundle(tmp_path: Path) 
                     "stage": "semantic_hard_gate",
                     "reason": "trace_only_reachability",
                     "arc_source_type": "rcsdroad_trace",
+                    "topology_arc_is_direct_legal": False,
+                    "topology_arc_is_unique": False,
+                    "bridge_chain_exists": False,
+                    "bridge_chain_unique": False,
+                    "bridge_chain_nodes": [],
                 },
                 {
                     "src_nodeid": 5384367610468452,
@@ -1472,17 +1543,70 @@ def test_t05v2_review_writes_acceptance_and_bridge_trial_bundle(tmp_path: Path) 
                     "stage": "semantic_hard_gate",
                     "reason": "directed_path_not_supported",
                     "arc_source_type": "",
+                    "topology_arc_is_direct_legal": False,
+                    "topology_arc_is_unique": False,
+                    "bridge_chain_exists": False,
+                    "bridge_chain_unique": False,
+                    "bridge_chain_nodes": [],
                 },
+                {
+                    "src_nodeid": 5395717732638194,
+                    "dst_nodeid": 37687913,
+                    "stage": "bridge_retain_gate",
+                    "reason": "synthetic_arc_not_allowed",
+                    "arc_source_type": "",
+                    "topology_arc_is_direct_legal": False,
+                    "topology_arc_is_unique": False,
+                    "bridge_chain_exists": True,
+                    "bridge_chain_unique": True,
+                    "bridge_chain_nodes": [29626540],
+                },
+            ],
+            "segments": [
+                {
+                    "segment_id": "seg_ref",
+                    "src_nodeid": 5395717732638194,
+                    "dst_nodeid": 29626540,
+                    "topology_arc_id": "arc_ref",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "topology_arc_is_direct_legal": True,
+                    "topology_arc_is_unique": True,
+                    "bridge_chain_exists": False,
+                    "bridge_chain_unique": False,
+                    "bridge_chain_nodes": [],
+                }
+            ],
+        },
+    )
+    _write_json(
+        complex_patch_dir / "step6" / "final_roads.json",
+        {
+            "roads": [
+                {
+                    "road_id": "complex_0",
+                    "segment_id": "seg_ref",
+                    "src_nodeid": 5395717732638194,
+                    "dst_nodeid": 29626540,
+                }
             ]
         },
     )
-    _write_json(complex_patch_dir / "step6" / "final_roads.json", {"roads": []})
     _write_json(
         complex_patch_dir / "debug" / "step2_segment_should_not_exist.json",
         {
             "pairs": [
                 {"src_nodeid": 5384367610468452, "dst_nodeid": 765141, "reason": "trace_only_reachability"},
                 {"src_nodeid": 5384367610468452, "dst_nodeid": 608638238, "reason": "directed_path_not_supported"},
+                {
+                    "src_nodeid": 5395717732638194,
+                    "dst_nodeid": 37687913,
+                    "reason": "synthetic_arc_not_allowed",
+                    "topology_arc_is_direct_legal": False,
+                    "topology_arc_is_unique": False,
+                    "bridge_chain_exists": True,
+                    "bridge_chain_unique": True,
+                    "bridge_chain_nodes": [29626540],
+                },
             ]
         },
     )
@@ -1503,6 +1627,11 @@ def test_t05v2_review_writes_acceptance_and_bridge_trial_bundle(tmp_path: Path) 
                     "dst_nodeid": 37687913,
                     "pair_id": "791871:37687913",
                     "topology_sources": ["direct_topology_arc"],
+                    "topology_arc_is_direct_legal": True,
+                    "topology_arc_is_unique": True,
+                    "bridge_chain_exists": False,
+                    "bridge_chain_unique": False,
+                    "bridge_chain_nodes": [],
                     "topology_paths": [{"node_path": [791871, 29626540, 37687913]}],
                 },
                 {
@@ -1510,7 +1639,38 @@ def test_t05v2_review_writes_acceptance_and_bridge_trial_bundle(tmp_path: Path) 
                     "dst_nodeid": 37687913,
                     "pair_id": "55353246:37687913",
                     "topology_sources": ["direct_topology_arc"],
+                    "topology_arc_is_direct_legal": True,
+                    "topology_arc_is_unique": True,
+                    "bridge_chain_exists": False,
+                    "bridge_chain_unique": False,
+                    "bridge_chain_nodes": [],
                     "topology_paths": [{"node_path": [55353246, 29626540, 37687913]}],
+                },
+                {
+                    "src_nodeid": 5395717732638194,
+                    "dst_nodeid": 29626540,
+                    "pair_id": "5395717732638194:29626540",
+                    "topology_sources": ["direct_topology_arc"],
+                    "arc_source_type": "direct_topology_arc",
+                    "topology_arc_is_direct_legal": True,
+                    "topology_arc_is_unique": True,
+                    "bridge_chain_exists": False,
+                    "bridge_chain_unique": False,
+                    "bridge_chain_nodes": [],
+                    "topology_paths": [{"node_path": [5395717732638194, 29626540]}],
+                },
+                {
+                    "src_nodeid": 5395717732638194,
+                    "dst_nodeid": 37687913,
+                    "pair_id": "5395717732638194:37687913",
+                    "topology_sources": [],
+                    "topology_arc_is_direct_legal": False,
+                    "topology_arc_is_unique": False,
+                    "bridge_chain_exists": True,
+                    "bridge_chain_unique": True,
+                    "bridge_chain_nodes": [29626540],
+                    "bridge_diagnostic_reason": "unique_directed_bridge_candidate",
+                    "topology_paths": [],
                 },
             ]
         },
@@ -1524,30 +1684,20 @@ def test_t05v2_review_writes_acceptance_and_bridge_trial_bundle(tmp_path: Path) 
                     "reject_stage": "pairing_filter",
                     "reject_reason": "non_adjacent_pair_blocked",
                     "bridge_classification": "topology_gap_unresolved",
-                },
+                 },
                 {
                     "pair_id": "55353246:37687913",
                     "reject_stage": "pairing_filter",
                     "reject_reason": "non_adjacent_pair_blocked",
                     "bridge_classification": "topology_gap_unresolved",
                 },
-            ]
-        },
-    )
-    _write_json(
-        complex_patch_dir / "debug" / "step6_bridge_trial_decisions.json",
-        {
-            "pairs": [
                 {
                     "pair_id": "5395717732638194:37687913",
-                    "bridge_candidate_retained": True,
-                    "bridge_chain_nodes": [5395717732638194, 29626540, 37687913],
-                    "bridge_chain_source": "unique_directed_bridge_candidate",
-                    "bridge_decision_stage": "bridge_final_decision",
-                    "bridge_decision_reason": "bridge_slot_not_established",
-                    "built_final_road": False,
+                    "reject_stage": "pairing_filter",
+                    "reject_reason": "non_adjacent_pair_blocked",
                     "bridge_classification": "unique_directed_bridge_candidate",
-                }
+                    "direct_bridge_nodeids": [29626540],
+                },
             ]
         },
     )
@@ -1557,18 +1707,25 @@ def test_t05v2_review_writes_acceptance_and_bridge_trial_bundle(tmp_path: Path) 
     assert bool(acceptance["acceptance_pass"]) is True
 
     output_root = tmp_path / "bundle"
-    summary = write_bridge_trial_review(run_root=run_root, output_root=output_root)
+    summary = write_arc_legality_fix_review(run_root=run_root, output_root=output_root)
     assert (output_root / "acceptance_5417632690143239.json").exists()
     assert (output_root / "acceptance_5417632690143326.json").exists()
     assert (output_root / "pair_decisions.json").exists()
-    assert (output_root / "complex_bridge_trial_review.json").exists()
+    assert (output_root / "arc_legality_audit.json").exists()
+    assert (output_root / "strong_constraint_status.json").exists()
+    assert (output_root / "simple_patch_regression.json").exists()
+    assert (output_root / "complex_patch_legality_review.json").exists()
     assert (output_root / "SUMMARY.md").exists()
     pair_decisions = _read_json(output_root / "pair_decisions.json")
     target = next(item for item in pair_decisions["pairs"] if str(item["pair"]) == "5395717732638194:37687913")
-    assert bool(target["bridge_candidate_retained"]) is True
-    assert target["bridge_decision_reason"] == "bridge_slot_not_established"
+    assert target["reject_reason"] == "synthetic_arc_not_allowed"
     assert bool(target["built_final_road"]) is False
-    assert summary["complex_bridge_trial_review"]["bridge_closure_status"] == "closed"
+    reference = next(item for item in pair_decisions["pairs"] if str(item["pair"]) == "5395717732638194:29626540")
+    assert bool(reference["built_final_road"]) is True
+    audit = _read_json(output_root / "arc_legality_audit.json")
+    assert bool(audit["summary"]["all_built_roads_direct_unique"]) is True
+    assert bool(audit["summary"]["synthetic_arc_in_production"]) is False
+    assert bool(summary["complex_patch_legality_review"]["target_pair_correctly_blocked"]) is True
 
 
 def test_t05v2_scripts_stepwise_state_resume(tmp_path: Path) -> None:
