@@ -644,6 +644,46 @@ def test_t05v2_step2_topology_gate_allows_traced_rcsdroad_pairs(tmp_path: Path) 
     assert int(step2_metrics["topology_invalid_segment_count"]) == 0
 
 
+def test_t05v2_step2_topology_gate_allows_terminal_trace_pairs(tmp_path: Path) -> None:
+    patch_id = "topology_terminal_trace"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -5.0), (0.0, 5.0)], {"nodeid": 10}),
+            _line_feature([(50.0, 15.0), (50.0, 25.0)], {"nodeid": 20}),
+            _line_feature([(100.0, -5.0), (100.0, 5.0)], {"nodeid": 40}),
+        ],
+        "EPSG:3857",
+    )
+    drivezone_fc = _fc([_poly_feature([(-5.0, -10.0), (105.0, -10.0), (105.0, 30.0), (-5.0, 30.0)])], "EPSG:3857")
+    road_fc = _fc(
+        [
+            _line_feature([(0.0, 0.0), (50.0, 20.0)], {"snodeid": 10, "enodeid": 20}),
+            _line_feature([(50.0, 20.0), (100.0, 0.0)], {"snodeid": 20, "enodeid": 40}),
+        ],
+        "EPSG:3857",
+    )
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=intersection_fc,
+        drivezone_fc=drivezone_fc,
+        traj_tracks=[[(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)]],
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_terminal_trace", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_terminal_trace", out_root=out_root)
+    patch_dir = out_root / "run_terminal_trace" / "patches" / patch_id
+    segments_payload = _read_json(patch_dir / "step2" / "segments.json")
+    kept_pairs = {(int(item["src_nodeid"]), int(item["dst_nodeid"])) for item in segments_payload["segments"]}
+    assert (10, 40) in kept_pairs
+    topology_debug = _read_json(patch_dir / "debug" / "step2_topology_pairs.json")
+    pair_map = {str(item["pair_id"]): item for item in topology_debug["pairs"]}
+    assert pair_map["10:40"]["topology_sources"] == ["rcsdroad_terminal_trace"]
+    assert pair_map["10:40"]["topology_paths"][0]["node_path"] == [10, 20, 40]
+
+
 def test_t05v2_step2_writes_traj_crossing_and_support_audits(tmp_path: Path) -> None:
     patch_id = "traj_audit"
     data_root = tmp_path / "data"

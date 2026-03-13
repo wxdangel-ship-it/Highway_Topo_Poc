@@ -865,6 +865,96 @@ def _search_topology_next_nodes_from_anchor(
     }
 
 
+def _search_topology_terminal_nodes_from_anchor(
+    compressed_adj: dict[int, list[dict[str, Any]]],
+    *,
+    src_nodeid: int,
+    start_to: int | None,
+    start_edge_ids: list[str],
+    start_path_nodes: list[int],
+    terminal_nodes: set[int],
+    max_expansions: int,
+) -> dict[str, Any]:
+    src = int(src_nodeid)
+    if start_to is None:
+        return {
+            "src_nodeid": int(src),
+            "dst_paths": {},
+            "dst_nodeids": [],
+            "expansions": 0,
+            "overflow": False,
+        }
+
+    init_node_path = [int(v) for v in start_path_nodes if v is not None]
+    if not init_node_path:
+        init_node_path = [int(src), int(start_to)]
+    if int(init_node_path[0]) != int(src):
+        init_node_path = [int(src)] + [int(v) for v in init_node_path]
+    if int(init_node_path[-1]) != int(start_to):
+        init_node_path.append(int(start_to))
+    init_edge_path = [str(v) for v in start_edge_ids]
+
+    stack: list[tuple[int, list[int], list[str]]] = [
+        (int(start_to), [int(v) for v in init_node_path], [str(v) for v in init_edge_path])
+    ]
+    expansions = 1
+    overflow = False
+    dst_paths_raw: dict[int, list[dict[str, Any]]] = {}
+
+    while stack:
+        node, node_path, edge_path = stack.pop()
+        if int(node) != int(src) and int(node) in terminal_nodes:
+            dst_paths_raw.setdefault(int(node), []).append(
+                {
+                    "node_path": [int(v) for v in node_path],
+                    "edge_ids": [str(v) for v in edge_path],
+                }
+            )
+            continue
+        for edge in compressed_adj.get(int(node), []):
+            if expansions >= int(max_expansions):
+                overflow = True
+                stack = []
+                break
+            nxt = int(edge.get("to"))
+            if int(nxt) in node_path:
+                continue
+            edge_ids = [str(v) for v in edge.get("edge_ids", [])]
+            stack.append(
+                (
+                    int(nxt),
+                    [int(v) for v in node_path] + [int(nxt)],
+                    [str(v) for v in edge_path] + edge_ids,
+                )
+            )
+            expansions += 1
+
+    dst_paths: dict[int, list[dict[str, Any]]] = {}
+    for dst, records in dst_paths_raw.items():
+        uniq: dict[tuple[str, ...], dict[str, Any]] = {}
+        for rec in records:
+            edge_ids = [str(v) for v in rec.get("edge_ids", [])]
+            node_path = [int(v) for v in rec.get("node_path", [])]
+            sig = tuple(edge_ids) if edge_ids else tuple(str(v) for v in node_path)
+            if sig in uniq:
+                continue
+            uniq[sig] = {
+                "node_path": node_path,
+                "edge_ids": edge_ids,
+                "signature": [str(v) for v in sig],
+                "chain_len": int(len(edge_ids)),
+            }
+        dst_paths[int(dst)] = list(uniq.values())
+
+    return {
+        "src_nodeid": int(src),
+        "dst_paths": dst_paths,
+        "dst_nodeids": sorted(int(k) for k in dst_paths.keys()),
+        "expansions": int(expansions),
+        "overflow": bool(overflow),
+    }
+
+
 def _build_terminal_reverse_ownership(
     *,
     compressed_adj: dict[int, list[dict[str, Any]]],
@@ -1068,6 +1158,55 @@ def _build_directed_topology(
         for nodeid, srcs in incoming.items()
         if srcs and not outgoing.get(int(nodeid))
     }
+    for src_nodeid in sorted(xsec_ids):
+        for edge in compressed_adj.get(int(src_nodeid), []):
+            start_to_raw = edge.get("to")
+            start_to = int(start_to_raw) if start_to_raw is not None else None
+            start_edge_ids = [str(v) for v in edge.get("edge_ids", [])]
+            start_path_nodes = [int(v) for v in edge.get("path_nodes", []) if v is not None]
+            search = _search_topology_terminal_nodes_from_anchor(
+                compressed_adj,
+                src_nodeid=int(src_nodeid),
+                start_to=start_to,
+                start_edge_ids=start_edge_ids,
+                start_path_nodes=start_path_nodes,
+                terminal_nodes=terminal_nodes,
+                max_expansions=2048,
+            )
+            for dst_nodeid, records in sorted(search.get("dst_paths", {}).items()):
+                pair = (int(src_nodeid), int(dst_nodeid))
+                if pair in allowed_pairs:
+                    continue
+                if int(src_nodeid) == int(dst_nodeid):
+                    continue
+                terminal_records = [
+                    rec
+                    for rec in records
+                    if int(len(rec.get("node_path", []))) >= 3
+                ]
+                if not terminal_records:
+                    continue
+                terminal_records.sort(
+                    key=lambda rec: (
+                        int(rec.get("chain_len", 0)),
+                        ",".join(str(v) for v in rec.get("edge_ids", [])),
+                    )
+                )
+                allowed_pairs.add(pair)
+                outgoing[int(src_nodeid)].add(int(dst_nodeid))
+                incoming[int(dst_nodeid)].add(int(src_nodeid))
+                for rec in terminal_records:
+                    edge_ids = [str(v) for v in rec.get("edge_ids", []) if str(v)]
+                    pair_prior_ids[pair].extend(edge_ids)
+                    pair_sources[pair].add("rcsdroad_terminal_trace")
+                    pair_paths[pair].append(
+                        {
+                            "source": "rcsdroad_terminal_trace",
+                            "node_path": [int(v) for v in rec.get("node_path", [])],
+                            "edge_ids": edge_ids,
+                            "chain_len": int(rec.get("chain_len", 0)),
+                        }
+                    )
     terminal_reverse_ownership, reverse_owner_stats = _build_terminal_reverse_ownership(
         compressed_adj=compressed_adj,
         terminal_nodes={int(v) for v in terminal_nodes},
