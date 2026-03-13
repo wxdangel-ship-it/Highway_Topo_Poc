@@ -499,12 +499,18 @@ def test_t05v2_step2_rejects_single_traj_pair_when_src_has_unique_unanchored_pri
     intersection_fc = _fc(
         [
             _line_feature([(0.0, -5.0), (0.0, 5.0)], {"nodeid": 10}),
-            _line_feature([(100.0, -5.0), (100.0, 5.0)], {"nodeid": 20}),
+            _line_feature([(100.0, -5.0), (100.0, 5.0)], {"nodeid": 40}),
         ],
         "EPSG:3857",
     )
     drivezone_fc = _fc([_poly_feature([(-5.0, -6.0), (105.0, -6.0), (105.0, 6.0), (-5.0, 6.0)])], "EPSG:3857")
-    road_fc = _fc([_line_feature([(0.0, 0.0), (0.0, 60.0)], {"snodeid": 10, "enodeid": 999})], "EPSG:3857")
+    road_fc = _fc(
+        [
+            _line_feature([(0.0, 0.0), (50.0, 0.0)], {"snodeid": 10, "enodeid": 30}),
+            _line_feature([(50.0, 0.0), (100.0, 0.0)], {"snodeid": 30, "enodeid": 40}),
+        ],
+        "EPSG:3857",
+    )
     _write_patch(
         data_root,
         patch_id=patch_id,
@@ -522,18 +528,20 @@ def test_t05v2_step2_rejects_single_traj_pair_when_src_has_unique_unanchored_pri
     excluded_by_pair = [
         item
         for item in segments_payload["excluded_candidates"]
-        if int(item["src_nodeid"]) == 10 and int(item["dst_nodeid"]) == 20
+        if int(item["src_nodeid"]) == 10 and int(item["dst_nodeid"]) == 40
     ]
     assert excluded_by_pair
     assert excluded_by_pair[0]["reason"] == "src_conflicts_with_unique_unanchored_prior_endpoint"
     assert excluded_by_pair[0]["stage"] == "ownership_gate"
-    assert excluded_by_pair[0]["competing_prior_pair_ids"] == ["10:999"]
+    assert excluded_by_pair[0]["competing_prior_pair_ids"] == ["10:30"]
     assert excluded_by_pair[0]["competing_prior_candidate_ids"] == ["prior_0"]
+    assert excluded_by_pair[0]["competing_prior_trace_paths"] == [[10, 30, 40]]
     assert int(segments_payload["step2_metrics"]["unanchored_prior_conflict_segment_count"]) == 1
     should_not_exist = _read_json(patch_dir / "debug" / "step2_segment_should_not_exist.json")
-    row = next(item for item in should_not_exist["pairs"] if int(item["src_nodeid"]) == 10 and int(item["dst_nodeid"]) == 20)
+    row = next(item for item in should_not_exist["pairs"] if int(item["src_nodeid"]) == 10 and int(item["dst_nodeid"]) == 40)
     assert row["reason"] == "src_conflicts_with_unique_unanchored_prior_endpoint"
-    assert row["competing_prior_pair_ids"] == ["10:999"]
+    assert row["competing_prior_pair_ids"] == ["10:30"]
+    assert row["competing_prior_trace_paths"] == [[10, 30, 40]]
 
 
 def test_t05v2_step2_keeps_multi_traj_pair_despite_unanchored_prior_endpoint(tmp_path: Path) -> None:
@@ -542,12 +550,18 @@ def test_t05v2_step2_keeps_multi_traj_pair_despite_unanchored_prior_endpoint(tmp
     intersection_fc = _fc(
         [
             _line_feature([(0.0, -5.0), (0.0, 5.0)], {"nodeid": 10}),
-            _line_feature([(100.0, -5.0), (100.0, 5.0)], {"nodeid": 20}),
+            _line_feature([(100.0, -5.0), (100.0, 5.0)], {"nodeid": 40}),
         ],
         "EPSG:3857",
     )
     drivezone_fc = _fc([_poly_feature([(-5.0, -6.0), (105.0, -6.0), (105.0, 6.0), (-5.0, 6.0)])], "EPSG:3857")
-    road_fc = _fc([_line_feature([(0.0, 0.0), (0.0, 60.0)], {"snodeid": 10, "enodeid": 999})], "EPSG:3857")
+    road_fc = _fc(
+        [
+            _line_feature([(0.0, 0.0), (50.0, 0.0)], {"snodeid": 10, "enodeid": 30}),
+            _line_feature([(50.0, 0.0), (100.0, 0.0)], {"snodeid": 30, "enodeid": 40}),
+        ],
+        "EPSG:3857",
+    )
     _write_patch(
         data_root,
         patch_id=patch_id,
@@ -565,7 +579,7 @@ def test_t05v2_step2_keeps_multi_traj_pair_despite_unanchored_prior_endpoint(tmp
     patch_dir = out_root / "run_prior_multi" / "patches" / patch_id
     segments_payload = _read_json(patch_dir / "step2" / "segments.json")
     kept_pairs = {(int(item["src_nodeid"]), int(item["dst_nodeid"])) for item in segments_payload["segments"]}
-    assert kept_pairs == {(10, 20)}
+    assert kept_pairs == {(10, 40)}
     assert int(segments_payload["segments"][0]["support_count"]) == 2
     assert int(segments_payload["step2_metrics"]["unanchored_prior_conflict_segment_count"]) == 0
 

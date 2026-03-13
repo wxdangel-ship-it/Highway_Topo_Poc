@@ -128,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
                 "prior_anchor_best_pair": item.get("prior_anchor_best_pair"),
                 "competing_prior_pair_ids": list(item.get("competing_prior_pair_ids", [])),
                 "competing_prior_candidate_ids": list(item.get("competing_prior_candidate_ids", [])),
+                "competing_prior_trace_paths": list(item.get("competing_prior_trace_paths", [])),
                 "support_traj_ids": list(item.get("support_traj_ids", [])),
             }
             for item in excluded_candidates

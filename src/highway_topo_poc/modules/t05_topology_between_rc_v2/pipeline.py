@@ -1495,6 +1495,22 @@ def _segment_candidates(
         competing_pair = next(iter(competing_pairs))
         if competing_pair == pair:
             return None
+        competing_dst_nodeids = {int(item.get("dst_nodeid", 0)) for item in competing_priors}
+        if len(competing_dst_nodeids) != 1:
+            return None
+        competing_dst_nodeid = next(iter(competing_dst_nodeids))
+        matching_paths: list[list[int]] = []
+        for path in topology.get("pair_paths", {}).get(pair, []):
+            node_path = [int(v) for v in path.get("node_path", []) if v is not None]
+            if (
+                len(node_path) >= 3
+                and int(node_path[0]) == int(candidate["src_nodeid"])
+                and int(node_path[1]) == int(competing_dst_nodeid)
+                and int(node_path[-1]) == int(candidate["dst_nodeid"])
+            ):
+                matching_paths.append(node_path)
+        if not matching_paths:
+            return None
         candidate["competing_prior_pair_ids"] = sorted(
             str(item.get("pair_id", "")) for item in competing_priors if str(item.get("pair_id", ""))
         )
@@ -1503,6 +1519,7 @@ def _segment_candidates(
         )
         candidate["competing_prior_anchor_cost_m"] = [item.get("prior_anchor_cost_m") for item in competing_priors]
         candidate["competing_prior_anchor_best_pairs"] = [item.get("prior_anchor_best_pair") for item in competing_priors]
+        candidate["competing_prior_trace_paths"] = [list(path) for path in matching_paths]
         return "src_conflicts_with_unique_unanchored_prior_endpoint"
 
     for candidate in pairing_candidates:
@@ -2199,6 +2216,18 @@ def _build_segment_should_not_exist(
                 "topology_reverse_owner_src_nodeids": list(row["topology_reverse_owner_src_nodeids"]),
                 "competing_prior_pair_ids": sorted(str(v) for v in row["competing_prior_pair_ids"]),
                 "competing_prior_candidate_ids": sorted(str(v) for v in row["competing_prior_candidate_ids"]),
+                "competing_prior_trace_paths": [
+                    list(path)
+                    for path in sorted(
+                        {
+                            tuple(int(v) for v in path)
+                            for item in rejected_candidates
+                            if int(item.get("src_nodeid", 0)) == int(row["src_nodeid"])
+                            and int(item.get("dst_nodeid", 0)) == int(row["dst_nodeid"])
+                            for path in item.get("competing_prior_trace_paths", []) or []
+                        }
+                    )
+                ],
             }
         )
     return out
@@ -3198,6 +3227,7 @@ def _stage2_segment(
                 "competing_prior_candidate_ids": [str(v) for v in item.get("competing_prior_candidate_ids", [])],
                 "competing_prior_anchor_cost_m": list(item.get("competing_prior_anchor_cost_m", [])),
                 "competing_prior_anchor_best_pairs": list(item.get("competing_prior_anchor_best_pairs", [])),
+                "competing_prior_trace_paths": list(item.get("competing_prior_trace_paths", [])),
                 "start_event_id": str(item.get("start_event_id", "")),
                 "end_event_id": str(item.get("end_event_id", "")),
             }
