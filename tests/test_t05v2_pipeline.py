@@ -592,6 +592,47 @@ def test_t05v2_step2_keeps_multi_traj_pair_despite_unanchored_prior_endpoint(tmp
     assert int(segments_payload["step2_metrics"]["unanchored_prior_conflict_segment_count"]) == 0
 
 
+def test_t05v2_step2_keeps_single_traj_pair_when_unanchored_prior_only_matches_deeper_terminal_trace(tmp_path: Path) -> None:
+    patch_id = "unanchored_prior_deep_terminal_trace"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -5.0), (0.0, 5.0)], {"nodeid": 10}),
+            _line_feature([(100.0, -5.0), (100.0, 5.0)], {"nodeid": 40}),
+        ],
+        "EPSG:3857",
+    )
+    drivezone_fc = _fc([_poly_feature([(-5.0, -6.0), (105.0, -6.0), (105.0, 60.0), (-5.0, 60.0)])], "EPSG:3857")
+    road_fc = _fc(
+        [
+            _line_feature([(0.0, 50.0), (30.0, 50.0)], {"snodeid": 10, "enodeid": 25}),
+            _line_feature([(30.0, 50.0), (70.0, 50.0)], {"snodeid": 25, "enodeid": 26}),
+            _line_feature([(70.0, 50.0), (100.0, 50.0)], {"snodeid": 26, "enodeid": 40}),
+        ],
+        "EPSG:3857",
+    )
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=intersection_fc,
+        drivezone_fc=drivezone_fc,
+        traj_tracks=[[(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)]],
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_prior_deep", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_prior_deep", out_root=out_root)
+    patch_dir = out_root / "run_prior_deep" / "patches" / patch_id
+    segments_payload = _read_json(patch_dir / "step2" / "segments.json")
+    kept_pairs = {(int(item["src_nodeid"]), int(item["dst_nodeid"])) for item in segments_payload["segments"]}
+    assert kept_pairs == {(10, 40)}
+    assert int(segments_payload["step2_metrics"]["unanchored_prior_conflict_segment_count"]) == 0
+    topology_debug = _read_json(patch_dir / "debug" / "step2_topology_pairs.json")
+    pair_map = {str(item["pair_id"]): item for item in topology_debug["pairs"]}
+    assert pair_map["10:40"]["topology_sources"] == ["rcsdroad_trace"]
+    assert pair_map["10:40"]["topology_paths"][0]["node_path"] == [10, 25, 26, 40]
+
+
 def test_t05v2_step2_topology_gate_allows_traced_rcsdroad_pairs(tmp_path: Path) -> None:
     patch_id = "topology_trace_chain"
     data_root = tmp_path / "data"

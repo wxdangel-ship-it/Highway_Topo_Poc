@@ -1636,7 +1636,8 @@ def _segment_candidates(
         for path in topology.get("pair_paths", {}).get(pair, []):
             node_path = [int(v) for v in path.get("node_path", []) if v is not None]
             if (
-                len(node_path) >= 3
+                int(path.get("chain_len", 0)) == 2
+                and len(node_path) == 3
                 and int(node_path[0]) == int(candidate["src_nodeid"])
                 and int(node_path[1]) == int(competing_dst_nodeid)
                 and int(node_path[-1]) == int(candidate["dst_nodeid"])
