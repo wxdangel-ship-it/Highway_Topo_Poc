@@ -339,6 +339,7 @@ def _resolve_anchor_points(
 
 def _patch_visual_rows(run_root: Path | str, patch_id: str) -> tuple[list[dict[str, Any]], list[tuple[Any, dict[str, Any]]], list[tuple[Any, dict[str, Any]]], list[tuple[Any, dict[str, Any]]], list[tuple[Any, dict[str, Any]]]]:
     patch_dir = _patch_dir(run_root, patch_id)
+    pipeline = _pipeline()
     metrics = _safe_read_json(patch_dir / "metrics.json")
     step3_payload = _safe_read_json(patch_dir / "step3" / "witness.json")
     step4_payload = _safe_read_json(patch_dir / "step4" / "corridor_identity.json")
