@@ -242,7 +242,10 @@ def build_final_road(
         "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
         "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
         "blocked_diagnostic_only": bool(segment.blocked_diagnostic_only),
+        "controlled_entry_allowed": bool(segment.controlled_entry_allowed),
         "hard_block_reason": str(segment.hard_block_reason),
+        "topology_gap_decision": str(segment.topology_gap_decision),
+        "topology_gap_reason": str(segment.topology_gap_reason),
         "reject_stage": "",
     }
     final_gate_reason = ""
@@ -259,7 +262,7 @@ def build_final_road(
         final_gate_reason = "final_gate_non_unique_arc"
     elif has_topology_assignment and not str(segment.topology_arc_id):
         final_gate_reason = "final_gate_arc_unique_connectivity_violation"
-    elif bool(segment.blocked_diagnostic_only):
+    elif bool(segment.blocked_diagnostic_only) and not bool(segment.controlled_entry_allowed):
         final_gate_reason = "final_gate_blocked_diagnostic_only"
     elif str(segment.hard_block_reason):
         final_gate_reason = "final_gate_hard_blocked"
@@ -447,7 +450,7 @@ def _finalize_full_legal_arc_registry(
             if built:
                 current["unbuilt_stage"] = ""
                 current["unbuilt_reason"] = ""
-            elif bool(current.get("blocked_diagnostic_only", False)):
+            elif bool(current.get("blocked_diagnostic_only", False)) and not bool(current.get("controlled_entry_allowed", False)):
                 current["unbuilt_stage"] = "hard_blocked"
                 current["unbuilt_reason"] = str(current.get("blocked_diagnostic_reason", "") or "blocked_diagnostic_only")
             elif str(current.get("hard_block_reason", "")):
@@ -466,7 +469,7 @@ def _finalize_full_legal_arc_registry(
                 current["unbuilt_stage"] = "step5_geometry_rejected"
                 current["unbuilt_reason"] = str(metric.get("unresolved_reason") or metric.get("failure_classification") or "final_geometry_rejected")
         else:
-            if bool(current.get("blocked_diagnostic_only", False)):
+            if bool(current.get("blocked_diagnostic_only", False)) and not bool(current.get("controlled_entry_allowed", False)):
                 current["unbuilt_stage"] = "hard_blocked"
                 current["unbuilt_reason"] = str(current.get("blocked_diagnostic_reason", "") or "blocked_diagnostic_only")
             elif str(current.get("hard_block_reason", "")):
@@ -554,7 +557,10 @@ def write_road_outputs(
                     "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
                     "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
                     "blocked_diagnostic_only": bool(segment.blocked_diagnostic_only),
+                    "controlled_entry_allowed": bool(segment.controlled_entry_allowed),
                     "hard_block_reason": str(segment.hard_block_reason),
+                    "topology_gap_decision": str(segment.topology_gap_decision),
+                    "topology_gap_reason": str(segment.topology_gap_reason),
                     "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
                     "bridge_chain_exists": bool(segment.bridge_chain_exists),
                     "bridge_chain_unique": bool(segment.bridge_chain_unique),
@@ -604,7 +610,10 @@ def write_road_outputs(
                         "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
                         "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
                         "blocked_diagnostic_only": bool(segment.blocked_diagnostic_only),
+                        "controlled_entry_allowed": bool(segment.controlled_entry_allowed),
                         "hard_block_reason": str(segment.hard_block_reason),
+                        "topology_gap_decision": str(segment.topology_gap_decision),
+                        "topology_gap_reason": str(segment.topology_gap_reason),
                         "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
                         "bridge_chain_exists": bool(segment.bridge_chain_exists),
                         "bridge_chain_unique": bool(segment.bridge_chain_unique),
@@ -637,7 +646,10 @@ def write_road_outputs(
                 "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
                 "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
                 "blocked_diagnostic_only": bool(segment.blocked_diagnostic_only),
+                "controlled_entry_allowed": bool(segment.controlled_entry_allowed),
                 "hard_block_reason": str(segment.hard_block_reason),
+                "topology_gap_decision": str(segment.topology_gap_decision),
+                "topology_gap_reason": str(segment.topology_gap_reason),
                 "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
                 "bridge_chain_exists": bool(segment.bridge_chain_exists),
                 "bridge_chain_unique": bool(segment.bridge_chain_unique),
@@ -686,7 +698,10 @@ def write_road_outputs(
             "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
             "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
             "blocked_diagnostic_only": bool(segment.blocked_diagnostic_only),
+            "controlled_entry_allowed": bool(segment.controlled_entry_allowed),
             "hard_block_reason": str(segment.hard_block_reason),
+            "topology_gap_decision": str(segment.topology_gap_decision),
+            "topology_gap_reason": str(segment.topology_gap_reason),
             "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
             "bridge_chain_exists": bool(segment.bridge_chain_exists),
             "bridge_chain_unique": bool(segment.bridge_chain_unique),

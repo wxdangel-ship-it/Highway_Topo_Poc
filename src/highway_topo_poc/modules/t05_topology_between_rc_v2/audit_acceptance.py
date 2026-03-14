@@ -278,7 +278,11 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
                     source_row.get("topology_arc_is_unique", source_row.get("is_unique", False))
                 ),
                 "blocked_diagnostic_only": bool(source_row.get("blocked_diagnostic_only", False)),
+                "blocked_diagnostic_reason": str(source_row.get("blocked_diagnostic_reason", "")),
+                "controlled_entry_allowed": bool(source_row.get("controlled_entry_allowed", False)),
                 "hard_block_reason": str(source_row.get("hard_block_reason", "")),
+                "topology_gap_decision": str(source_row.get("topology_gap_decision", "")),
+                "topology_gap_reason": str(source_row.get("topology_gap_reason", "")),
                 "bridge_chain_exists": bool(source_row.get("bridge_chain_exists", False)),
                 "bridge_chain_unique": bool(source_row.get("bridge_chain_unique", False)),
                 "bridge_chain_nodes": list(source_row.get("bridge_chain_nodes", [])),
@@ -1629,6 +1633,37 @@ def write_witness_vis_step5_recovery_review(
     }
 
 
+def write_topology_gap_controlled_cover_review(
+    *,
+    run_root: Path | str,
+    output_root: Path | str,
+    simple_patch_ids: list[str] | None = None,
+    complex_patch_id: str = "5417632623039346",
+) -> dict[str, Any]:
+    summary = write_witness_vis_step5_recovery_review(
+        run_root=run_root,
+        output_root=output_root,
+        simple_patch_ids=simple_patch_ids,
+        complex_patch_id=complex_patch_id,
+    )
+    output_root_path = Path(output_root)
+    topology_gap_review = dict(summary.get("topology_gap_decision_review", {}))
+    same_pair_multi_arc_observation = dict(summary.get("same_pair_multi_arc_observation", {}))
+    strict_vs_visual_gap_summary = dict(summary.get("strict_vs_visual_gap_summary", {}))
+    complex_gap_cover_review = {
+        "patch_id": str(complex_patch_id),
+        "topology_gap_decision_review": topology_gap_review,
+        "same_pair_multi_arc_observation": same_pair_multi_arc_observation,
+        "strict_vs_visual_gap_summary": strict_vs_visual_gap_summary,
+        "complex_patch_step5_recovery_review": dict(summary.get("complex_patch_step5_recovery_review", {})),
+    }
+    write_json(output_root_path / "complex_patch_gap_cover_review.json", complex_gap_cover_review)
+    return {
+        **summary,
+        "complex_patch_gap_cover_review": complex_gap_cover_review,
+    }
+
+
 __all__ = [
     "build_arc_evidence_attach_audit",
     "build_arc_legality_audit",
@@ -1646,5 +1681,6 @@ __all__ = [
     "write_legal_arc_coverage_review",
     "write_perf_opt_arc_first_review",
     "write_semantic_fix_after_perf_review",
+    "write_topology_gap_controlled_cover_review",
     "write_witness_vis_step5_recovery_review",
 ]

@@ -36,10 +36,14 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.review import (
     write_legal_arc_coverage_review,
     write_perf_opt_arc_first_review,
     write_semantic_fix_after_perf_review,
+    write_topology_gap_controlled_cover_review,
     write_witness_vis_step5_recovery_review,
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.step2_arc_registry import build_full_legal_arc_registry
-from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_arc_evidence import build_arc_evidence_attach
+from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_arc_evidence import (
+    build_arc_evidence_attach,
+    classify_topology_gap_rows,
+)
 from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_corridor_identity import (
     build_corridor_identities,
     build_patch_geometry_cache,
@@ -2700,7 +2704,124 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
                     "unbuilt_stage": "step5_geometry_rejected",
                     "unbuilt_reason": "road_crosses_divstrip",
                     "working_segment_id": "arcseg::arc_target",
-                }
+                },
+                {
+                    "patch_id": patch_id,
+                    "src": 55353246,
+                    "dst": 37687913,
+                    "pair": "55353246:37687913",
+                    "topology_arc_id": "arc_gap_a",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": True,
+                    "entered_main_flow": False,
+                    "blocked_diagnostic_reason": "topology_gap_unresolved",
+                    "traj_support_type": "terminal_crossing_support",
+                    "traj_support_ids": ["traj_gap_a"],
+                    "traj_support_coverage_ratio": 0.82,
+                    "prior_support_type": "prior_fallback_support",
+                    "support_anchor_src_coords": [0.0, 2.0],
+                    "support_anchor_dst_coords": [100.0, 2.0],
+                    "line_coords": [[0.0, 2.0], [100.0, 2.0]],
+                },
+                {
+                    "patch_id": patch_id,
+                    "src": 791871,
+                    "dst": 37687913,
+                    "pair": "791871:37687913",
+                    "topology_arc_id": "arc_gap_b",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": True,
+                    "entered_main_flow": False,
+                    "blocked_diagnostic_reason": "topology_gap_unresolved",
+                    "traj_support_type": "terminal_crossing_support",
+                    "traj_support_ids": ["traj_gap_b"],
+                    "traj_support_coverage_ratio": 0.79,
+                    "prior_support_type": "prior_fallback_support",
+                    "support_anchor_src_coords": [0.0, 4.0],
+                    "support_anchor_dst_coords": [100.0, 4.0],
+                    "line_coords": [[0.0, 4.0], [100.0, 4.0]],
+                },
+                {
+                    "patch_id": patch_id,
+                    "src": 760239,
+                    "dst": 6963539359479390368,
+                    "pair": "760239:6963539359479390368",
+                    "topology_arc_id": "arc_gap_c",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": True,
+                    "entered_main_flow": False,
+                    "blocked_diagnostic_reason": "topology_gap_unresolved",
+                    "traj_support_type": "terminal_crossing_support",
+                    "traj_support_ids": ["traj_gap_c"],
+                    "traj_support_coverage_ratio": 0.91,
+                    "prior_support_type": "prior_fallback_support",
+                    "support_anchor_src_coords": [0.0, 6.0],
+                    "support_anchor_dst_coords": [100.0, 6.0],
+                    "line_coords": [[0.0, 6.0], [100.0, 6.0]],
+                },
+                {
+                    "patch_id": patch_id,
+                    "src": 21779764,
+                    "dst": 785642,
+                    "pair": "21779764:785642",
+                    "topology_arc_id": "arc_multi_1",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": False,
+                    "direct_arc_count_for_pair": 2,
+                    "built_final_road": True,
+                    "support_anchor_src_coords": [0.0, 8.0],
+                    "support_anchor_dst_coords": [100.0, 8.0],
+                    "line_coords": [[0.0, 8.0], [100.0, 8.0]],
+                },
+                {
+                    "patch_id": patch_id,
+                    "src": 21779764,
+                    "dst": 785642,
+                    "pair": "21779764:785642",
+                    "topology_arc_id": "arc_multi_2",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": False,
+                    "direct_arc_count_for_pair": 2,
+                    "built_final_road": False,
+                    "support_anchor_src_coords": [0.0, 9.0],
+                    "support_anchor_dst_coords": [100.0, 9.0],
+                    "line_coords": [[0.0, 9.0], [100.0, 9.0]],
+                },
+                {
+                    "patch_id": patch_id,
+                    "src": 791873,
+                    "dst": 791871,
+                    "pair": "791873:791871",
+                    "topology_arc_id": "arc_multi_3",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": False,
+                    "direct_arc_count_for_pair": 2,
+                    "built_final_road": False,
+                    "support_anchor_src_coords": [0.0, 10.0],
+                    "support_anchor_dst_coords": [100.0, 10.0],
+                    "line_coords": [[0.0, 10.0], [100.0, 10.0]],
+                },
+                {
+                    "patch_id": patch_id,
+                    "src": 791873,
+                    "dst": 791871,
+                    "pair": "791873:791871",
+                    "topology_arc_id": "arc_multi_4",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": False,
+                    "direct_arc_count_for_pair": 2,
+                    "built_final_road": False,
+                    "support_anchor_src_coords": [0.0, 11.0],
+                    "support_anchor_dst_coords": [100.0, 11.0],
+                    "line_coords": [[0.0, 11.0], [100.0, 11.0]],
+                },
             ],
         },
     )
@@ -2855,6 +2976,9 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     assert (output_root / "arc_corridor_witness_polygons.geojson").exists()
     assert (output_root / "corridor_witness_review.json").exists()
     assert (output_root / "complex_patch_step5_recovery_review.json").exists()
+    assert (output_root / "topology_gap_decision_review.json").exists()
+    assert (output_root / "same_pair_multi_arc_observation.json").exists()
+    assert (output_root / "strict_vs_visual_gap_summary.json").exists()
     chords = _read_json(output_root / "arc_crosssection_chords.geojson")
     assert any(str(item["properties"]["topology_arc_id"]) == "arc_target" for item in chords["features"])
     support_fc = _read_json(output_root / "arc_traj_support_segments.geojson")
@@ -2863,6 +2987,85 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     assert int(recovery["target_arc_count"]) >= 1
     assert recovery["rows"][0]["issue_classification"] in {"witness_layer_issue", "step5_issue_confirmed"}
     assert "corridor_witness_review" in summary
+    gap_review = _read_json(output_root / "topology_gap_decision_review.json")
+    assert int(gap_review["row_count"]) == 3
+    gap_by_pair = {str(item["pair"]): item for item in gap_review["rows"]}
+    assert gap_by_pair["760239:6963539359479390368"]["gap_classification"] == "gap_enter_mainflow"
+    assert gap_by_pair["760239:6963539359479390368"]["gap_reason"] == "gap_should_enter_mainflow"
+    assert gap_by_pair["55353246:37687913"]["gap_classification"] == "gap_ambiguous_need_more_constraints"
+    assert gap_by_pair["55353246:37687913"]["gap_reason"] == "gap_competing_arc_conflict"
+    assert gap_by_pair["791871:37687913"]["gap_classification"] == "gap_ambiguous_need_more_constraints"
+    same_pair_obs = _read_json(output_root / "same_pair_multi_arc_observation.json")
+    obs_by_pair = {str(item["pair"]): item for item in same_pair_obs["rows"]}
+    assert obs_by_pair["21779764:785642"]["pair_arc_count"] == 2
+    assert obs_by_pair["21779764:785642"]["excluded_from_unique_denominator_reason"] == "same_pair_multi_arc"
+    assert obs_by_pair["21779764:785642"]["has_built_sibling_arc"] is True
+    assert obs_by_pair["791873:791871"]["pair_arc_count"] == 2
+    strict_vs_visual = _read_json(output_root / "strict_vs_visual_gap_summary.json")
+    assert strict_vs_visual["strict_coverage"]["total"] == 4
+    assert strict_vs_visual["strict_coverage"]["built"] == 0
+    assert "21779764:785642" in strict_vs_visual["visual_observation"]["observation_pairs"]
+
+    output_root_wrap = tmp_path / "bundle_gap_cover"
+    wrapped = write_topology_gap_controlled_cover_review(run_root=run_root, output_root=output_root_wrap)
+    assert (output_root_wrap / "complex_patch_gap_cover_review.json").exists()
+    assert "complex_patch_gap_cover_review" in wrapped
+
+
+def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
+    rows = [
+        {
+            "pair": "55353246:37687913",
+            "src": 55353246,
+            "dst": 37687913,
+            "is_direct_legal": True,
+            "is_unique": True,
+            "blocked_diagnostic_reason": "topology_gap_unresolved",
+            "traj_support_type": "terminal_crossing_support",
+            "traj_support_ids": ["traj_gap_a"],
+            "traj_support_coverage_ratio": 0.82,
+            "prior_support_type": "prior_fallback_support",
+            "support_anchor_src_coords": [0.0, 2.0],
+            "support_anchor_dst_coords": [100.0, 2.0],
+        },
+        {
+            "pair": "791871:37687913",
+            "src": 791871,
+            "dst": 37687913,
+            "is_direct_legal": True,
+            "is_unique": True,
+            "blocked_diagnostic_reason": "topology_gap_unresolved",
+            "traj_support_type": "terminal_crossing_support",
+            "traj_support_ids": ["traj_gap_b"],
+            "traj_support_coverage_ratio": 0.79,
+            "prior_support_type": "prior_fallback_support",
+            "support_anchor_src_coords": [0.0, 4.0],
+            "support_anchor_dst_coords": [100.0, 4.0],
+        },
+        {
+            "pair": "760239:6963539359479390368",
+            "src": 760239,
+            "dst": 6963539359479390368,
+            "is_direct_legal": True,
+            "is_unique": True,
+            "blocked_diagnostic_reason": "topology_gap_unresolved",
+            "traj_support_type": "terminal_crossing_support",
+            "traj_support_ids": ["traj_gap_c"],
+            "traj_support_coverage_ratio": 0.91,
+            "prior_support_type": "prior_fallback_support",
+            "support_anchor_src_coords": [0.0, 6.0],
+            "support_anchor_dst_coords": [100.0, 6.0],
+        },
+    ]
+
+    decisions = classify_topology_gap_rows(rows, params=dict(DEFAULT_PARAMS))
+
+    assert decisions["760239:6963539359479390368"]["decision"] == "gap_enter_mainflow"
+    assert decisions["760239:6963539359479390368"]["reason"] == "gap_should_enter_mainflow"
+    assert decisions["55353246:37687913"]["decision"] == "gap_ambiguous_need_more_constraints"
+    assert decisions["55353246:37687913"]["reason"] == "gap_competing_arc_conflict"
+    assert decisions["791871:37687913"]["decision"] == "gap_ambiguous_need_more_constraints"
+    assert decisions["791871:37687913"]["reason"] == "gap_competing_arc_conflict"
 
 
 def test_t05v2_arc_legality_audit_uses_full_registry_for_arc_first_built_segment(tmp_path: Path) -> None:
@@ -2899,6 +3102,8 @@ def test_t05v2_arc_legality_audit_uses_full_registry_for_arc_first_built_segment
 
 
 def test_t05v2_scripts_stepwise_state_resume(tmp_path: Path) -> None:
+    if os.name == "nt":
+        pytest.skip("bash script resume test requires a POSIX-mounted workspace path")
     repo_root = Path(__file__).resolve().parents[1]
     patch_id = "script_resume"
     data_root = tmp_path / "data"
@@ -2917,9 +3122,21 @@ def test_t05v2_scripts_stepwise_state_resume(tmp_path: Path) -> None:
     env["PYTHON_BIN"] = sys.executable
     step1 = repo_root / "scripts" / "t05v2_step1_input_frame.sh"
     resume = repo_root / "scripts" / "t05v2_resume.sh"
-    subprocess.run(["bash", str(step1), "--data_root", str(data_root), "--patch_id", patch_id, "--run_id", run_id, "--out_root", str(out_root), "--debug"], env=env, check=True)
-    subprocess.run(["bash", str(resume), "--data_root", str(data_root), "--patch_id", patch_id, "--run_id", run_id, "--out_root", str(out_root), "--debug"], env=env, check=True)
-    subprocess.run(["bash", str(resume), "--data_root", str(data_root), "--patch_id", patch_id, "--run_id", run_id, "--out_root", str(out_root), "--debug"], env=env, check=True)
+    subprocess.run(
+        ["bash", step1.as_posix(), "--data_root", data_root.as_posix(), "--patch_id", patch_id, "--run_id", run_id, "--out_root", out_root.as_posix(), "--debug"],
+        env=env,
+        check=True,
+    )
+    subprocess.run(
+        ["bash", resume.as_posix(), "--data_root", data_root.as_posix(), "--patch_id", patch_id, "--run_id", run_id, "--out_root", out_root.as_posix(), "--debug"],
+        env=env,
+        check=True,
+    )
+    subprocess.run(
+        ["bash", resume.as_posix(), "--data_root", data_root.as_posix(), "--patch_id", patch_id, "--run_id", run_id, "--out_root", out_root.as_posix(), "--debug"],
+        env=env,
+        check=True,
+    )
     step6_state = _read_json(out_root / run_id / "patches" / patch_id / "step6" / "step_state.json")
     road_geojson = _read_json(out_root / run_id / "patches" / patch_id / "Road.geojson")
     assert bool(step6_state["ok"]) is True

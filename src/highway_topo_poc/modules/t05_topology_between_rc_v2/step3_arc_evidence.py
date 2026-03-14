@@ -11,11 +11,103 @@ from .io import write_features_geojson, write_json, write_lines_geojson
 from .models import Segment, coords_to_line, line_to_coords
 from .step3_corridor_identity import build_patch_geometry_cache, build_prior_reference_index
 
+_DEFAULT_TOPOLOGY_GAP_PAIR_IDS = (
+    "55353246:37687913",
+    "760239:6963539359479390368",
+    "791871:37687913",
+)
+
+_TOPOLOGY_GAP_DECISIONS = {
+    "gap_enter_mainflow",
+    "gap_remain_blocked",
+    "gap_ambiguous_need_more_constraints",
+}
+
 
 def _pipeline():
     from . import pipeline as pipeline_module
 
     return pipeline_module
+
+
+def _parse_pair_ids(value: Any) -> set[str]:
+    pipeline = _pipeline()
+    return {
+        pipeline._pair_id_text(int(src_nodeid), int(dst_nodeid))
+        for src_nodeid, dst_nodeid in pipeline._parse_pair_scoped_allowlist(value)
+    }
+
+
+def _topology_gap_pair_ids(params: dict[str, Any]) -> set[str]:
+    pair_ids = _parse_pair_ids(params.get("STEP3_TOPOLOGY_GAP_CONTROL_PAIR_IDS", ""))
+    return pair_ids or set(_DEFAULT_TOPOLOGY_GAP_PAIR_IDS)
+
+
+def classify_topology_gap_rows(
+    rows: list[dict[str, Any]],
+    *,
+    params: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    if not bool(int(params.get("STEP3_TOPOLOGY_GAP_CONTROL_ENABLE", 1))):
+        return {}
+    target_pair_ids = _topology_gap_pair_ids(params)
+    coverage_threshold = float(params.get("STEP3_TOPOLOGY_GAP_MIN_SUPPORT_COVERAGE_RATIO", 0.35))
+    strong_types = {"terminal_crossing_support", "stitched_arc_support"}
+    target_rows = [
+        dict(row)
+        for row in rows
+        if str(row.get("pair", "")) in target_pair_ids
+        and str(row.get("blocked_diagnostic_reason", row.get("unbuilt_reason", ""))) == "topology_gap_unresolved"
+        and bool(row.get("is_direct_legal", False))
+        and bool(row.get("is_unique", False))
+    ]
+    target_count_by_dst = Counter(int(row.get("dst", 0)) for row in target_rows)
+    out: dict[str, dict[str, Any]] = {}
+    for row in target_rows:
+        pair_id = str(row.get("pair", ""))
+        traj_support_type = str(row.get("traj_support_type", "no_support"))
+        prior_support_type = str(row.get("prior_support_type", "no_support"))
+        coverage_ratio = float(row.get("traj_support_coverage_ratio", 0.0) or 0.0)
+        support_count = int(len(row.get("traj_support_ids", [])))
+        has_src_anchor = row.get("support_anchor_src_coords") is not None
+        has_dst_anchor = row.get("support_anchor_dst_coords") is not None
+        dst_nodeid = int(row.get("dst", 0))
+
+        decision = "gap_remain_blocked"
+        reason = "gap_support_insufficient"
+        if traj_support_type == "no_support" and prior_support_type == "no_support":
+            decision = "gap_remain_blocked"
+            reason = "gap_support_insufficient"
+        elif not has_src_anchor or not has_dst_anchor:
+            decision = "gap_ambiguous_need_more_constraints"
+            reason = "gap_anchor_unreliable"
+        elif int(target_count_by_dst.get(dst_nodeid, 0)) >= 2:
+            decision = "gap_ambiguous_need_more_constraints"
+            reason = "gap_competing_arc_conflict"
+        elif traj_support_type in strong_types and support_count >= 1 and coverage_ratio >= coverage_threshold:
+            decision = "gap_enter_mainflow"
+            reason = "gap_should_enter_mainflow"
+        elif traj_support_type == "partial_arc_support" and coverage_ratio >= max(coverage_threshold, 0.5):
+            decision = "gap_enter_mainflow"
+            reason = "gap_should_enter_mainflow"
+        elif coverage_ratio > 0.0:
+            decision = "gap_ambiguous_need_more_constraints"
+            reason = "gap_support_insufficient"
+        elif prior_support_type == "prior_fallback_support":
+            decision = "gap_ambiguous_need_more_constraints"
+            reason = "gap_slot_ambiguous"
+
+        out[pair_id] = {
+            "pair": str(pair_id),
+            "decision": str(decision),
+            "reason": str(reason),
+            "controlled_entry_allowed": bool(decision == "gap_enter_mainflow"),
+            "target_count_same_dst": int(target_count_by_dst.get(dst_nodeid, 0)),
+            "traj_support_type": str(traj_support_type),
+            "prior_support_type": str(prior_support_type),
+            "traj_support_coverage_ratio": float(coverage_ratio),
+        }
+    return out
 
 
 def _arc_line(row: dict[str, Any]) -> LineString | None:
@@ -560,7 +652,10 @@ def _materialize_working_segment(
             topology_arc_is_direct_legal=bool(selected_segment.topology_arc_is_direct_legal),
             topology_arc_is_unique=bool(selected_segment.topology_arc_is_unique),
             blocked_diagnostic_only=bool(getattr(selected_segment, "blocked_diagnostic_only", False)),
+            controlled_entry_allowed=bool(row.get("controlled_entry_allowed", getattr(selected_segment, "controlled_entry_allowed", False))),
             hard_block_reason=str(getattr(selected_segment, "hard_block_reason", "")),
+            topology_gap_decision=str(row.get("topology_gap_decision", getattr(selected_segment, "topology_gap_decision", ""))),
+            topology_gap_reason=str(row.get("topology_gap_reason", getattr(selected_segment, "topology_gap_reason", ""))),
             bridge_candidate_retained=False,
             bridge_chain_exists=bool(selected_segment.bridge_chain_exists),
             bridge_chain_unique=bool(selected_segment.bridge_chain_unique),
@@ -605,7 +700,10 @@ def _materialize_working_segment(
         topology_arc_is_direct_legal=bool(row.get("is_direct_legal", False)),
         topology_arc_is_unique=bool(row.get("is_unique", False)),
         blocked_diagnostic_only=bool(row.get("blocked_diagnostic_only", False)),
+        controlled_entry_allowed=bool(row.get("controlled_entry_allowed", False)),
         hard_block_reason=str(row.get("hard_block_reason", "")),
+        topology_gap_decision=str(row.get("topology_gap_decision", "")),
+        topology_gap_reason=str(row.get("topology_gap_reason", "")),
         bridge_candidate_retained=False,
         bridge_chain_exists=False,
         bridge_chain_unique=False,
@@ -668,6 +766,7 @@ def build_arc_evidence_attach(
         prefilter_stats["candidate_traj_total"] += int(len(candidate_traj_rows))
         prefilter_stats["candidate_traj_max"] = max(int(prefilter_stats["candidate_traj_max"]), int(len(candidate_traj_rows)))
         prefilter_stats["candidate_traj_hist"][int(len(candidate_traj_rows))] += 1
+        current["_prefilter_candidate_traj_count"] = int(len(candidate_traj_rows))
 
         core_started = perf_counter()
         support = _support_type_for_arc(
@@ -697,7 +796,31 @@ def build_arc_evidence_attach(
             }
         )
         runtime_totals["terminal_partial_stitched_aggregation_time_ms"] += float((perf_counter() - aggregation_started) * 1000.0)
+        rows.append(current)
 
+    topology_gap_decisions = classify_topology_gap_rows(rows, params=params)
+    for current in rows:
+        pair_id = str(current.get("pair", ""))
+        gap_decision = dict(topology_gap_decisions.get(pair_id) or {})
+        if gap_decision:
+            current["topology_gap_decision"] = str(gap_decision.get("decision", ""))
+            current["topology_gap_reason"] = str(gap_decision.get("reason", ""))
+            current["controlled_entry_allowed"] = bool(gap_decision.get("controlled_entry_allowed", False))
+            if bool(current.get("controlled_entry_allowed", False)):
+                current["entered_main_flow"] = True
+                current["unbuilt_stage"] = ""
+                current["unbuilt_reason"] = ""
+            else:
+                current["entered_main_flow"] = False
+                current["unbuilt_stage"] = (
+                    "hard_blocked"
+                    if str(current.get("topology_gap_decision", "")) == "gap_remain_blocked"
+                    else "gap_needs_more_constraints"
+                )
+                current["unbuilt_reason"] = str(current.get("topology_gap_reason", ""))
+                current["blocked_diagnostic_reason"] = str(current.get("topology_gap_reason", ""))
+
+        selected_segment = selected_by_arc.get(str(current.get("topology_arc_id", "")))
         if bool(current.get("entered_main_flow", False)):
             materialize_started = perf_counter()
             working_segment = _materialize_working_segment(
@@ -710,12 +833,13 @@ def build_arc_evidence_attach(
             current["working_segment_id"] = str(working_segment.segment_id)
             current["working_segment_source"] = "step2_selected_segment" if selected_segment is not None else "arc_first_materialized_segment"
             current["entered_main_flow"] = True
-            current["unbuilt_stage"] = (
-                "step3_no_support"
-                if str(current["traj_support_type"]) == "no_support" and str(current["prior_support_type"]) != "prior_fallback_support"
-                else ""
-            )
-            current["unbuilt_reason"] = "no_traj_support" if str(current["unbuilt_stage"]) == "step3_no_support" else ""
+            if (
+                str(current.get("unbuilt_stage", "")) == ""
+                and str(current["traj_support_type"]) == "no_support"
+                and str(current["prior_support_type"]) != "prior_fallback_support"
+            ):
+                current["unbuilt_stage"] = "step3_no_support"
+                current["unbuilt_reason"] = "no_traj_support"
             working_segments.append(working_segment)
             runtime_totals["working_segment_materialize_time_ms"] += float((perf_counter() - materialize_started) * 1000.0)
 
@@ -724,7 +848,7 @@ def build_arc_evidence_attach(
                 "pair": str(current["pair"]),
                 "topology_arc_id": str(current["topology_arc_id"]),
                 "entered_main_flow": bool(current.get("entered_main_flow", False)),
-                "prefilter_candidate_traj_count": int(len(candidate_traj_rows)),
+                "prefilter_candidate_traj_count": int(current.get("_prefilter_candidate_traj_count", 0)),
                 "selected_segment_count": int(current.get("selected_segment_count", 0)),
                 "traj_support_type": str(current["traj_support_type"]),
                 "traj_support_ids": [str(v) for v in current["traj_support_ids"]],
@@ -732,11 +856,14 @@ def build_arc_evidence_attach(
                 "traj_support_coverage_ratio": float(current["traj_support_coverage_ratio"]),
                 "traj_support_segment_count": int(len(current.get("traj_support_segments", []))),
                 "prior_support_type": str(current["prior_support_type"]),
+                "topology_gap_decision": str(current.get("topology_gap_decision", "")),
+                "topology_gap_reason": str(current.get("topology_gap_reason", "")),
+                "controlled_entry_allowed": bool(current.get("controlled_entry_allowed", False)),
                 "working_segment_id": str(current.get("working_segment_id", "")),
                 "working_segment_source": str(current.get("working_segment_source", "")),
             }
         )
-        rows.append(current)
+        current.pop("_prefilter_candidate_traj_count", None)
 
     entered_main_flow_rows = [row for row in rows if bool(row.get("entered_main_flow", False))]
     traj_supported_rows = [row for row in entered_main_flow_rows if str(row.get("traj_support_type", "")) != "no_support"]
@@ -751,6 +878,9 @@ def build_arc_evidence_attach(
             "traj_supported_arc_count": int(len(traj_supported_rows)),
             "prior_supported_arc_count": int(len(prior_supported_rows)),
             "traj_support_type_hist": dict(Counter(str(row.get("traj_support_type", "")) for row in entered_main_flow_rows)),
+            "topology_gap_decision_hist": dict(
+                Counter(str(row.get("topology_gap_decision", "")) for row in rows if str(row.get("topology_gap_decision", "")))
+            ),
             "working_segment_count": int(len(working_segments)),
         },
         "audit_rows": support_debug_rows,
@@ -909,4 +1039,4 @@ def run_witness_stage(
     }
 
 
-__all__ = ["build_arc_evidence_attach", "run_witness_stage"]
+__all__ = ["build_arc_evidence_attach", "classify_topology_gap_rows", "run_witness_stage"]

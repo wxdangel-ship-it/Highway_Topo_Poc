@@ -9,6 +9,7 @@ from shapely.geometry import LineString, Point
 
 from .io import read_json, write_features_geojson, write_json
 from .models import CorridorIdentity, CorridorWitness, Segment, SlotInterval
+from .step3_arc_evidence import classify_topology_gap_rows
 from .step3_corridor_identity import build_patch_geometry_cache, build_prior_reference_index
 from .step5_conservative_road import shape_ref_line
 
@@ -18,6 +19,17 @@ _STEP5_TARGET_PAIRS = {
     "5384372208085190:5261514061535579261",
     "5389884430552920:2703260460721685999",
     "6460260817894928273:29626540",
+}
+
+_TOPOLOGY_GAP_TARGET_PAIRS = {
+    "55353246:37687913",
+    "760239:6963539359479390368",
+    "791871:37687913",
+}
+
+_SAME_PAIR_MULTI_ARC_FOCUS_PAIRS = {
+    "21779764:785642",
+    "791873:791871",
 }
 
 _PATCH_CONTEXT_CACHE: dict[str, dict[str, Any]] = {}
@@ -416,8 +428,19 @@ def _patch_visual_rows(run_root: Path | str, patch_id: str) -> tuple[list[dict[s
                 "is_direct_legal": bool(current.get("is_direct_legal", current.get("topology_arc_is_direct_legal", False))),
                 "is_unique": bool(current.get("is_unique", current.get("topology_arc_is_unique", False))),
                 "entered_main_flow": bool(current.get("entered_main_flow", False)),
+                "direct_arc_count_for_pair": int(current.get("direct_arc_count_for_pair", 0)),
+                "blocked_diagnostic_only": bool(current.get("blocked_diagnostic_only", False)),
+                "blocked_diagnostic_reason": str(current.get("blocked_diagnostic_reason", "")),
+                "controlled_entry_allowed": bool(current.get("controlled_entry_allowed", False)),
+                "topology_gap_decision": str(current.get("topology_gap_decision", "")),
+                "topology_gap_reason": str(current.get("topology_gap_reason", "")),
                 "traj_support_type": str(current.get("traj_support_type", "no_support")),
+                "traj_support_ids": [str(v) for v in current.get("traj_support_ids", [])],
                 "traj_support_count": int(support_count),
+                "traj_support_coverage_ratio": float(current.get("traj_support_coverage_ratio", 0.0)),
+                "prior_support_type": str(current.get("prior_support_type", "no_support")),
+                "support_anchor_src_coords": current.get("support_anchor_src_coords"),
+                "support_anchor_dst_coords": current.get("support_anchor_dst_coords"),
                 "stitched_used": bool(
                     str(current.get("traj_support_type", "")) == "stitched_arc_support"
                     or any(bool(item.get("is_stitched", False)) for item in current.get("traj_support_segments", []))
@@ -453,6 +476,129 @@ def _step5_issue_classification(row: dict[str, Any]) -> str:
     if str(row.get("slot_status", "")) != "resolved":
         return "witness_layer_issue"
     return "step5_issue_confirmed"
+
+
+def _topology_gap_decision_rows(
+    *,
+    patch_id: str,
+    review_rows: list[dict[str, Any]],
+    params: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    by_pair = {
+        str(row.get("pair", "")): dict(row)
+        for row in review_rows
+        if str(row.get("patch_id", "")) == str(patch_id)
+    }
+    decisions = classify_topology_gap_rows(list(by_pair.values()), params=dict(params or {}))
+    rows: list[dict[str, Any]] = []
+    for pair_id in sorted(_TOPOLOGY_GAP_TARGET_PAIRS):
+        row = dict(by_pair.get(pair_id) or {})
+        if not row:
+            src_text, dst_text = str(pair_id).split(":", 1)
+            row = {
+                "patch_id": str(patch_id),
+                "src": int(src_text),
+                "dst": int(dst_text),
+                "pair": str(pair_id),
+            }
+        decision = dict(decisions.get(pair_id) or {})
+        classification = str(
+            row.get("topology_gap_decision")
+            or decision.get("decision")
+            or ("gap_remain_blocked" if str(row.get("blocked_diagnostic_reason", "")) == "topology_gap_unresolved" else "")
+        )
+        reason = str(
+            row.get("topology_gap_reason")
+            or decision.get("reason")
+            or row.get("blocked_diagnostic_reason", "")
+            or row.get("unbuilt_reason", "")
+        )
+        rows.append(
+            {
+                "patch_id": str(patch_id),
+                "src": int(row.get("src", 0)),
+                "dst": int(row.get("dst", 0)),
+                "pair": str(pair_id),
+                "topology_arc_id": str(row.get("topology_arc_id", "")),
+                "gap_classification": str(classification),
+                "gap_reason": str(reason),
+                "controlled_entry_allowed": bool(
+                    row.get("controlled_entry_allowed", decision.get("controlled_entry_allowed", False))
+                ),
+                "entered_main_flow": bool(row.get("entered_main_flow", False)),
+                "built_final_road": bool(row.get("built_final_road", False)),
+                "traj_support_type": str(row.get("traj_support_type", "no_support")),
+                "traj_support_count": int(row.get("traj_support_count", 0)),
+                "corridor_identity": str(row.get("corridor_identity", "unresolved")),
+                "slot_status": str(row.get("slot_status", "unresolved")),
+                "unbuilt_stage": str(row.get("unbuilt_stage", "")),
+                "unbuilt_reason": str(row.get("unbuilt_reason", "")),
+                "src_anchor_source": str(row.get("src_anchor_source", "")),
+                "dst_anchor_source": str(row.get("dst_anchor_source", "")),
+                "drivezone_overlap_ratio": float(row.get("drivezone_overlap_ratio", 0.0)),
+                "divstrip_overlap_ratio": float(row.get("divstrip_overlap_ratio", 0.0)),
+                "support_total_length_m": float(row.get("support_total_length_m", 0.0)),
+            }
+        )
+    return rows
+
+
+def _same_pair_multi_arc_rows(
+    *,
+    patch_id: str,
+    review_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    patch_rows = [dict(row) for row in review_rows if str(row.get("patch_id", "")) == str(patch_id)]
+    by_pair: dict[str, list[dict[str, Any]]] = {}
+    for row in patch_rows:
+        by_pair.setdefault(str(row.get("pair", "")), []).append(dict(row))
+    rows: list[dict[str, Any]] = []
+    for pair_id, pair_rows in sorted(by_pair.items()):
+        pair_arc_count = max(int(max((int(item.get("direct_arc_count_for_pair", 0)) for item in pair_rows), default=0)), int(len(pair_rows)))
+        if pair_arc_count <= 1 and pair_id not in _SAME_PAIR_MULTI_ARC_FOCUS_PAIRS:
+            continue
+        built_rows = [item for item in pair_rows if bool(item.get("built_final_road", False))]
+        rows.append(
+            {
+                "patch_id": str(patch_id),
+                "src": int(pair_rows[0].get("src", 0)),
+                "dst": int(pair_rows[0].get("dst", 0)),
+                "pair": str(pair_id),
+                "pair_arc_count": int(pair_arc_count),
+                "arc_ids": [str(item.get("topology_arc_id", "")) for item in pair_rows if str(item.get("topology_arc_id", ""))],
+                "excluded_from_unique_denominator_reason": "same_pair_multi_arc",
+                "has_built_sibling_arc": bool(built_rows),
+                "built_sibling_arc_ids": [str(item.get("topology_arc_id", "")) for item in built_rows if str(item.get("topology_arc_id", ""))],
+                "chord_available": bool(any(str(item.get("src_anchor_source", "")) and str(item.get("dst_anchor_source", "")) for item in pair_rows)),
+                "witness_available": bool(any(str(item.get("traj_support_type", "no_support")) != "no_support" for item in pair_rows)),
+                "visual_gap_note": (
+                    "built_sibling_present_visual_gap_possible"
+                    if built_rows
+                    else "no_built_sibling_visual_gap_candidate"
+                ),
+            }
+        )
+    present_pairs = {str(row.get("pair", "")) for row in rows}
+    for pair_id in sorted(_SAME_PAIR_MULTI_ARC_FOCUS_PAIRS - present_pairs):
+        src_text, dst_text = str(pair_id).split(":", 1)
+        rows.append(
+            {
+                "patch_id": str(patch_id),
+                "src": int(src_text),
+                "dst": int(dst_text),
+                "pair": str(pair_id),
+                "pair_arc_count": 0,
+                "arc_ids": [],
+                "excluded_from_unique_denominator_reason": "same_pair_multi_arc",
+                "has_built_sibling_arc": False,
+                "built_sibling_arc_ids": [],
+                "chord_available": False,
+                "witness_available": False,
+                "visual_gap_note": "focus_pair_missing_from_review_rows",
+            }
+        )
+    rows.sort(key=lambda item: (str(item.get("pair", "")), str(item.get("patch_id", ""))))
+    return rows
 
 
 def write_witness_vis_step5_recovery_bundle(
@@ -504,6 +650,50 @@ def write_witness_vis_step5_recovery_bundle(
         "rows": step5_target_rows,
     }
 
+    complex_context = _patch_context(run_root, complex_patch_id)
+    topology_gap_rows = _topology_gap_decision_rows(
+        patch_id=str(complex_patch_id),
+        review_rows=review_rows,
+        params=dict(complex_context.get("params") or {}),
+    )
+    same_pair_rows = _same_pair_multi_arc_rows(
+        patch_id=str(complex_patch_id),
+        review_rows=review_rows,
+    )
+    strict_total = int(
+        sum(
+            1
+            for row in review_rows
+            if str(row.get("patch_id", "")) == str(complex_patch_id)
+            and bool(row.get("is_direct_legal", False))
+            and bool(row.get("is_unique", False))
+        )
+    )
+    strict_built = int(
+        sum(
+            1
+            for row in review_rows
+            if str(row.get("patch_id", "")) == str(complex_patch_id)
+            and bool(row.get("is_direct_legal", False))
+            and bool(row.get("is_unique", False))
+            and bool(row.get("built_final_road", False))
+        )
+    )
+    strict_vs_visual_summary = {
+        "patch_id": str(complex_patch_id),
+        "strict_coverage": {
+            "built": int(strict_built),
+            "total": int(strict_total),
+            "rate": float((strict_built / max(1, strict_total)) if strict_total else 0.0),
+        },
+        "visual_observation": {
+            "same_pair_multi_arc_observation_count": int(len(same_pair_rows)),
+            "same_pair_multi_arc_focus_pair_count": int(sum(1 for row in same_pair_rows if str(row.get("pair", "")) in _SAME_PAIR_MULTI_ARC_FOCUS_PAIRS)),
+            "built_sibling_present_count": int(sum(1 for row in same_pair_rows if bool(row.get("has_built_sibling_arc", False)))),
+            "observation_pairs": [str(row.get("pair", "")) for row in same_pair_rows],
+        },
+    }
+
     write_features_geojson(output_root_path / "arc_crosssection_chords.geojson", chord_features)
     write_features_geojson(output_root_path / "arc_traj_support_segments.geojson", support_features)
     write_features_geojson(output_root_path / "arc_corridor_witness_lines.geojson", witness_line_features)
@@ -521,6 +711,12 @@ def write_witness_vis_step5_recovery_bundle(
                 "is_direct_legal",
                 "is_unique",
                 "entered_main_flow",
+                "direct_arc_count_for_pair",
+                "blocked_diagnostic_only",
+                "blocked_diagnostic_reason",
+                "controlled_entry_allowed",
+                "topology_gap_decision",
+                "topology_gap_reason",
                 "traj_support_type",
                 "traj_support_count",
                 "stitched_used",
@@ -540,6 +736,73 @@ def write_witness_vis_step5_recovery_bundle(
         writer.writeheader()
         for row in review_rows:
             writer.writerow({key: row.get(key, "") for key in writer.fieldnames})
+    topology_gap_review = {
+        "patch_id": str(complex_patch_id),
+        "row_count": int(len(topology_gap_rows)),
+        "rows": topology_gap_rows,
+    }
+    write_json(output_root_path / "topology_gap_decision_review.json", topology_gap_review)
+    with (output_root_path / "topology_gap_decision_review.csv").open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "patch_id",
+                "src",
+                "dst",
+                "pair",
+                "topology_arc_id",
+                "gap_classification",
+                "gap_reason",
+                "controlled_entry_allowed",
+                "entered_main_flow",
+                "built_final_road",
+                "traj_support_type",
+                "traj_support_count",
+                "corridor_identity",
+                "slot_status",
+                "unbuilt_stage",
+                "unbuilt_reason",
+                "src_anchor_source",
+                "dst_anchor_source",
+                "drivezone_overlap_ratio",
+                "divstrip_overlap_ratio",
+                "support_total_length_m",
+            ],
+        )
+        writer.writeheader()
+        for row in topology_gap_rows:
+            writer.writerow({key: row.get(key, "") for key in writer.fieldnames})
+    same_pair_multi_arc_observation = {
+        "patch_id": str(complex_patch_id),
+        "row_count": int(len(same_pair_rows)),
+        "rows": same_pair_rows,
+    }
+    write_json(output_root_path / "same_pair_multi_arc_observation.json", same_pair_multi_arc_observation)
+    with (output_root_path / "same_pair_multi_arc_observation.csv").open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "patch_id",
+                "src",
+                "dst",
+                "pair",
+                "pair_arc_count",
+                "arc_ids",
+                "excluded_from_unique_denominator_reason",
+                "has_built_sibling_arc",
+                "built_sibling_arc_ids",
+                "chord_available",
+                "witness_available",
+                "visual_gap_note",
+            ],
+        )
+        writer.writeheader()
+        for row in same_pair_rows:
+            payload = dict(row)
+            payload["arc_ids"] = ",".join(str(v) for v in row.get("arc_ids", []))
+            payload["built_sibling_arc_ids"] = ",".join(str(v) for v in row.get("built_sibling_arc_ids", []))
+            writer.writerow({key: payload.get(key, "") for key in writer.fieldnames})
+    write_json(output_root_path / "strict_vs_visual_gap_summary.json", strict_vs_visual_summary)
     write_json(output_root_path / "complex_patch_step5_recovery_review.json", step5_review)
     write_json(
         output_root_path / "debug" / "step5_target_arc_examples.json",
@@ -549,9 +812,28 @@ def write_witness_vis_step5_recovery_bundle(
         output_root_path / "debug" / "witness_layer_issue_examples.json",
         {"rows": [dict(item) for item in step5_target_rows if str(item.get("issue_classification", "")) == "witness_layer_issue"]},
     )
+    write_features_geojson(
+        output_root_path / "debug" / "topology_gap_arc_examples.geojson",
+        [
+            (geom, dict(props))
+            for geom, props in chord_features
+            if f"{int(props.get('src', 0))}:{int(props.get('dst', 0))}" in _TOPOLOGY_GAP_TARGET_PAIRS
+        ],
+    )
+    write_features_geojson(
+        output_root_path / "debug" / "same_pair_multi_arc_chords.geojson",
+        [
+            (geom, dict(props))
+            for geom, props in chord_features
+            if f"{int(props.get('src', 0))}:{int(props.get('dst', 0))}" in {str(row.get("pair", "")) for row in same_pair_rows}
+        ],
+    )
     return {
         "corridor_witness_review": corridor_review,
         "complex_patch_step5_recovery_review": step5_review,
+        "topology_gap_decision_review": topology_gap_review,
+        "same_pair_multi_arc_observation": same_pair_multi_arc_observation,
+        "strict_vs_visual_gap_summary": strict_vs_visual_summary,
     }
 
 

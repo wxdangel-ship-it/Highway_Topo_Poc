@@ -134,7 +134,10 @@ class Segment:
     topology_arc_is_direct_legal: bool = False
     topology_arc_is_unique: bool = False
     blocked_diagnostic_only: bool = False
+    controlled_entry_allowed: bool = False
     hard_block_reason: str = ""
+    topology_gap_decision: str = ""
+    topology_gap_reason: str = ""
     bridge_candidate_retained: bool = False
     bridge_chain_exists: bool = False
     bridge_chain_unique: bool = False
@@ -162,7 +165,10 @@ class Segment:
             "topology_arc_is_direct_legal": bool(self.topology_arc_is_direct_legal),
             "topology_arc_is_unique": bool(self.topology_arc_is_unique),
             "blocked_diagnostic_only": bool(self.blocked_diagnostic_only),
+            "controlled_entry_allowed": bool(self.controlled_entry_allowed),
             "hard_block_reason": str(self.hard_block_reason),
+            "topology_gap_decision": str(self.topology_gap_decision),
+            "topology_gap_reason": str(self.topology_gap_reason),
             "bridge_candidate_retained": bool(self.bridge_candidate_retained),
             "bridge_chain_exists": bool(self.bridge_chain_exists),
             "bridge_chain_unique": bool(self.bridge_chain_unique),
@@ -204,7 +210,10 @@ class Segment:
             topology_arc_is_direct_legal=bool(payload.get("topology_arc_is_direct_legal", False)),
             topology_arc_is_unique=bool(payload.get("topology_arc_is_unique", False)),
             blocked_diagnostic_only=bool(payload.get("blocked_diagnostic_only", False)),
+            controlled_entry_allowed=bool(payload.get("controlled_entry_allowed", False)),
             hard_block_reason=str(payload.get("hard_block_reason", "")),
+            topology_gap_decision=str(payload.get("topology_gap_decision", "")),
+            topology_gap_reason=str(payload.get("topology_gap_reason", "")),
             bridge_candidate_retained=bool(payload.get("bridge_candidate_retained", False)),
             bridge_chain_exists=bool(payload.get("bridge_chain_exists", False)),
             bridge_chain_unique=bool(payload.get("bridge_chain_unique", False)),
