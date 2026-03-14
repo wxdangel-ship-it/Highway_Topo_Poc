@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -97,6 +98,24 @@ def _patch_dir(run_root: Path | str, patch_id: str) -> Path:
     return Path(run_root) / "patches" / str(patch_id)
 
 
+def _row_pair_id(row: dict[str, Any]) -> str:
+    pair_id = str(row.get("pair", "") or row.get("pair_id", ""))
+    if pair_id:
+        return pair_id
+    src_nodeid = row.get("src")
+    dst_nodeid = row.get("dst")
+    if src_nodeid is None:
+        src_nodeid = row.get("src_nodeid")
+    if dst_nodeid is None:
+        dst_nodeid = row.get("dst_nodeid")
+    if src_nodeid is None or dst_nodeid is None:
+        return ""
+    try:
+        return _pair_id_text(int(src_nodeid), int(dst_nodeid))
+    except (TypeError, ValueError):
+        return ""
+
+
 def _built_pairs(roads_payload: dict[str, Any]) -> list[str]:
     return sorted(
         _pair_id_text(int(item.get("src_nodeid", 0)), int(item.get("dst_nodeid", 0)))
@@ -134,11 +153,7 @@ def _best_segment_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 def _find_pair_row(rows: list[dict[str, Any]], pair_id: str) -> dict[str, Any] | None:
     for row in rows:
-        if str(row.get("pair_id", "")) == str(pair_id):
-            return row
-        src_nodeid = row.get("src_nodeid")
-        dst_nodeid = row.get("dst_nodeid")
-        if src_nodeid is not None and dst_nodeid is not None and _pair_id_text(int(src_nodeid), int(dst_nodeid)) == str(pair_id):
+        if _row_pair_id(row) == str(pair_id):
             return row
     return None
 
@@ -154,9 +169,158 @@ def _road_segment_map(patch_dir: Path) -> tuple[dict[str, dict[str, Any]], set[s
 def _pair_rows_by_id(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        pair_id = str(row.get("pair_id", "")) or _pair_id_text(int(row.get("src_nodeid", 0)), int(row.get("dst_nodeid", 0)))
+        pair_id = _row_pair_id(row)
+        if not pair_id:
+            continue
         grouped.setdefault(pair_id, []).append(dict(row))
     return grouped
+
+
+def _best_registry_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return sorted(
+        rows,
+        key=lambda item: (
+            0 if bool(item.get("built_final_road", False)) else 1,
+            0 if bool(item.get("controlled_entry_allowed", False)) else 1,
+            0 if bool(item.get("entered_main_flow", False)) else 1,
+            0 if bool(item.get("is_direct_legal", item.get("topology_arc_is_direct_legal", False))) else 1,
+            0 if bool(item.get("is_unique", item.get("topology_arc_is_unique", False))) else 1,
+            str(item.get("working_segment_id", "")),
+            str(item.get("topology_arc_id", "")),
+        ),
+    )[0]
+
+
+def _registry_rows_by_pair(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        pair_id = _row_pair_id(row)
+        if not pair_id:
+            continue
+        grouped.setdefault(pair_id, []).append(dict(row))
+    return grouped
+
+
+def _registry_rows_by_working_segment(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        working_segment_id = str(row.get("working_segment_id", ""))
+        if not working_segment_id:
+            continue
+        grouped[working_segment_id] = dict(row)
+    return grouped
+
+
+def _identity_record_from_row(
+    row: dict[str, Any] | None,
+    *,
+    pair_id: str = "",
+    working_segment_id: str = "",
+    resolution_source: str = "",
+) -> dict[str, Any]:
+    payload = dict(row or {})
+    resolved_pair = str(pair_id or _row_pair_id(payload))
+    resolved_segment_id = str(working_segment_id or payload.get("working_segment_id") or payload.get("segment_id") or "")
+    controlled_entry_allowed = bool(payload.get("controlled_entry_allowed", False))
+    blocked_diagnostic_only = bool(payload.get("blocked_diagnostic_only", False)) and not controlled_entry_allowed
+    hard_block_reason = "" if controlled_entry_allowed else str(payload.get("hard_block_reason", ""))
+    blocked_diagnostic_reason = (
+        ""
+        if not blocked_diagnostic_only
+        else str(payload.get("blocked_diagnostic_reason", "") or payload.get("unbuilt_reason", ""))
+    )
+    topology_arc_source_type = str(payload.get("topology_arc_source_type") or payload.get("arc_source_type") or "")
+    return {
+        "pair": resolved_pair,
+        "working_segment_id": resolved_segment_id,
+        "topology_arc_id": str(payload.get("topology_arc_id", "")),
+        "topology_arc_source_type": topology_arc_source_type,
+        "topology_arc_is_direct_legal": bool(
+            payload.get("topology_arc_is_direct_legal", payload.get("is_direct_legal", False))
+        ),
+        "topology_arc_is_unique": bool(payload.get("topology_arc_is_unique", payload.get("is_unique", False))),
+        "controlled_entry_allowed": controlled_entry_allowed,
+        "topology_gap_decision": str(payload.get("topology_gap_decision", "")),
+        "topology_gap_reason": str(payload.get("topology_gap_reason", "")),
+        "entered_main_flow": bool(payload.get("entered_main_flow", False)),
+        "blocked_diagnostic_only": blocked_diagnostic_only,
+        "blocked_diagnostic_reason": blocked_diagnostic_reason,
+        "hard_block_reason": hard_block_reason,
+        "traj_support_type": str(payload.get("traj_support_type", "")),
+        "prior_support_type": str(payload.get("prior_support_type", "")),
+        "corridor_identity": str(payload.get("corridor_identity", "")),
+        "slot_status": str(payload.get("slot_status", "")),
+        "built_final_road": bool(payload.get("built_final_road", False)),
+        "unbuilt_stage": str(payload.get("unbuilt_stage", "")),
+        "unbuilt_reason": str(payload.get("unbuilt_reason", "")),
+        "bridge_chain_exists": bool(payload.get("bridge_chain_exists", False)),
+        "bridge_chain_unique": bool(payload.get("bridge_chain_unique", False)),
+        "bridge_chain_nodes": list(payload.get("bridge_chain_nodes", [])),
+        "identity_resolution_source": str(resolution_source),
+    }
+
+
+def _resolve_identity_record(
+    *,
+    pair_id: str = "",
+    working_segment_id: str = "",
+    registry_row: dict[str, Any] | None = None,
+    registry_by_pair: dict[str, list[dict[str, Any]]] | None = None,
+    registry_by_working_segment: dict[str, dict[str, Any]] | None = None,
+    segment_map: dict[str, dict[str, Any]] | None = None,
+    selected_rows: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    if registry_row:
+        return _identity_record_from_row(
+            registry_row,
+            pair_id=pair_id,
+            working_segment_id=working_segment_id,
+            resolution_source="full_legal_arc_registry",
+        )
+    if working_segment_id and registry_by_working_segment:
+        matched = dict(registry_by_working_segment.get(str(working_segment_id), {}) or {})
+        if matched:
+            return _identity_record_from_row(
+                matched,
+                pair_id=pair_id,
+                working_segment_id=working_segment_id,
+                resolution_source="full_legal_arc_registry",
+            )
+    if pair_id and registry_by_pair:
+        matched = _best_registry_row(list(registry_by_pair.get(str(pair_id), [])))
+        if matched:
+            return _identity_record_from_row(
+                matched,
+                pair_id=pair_id,
+                working_segment_id=working_segment_id,
+                resolution_source="full_legal_arc_registry",
+            )
+    if working_segment_id and segment_map:
+        matched = dict(segment_map.get(str(working_segment_id), {}) or {})
+        if matched:
+            return _identity_record_from_row(
+                matched,
+                pair_id=pair_id,
+                working_segment_id=working_segment_id,
+                resolution_source="step2_segments",
+            )
+    if pair_id and selected_rows:
+        matched = _best_segment_row(list(selected_rows.get(str(pair_id), [])))
+        if matched:
+            return _identity_record_from_row(
+                matched,
+                pair_id=pair_id,
+                working_segment_id=working_segment_id,
+                resolution_source="step2_segments",
+            )
+    return _identity_record_from_row(
+        {},
+        pair_id=pair_id,
+        working_segment_id=working_segment_id,
+        resolution_source="unresolved",
+    )
 
 
 def evaluate_patch_acceptance(run_root: Path | str, patch_id: str) -> dict[str, Any]:
@@ -221,7 +385,6 @@ def evaluate_patch_acceptance(run_root: Path | str, patch_id: str) -> dict[str, 
 def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[str, Any]:
     patch_dir = _patch_dir(run_root, complex_patch_id)
     segments_payload = _cached_patch_json(patch_dir / "step2" / "segments.json")
-    metrics_payload = _patch_metrics(run_root, complex_patch_id)
     roads_payload = _cached_patch_json(patch_dir / "step6" / "final_roads.json")
     should_not_payload = _cached_patch_json(patch_dir / "debug" / "step2_segment_should_not_exist.json")
     topology_pairs_payload = _cached_patch_json(patch_dir / "debug" / "step2_topology_pairs.json")
@@ -229,35 +392,71 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
 
     built_pair_set = set(_built_pairs(roads_payload))
     selected_rows = _pair_rows_by_id(list(segments_payload.get("segments", [])))
+    segment_map = {
+        str(item.get("segment_id", "")): dict(item)
+        for item in segments_payload.get("segments", [])
+        if str(item.get("segment_id", ""))
+    }
     excluded_rows = _pair_rows_by_id(list(segments_payload.get("excluded_candidates", [])))
     should_not_rows = list(should_not_payload.get("pairs", []))
     topology_rows = list(topology_pairs_payload.get("pairs", []))
     bridge_rows = list(bridge_audit_payload.get("pairs", []))
-    registry_rows = list(metrics_payload.get("full_legal_arc_registry", []))
+    registry_rows = _patch_full_registry_rows(run_root, complex_patch_id)
+    registry_by_pair = _registry_rows_by_pair(registry_rows)
+    registry_by_working_segment = _registry_rows_by_working_segment(registry_rows)
 
     decisions: list[dict[str, Any]] = []
-    target_pairs = [*_FALSE_POSITIVE_PAIRS, *_STABLE_BLOCKED_PAIRS, _BRIDGE_TARGET_PAIR, _REFERENCE_PAIR]
-    for pair_id in target_pairs:
-        selected = _best_segment_row(selected_rows.get(pair_id, []))
+    target_pairs = {
+        *_FALSE_POSITIVE_PAIRS,
+        *_STABLE_BLOCKED_PAIRS,
+        _BRIDGE_TARGET_PAIR,
+        _REFERENCE_PAIR,
+        *built_pair_set,
+    }
+    target_pairs.update(
+        str(_row_pair_id(row))
+        for row in registry_rows
+        if (
+            str(_row_pair_id(row))
+            and (
+                bool(row.get("controlled_entry_allowed", False))
+                or bool(row.get("built_final_road", False))
+                or str(row.get("topology_gap_decision", ""))
+                or bool(row.get("blocked_diagnostic_only", False))
+                or bool(str(row.get("hard_block_reason", "")))
+            )
+        )
+    )
+    for pair_id in sorted(target_pairs):
+        selected = _best_segment_row(list(selected_rows.get(pair_id, [])))
         excluded = _best_excluded_entry(excluded_rows.get(pair_id, []))
         should_not_row = _find_pair_row(should_not_rows, pair_id)
         topology_row = _find_pair_row(topology_rows, pair_id)
         bridge_row = _find_pair_row(bridge_rows, pair_id)
-        registry_row = _find_pair_row(registry_rows, pair_id)
-        source_row = selected or registry_row or excluded or topology_row or should_not_row or bridge_row or {}
+        registry_row = _best_registry_row(list(registry_by_pair.get(pair_id, [])))
+        resolved = _resolve_identity_record(
+            pair_id=pair_id,
+            working_segment_id=str((selected or {}).get("segment_id", "")),
+            registry_row=registry_row,
+            registry_by_pair=registry_by_pair,
+            registry_by_working_segment=registry_by_working_segment,
+            segment_map=segment_map,
+            selected_rows=selected_rows,
+        )
+        built_final_road = bool(pair_id in built_pair_set or resolved.get("built_final_road", False))
         reject_stage = ""
         reject_reason = ""
-        if not bool(pair_id in built_pair_set) and not selected:
+        if not built_final_road and not bool(resolved.get("entered_main_flow", False)) and not selected:
             reject_stage = str(
                 (excluded or {}).get("stage")
-                or (registry_row or {}).get("unbuilt_stage")
+                or resolved.get("unbuilt_stage", "")
                 or (bridge_row or {}).get("reject_stage")
                 or ""
             )
             reject_reason = str(
                 (excluded or {}).get("reason")
-                or (registry_row or {}).get("hard_block_reason")
-                or (registry_row or {}).get("unbuilt_reason")
+                or resolved.get("hard_block_reason", "")
+                or resolved.get("unbuilt_reason", "")
                 or (bridge_row or {}).get("reject_reason")
                 or ""
             )
@@ -265,32 +464,24 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
             {
                 "patch_id": str(complex_patch_id),
                 "pair": str(pair_id),
-                "topology_arc_id": str(source_row.get("topology_arc_id", "")),
-                "topology_arc_source_type": str(
-                    source_row.get("topology_arc_source_type")
-                    or source_row.get("arc_source_type")
-                    or ""
-                ),
-                "topology_arc_is_direct_legal": bool(
-                    source_row.get("topology_arc_is_direct_legal", source_row.get("is_direct_legal", False))
-                ),
-                "topology_arc_is_unique": bool(
-                    source_row.get("topology_arc_is_unique", source_row.get("is_unique", False))
-                ),
-                "blocked_diagnostic_only": bool(source_row.get("blocked_diagnostic_only", False)),
-                "blocked_diagnostic_reason": str(source_row.get("blocked_diagnostic_reason", "")),
-                "controlled_entry_allowed": bool(source_row.get("controlled_entry_allowed", False)),
-                "hard_block_reason": str(source_row.get("hard_block_reason", "")),
-                "topology_gap_decision": str(source_row.get("topology_gap_decision", "")),
-                "topology_gap_reason": str(source_row.get("topology_gap_reason", "")),
-                "bridge_chain_exists": bool(source_row.get("bridge_chain_exists", False)),
-                "bridge_chain_unique": bool(source_row.get("bridge_chain_unique", False)),
-                "bridge_chain_nodes": list(source_row.get("bridge_chain_nodes", [])),
-                "bridge_diagnostic_reason": str(source_row.get("bridge_diagnostic_reason", "")),
+                "topology_arc_id": str(resolved.get("topology_arc_id", "")),
+                "topology_arc_source_type": str(resolved.get("topology_arc_source_type", "")),
+                "topology_arc_is_direct_legal": bool(resolved.get("topology_arc_is_direct_legal", False)),
+                "topology_arc_is_unique": bool(resolved.get("topology_arc_is_unique", False)),
+                "blocked_diagnostic_only": bool(resolved.get("blocked_diagnostic_only", False)),
+                "blocked_diagnostic_reason": str(resolved.get("blocked_diagnostic_reason", "")),
+                "controlled_entry_allowed": bool(resolved.get("controlled_entry_allowed", False)),
+                "hard_block_reason": str(resolved.get("hard_block_reason", "")),
+                "topology_gap_decision": str(resolved.get("topology_gap_decision", "")),
+                "topology_gap_reason": str(resolved.get("topology_gap_reason", "")),
+                "bridge_chain_exists": bool(resolved.get("bridge_chain_exists", False)),
+                "bridge_chain_unique": bool(resolved.get("bridge_chain_unique", False)),
+                "bridge_chain_nodes": list(resolved.get("bridge_chain_nodes", [])),
+                "bridge_diagnostic_reason": str((topology_row or {}).get("bridge_diagnostic_reason", "")),
                 "bridge_classification": str(
                     (bridge_row or {}).get("bridge_classification")
-                    or source_row.get("bridge_classification")
-                    or source_row.get("bridge_diagnostic_reason", "")
+                    or (topology_row or {}).get("bridge_classification")
+                    or (bridge_row or {}).get("bridge_diagnostic_reason", "")
                     or ""
                 ),
                 "reject_stage": str(reject_stage),
@@ -298,16 +489,17 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
                 "should_not_reason": str((should_not_row or {}).get("reason", "")),
                 "topology_sources": list((topology_row or {}).get("topology_sources", [])),
                 "topology_paths": list((topology_row or {}).get("topology_paths", [])),
-                "entered_main_flow": bool(source_row.get("entered_main_flow", False)),
-                "traj_support_type": str(source_row.get("traj_support_type", "")),
-                "prior_support_type": str(source_row.get("prior_support_type", "")),
-                "corridor_identity": str(source_row.get("corridor_identity", "")),
-                "slot_status": str(source_row.get("slot_status", "")),
-                "unbuilt_stage": str(source_row.get("unbuilt_stage", "")),
-                "unbuilt_reason": str(source_row.get("unbuilt_reason", "")),
-                "built_final_road": bool(pair_id in built_pair_set),
-                "segment_id": str((selected or {}).get("segment_id", "")),
+                "entered_main_flow": bool(resolved.get("entered_main_flow", False)),
+                "traj_support_type": str(resolved.get("traj_support_type", "")),
+                "prior_support_type": str(resolved.get("prior_support_type", "")),
+                "corridor_identity": str(resolved.get("corridor_identity", "")),
+                "slot_status": str(resolved.get("slot_status", "")),
+                "unbuilt_stage": str(resolved.get("unbuilt_stage", "")),
+                "unbuilt_reason": str(resolved.get("unbuilt_reason", "")),
+                "built_final_road": built_final_road,
+                "segment_id": str(resolved.get("working_segment_id", "")),
                 "selected_segment": bool(selected is not None),
+                "identity_resolution_source": str(resolved.get("identity_resolution_source", "")),
             }
         )
     return {
@@ -733,17 +925,22 @@ def _production_arc_pass(row: dict[str, Any]) -> bool:
 
 
 def _registry_row_to_arc_record(row: dict[str, Any]) -> dict[str, Any]:
+    identity = _identity_record_from_row(row)
     return {
-        "topology_arc_id": str(row.get("topology_arc_id", "")),
-        "topology_arc_source_type": str(row.get("topology_arc_source_type", "")),
-        "topology_arc_is_direct_legal": bool(row.get("topology_arc_is_direct_legal", row.get("is_direct_legal", False))),
-        "topology_arc_is_unique": bool(row.get("topology_arc_is_unique", row.get("is_unique", False))),
-        "bridge_chain_exists": bool(row.get("bridge_chain_exists", False)),
-        "bridge_chain_unique": bool(row.get("bridge_chain_unique", False)),
-        "bridge_chain_nodes": list(row.get("bridge_chain_nodes", [])),
-        "blocked_diagnostic_only": bool(row.get("blocked_diagnostic_only", False)),
-        "blocked_diagnostic_reason": str(row.get("blocked_diagnostic_reason", "")),
-        "hard_block_reason": str(row.get("hard_block_reason", "")),
+        "topology_arc_id": str(identity.get("topology_arc_id", "")),
+        "topology_arc_source_type": str(identity.get("topology_arc_source_type", "")),
+        "topology_arc_is_direct_legal": bool(identity.get("topology_arc_is_direct_legal", False)),
+        "topology_arc_is_unique": bool(identity.get("topology_arc_is_unique", False)),
+        "controlled_entry_allowed": bool(identity.get("controlled_entry_allowed", False)),
+        "topology_gap_decision": str(identity.get("topology_gap_decision", "")),
+        "topology_gap_reason": str(identity.get("topology_gap_reason", "")),
+        "bridge_chain_exists": bool(identity.get("bridge_chain_exists", False)),
+        "bridge_chain_unique": bool(identity.get("bridge_chain_unique", False)),
+        "bridge_chain_nodes": list(identity.get("bridge_chain_nodes", [])),
+        "blocked_diagnostic_only": bool(identity.get("blocked_diagnostic_only", False)),
+        "blocked_diagnostic_reason": str(identity.get("blocked_diagnostic_reason", "")),
+        "hard_block_reason": str(identity.get("hard_block_reason", "")),
+        "working_segment_id": str(identity.get("working_segment_id", "")),
     }
 
 
@@ -760,40 +957,41 @@ def build_arc_legality_audit(run_root: Path | str, patch_ids: list[str]) -> dict
             for item in segments_payload.get("segments", [])
             if str(item.get("segment_id", ""))
         }
-        registry_by_working_segment = {
-            str(item.get("working_segment_id", "")): dict(item)
-            for item in registry_rows
-            if str(item.get("working_segment_id", ""))
-        }
+        registry_by_pair = _registry_rows_by_pair(registry_rows)
+        registry_by_working_segment = _registry_rows_by_working_segment(registry_rows)
+        selected_rows = _pair_rows_by_id(list(segments_payload.get("segments", [])))
         for segment in segments_payload.get("segments", []):
-            row = {
+            row = _identity_record_from_row(
+                segment,
+                pair_id=_pair_id_text(int(segment.get("src_nodeid", 0)), int(segment.get("dst_nodeid", 0))),
+                working_segment_id=str(segment.get("segment_id", "")),
+                resolution_source="step2_segments",
+            )
+            selected_row = {
                 "patch_id": str(patch_id),
                 "segment_id": str(segment.get("segment_id", "")),
-                "pair": _pair_id_text(int(segment.get("src_nodeid", 0)), int(segment.get("dst_nodeid", 0))),
-                "topology_arc_id": str(segment.get("topology_arc_id", "")),
-                "topology_arc_source_type": str(segment.get("topology_arc_source_type", "")),
-                "topology_arc_is_direct_legal": bool(segment.get("topology_arc_is_direct_legal", False)),
-                "topology_arc_is_unique": bool(segment.get("topology_arc_is_unique", False)),
-                "bridge_chain_exists": bool(segment.get("bridge_chain_exists", False)),
-                "bridge_chain_unique": bool(segment.get("bridge_chain_unique", False)),
-                "bridge_chain_nodes": list(segment.get("bridge_chain_nodes", [])),
-                "blocked_diagnostic_only": bool(segment.get("blocked_diagnostic_only", False)),
-                "blocked_diagnostic_reason": str(segment.get("blocked_diagnostic_reason", "")),
-                "hard_block_reason": str(segment.get("hard_block_reason", "")),
+                **row,
             }
-            row["production_arc_pass"] = _production_arc_pass(row)
-            selected_segment_rows.append(row)
+            selected_row["production_arc_pass"] = _production_arc_pass(selected_row)
+            selected_segment_rows.append(selected_row)
         for road in roads_payload.get("roads", []):
             road_segment_id = str(road.get("segment_id", ""))
-            segment = segment_map.get(road_segment_id, {})
-            registry_segment = registry_by_working_segment.get(road_segment_id, {})
-            source = dict(segment or registry_segment)
+            road_pair = _pair_id_text(int(road.get("src_nodeid", 0)), int(road.get("dst_nodeid", 0)))
+            resolved = _resolve_identity_record(
+                pair_id=road_pair,
+                working_segment_id=road_segment_id,
+                registry_by_pair=registry_by_pair,
+                registry_by_working_segment=registry_by_working_segment,
+                segment_map=segment_map,
+                selected_rows=selected_rows,
+            )
             row = {
                 "patch_id": str(patch_id),
                 "segment_id": road_segment_id,
-                "pair": _pair_id_text(int(road.get("src_nodeid", 0)), int(road.get("dst_nodeid", 0))),
-                **_registry_row_to_arc_record(source),
+                "pair": road_pair,
+                **_registry_row_to_arc_record(resolved),
                 "built_final_road": True,
+                "identity_resolution_source": str(resolved.get("identity_resolution_source", "")),
             }
             row["production_arc_pass"] = _production_arc_pass(row)
             built_road_rows.append(row)
@@ -823,6 +1021,7 @@ def build_arc_legality_audit(run_root: Path | str, patch_ids: list[str]) -> dict
         "selected_segments": selected_segment_rows,
         "built_roads": built_road_rows,
         "built_road_arc_checks": built_road_rows,
+        "violating_rows": violating_built_rows,
         "summary": {
             "selected_segment_count": int(len(selected_segment_rows)),
             "built_road_count": built_arc_count,
@@ -1337,6 +1536,217 @@ def build_strong_constraint_status(
     }
 
 
+def _gap_blocking_reason(
+    row: dict[str, Any],
+    *,
+    competing_rows: list[dict[str, Any]],
+) -> str:
+    if float(row.get("divstrip_overlap_ratio", 0.0)) > 0.10:
+        return "competing_arc_crosses_divstrip"
+    stronger_peer = any(
+        (
+            float(peer.get("traj_support_coverage_ratio", 0.0)) > float(row.get("traj_support_coverage_ratio", 0.0)) + 0.05
+            or float(peer.get("support_total_length_m", 0.0)) > float(row.get("support_total_length_m", 0.0)) + 10.0
+            or int(peer.get("traj_support_count", 0)) > int(row.get("traj_support_count", 0))
+        )
+        for peer in competing_rows
+        if str(peer.get("pair", "")) != str(row.get("pair", ""))
+    )
+    if stronger_peer:
+        return "competing_arc_support_weaker"
+    return "competing_arc_slot_conflict"
+
+
+def build_arc_obligation_registry(
+    *,
+    complex_patch_id: str,
+    topology_gap_review: dict[str, Any],
+    same_pair_multi_arc_observation: dict[str, Any],
+) -> dict[str, Any]:
+    gap_rows = [dict(row) for row in topology_gap_review.get("rows", []) if str(row.get("patch_id", "")) == str(complex_patch_id)]
+    same_pair_rows = [
+        dict(row)
+        for row in same_pair_multi_arc_observation.get("rows", [])
+        if str(row.get("patch_id", "")) == str(complex_patch_id)
+    ]
+    gap_rows_by_dst: dict[str, list[dict[str, Any]]] = {}
+    for row in gap_rows:
+        gap_rows_by_dst.setdefault(str(row.get("dst", "")), []).append(dict(row))
+
+    rows: list[dict[str, Any]] = []
+    for row in gap_rows:
+        classification = str(row.get("gap_classification", ""))
+        pair_id = str(row.get("pair", ""))
+        competing_rows = list(gap_rows_by_dst.get(str(row.get("dst", "")), []))
+        if classification == "gap_enter_mainflow":
+            obligation_status = "must_build_now"
+            current_status = "controlled_entry_built" if bool(row.get("built_final_road", False)) else "blocked"
+            blocking_layer = "none" if bool(row.get("built_final_road", False)) else str(row.get("unbuilt_stage", "") or "entry_gate")
+            blocking_reason = "" if bool(row.get("built_final_road", False)) else str(row.get("unbuilt_reason", "") or row.get("gap_reason", ""))
+            next_action = (
+                "keep_current_controlled_entry_resolution"
+                if bool(row.get("built_final_road", False))
+                else "trace_remaining_failure_in_stable_mainflow"
+            )
+        elif classification == "gap_remain_blocked":
+            obligation_status = "must_remain_blocked"
+            current_status = "blocked"
+            blocking_layer = "entry_gate"
+            blocking_reason = str(row.get("gap_reason", "") or row.get("unbuilt_reason", ""))
+            next_action = "keep_blocked_until_business_rule_changes"
+        else:
+            obligation_status = "root_cause_confirm_first"
+            current_status = "blocked"
+            blocking_layer = "pair_identity"
+            blocking_reason = _gap_blocking_reason(row, competing_rows=competing_rows)
+            next_action = "compare_competing_arc_slot_and_support_before_release"
+
+        rows.append(
+            {
+                "patch_id": str(complex_patch_id),
+                "src": int(row.get("src", 0)),
+                "dst": int(row.get("dst", 0)),
+                "pair": pair_id,
+                "topology_arc_id": str(row.get("topology_arc_id", "")),
+                "obligation_status": str(obligation_status),
+                "current_status": str(current_status),
+                "blocking_layer": str(blocking_layer),
+                "blocking_reason": str(blocking_reason),
+                "next_action": str(next_action),
+                "gap_classification": str(classification),
+                "gap_reason": str(row.get("gap_reason", "")),
+                "controlled_entry_allowed": bool(row.get("controlled_entry_allowed", False)),
+                "entered_main_flow": bool(row.get("entered_main_flow", False)),
+                "built_final_road": bool(row.get("built_final_road", False)),
+                "traj_support_type": str(row.get("traj_support_type", "no_support")),
+                "traj_support_count": int(row.get("traj_support_count", 0)),
+                "corridor_identity": str(row.get("corridor_identity", "unresolved")),
+                "slot_status": str(row.get("slot_status", "unresolved")),
+                "unbuilt_stage": str(row.get("unbuilt_stage", "")),
+                "unbuilt_reason": str(row.get("unbuilt_reason", "")),
+            }
+        )
+
+    for row in same_pair_rows:
+        rows.append(
+            {
+                "patch_id": str(complex_patch_id),
+                "src": int(row.get("src", 0)),
+                "dst": int(row.get("dst", 0)),
+                "pair": str(row.get("pair", "")),
+                "topology_arc_id": "",
+                "obligation_status": "root_cause_confirm_first",
+                "current_status": "observation_only",
+                "blocking_layer": "pair_identity",
+                "blocking_reason": "multi_arc_excluded_from_unique_denominator",
+                "next_action": (
+                    "compare_multi_arc_candidates_against_business_selection_rule"
+                    if bool(row.get("has_built_sibling_arc", False))
+                    else "define_multi_arc_selection_rule_before_allowing_build"
+                ),
+                "pair_arc_count": int(row.get("pair_arc_count", 0)),
+                "arc_ids": [str(v) for v in row.get("arc_ids", [])],
+                "has_built_sibling_arc": bool(row.get("has_built_sibling_arc", False)),
+                "built_sibling_arc_ids": [str(v) for v in row.get("built_sibling_arc_ids", [])],
+                "chord_available": bool(row.get("chord_available", False)),
+                "witness_available": bool(row.get("witness_available", False)),
+                "visual_gap_note": str(row.get("visual_gap_note", "")),
+            }
+        )
+
+    rows.sort(key=lambda item: (str(item.get("pair", "")), str(item.get("obligation_status", ""))))
+    return {
+        "patch_id": str(complex_patch_id),
+        "row_count": int(len(rows)),
+        "rows": rows,
+    }
+
+
+def build_competing_arc_review(
+    *,
+    complex_patch_id: str,
+    topology_gap_review: dict[str, Any],
+    same_pair_multi_arc_observation: dict[str, Any],
+) -> dict[str, Any]:
+    gap_rows = [dict(row) for row in topology_gap_review.get("rows", []) if str(row.get("patch_id", "")) == str(complex_patch_id)]
+    same_pair_rows = [
+        dict(row)
+        for row in same_pair_multi_arc_observation.get("rows", [])
+        if str(row.get("patch_id", "")) == str(complex_patch_id)
+    ]
+    gap_rows_by_dst: dict[str, list[dict[str, Any]]] = {}
+    for row in gap_rows:
+        gap_rows_by_dst.setdefault(str(row.get("dst", "")), []).append(dict(row))
+
+    rows: list[dict[str, Any]] = []
+    for row in gap_rows:
+        if str(row.get("gap_classification", "")) != "gap_ambiguous_need_more_constraints":
+            continue
+        competing_rows = list(gap_rows_by_dst.get(str(row.get("dst", "")), []))
+        root_cause_code = _gap_blocking_reason(row, competing_rows=competing_rows)
+        rows.append(
+            {
+                "patch_id": str(complex_patch_id),
+                "pair": str(row.get("pair", "")),
+                "review_scope": "topology_gap_competing_arc",
+                "topology_arc_id": str(row.get("topology_arc_id", "")),
+                "competing_group_key": f"dst:{int(row.get('dst', 0))}",
+                "competing_pair_count": int(len(competing_rows)),
+                "competing_pairs": [str(item.get("pair", "")) for item in competing_rows],
+                "traj_support_type": str(row.get("traj_support_type", "no_support")),
+                "traj_support_count": int(row.get("traj_support_count", 0)),
+                "support_total_length_m": float(row.get("support_total_length_m", 0.0)),
+                "drivezone_overlap_ratio": float(row.get("drivezone_overlap_ratio", 0.0)),
+                "divstrip_overlap_ratio": float(row.get("divstrip_overlap_ratio", 0.0)),
+                "root_cause_code": str(root_cause_code),
+                "root_cause_detail": (
+                    "candidate witness still overlaps divstrip, so the competing arc cannot be released without violating physical separation"
+                    if root_cause_code == "competing_arc_crosses_divstrip"
+                    else (
+                    "multiple topology-gap arcs compete for the same downstream destination slot; release requires stronger pair identity constraints"
+                    if root_cause_code == "competing_arc_slot_conflict"
+                    else "multiple topology-gap arcs compete for the same destination and this arc currently has weaker support than its peer"
+                    )
+                ),
+                "next_action": "compare_competing_arc_slot_and_support_before_release",
+            }
+        )
+
+    for row in same_pair_rows:
+        rows.append(
+            {
+                "patch_id": str(complex_patch_id),
+                "pair": str(row.get("pair", "")),
+                "review_scope": "same_pair_multi_arc_observation",
+                "topology_arc_id": "",
+                "pair_arc_count": int(row.get("pair_arc_count", 0)),
+                "arc_ids": [str(v) for v in row.get("arc_ids", [])],
+                "has_built_sibling_arc": bool(row.get("has_built_sibling_arc", False)),
+                "built_sibling_arc_ids": [str(v) for v in row.get("built_sibling_arc_ids", [])],
+                "chord_available": bool(row.get("chord_available", False)),
+                "witness_available": bool(row.get("witness_available", False)),
+                "root_cause_code": "multi_arc_excluded_from_unique_denominator",
+                "root_cause_detail": (
+                    "same src/dst has multiple direct arcs; current strict coverage excludes the pair from the unique denominator"
+                    if not bool(row.get("has_built_sibling_arc", False))
+                    else "same src/dst has multiple direct arcs; a built sibling exists but this observation pair still requires explicit business selection semantics"
+                ),
+                "next_action": (
+                    "define_multi_arc_selection_rule_before_allowing_build"
+                    if not bool(row.get("has_built_sibling_arc", False))
+                    else "compare_built_sibling_and_nonbuilt_arc_before_selection"
+                ),
+            }
+        )
+
+    rows.sort(key=lambda item: (str(item.get("review_scope", "")), str(item.get("pair", ""))))
+    return {
+        "patch_id": str(complex_patch_id),
+        "row_count": int(len(rows)),
+        "rows": rows,
+    }
+
+
 def _render_summary_markdown(
     *,
     run_root: Path,
@@ -1664,6 +2074,120 @@ def write_topology_gap_controlled_cover_review(
     }
 
 
+def write_arc_obligation_closure_review(
+    *,
+    run_root: Path | str,
+    output_root: Path | str,
+    simple_patch_ids: list[str] | None = None,
+    complex_patch_id: str = "5417632623039346",
+) -> dict[str, Any]:
+    summary = write_topology_gap_controlled_cover_review(
+        run_root=run_root,
+        output_root=output_root,
+        simple_patch_ids=simple_patch_ids,
+        complex_patch_id=complex_patch_id,
+    )
+    output_root_path = Path(output_root)
+    topology_gap_review = dict(summary.get("topology_gap_decision_review", {}))
+    same_pair_multi_arc_observation = dict(summary.get("same_pair_multi_arc_observation", {}))
+    strict_vs_visual_gap_summary = dict(summary.get("strict_vs_visual_gap_summary", {}))
+    arc_obligation_registry = build_arc_obligation_registry(
+        complex_patch_id=str(complex_patch_id),
+        topology_gap_review=topology_gap_review,
+        same_pair_multi_arc_observation=same_pair_multi_arc_observation,
+    )
+    competing_arc_review = build_competing_arc_review(
+        complex_patch_id=str(complex_patch_id),
+        topology_gap_review=topology_gap_review,
+        same_pair_multi_arc_observation=same_pair_multi_arc_observation,
+    )
+    complex_patch_arc_obligation_review = {
+        "patch_id": str(complex_patch_id),
+        "arc_obligation_registry": arc_obligation_registry,
+        "competing_arc_review": competing_arc_review,
+        "strict_vs_visual_gap_summary": strict_vs_visual_gap_summary,
+    }
+
+    write_json(output_root_path / "arc_obligation_registry.json", arc_obligation_registry)
+    with (output_root_path / "arc_obligation_registry.csv").open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "patch_id",
+                "src",
+                "dst",
+                "pair",
+                "topology_arc_id",
+                "obligation_status",
+                "current_status",
+                "blocking_layer",
+                "blocking_reason",
+                "next_action",
+                "gap_classification",
+                "gap_reason",
+                "controlled_entry_allowed",
+                "entered_main_flow",
+                "built_final_road",
+                "traj_support_type",
+                "traj_support_count",
+                "corridor_identity",
+                "slot_status",
+                "unbuilt_stage",
+                "unbuilt_reason",
+                "pair_arc_count",
+                "arc_ids",
+                "has_built_sibling_arc",
+                "built_sibling_arc_ids",
+                "chord_available",
+                "witness_available",
+                "visual_gap_note",
+            ],
+        )
+        writer.writeheader()
+        for row in arc_obligation_registry.get("rows", []):
+            payload = dict(row)
+            payload["arc_ids"] = ",".join(str(v) for v in row.get("arc_ids", []))
+            payload["built_sibling_arc_ids"] = ",".join(str(v) for v in row.get("built_sibling_arc_ids", []))
+            writer.writerow({key: payload.get(key, "") for key in writer.fieldnames})
+
+    write_json(output_root_path / "competing_arc_review.json", competing_arc_review)
+    write_json(output_root_path / "complex_patch_arc_obligation_review.json", complex_patch_arc_obligation_review)
+    summary_lines = []
+    summary_lines.append("")
+    summary_lines.append("## Arc Obligation Closure")
+    summary_lines.append("")
+    summary_lines.append(
+        f"- strict_coverage=`{strict_vs_visual_gap_summary.get('strict_coverage', {}).get('built', 0)}/{strict_vs_visual_gap_summary.get('strict_coverage', {}).get('total', 0)}`"
+    )
+    summary_lines.append(
+        f"- same_pair_multi_arc_observation_count=`{same_pair_multi_arc_observation.get('row_count', 0)}`"
+    )
+    summary_lines.append(
+        f"- arc_obligation_row_count=`{arc_obligation_registry.get('row_count', 0)}`"
+    )
+    summary_lines.append(
+        f"- competing_arc_row_count=`{competing_arc_review.get('row_count', 0)}`"
+    )
+    controlled_rows = [
+        row
+        for row in arc_obligation_registry.get("rows", [])
+        if str(row.get("current_status", "")) == "controlled_entry_built"
+    ]
+    if controlled_rows:
+        summary_lines.append(
+            f"- controlled_entry_built_pairs=`{','.join(str(row.get('pair', '')) for row in controlled_rows)}`"
+        )
+    summary_path = output_root_path / "SUMMARY.md"
+    existing_summary = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
+    summary_path.write_text(existing_summary + "\n".join(summary_lines) + "\n", encoding="utf-8")
+    return {
+        **summary,
+        "arc_obligation_registry": arc_obligation_registry,
+        "competing_arc_review": competing_arc_review,
+        "complex_patch_arc_obligation_review": complex_patch_arc_obligation_review,
+    }
+
+
 __all__ = [
     "build_arc_evidence_attach_audit",
     "build_arc_legality_audit",
@@ -1680,6 +2204,7 @@ __all__ = [
     "write_bridge_trial_review",
     "write_legal_arc_coverage_review",
     "write_perf_opt_arc_first_review",
+    "write_arc_obligation_closure_review",
     "write_semantic_fix_after_perf_review",
     "write_topology_gap_controlled_cover_review",
     "write_witness_vis_step5_recovery_review",

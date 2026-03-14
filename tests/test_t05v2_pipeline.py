@@ -11,7 +11,10 @@ import pytest
 from shapely.geometry import LineString, Polygon
 
 from highway_topo_poc.modules.t05_topology_between_rc_v2.io import PatchInputs
-from highway_topo_poc.modules.t05_topology_between_rc_v2.audit_acceptance import build_arc_legality_audit
+from highway_topo_poc.modules.t05_topology_between_rc_v2.audit_acceptance import (
+    build_arc_legality_audit,
+    build_pair_decisions,
+)
 from highway_topo_poc.modules.t05_topology_between_rc_v2.models import (
     CorridorIdentity,
     CorridorInterval,
@@ -33,6 +36,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.review import (
     evaluate_patch_acceptance,
     write_arc_first_attach_evidence_review,
     write_arc_legality_fix_review,
+    write_arc_obligation_closure_review,
     write_legal_arc_coverage_review,
     write_perf_opt_arc_first_review,
     write_semantic_fix_after_perf_review,
@@ -3011,6 +3015,25 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     assert (output_root_wrap / "complex_patch_gap_cover_review.json").exists()
     assert "complex_patch_gap_cover_review" in wrapped
 
+    output_root_obligation = tmp_path / "bundle_obligation"
+    obligation = write_arc_obligation_closure_review(run_root=run_root, output_root=output_root_obligation)
+    assert (output_root_obligation / "arc_obligation_registry.json").exists()
+    assert (output_root_obligation / "arc_obligation_registry.csv").exists()
+    assert (output_root_obligation / "competing_arc_review.json").exists()
+    assert (output_root_obligation / "complex_patch_arc_obligation_review.json").exists()
+    obligation_registry = _read_json(output_root_obligation / "arc_obligation_registry.json")
+    obligation_by_pair = {str(item["pair"]): item for item in obligation_registry["rows"]}
+    assert obligation_by_pair["760239:6963539359479390368"]["obligation_status"] == "must_build_now"
+    assert obligation_by_pair["55353246:37687913"]["obligation_status"] == "root_cause_confirm_first"
+    assert obligation_by_pair["55353246:37687913"]["blocking_reason"].startswith("competing_arc_")
+    assert obligation_by_pair["21779764:785642"]["current_status"] == "observation_only"
+    competing = _read_json(output_root_obligation / "competing_arc_review.json")
+    competing_by_pair = {str(item["pair"]): item for item in competing["rows"]}
+    assert competing_by_pair["55353246:37687913"]["root_cause_code"].startswith("competing_arc_")
+    assert competing_by_pair["21779764:785642"]["root_cause_code"] == "multi_arc_excluded_from_unique_denominator"
+    assert "arc_obligation_registry" in obligation
+    assert "competing_arc_review" in obligation
+
 
 def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
     rows = [
@@ -3099,6 +3122,120 @@ def test_t05v2_arc_legality_audit_uses_full_registry_for_arc_first_built_segment
     audit = build_arc_legality_audit(run_root, [patch_id])
     assert int(audit["summary"]["bad_built_arc_count"]) == 0
     assert bool(audit["summary"]["built_all_direct_unique"]) is True
+
+
+def test_t05v2_pair_decisions_include_controlled_entry_built_pair(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    patch_id = "patch_controlled_pair"
+    patch_dir = run_root / "patches" / patch_id
+    _write_json(
+        patch_dir / "metrics.json",
+        {
+            "patch_id": patch_id,
+            "full_legal_arc_registry": [
+                {
+                    "pair": "760239:6963539359479390368",
+                    "src": 760239,
+                    "dst": 6963539359479390368,
+                    "topology_arc_id": "arc_gap_c",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": True,
+                    "entered_main_flow": True,
+                    "controlled_entry_allowed": True,
+                    "topology_gap_decision": "gap_enter_mainflow",
+                    "topology_gap_reason": "gap_should_enter_mainflow",
+                    "working_segment_id": "arcseg::arc_gap_c",
+                    "built_final_road": True,
+                }
+            ],
+        },
+    )
+    _write_json(patch_dir / "step2" / "segments.json", {"segments": [], "excluded_candidates": []})
+    _write_json(
+        patch_dir / "step6" / "final_roads.json",
+        {
+            "roads": [
+                {
+                    "road_id": "road_gap_c",
+                    "segment_id": "arcseg::arc_gap_c",
+                    "src_nodeid": 760239,
+                    "dst_nodeid": 6963539359479390368,
+                }
+            ],
+            "road_results": [],
+        },
+    )
+    _write_json(patch_dir / "debug" / "step2_segment_should_not_exist.json", {"pairs": []})
+    _write_json(patch_dir / "debug" / "step2_topology_pairs.json", {"pairs": []})
+    _write_json(patch_dir / "debug" / "step2_blocked_pair_bridge_audit.json", {"pairs": []})
+
+    decisions = build_pair_decisions(run_root, patch_id)
+    by_pair = {str(item.get("pair", "")): item for item in decisions.get("pairs", [])}
+    row = by_pair["760239:6963539359479390368"]
+    assert bool(row["built_final_road"]) is True
+    assert bool(row["topology_arc_is_direct_legal"]) is True
+    assert bool(row["topology_arc_is_unique"]) is True
+    assert bool(row["controlled_entry_allowed"]) is True
+    assert row["topology_gap_decision"] == "gap_enter_mainflow"
+    assert row["topology_gap_reason"] == "gap_should_enter_mainflow"
+    assert row["identity_resolution_source"] == "full_legal_arc_registry"
+
+
+def test_t05v2_arc_legality_audit_does_not_flag_controlled_entry_built_pair(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    patch_id = "patch_controlled_audit"
+    patch_dir = run_root / "patches" / patch_id
+    _write_json(
+        patch_dir / "metrics.json",
+        {
+            "patch_id": patch_id,
+            "full_legal_arc_registry": [
+                {
+                    "pair": "760239:6963539359479390368",
+                    "src": 760239,
+                    "dst": 6963539359479390368,
+                    "topology_arc_id": "arc_gap_c",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": True,
+                    "entered_main_flow": True,
+                    "controlled_entry_allowed": True,
+                    "blocked_diagnostic_only": True,
+                    "blocked_diagnostic_reason": "topology_gap_unresolved",
+                    "hard_block_reason": "topology_gap_unresolved",
+                    "topology_gap_decision": "gap_enter_mainflow",
+                    "topology_gap_reason": "gap_should_enter_mainflow",
+                    "working_segment_id": "arcseg::arc_gap_c",
+                    "built_final_road": True,
+                }
+            ],
+        },
+    )
+    _write_json(patch_dir / "step2" / "segments.json", {"segments": [], "excluded_candidates": []})
+    _write_json(
+        patch_dir / "step6" / "final_roads.json",
+        {
+            "roads": [
+                {
+                    "road_id": "road_gap_c",
+                    "segment_id": "arcseg::arc_gap_c",
+                    "src_nodeid": 760239,
+                    "dst_nodeid": 6963539359479390368,
+                }
+            ],
+            "road_results": [],
+        },
+    )
+
+    audit = build_arc_legality_audit(run_root, [patch_id])
+    built_row = audit["built_roads"][0]
+    assert bool(built_row["controlled_entry_allowed"]) is True
+    assert bool(built_row["blocked_diagnostic_only"]) is False
+    assert built_row["hard_block_reason"] == ""
+    assert int(audit["summary"]["bad_built_arc_count"]) == 0
+    assert bool(audit["summary"]["built_all_direct_unique"]) is True
+    assert "760239:6963539359479390368" not in audit["summary"]["violating_built_pairs"]
 
 
 def test_t05v2_scripts_stepwise_state_resume(tmp_path: Path) -> None:
