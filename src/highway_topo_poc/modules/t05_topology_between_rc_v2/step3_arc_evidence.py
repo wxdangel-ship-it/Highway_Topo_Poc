@@ -7,7 +7,7 @@ from typing import Any
 
 from shapely.geometry import LineString, Point
 
-from .io import write_json, write_lines_geojson
+from .io import write_features_geojson, write_json, write_lines_geojson
 from .models import Segment, coords_to_line, line_to_coords
 from .step3_corridor_identity import build_patch_geometry_cache, build_prior_reference_index
 
@@ -91,6 +91,8 @@ def _group_projected_spans(
                 "end_s": float(end_s),
                 "span_length_m": float(span_len),
                 "coverage_ratio": float(span_ratio),
+                "source_span_start_idx": int(min(item[0] for item in rows)),
+                "source_span_end_idx": int(max(item[0] for item in rows)),
             }
         )
     return out
@@ -108,6 +110,103 @@ def _ordered_terminal_hit(hit_positions_by_node: dict[int, tuple[int, ...]], src
         if dst_idx < len(dst_positions):
             return True
     return False
+
+
+def _ordered_terminal_event_pair(events: tuple[dict[str, Any], ...], src_nodeid: int, dst_nodeid: int) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    src_events = [dict(item) for item in events if int(item.get("nodeid", 0)) == int(src_nodeid)]
+    dst_events = [dict(item) for item in events if int(item.get("nodeid", 0)) == int(dst_nodeid)]
+    if not src_events or not dst_events:
+        return None
+    dst_idx = 0
+    for src_event in src_events:
+        src_pos = int(src_event.get("index", -1))
+        while dst_idx < len(dst_events) and int(dst_events[dst_idx].get("index", -1)) <= int(src_pos):
+            dst_idx += 1
+        if dst_idx < len(dst_events):
+            return dict(src_event), dict(dst_events[dst_idx])
+    return None
+
+
+def _subline_from_coords(coords: tuple[tuple[float, float], ...], start_idx: int, end_idx: int) -> LineString | None:
+    if not coords:
+        return None
+    lo = max(0, min(int(start_idx), int(end_idx)))
+    hi = min(len(coords) - 1, max(int(start_idx), int(end_idx)))
+    if hi - lo < 1:
+        return None
+    line = LineString(list(coords[lo : hi + 1]))
+    if line.is_empty or line.length <= 1e-6:
+        return None
+    return line
+
+
+def _coords_list(line: LineString | None) -> list[list[float]]:
+    if line is None or line.is_empty:
+        return []
+    return [[float(x), float(y)] for x, y, *_ in line.coords]
+
+
+def _support_segment_payload(
+    *,
+    traj_id: str,
+    support_type: str,
+    line: LineString | None,
+    segment_order: int,
+    is_stitched: bool,
+    support_score: float,
+    source_span_start_idx: int,
+    source_span_end_idx: int,
+) -> dict[str, Any] | None:
+    if line is None or line.is_empty or line.length <= 1e-6:
+        return None
+    return {
+        "traj_id": str(traj_id),
+        "support_type": str(support_type),
+        "segment_order": int(segment_order),
+        "is_stitched": bool(is_stitched),
+        "support_score": float(support_score),
+        "support_length_m": float(line.length),
+        "source_span_start_idx": int(source_span_start_idx),
+        "source_span_end_idx": int(source_span_end_idx),
+        "line_coords": _coords_list(line),
+        "start_anchor_coords": [float(line.coords[0][0]), float(line.coords[0][1])],
+        "end_anchor_coords": [float(line.coords[-1][0]), float(line.coords[-1][1])],
+    }
+
+
+def _support_anchors_from_segments(segments: list[dict[str, Any]]) -> tuple[list[float] | None, list[float] | None]:
+    if not segments:
+        return None, None
+    ordered = sorted(
+        [dict(item) for item in segments if list(item.get("line_coords", []))],
+        key=lambda item: (
+            int(item.get("segment_order", 0)),
+            int(item.get("source_span_start_idx", 0)),
+            int(item.get("source_span_end_idx", 0)),
+        ),
+    )
+    if not ordered:
+        return None, None
+    start_coords = list(ordered[0].get("start_anchor_coords", [])) or list((ordered[0].get("line_coords") or [[]])[0])
+    end_coords = list(ordered[-1].get("end_anchor_coords", [])) or list((ordered[-1].get("line_coords") or [[]])[-1])
+    if len(start_coords) < 2 or len(end_coords) < 2:
+        return None, None
+    return [float(start_coords[0]), float(start_coords[1])], [float(end_coords[0]), float(end_coords[1])]
+
+
+def _best_support_reference_coords(segments: list[dict[str, Any]]) -> list[list[float]]:
+    if not segments:
+        return []
+    best = sorted(
+        [dict(item) for item in segments if list(item.get("line_coords", []))],
+        key=lambda item: (
+            -float(item.get("support_score", 0.0)),
+            -float(item.get("support_length_m", 0.0)),
+            str(item.get("traj_id", "")),
+            int(item.get("segment_order", 0)),
+        ),
+    )
+    return list(best[0].get("line_coords", [])) if best else []
 
 
 def _build_trajectory_attach_cache(
@@ -140,9 +239,11 @@ def _build_trajectory_attach_cache(
         rows.append(
             {
                 "traj_id": str(getattr(traj, "traj_id", "")),
+                "coords": tuple((float(x), float(y)) for x, y in coords),
                 "points": points,
                 "line": line,
                 "bbox": bbox,
+                "events": tuple(dict(item) for item in events),
                 "hit_positions_by_node": {int(nodeid): tuple(vals) for nodeid, vals in hit_positions_by_node.items()},
             }
         )
@@ -259,6 +360,10 @@ def _support_type_for_arc(
             "traj_support_span_count": 0,
             "traj_support_coverage_ratio": 0.0,
             "traj_support_spans": [],
+            "traj_support_segments": [],
+            "support_reference_coords": [],
+            "support_anchor_src_coords": None,
+            "support_anchor_dst_coords": None,
             "prior_support_type": prior_support_type,
             "prior_support_available": bool(prior_available),
         }
@@ -266,6 +371,7 @@ def _support_type_for_arc(
     terminal_traj_ids: list[str] = []
     span_rows: list[dict[str, Any]] = []
     span_traj_ids: list[str] = []
+    support_segments: list[dict[str, Any]] = []
     for traj_row in candidate_traj_rows:
         support = _scan_arc_traj_support(
             arc_line=arc_line,
@@ -279,16 +385,55 @@ def _support_type_for_arc(
             max_seq_gap=max_seq_gap,
             max_proj_gap_m=max_proj_gap_m,
         )
+        traj_id = str(support["traj_id"])
         if bool(support["terminal_supported"]):
-            terminal_traj_ids.append(str(support["traj_id"]))
+            terminal_traj_ids.append(traj_id)
+            terminal_event_pair = _ordered_terminal_event_pair(tuple(traj_row.get("events", tuple())), int(row["src"]), int(row["dst"]))
+            if terminal_event_pair is not None:
+                start_event, end_event = terminal_event_pair
+                terminal_line = _subline_from_coords(
+                    tuple(traj_row.get("coords", tuple())),
+                    int(start_event.get("index", 0)),
+                    int(end_event.get("index", 0)),
+                )
+                terminal_payload = _support_segment_payload(
+                    traj_id=traj_id,
+                    support_type="terminal_crossing_support",
+                    line=terminal_line,
+                    segment_order=int(len(support_segments)),
+                    is_stitched=False,
+                    support_score=1.0,
+                    source_span_start_idx=int(start_event.get("index", 0)),
+                    source_span_end_idx=int(end_event.get("index", 0)),
+                )
+                if terminal_payload is not None:
+                    support_segments.append(terminal_payload)
         spans = list(support["spans"])
         if not spans:
             continue
-        traj_id = str(support["traj_id"])
         span_traj_ids.append(traj_id)
-        for span in spans:
+        for span_order, span in enumerate(spans):
             span_rows.append({**dict(span), "traj_id": traj_id})
+            span_line = _subline_from_coords(
+                tuple(traj_row.get("coords", tuple())),
+                int(span.get("source_span_start_idx", 0)),
+                int(span.get("source_span_end_idx", 0)),
+            )
+            span_payload = _support_segment_payload(
+                traj_id=traj_id,
+                support_type="partial_arc_support",
+                line=span_line,
+                segment_order=int(span_order),
+                is_stitched=False,
+                support_score=float(span.get("coverage_ratio", 0.0)),
+                source_span_start_idx=int(span.get("source_span_start_idx", 0)),
+                source_span_end_idx=int(span.get("source_span_end_idx", 0)),
+            )
+            if span_payload is not None:
+                support_segments.append(span_payload)
     traj_ids = sorted(set([*terminal_traj_ids, *span_traj_ids]))
+    support_anchor_src_coords, support_anchor_dst_coords = _support_anchors_from_segments(support_segments)
+    support_reference_coords = _best_support_reference_coords(support_segments)
     if terminal_traj_ids:
         coverage_ratio = 1.0 if arc_line.length > 1e-6 else 0.0
         return {
@@ -297,6 +442,10 @@ def _support_type_for_arc(
             "traj_support_span_count": int(max(1, len(span_rows))),
             "traj_support_coverage_ratio": float(coverage_ratio),
             "traj_support_spans": span_rows,
+            "traj_support_segments": support_segments,
+            "support_reference_coords": support_reference_coords,
+            "support_anchor_src_coords": support_anchor_src_coords,
+            "support_anchor_dst_coords": support_anchor_dst_coords,
             "prior_support_type": prior_support_type,
             "prior_support_available": bool(prior_available),
         }
@@ -307,6 +456,10 @@ def _support_type_for_arc(
             "traj_support_span_count": 0,
             "traj_support_coverage_ratio": 0.0,
             "traj_support_spans": [],
+            "traj_support_segments": [],
+            "support_reference_coords": [],
+            "support_anchor_src_coords": None,
+            "support_anchor_dst_coords": None,
             "prior_support_type": prior_support_type,
             "prior_support_available": bool(prior_available),
         }
@@ -326,12 +479,21 @@ def _support_type_for_arc(
     covers_start = bool(merged and float(merged[0][0]) <= endpoint_margin)
     covers_end = bool(merged and float(merged[-1][1]) >= float(arc_line.length) - endpoint_margin)
     stitched = bool(len(span_rows) >= 2 and covers_start and covers_end and coverage_ratio >= stitched_min_ratio)
+    if stitched:
+        for item in support_segments:
+            if str(item.get("support_type", "")) == "partial_arc_support":
+                item["support_type"] = "stitched_arc_support"
+                item["is_stitched"] = True
     return {
         "traj_support_type": "stitched_arc_support" if stitched else "partial_arc_support",
         "traj_support_ids": traj_ids,
         "traj_support_span_count": int(len(span_rows)),
         "traj_support_coverage_ratio": float(coverage_ratio),
         "traj_support_spans": span_rows,
+        "traj_support_segments": support_segments,
+        "support_reference_coords": support_reference_coords,
+        "support_anchor_src_coords": support_anchor_src_coords,
+        "support_anchor_dst_coords": support_anchor_dst_coords,
         "prior_support_type": prior_support_type,
         "prior_support_available": bool(prior_available),
     }
@@ -526,6 +688,10 @@ def build_arc_evidence_attach(
                 "traj_support_span_count": int(support["traj_support_span_count"]),
                 "traj_support_coverage_ratio": float(support["traj_support_coverage_ratio"]),
                 "traj_support_spans": list(support["traj_support_spans"]),
+                "traj_support_segments": list(support.get("traj_support_segments", [])),
+                "support_reference_coords": list(support.get("support_reference_coords", [])),
+                "support_anchor_src_coords": support.get("support_anchor_src_coords"),
+                "support_anchor_dst_coords": support.get("support_anchor_dst_coords"),
                 "prior_support_type": str(support["prior_support_type"]),
                 "prior_support_available": bool(support["prior_support_available"]),
             }
@@ -564,6 +730,7 @@ def build_arc_evidence_attach(
                 "traj_support_ids": [str(v) for v in current["traj_support_ids"]],
                 "traj_support_span_count": int(current["traj_support_span_count"]),
                 "traj_support_coverage_ratio": float(current["traj_support_coverage_ratio"]),
+                "traj_support_segment_count": int(len(current.get("traj_support_segments", []))),
                 "prior_support_type": str(current["prior_support_type"]),
                 "working_segment_id": str(current.get("working_segment_id", "")),
                 "working_segment_source": str(current.get("working_segment_source", "")),
@@ -699,6 +866,37 @@ def run_witness_stage(
     write_lines_geojson(
         dbg_dir / "arc_first_working_segments.geojson",
         [_segment_feature(segment, row_by_segment_id.get(str(segment.segment_id), {})) for segment in evidence["working_segments"]],
+    )
+    write_features_geojson(
+        dbg_dir / "arc_traj_support_segments.geojson",
+        [
+            (
+                coords_to_line(
+                    tuple(
+                        (float(coord[0]), float(coord[1]))
+                        for coord in item.get("line_coords", [])
+                        if isinstance(coord, (list, tuple)) and len(coord) >= 2
+                    )
+                ),
+                {
+                    "patch_id": str(patch_id),
+                    "src": int(row.get("src", 0)),
+                    "dst": int(row.get("dst", 0)),
+                    "topology_arc_id": str(row.get("topology_arc_id", "")),
+                    "traj_id": str(item.get("traj_id", "")),
+                    "support_type": str(item.get("support_type", "")),
+                    "segment_order": int(item.get("segment_order", 0)),
+                    "is_stitched": bool(item.get("is_stitched", False)),
+                    "support_score": float(item.get("support_score", 0.0)),
+                    "support_length_m": float(item.get("support_length_m", 0.0)),
+                    "source_span_start_idx": int(item.get("source_span_start_idx", 0)),
+                    "source_span_end_idx": int(item.get("source_span_end_idx", 0)),
+                },
+            )
+            for row in evidence["rows"]
+            for item in row.get("traj_support_segments", [])
+            if len(item.get("line_coords", [])) >= 2
+        ],
     )
     return {
         "artifact": artifact,

@@ -1601,6 +1601,34 @@ def write_semantic_fix_after_perf_review(
     )
 
 
+def write_witness_vis_step5_recovery_review(
+    *,
+    run_root: Path | str,
+    output_root: Path | str,
+    simple_patch_ids: list[str] | None = None,
+    complex_patch_id: str = "5417632623039346",
+) -> dict[str, Any]:
+    all_simple_patch_ids = list(simple_patch_ids) if simple_patch_ids else ["5417632690143239", "5417632690143326"]
+    summary = write_semantic_fix_after_perf_review(
+        run_root=run_root,
+        output_root=output_root,
+        simple_patch_ids=all_simple_patch_ids,
+        complex_patch_id=complex_patch_id,
+    )
+    from .witness_review import write_witness_vis_step5_recovery_bundle
+
+    witness_summary = write_witness_vis_step5_recovery_bundle(
+        run_root=run_root,
+        output_root=output_root,
+        patch_ids=[*all_simple_patch_ids, str(complex_patch_id)],
+        complex_patch_id=str(complex_patch_id),
+    )
+    return {
+        **summary,
+        **witness_summary,
+    }
+
+
 __all__ = [
     "build_arc_evidence_attach_audit",
     "build_arc_legality_audit",
@@ -1618,4 +1646,5 @@ __all__ = [
     "write_legal_arc_coverage_review",
     "write_perf_opt_arc_first_review",
     "write_semantic_fix_after_perf_review",
+    "write_witness_vis_step5_recovery_review",
 ]

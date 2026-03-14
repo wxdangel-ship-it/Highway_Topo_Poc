@@ -3236,6 +3236,8 @@ def _build_final_road(
     inputs: PatchInputs,
     prior_roads: list[Any],
     params: dict[str, Any],
+    arc_row: dict[str, Any] | None = None,
+    divstrip_buffer: Any | None = None,
 ) -> tuple[FinalRoad | None, dict[str, Any]]:
     return _step5_build_final_road(
         patch_id=patch_id,
@@ -3247,6 +3249,8 @@ def _build_final_road(
         inputs=inputs,
         prior_roads=prior_roads,
         params=params,
+        arc_row=arc_row,
+        divstrip_buffer=divstrip_buffer,
     )
 
 

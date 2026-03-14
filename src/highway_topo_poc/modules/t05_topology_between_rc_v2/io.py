@@ -147,13 +147,22 @@ def _feature(geom: LineString, props: dict[str, Any]) -> dict[str, Any]:
     return {"type": "Feature", "geometry": mapping(geom), "properties": dict(props)}
 
 
-def write_lines_geojson(path: Path, features: list[tuple[LineString, dict[str, Any]]], *, crs_name: str = "EPSG:3857") -> None:
+def write_features_geojson(
+    path: Path,
+    features: list[tuple[BaseGeometry, dict[str, Any]]],
+    *,
+    crs_name: str = "EPSG:3857",
+) -> None:
     payload = {
         "type": "FeatureCollection",
         "features": [_feature(geom, props) for geom, props in features if geom is not None and not geom.is_empty],
         "crs": {"type": "name", "properties": {"name": str(crs_name)}},
     }
     write_json(path, payload)
+
+
+def write_lines_geojson(path: Path, features: list[tuple[LineString, dict[str, Any]]], *, crs_name: str = "EPSG:3857") -> None:
+    write_features_geojson(path, features, crs_name=crs_name)
 
 
 def write_step_state(

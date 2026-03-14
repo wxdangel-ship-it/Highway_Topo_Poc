@@ -6,7 +6,7 @@ from time import perf_counter
 from typing import Any
 
 from shapely.geometry import LineString, Point
-from shapely.ops import nearest_points
+from shapely.ops import nearest_points, substring
 
 from .io import write_json, write_lines_geojson
 from .models import BaseCrossSection, CorridorIdentity, CorridorWitness, FinalRoad, Segment, SlotInterval, line_to_coords
@@ -34,6 +34,41 @@ def _replace_endpoints(line: LineString, start_pt: Point, end_pt: Point) -> Line
     new_coords = [(float(start_pt.x), float(start_pt.y)), *mid, (float(end_pt.x), float(end_pt.y))]
     deduped: list[tuple[float, float]] = []
     for xy in new_coords:
+        if not deduped or xy != deduped[-1]:
+            deduped.append(xy)
+    if len(deduped) < 2:
+        deduped = [(float(start_pt.x), float(start_pt.y)), (float(end_pt.x), float(end_pt.y))]
+    return LineString(deduped)
+
+
+def _line_from_coords(coords: list[list[float]] | tuple[tuple[float, float], ...] | tuple[Any, ...]) -> LineString | None:
+    pts = tuple(
+        (float(item[0]), float(item[1]))
+        for item in coords
+        if isinstance(item, (list, tuple)) and len(item) >= 2
+    )
+    if len(pts) < 2:
+        return None
+    line = LineString(list(pts))
+    if line.is_empty or line.length <= 1e-6:
+        return None
+    return line
+
+
+def _anchor_along_base_line(base_line: LineString, start_pt: Point, end_pt: Point) -> LineString:
+    if base_line.is_empty or base_line.length <= 1e-6:
+        return _replace_endpoints(base_line, start_pt, end_pt)
+    start_s = float(base_line.project(start_pt))
+    end_s = float(base_line.project(end_pt))
+    middle = substring(base_line, start_s, end_s)
+    coords: list[tuple[float, float]] = [(float(start_pt.x), float(start_pt.y))]
+    if isinstance(middle, Point):
+        coords.append((float(middle.x), float(middle.y)))
+    elif isinstance(middle, LineString) and not middle.is_empty:
+        coords.extend((float(x), float(y)) for x, y, *_ in middle.coords)
+    coords.append((float(end_pt.x), float(end_pt.y)))
+    deduped: list[tuple[float, float]] = []
+    for xy in coords:
         if not deduped or xy != deduped[-1]:
             deduped.append(xy)
     if len(deduped) < 2:
@@ -182,6 +217,7 @@ def build_final_road(
     inputs: Any,
     prior_roads: list[Any],
     params: dict[str, Any],
+    arc_row: dict[str, Any] | None = None,
     prior_index: dict[tuple[int, int], list[Any]] | None = None,
     divstrip_buffer: Any | None = None,
 ) -> tuple[FinalRoad | None, dict[str, Any]]:
@@ -264,11 +300,25 @@ def build_final_road(
         prior_index=prior_index,
     )
     candidate_lines: list[tuple[LineString, str]] = [(preferred_line, str(preferred_mode))]
+    support_reference_line = _line_from_coords(list((arc_row or {}).get("support_reference_coords", [])))
+    if support_reference_line is not None:
+        support_anchor = _anchor_along_base_line(support_reference_line, start_pt, end_pt)
+        if not any(support_anchor.equals(item[0]) for item in candidate_lines):
+            candidate_lines.append((support_anchor, "traj_support_slot_anchored"))
+    segment_projected = _anchor_along_base_line(segment.geometry_metric(), start_pt, end_pt)
+    if not any(segment_projected.equals(item[0]) for item in candidate_lines):
+        candidate_lines.append((segment_projected, "segment_support_projected_anchored"))
     segment_anchor = _replace_endpoints(segment.geometry_metric(), start_pt, end_pt)
     if not segment_anchor.equals(preferred_line):
         candidate_lines.append((segment_anchor, "segment_support_slot_anchored"))
     prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
     if prior_line is not None:
+        prior_projected = _anchor_along_base_line(prior_line, start_pt, end_pt)
+        if not any(prior_projected.equals(item[0]) for item in candidate_lines):
+            if str(identity.state) == "prior_based":
+                candidate_lines.insert(1, (prior_projected, "prior_reference_projected_anchored"))
+            else:
+                candidate_lines.append((prior_projected, "prior_reference_projected_anchored"))
         prior_anchor = _replace_endpoints(prior_line, start_pt, end_pt)
         if not any(prior_anchor.equals(item[0]) for item in candidate_lines):
             if str(identity.state) == "prior_based":
@@ -1054,6 +1104,16 @@ def run_build_road_stage(
         for segment_id, value in (slots_payload.get("slot_mapping") or {}).items()
     }
     full_registry_rows = list(identities_payload.get("full_legal_arc_registry", []))
+    registry_by_working_segment = {
+        str(item.get("working_segment_id", "")): dict(item)
+        for item in full_registry_rows
+        if str(item.get("working_segment_id", ""))
+    }
+    registry_by_arc_id = {
+        str(item.get("topology_arc_id", "")): dict(item)
+        for item in full_registry_rows
+        if str(item.get("topology_arc_id", ""))
+    }
     legal_arc_funnel_seed = dict(identities_payload.get("legal_arc_funnel", {}))
     arc_evidence_attach_audit = list(witnesses_payload.get("arc_evidence_attach_audit", []))
     roads: list[FinalRoad] = []
@@ -1069,6 +1129,9 @@ def run_build_road_stage(
             inputs=inputs,
             prior_roads=prior_roads,
             params=params,
+            arc_row=registry_by_working_segment.get(str(segment.segment_id))
+            or registry_by_arc_id.get(str(segment.topology_arc_id))
+            or {},
             prior_index=prior_index,
             divstrip_buffer=patch_geometry_cache.get("divstrip_buffer"),
         )
