@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from shapely.geometry import LineString, Point
@@ -9,7 +10,12 @@ from shapely.ops import nearest_points
 
 from .io import write_json, write_lines_geojson
 from .models import BaseCrossSection, CorridorIdentity, CorridorWitness, FinalRoad, Segment, SlotInterval, line_to_coords
-from .step3_corridor_identity import find_prior_reference_line, make_missing_witness
+from .step3_corridor_identity import (
+    build_patch_geometry_cache,
+    build_prior_reference_index,
+    find_prior_reference_line,
+    make_missing_witness,
+)
 
 
 def _pipeline():
@@ -49,9 +55,10 @@ def slot_reference_line(
     segment: Segment,
     identity: CorridorIdentity,
     prior_roads: list[Any],
+    prior_index: dict[tuple[int, int], list[Any]] | None = None,
 ) -> tuple[LineString, str]:
     if str(identity.state) == "prior_based":
-        prior_line = find_prior_reference_line(segment, prior_roads)
+        prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
         if prior_line is not None:
             return prior_line, "prior_reference"
     return segment.geometry_metric(), "segment_support"
@@ -65,9 +72,10 @@ def shape_ref_line(
     src_slot: SlotInterval,
     dst_slot: SlotInterval,
     prior_roads: list[Any],
+    prior_index: dict[tuple[int, int], list[Any]] | None = None,
 ) -> tuple[LineString, str]:
     pipeline = _pipeline()
-    base_line, mode = slot_reference_line(segment=segment, identity=identity, prior_roads=prior_roads)
+    base_line, mode = slot_reference_line(segment=segment, identity=identity, prior_roads=prior_roads, prior_index=prior_index)
     if src_slot.interval is None or dst_slot.interval is None:
         return base_line, str(mode)
     start_pt = pipeline._midpoint_of_interval(src_slot.interval)
@@ -99,9 +107,10 @@ def build_slot(
     inputs: Any,
     params: dict[str, Any],
     endpoint_tag: str,
+    drivable_surface: Any | None = None,
 ) -> SlotInterval:
     pipeline = _pipeline()
-    surface = pipeline._drivable_surface(inputs, params)
+    surface = drivable_surface if drivable_surface is not None else pipeline._drivable_surface(inputs, params)
     xsec_line = xsec.geometry_metric()
     align_vector = witness.axis_vector if witness is not None else pipeline._line_direction(xsec_line)
     intervals = pipeline._intervals_on_xsec(
@@ -173,6 +182,8 @@ def build_final_road(
     inputs: Any,
     prior_roads: list[Any],
     params: dict[str, Any],
+    prior_index: dict[tuple[int, int], list[Any]] | None = None,
+    divstrip_buffer: Any | None = None,
 ) -> tuple[FinalRoad | None, dict[str, Any]]:
     pipeline = _pipeline()
     bridge_retained = bool(segment.bridge_candidate_retained)
@@ -225,6 +236,7 @@ def build_final_road(
             src_slot=src_slot,
             dst_slot=dst_slot,
             prior_roads=prior_roads,
+            prior_index=prior_index,
         )
         result["shape_ref_mode"] = str(fallback_mode)
         result["shape_ref_coords"] = [[float(x), float(y)] for x, y in line_to_coords(fallback_shape_ref)]
@@ -241,12 +253,13 @@ def build_final_road(
         src_slot=src_slot,
         dst_slot=dst_slot,
         prior_roads=prior_roads,
+        prior_index=prior_index,
     )
     candidate_lines: list[tuple[LineString, str]] = [(preferred_line, str(preferred_mode))]
     segment_anchor = _replace_endpoints(segment.geometry_metric(), start_pt, end_pt)
     if not segment_anchor.equals(preferred_line):
         candidate_lines.append((segment_anchor, "segment_support_slot_anchored"))
-    prior_line = find_prior_reference_line(segment, prior_roads)
+    prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
     if prior_line is not None:
         prior_anchor = _replace_endpoints(prior_line, start_pt, end_pt)
         if not any(prior_anchor.equals(item[0]) for item in candidate_lines):
@@ -254,7 +267,6 @@ def build_final_road(
                 candidate_lines.insert(1, (prior_anchor, "prior_reference_slot_anchored"))
             else:
                 candidate_lines.append((prior_anchor, "prior_reference_slot_anchored"))
-    divstrip_buffer = pipeline.load_divstrip_buffer(inputs.divstrip_zone_metric, float(params["DIVSTRIP_BUFFER_M"]))
     attempts: list[dict[str, Any]] = []
     selected_candidate: tuple[LineString, str, float, bool] | None = None
     best_candidate: tuple[LineString, str, float, bool] | None = None
@@ -428,8 +440,11 @@ def write_road_outputs(
     full_registry_rows: list[dict[str, Any]] | None = None,
     legal_arc_funnel_seed: dict[str, Any] | None = None,
     arc_evidence_attach_audit: list[dict[str, Any]] | None = None,
+    params: dict[str, Any] | None = None,
 ) -> None:
     pipeline = _pipeline()
+    patch_geometry_cache = build_patch_geometry_cache(inputs, params or pipeline.DEFAULT_PARAMS)
+    divstrip_buffer = patch_geometry_cache.get("divstrip_buffer")
     patch_dir = pipeline.patch_root(out_root, run_id, patch_id)
     dbg_dir = pipeline.debug_dir(out_root, run_id, patch_id)
     road_features: list[tuple[LineString, dict[str, Any]]] = []
@@ -493,7 +508,6 @@ def write_road_outputs(
             road_line = road.geometry_metric()
             road_in_drivezone_ratio = float(pipeline._drivezone_ratio(road_line, inputs.drivezone_zone_metric))
             road_in_drivezone = road_in_drivezone_ratio >= 0.999
-            divstrip_buffer = pipeline.load_divstrip_buffer(inputs.divstrip_zone_metric, float(pipeline.DEFAULT_PARAMS["DIVSTRIP_BUFFER_M"]))
             road_crosses_divstrip = bool(divstrip_buffer is not None and (not divstrip_buffer.is_empty) and road_line.intersects(divstrip_buffer))
             if src_slot.interval is not None:
                 endpoint_dist_to_slot["src"] = float(Point(road_line.coords[0][:2]).distance(src_slot.interval.geometry_metric()))
@@ -888,7 +902,10 @@ def run_slot_mapping_stage(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     pipeline = _pipeline()
+    stage_started = perf_counter()
     inputs, frame, prior_roads = pipeline.load_inputs_and_frame(data_root, patch_id, params=params)
+    patch_geometry_cache = build_patch_geometry_cache(inputs, params)
+    prior_index = build_prior_reference_index(prior_roads)
     xsec_map = pipeline._xsec_map(frame)
     witnesses_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step3_witness")
     identities_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step4_corridor_identity")
@@ -902,7 +919,7 @@ def run_slot_mapping_stage(
     for segment in segments:
         witness = witnesses.get(str(segment.segment_id))
         identity = identities[str(segment.segment_id)]
-        line, line_mode = slot_reference_line(segment=segment, identity=identity, prior_roads=prior_roads)
+        line, line_mode = slot_reference_line(segment=segment, identity=identity, prior_roads=prior_roads, prior_index=prior_index)
         src_slot = build_slot(
             segment=segment,
             witness=witness,
@@ -912,6 +929,7 @@ def run_slot_mapping_stage(
             inputs=inputs,
             params=params,
             endpoint_tag="src",
+            drivable_surface=patch_geometry_cache.get("drivable_surface"),
         )
         dst_slot = build_slot(
             segment=segment,
@@ -922,6 +940,7 @@ def run_slot_mapping_stage(
             inputs=inputs,
             params=params,
             endpoint_tag="dst",
+            drivable_surface=patch_geometry_cache.get("drivable_surface"),
         )
         slot_map[str(segment.segment_id)] = {"src": src_slot, "dst": dst_slot}
         for slot in (src_slot, dst_slot):
@@ -963,6 +982,7 @@ def run_slot_mapping_stage(
         "working_segments": [segment.to_dict() for segment in segments],
         "full_legal_arc_registry": full_registry_rows,
         "legal_arc_funnel": legal_arc_funnel,
+        "runtime": {"stage_runtime_ms": float((perf_counter() - stage_started) * 1000.0)},
     }
     dbg_dir = pipeline.debug_dir(out_root, run_id, patch_id)
     write_json(pipeline._artifact_path(out_root, run_id, patch_id, "step5_slot_mapping"), artifact)
@@ -977,6 +997,7 @@ def run_slot_mapping_stage(
         "slots": slot_map,
         "full_legal_arc_registry": full_registry_rows,
         "legal_arc_funnel": legal_arc_funnel,
+        "runtime": artifact["runtime"],
         "reason": "slot_mapping_ready",
     }
 
@@ -990,7 +1011,10 @@ def run_build_road_stage(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     pipeline = _pipeline()
+    stage_started = perf_counter()
     inputs, _frame, prior_roads = pipeline.load_inputs_and_frame(data_root, patch_id, params=params)
+    patch_geometry_cache = build_patch_geometry_cache(inputs, params)
+    prior_index = build_prior_reference_index(prior_roads)
     segments_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step2_segment")
     step2_metrics = dict(segments_payload.get("step2_metrics") or {})
     witnesses_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step3_witness")
@@ -1019,11 +1043,17 @@ def run_build_road_stage(
             inputs=inputs,
             prior_roads=prior_roads,
             params=params,
+            prior_index=prior_index,
+            divstrip_buffer=patch_geometry_cache.get("divstrip_buffer"),
         )
         road_results.append(dict(build_meta))
         if road is not None:
             roads.append(road)
-    artifact = {"roads": [road.to_dict() for road in roads], "road_results": road_results}
+    artifact = {
+        "roads": [road.to_dict() for road in roads],
+        "road_results": road_results,
+        "runtime": {"stage_runtime_ms": float((perf_counter() - stage_started) * 1000.0)},
+    }
     write_json(pipeline._artifact_path(out_root, run_id, patch_id, "step6_build_road"), artifact)
     write_road_outputs(
         out_root=out_root,
@@ -1040,8 +1070,14 @@ def run_build_road_stage(
         full_registry_rows=full_registry_rows,
         legal_arc_funnel_seed=legal_arc_funnel_seed,
         arc_evidence_attach_audit=arc_evidence_attach_audit,
+        params=params,
     )
-    return {"artifact": artifact, "roads": roads, "reason": "road_ready" if roads else "no_geometry_candidate"}
+    return {
+        "artifact": artifact,
+        "roads": roads,
+        "runtime": artifact["runtime"],
+        "reason": "road_ready" if roads else "no_geometry_candidate",
+    }
 
 
 __all__ = [

@@ -12,6 +12,7 @@ from .audit_acceptance import (
     write_arc_legality_fix_review,
     write_bridge_trial_review,
     write_legal_arc_coverage_review,
+    write_perf_opt_arc_first_review,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "write_arc_legality_fix_review",
     "write_bridge_trial_review",
     "write_legal_arc_coverage_review",
+    "write_perf_opt_arc_first_review",
 ]

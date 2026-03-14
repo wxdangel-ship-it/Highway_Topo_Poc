@@ -33,9 +33,15 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.review import (
     write_arc_first_attach_evidence_review,
     write_arc_legality_fix_review,
     write_legal_arc_coverage_review,
+    write_perf_opt_arc_first_review,
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.step2_arc_registry import build_full_legal_arc_registry
-from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_corridor_identity import build_corridor_identities
+from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_arc_evidence import build_arc_evidence_attach
+from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_corridor_identity import (
+    build_corridor_identities,
+    build_patch_geometry_cache,
+    build_witness_for_segment,
+)
 
 
 def _fc(features: list[dict], crs_name: str | None = "EPSG:3857") -> dict:
@@ -1225,6 +1231,92 @@ def test_t05v2_arc_first_stitched_support_uses_same_arc_fragments(tmp_path: Path
     assert float(row["traj_support_coverage_ratio"]) >= 0.72
 
 
+def test_t05v2_arc_first_prefilter_keeps_same_arc_support_and_skips_far_traj(tmp_path: Path) -> None:
+    patch_id = "arc_first_prefilter"
+    data_root = tmp_path / "data"
+    road_fc = _fc([_line_feature([(0.0, 0.0), (100.0, 0.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=_simple_intersections(),
+        drivezone_fc=_fc([_poly_feature([(-5.0, -4.0), (105.0, -4.0), (105.0, 4.0), (-5.0, 4.0)])], "EPSG:3857"),
+        traj_tracks=[
+            [(20.0, 0.0), (40.0, 0.0), (60.0, 0.0), (80.0, 0.0)],
+            [(20.0, 40.0), (40.0, 40.0), (60.0, 40.0), (80.0, 40.0)],
+        ],
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_prefilter", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_prefilter", out_root=out_root)
+    run_stage(stage="step3_witness", data_root=data_root, patch_id=patch_id, run_id="run_prefilter", out_root=out_root)
+    step3_payload = _read_json(out_root / "run_prefilter" / "patches" / patch_id / "step3" / "witnesses.json")
+    audit_row = step3_payload["arc_evidence_attach_audit"][0]
+    assert audit_row["traj_support_type"] == "partial_arc_support"
+    assert int(audit_row["prefilter_candidate_traj_count"]) == 1
+    assert step3_payload["runtime"]["trajectory_prefilter_time_ms"] >= 0.0
+    assert step3_payload["runtime"]["support_attach_core_loop_time_ms"] >= 0.0
+
+
+def test_t05v2_build_witness_patch_surface_cache_keeps_same_result(tmp_path: Path) -> None:
+    from highway_topo_poc.modules.t05_topology_between_rc_v2 import pipeline as pipeline_module
+
+    patch_id = "surface_cache_same_result"
+    data_root = tmp_path / "data"
+    road_fc = _fc([_line_feature([(0.0, 0.0), (100.0, 0.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=_simple_intersections(),
+        drivezone_fc=_fc([_poly_feature([(-5.0, -4.0), (105.0, -4.0), (105.0, 4.0), (-5.0, 4.0)])], "EPSG:3857"),
+        traj_tracks=[[(0.0, 0.0), (30.0, 0.0), (60.0, 0.0), (100.0, 0.0)]],
+        road_fc=road_fc,
+    )
+    inputs, _frame, _prior = pipeline_module.load_inputs_and_frame(data_root, patch_id, params=DEFAULT_PARAMS)
+    cache = build_patch_geometry_cache(inputs, DEFAULT_PARAMS)
+    segment = Segment(
+        segment_id="seg-cache",
+        src_nodeid=1,
+        dst_nodeid=2,
+        direction="src->dst",
+        geometry_coords=((0.0, 0.0), (100.0, 0.0)),
+        candidate_ids=("cand",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_00",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=1,
+        prior_supported=False,
+        formation_reason="test",
+        length_m=100.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_1_2_1",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_edge_ids=("edge_12",),
+        topology_arc_node_path=(1, 2),
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        bridge_candidate_retained=False,
+        bridge_chain_exists=False,
+        bridge_chain_unique=False,
+        bridge_chain_nodes=tuple(),
+        bridge_chain_source="",
+        bridge_diagnostic_reason="",
+        bridge_decision_stage="",
+        bridge_decision_reason="",
+        same_pair_rank=1,
+        kept_reason="test",
+    )
+    uncached = build_witness_for_segment(segment, inputs, DEFAULT_PARAMS)
+    cached = build_witness_for_segment(segment, inputs, DEFAULT_PARAMS, drivable_surface=cache["drivable_surface"])
+    assert uncached.status == cached.status
+    assert uncached.reason == cached.reason
+    assert uncached.selected_interval_rank == cached.selected_interval_rank
+
+
 def test_t05v2_divstrip_blocks_final_road(tmp_path: Path) -> None:
     patch_id = "divstrip_block"
     data_root = tmp_path / "data"
@@ -2000,9 +2092,12 @@ def test_t05v2_review_writes_arc_legality_bundle(tmp_path: Path) -> None:
     assert (output_root / "simple_patch_acceptance.json").exists()
     assert (output_root / "strong_constraint_status.json").exists()
     assert (output_root / "simple_patch_regression.json").exists()
+    assert (output_root / "runtime_breakdown.json").exists()
+    assert (output_root / "runtime_before_after.md").exists()
     assert (output_root / "complex_patch_funnel_review.json").exists()
     assert (output_root / "complex_patch_legality_review.json").exists()
     assert (output_root / "complex_patch_coverage_review.json").exists()
+    assert (output_root / "complex_patch_perf_review.json").exists()
     assert (output_root / "SUMMARY.md").exists()
     pair_decisions = _read_json(output_root / "pair_decisions.json")
     target = next(item for item in pair_decisions["pairs"] if str(item["pair"]) == "5395717732638194:37687913")
@@ -2021,6 +2116,11 @@ def test_t05v2_review_writes_arc_legality_bundle(tmp_path: Path) -> None:
     complex_row = next(item for item in coverage["patches"] if str(item["patch_id"]) == "5417632623039346")
     assert int(complex_row["legal_arc_total"]) == 1
     assert int(complex_row["legal_arc_built"]) == 1
+    runtime_breakdown = _read_json(output_root / "runtime_breakdown.json")
+    assert "patches" in runtime_breakdown
+    assert "review_runtime_ms" in runtime_breakdown
+    perf_review = _read_json(output_root / "complex_patch_perf_review.json")
+    assert "runtime" in perf_review
 
 
 def test_t05v2_write_legal_arc_coverage_review_outputs_new_bundle(tmp_path: Path) -> None:
@@ -2089,6 +2189,101 @@ def test_t05v2_write_legal_arc_coverage_review_outputs_new_bundle(tmp_path: Path
     assert (output_root / "complex_patch_funnel_review.json").exists()
     assert (output_root / "complex_patch_coverage_review.json").exists()
     assert "legal_arc_coverage" in summary
+
+
+def test_t05v2_write_perf_opt_arc_first_review_outputs_runtime_bundle(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    for patch_id in ("5417632690143239", "5417632690143326", "5417632623039346"):
+        patch_dir = run_root / "patches" / patch_id
+        _write_json(patch_dir / "metrics.json", {"patch_id": patch_id, "unresolved_segment_count": 0, "segments": []})
+        _write_json(patch_dir / "gate.json", {"overall_pass": True, "hard_breakpoints": []})
+        _write_json(
+            patch_dir / "step2" / "segments.json",
+            {
+                "segments": [
+                    {
+                        "segment_id": f"seg_{patch_id}",
+                        "src_nodeid": 10,
+                        "dst_nodeid": 20,
+                        "topology_arc_id": f"arc_{patch_id}",
+                        "topology_arc_source_type": "direct_topology_arc",
+                        "topology_arc_is_direct_legal": True,
+                        "topology_arc_is_unique": True,
+                    }
+                ],
+                "excluded_candidates": [],
+            },
+        )
+        _write_json(
+            patch_dir / "step4" / "corridor_identity.json",
+            {
+                "legal_arc_registry": [
+                    {
+                        "src": 10,
+                        "dst": 20,
+                        "pair": "10:20",
+                        "topology_arc_id": f"arc_{patch_id}",
+                        "topology_arc_is_direct_legal": True,
+                        "topology_arc_is_unique": True,
+                        "segment_ids": [f"seg_{patch_id}"],
+                        "segment_count": 1,
+                        "corridor_identity": "witness_based",
+                        "corridor_reason": "terminal_crossing_support",
+                    }
+                ]
+            },
+        )
+        _write_json(
+            patch_dir / "step3" / "step_state.json",
+            {"ok": True, "duration_ms": 12.5, "runtime": {"trajectory_prefilter_time_ms": 3.0}},
+        )
+        _write_json(
+            patch_dir / "step4" / "step_state.json",
+            {"ok": True, "duration_ms": 5.0, "runtime": {"stage_runtime_ms": 5.0}},
+        )
+        _write_json(
+            patch_dir / "step5" / "step_state.json",
+            {"ok": True, "duration_ms": 4.0, "runtime": {"stage_runtime_ms": 4.0}},
+        )
+        _write_json(
+            patch_dir / "step6" / "step_state.json",
+            {"ok": True, "duration_ms": 6.0, "runtime": {"stage_runtime_ms": 6.0}},
+        )
+        _write_json(
+            patch_dir / "step6" / "final_roads.json",
+            {"roads": [{"road_id": f"road_{patch_id}", "segment_id": f"seg_{patch_id}", "src_nodeid": 10, "dst_nodeid": 20}]},
+        )
+        _write_json(
+            patch_dir / "debug" / "arc_evidence_attach.json",
+            {
+                "rows": [
+                    {
+                        "pair": "10:20",
+                        "topology_arc_id": f"arc_{patch_id}",
+                        "traj_support_type": "partial_arc_support",
+                        "prior_support_type": "no_support",
+                        "corridor_identity": "witness_based",
+                        "slot_status": "established",
+                        "built_final_road": True,
+                    }
+                ]
+            },
+        )
+        _write_json(patch_dir / "debug" / "step2_segment_should_not_exist.json", {"pairs": []})
+        _write_json(patch_dir / "debug" / "step2_topology_pairs.json", {"pairs": []})
+        _write_json(patch_dir / "debug" / "step2_blocked_pair_bridge_audit.json", {"pairs": []})
+
+    output_root = tmp_path / "bundle_perf"
+    summary = write_perf_opt_arc_first_review(run_root=run_root, output_root=output_root)
+    assert (output_root / "runtime_breakdown.json").exists()
+    assert (output_root / "runtime_before_after.md").exists()
+    assert (output_root / "complex_patch_perf_review.json").exists()
+    runtime = _read_json(output_root / "runtime_breakdown.json")
+    assert float(runtime["review_runtime_ms"]) >= 0.0
+    assert len(runtime["patches"]) == 3
+    perf_review = _read_json(output_root / "complex_patch_perf_review.json")
+    assert "runtime" in perf_review
+    assert "runtime_breakdown" in summary
 
 
 def test_t05v2_scripts_stepwise_state_resume(tmp_path: Path) -> None:

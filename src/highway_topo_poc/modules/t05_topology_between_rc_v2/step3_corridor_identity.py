@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from shapely.geometry import LineString, Point
@@ -20,13 +21,42 @@ def _reverse_line(line: LineString) -> LineString:
     return LineString(list(reversed(list(line.coords))))
 
 
-def find_prior_reference_line(segment: Segment, prior_roads: list[Any]) -> LineString | None:
+def build_patch_geometry_cache(inputs: Any, params: dict[str, Any]) -> dict[str, Any]:
+    pipeline = _pipeline()
+    return {
+        "drivable_surface": pipeline._drivable_surface(inputs, params),
+        "divstrip_buffer": pipeline.load_divstrip_buffer(inputs.divstrip_zone_metric, float(params["DIVSTRIP_BUFFER_M"])),
+    }
+
+
+def build_prior_reference_index(prior_roads: list[Any]) -> dict[tuple[int, int], list[Any]]:
+    by_pair: dict[tuple[int, int], list[Any]] = defaultdict(list)
+    for road in prior_roads:
+        snodeid = int(getattr(road, "snodeid", 0))
+        enodeid = int(getattr(road, "enodeid", 0))
+        by_pair[(int(snodeid), int(enodeid))].append(road)
+    return {pair: list(rows) for pair, rows in by_pair.items()}
+
+
+def find_prior_reference_line(
+    segment: Segment,
+    prior_roads: list[Any],
+    *,
+    prior_index: dict[tuple[int, int], list[Any]] | None = None,
+) -> LineString | None:
     best_line: LineString | None = None
     best_cost = float("inf")
     segment_line = segment.geometry_metric()
     seg_start = Point(float(segment_line.coords[0][0]), float(segment_line.coords[0][1]))
     seg_end = Point(float(segment_line.coords[-1][0]), float(segment_line.coords[-1][1]))
-    for road in prior_roads:
+    if prior_index is None:
+        candidate_roads = list(prior_roads)
+    else:
+        candidate_roads = [
+            *list(prior_index.get((int(segment.src_nodeid), int(segment.dst_nodeid)), [])),
+            *list(prior_index.get((int(segment.dst_nodeid), int(segment.src_nodeid)), [])),
+        ]
+    for road in candidate_roads:
         line = getattr(road, "line", None)
         if not isinstance(line, LineString) or line.is_empty or line.length <= 1e-6:
             continue
@@ -66,7 +96,13 @@ def make_missing_witness(segment: Segment) -> CorridorWitness:
     )
 
 
-def build_witness_for_segment(segment: Segment, inputs: Any, params: dict[str, Any]) -> CorridorWitness:
+def build_witness_for_segment(
+    segment: Segment,
+    inputs: Any,
+    params: dict[str, Any],
+    *,
+    drivable_surface: Any | None = None,
+) -> CorridorWitness:
     pipeline = _pipeline()
     line = segment.geometry_metric()
     if float(line.length) < float(params["WITNESS_MIN_SEGMENT_LENGTH_M"]):
@@ -85,7 +121,7 @@ def build_witness_for_segment(segment: Segment, inputs: Any, params: dict[str, A
             neighbor_match_count=0,
             axis_vector=(0.0, 1.0),
         )
-    surface = pipeline._drivable_surface(inputs, params)
+    surface = drivable_surface if drivable_surface is not None else pipeline._drivable_surface(inputs, params)
     if surface is None or surface.is_empty:
         return CorridorWitness(
             segment_id=str(segment.segment_id),
@@ -288,6 +324,7 @@ def build_legal_arc_registry(
     segments: list[Segment],
     witnesses: dict[str, CorridorWitness],
     prior_roads: list[Any],
+    prior_index: dict[tuple[int, int], list[Any]] | None = None,
 ) -> list[dict[str, Any]]:
     by_arc: dict[str, dict[str, Any]] = {}
     for segment in segments:
@@ -318,7 +355,7 @@ def build_legal_arc_registry(
         )
         row["segment_ids"].append(str(segment.segment_id))
         row["segment_count"] = int(row["segment_count"]) + 1
-        if find_prior_reference_line(segment, prior_roads) is not None:
+        if find_prior_reference_line(segment, prior_roads, prior_index=prior_index) is not None:
             row["prior_available"] = True
     for arc_id, row in by_arc.items():
         arc_segments = [segment for segment in segments if str(segment.topology_arc_id) == str(arc_id)]
@@ -356,12 +393,26 @@ def build_corridor_identities(
     witnesses: list[CorridorWitness],
     prior_roads: list[Any],
     full_registry_rows: list[dict[str, Any]] | None = None,
+    prior_index: dict[tuple[int, int], list[Any]] | None = None,
 ) -> tuple[list[CorridorIdentity], list[dict[str, Any]]]:
     witness_map = {str(item.segment_id): item for item in witnesses}
+    segments_by_arc: dict[str, list[Segment]] = defaultdict(list)
+    for segment in segments:
+        segments_by_arc[str(segment.topology_arc_id)].append(segment)
+    selected_rows_by_arc: dict[str, list[tuple[Segment, CorridorWitness]]] = defaultdict(list)
+    for segment in segments:
+        witness = witness_map.get(str(segment.segment_id), make_missing_witness(segment))
+        if str(witness.status) == "selected" and bool(witness.exclusive_interval):
+            selected_rows_by_arc[str(segment.topology_arc_id)].append((segment, witness))
     if full_registry_rows:
         registry_rows = [dict(item) for item in full_registry_rows]
     else:
-        registry_rows = build_legal_arc_registry(segments=segments, witnesses=witness_map, prior_roads=prior_roads)
+        registry_rows = build_legal_arc_registry(
+            segments=segments,
+            witnesses=witness_map,
+            prior_roads=prior_roads,
+            prior_index=prior_index,
+        )
     registry_by_arc = {str(item["topology_arc_id"]): item for item in registry_rows}
     identities: list[CorridorIdentity] = []
     for segment in segments:
@@ -372,18 +423,13 @@ def build_corridor_identities(
                 _fallback_segment_identity(
                     segment=segment,
                     witness=witness,
-                    prior_available=find_prior_reference_line(segment, prior_roads) is not None,
+                    prior_available=find_prior_reference_line(segment, prior_roads, prior_index=prior_index) is not None,
                 )
             )
             continue
-        arc_segments = [item for item in segments if str(item.topology_arc_id) == str(segment.topology_arc_id)]
+        arc_segments = list(segments_by_arc.get(str(segment.topology_arc_id), []))
         arc_witnesses = [witness_map.get(str(item.segment_id), make_missing_witness(item)) for item in arc_segments]
-        legacy_selected_rows = [
-            (arc_segment, witness_map.get(str(arc_segment.segment_id), make_missing_witness(arc_segment)))
-            for arc_segment in arc_segments
-            if str(witness_map.get(str(arc_segment.segment_id), make_missing_witness(arc_segment)).status) == "selected"
-            and bool(witness_map.get(str(arc_segment.segment_id), make_missing_witness(arc_segment)).exclusive_interval)
-        ]
+        legacy_selected_rows = list(selected_rows_by_arc.get(str(segment.topology_arc_id), []))
         traj_support_type = str(registry.get("traj_support_type", "no_support"))
         prior_support_type = str(registry.get("prior_support_type", "no_support"))
         coverage_ratio = float(registry.get("traj_support_coverage_ratio", 0.0))
@@ -477,10 +523,19 @@ def run_witness_stage(
 ) -> dict[str, Any]:
     pipeline = _pipeline()
     inputs, frame, _prior_roads = pipeline.load_inputs_and_frame(data_root, patch_id, params=params)
+    patch_geometry_cache = build_patch_geometry_cache(inputs, params)
     segments_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step2_segment")
     segments = [Segment.from_dict(item) for item in segments_payload.get("segments", [])]
     segment_map = {str(segment.segment_id): segment for segment in segments}
-    witnesses = [build_witness_for_segment(segment, inputs, params) for segment in segments]
+    witnesses = [
+        build_witness_for_segment(
+            segment,
+            inputs,
+            params,
+            drivable_surface=patch_geometry_cache.get("drivable_surface"),
+        )
+        for segment in segments
+    ]
     artifact = {"witnesses": [witness.to_dict() for witness in witnesses]}
     dbg_dir = pipeline.debug_dir(out_root, run_id, patch_id)
     write_json(pipeline._artifact_path(out_root, run_id, patch_id, "step3_witness"), artifact)
@@ -544,7 +599,9 @@ def run_corridor_identity_stage(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     pipeline = _pipeline()
+    stage_started = perf_counter()
     _inputs, _frame, prior_roads = pipeline.load_inputs_and_frame(data_root, patch_id, params=params)
+    prior_index = build_prior_reference_index(prior_roads)
     witnesses_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step3_witness")
     segments = [Segment.from_dict(item) for item in witnesses_payload.get("working_segments", [])]
     witnesses = [CorridorWitness.from_dict(item) for item in witnesses_payload.get("witnesses", [])]
@@ -554,6 +611,7 @@ def run_corridor_identity_stage(
         witnesses=witnesses,
         prior_roads=prior_roads,
         full_registry_rows=full_registry_rows,
+        prior_index=prior_index,
     )
     corridor_resolved_arc_count = int(sum(1 for item in registry_rows if str(item.get("corridor_identity", "")) in {"witness_based", "prior_based"}))
     legal_arc_funnel = dict(witnesses_payload.get("legal_arc_funnel", {}))
@@ -564,14 +622,23 @@ def run_corridor_identity_stage(
         "full_legal_arc_registry": registry_rows,
         "working_segments": [segment.to_dict() for segment in segments],
         "legal_arc_funnel": legal_arc_funnel,
+        "runtime": {"stage_runtime_ms": float((perf_counter() - stage_started) * 1000.0)},
     }
     dbg_dir = pipeline.debug_dir(out_root, run_id, patch_id)
     write_json(pipeline._artifact_path(out_root, run_id, patch_id, "step4_corridor_identity"), artifact)
     write_json(dbg_dir / "corridor_identity.json", artifact)
-    return {"artifact": artifact, "segments": segments, "identities": identities, "reason": "corridor_identity_ready"}
+    return {
+        "artifact": artifact,
+        "segments": segments,
+        "identities": identities,
+        "runtime": artifact["runtime"],
+        "reason": "corridor_identity_ready",
+    }
 
 
 __all__ = [
+    "build_patch_geometry_cache",
+    "build_prior_reference_index",
     "build_corridor_identities",
     "build_legal_arc_registry",
     "build_witness_for_segment",

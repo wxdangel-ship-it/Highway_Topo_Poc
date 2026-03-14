@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 
@@ -113,9 +114,11 @@ def run_stage(
         "step5_slot_mapping": _stage5_slot_mapping,
         "step6_build_road": _stage6_build_road,
     }[stage_name]
+    started = perf_counter()
     try:
         result = runner(data_root=data_root, patch_id=patch_id, run_id=run_id, out_root=out_root, params=merged_params)
     except Exception as exc:
+        duration_ms = float((perf_counter() - started) * 1000.0)
         reason = pipeline._trim_reason(str(exc) or type(exc).__name__)
         pipeline.write_step_state(
             step_dir=pipeline.stage_dir(out_root, run_id, patch_id, stage_name),
@@ -126,8 +129,11 @@ def run_stage(
             patch_id=patch_id,
             data_root=data_root,
             out_root=out_root,
+            extra={"duration_ms": float(duration_ms)},
         )
         raise
+    duration_ms = float((perf_counter() - started) * 1000.0)
+    runtime = dict(result.get("runtime") or {})
     pipeline.write_step_state(
         step_dir=pipeline.stage_dir(out_root, run_id, patch_id, stage_name),
         step=stage_name,
@@ -137,8 +143,15 @@ def run_stage(
         patch_id=patch_id,
         data_root=data_root,
         out_root=out_root,
+        extra={"duration_ms": float(duration_ms), "runtime": runtime},
     )
-    return {"stage": stage_name, "status": "ok", "reason": str(result.get("reason", "ok"))}
+    return {
+        "stage": stage_name,
+        "status": "ok",
+        "reason": str(result.get("reason", "ok")),
+        "duration_ms": float(duration_ms),
+        "runtime": runtime,
+    }
 
 
 def run_full_pipeline(
@@ -152,6 +165,7 @@ def run_full_pipeline(
 ) -> list[dict[str, Any]]:
     pipeline = _pipeline_module()
     merged_params = pipeline._merge_params(params)
+    started = perf_counter()
     out: list[dict[str, Any]] = []
     for stage in pipeline.STAGES:
         out.append(
@@ -165,6 +179,22 @@ def run_full_pipeline(
                 params=merged_params,
             )
         )
+    total_runtime_ms = float((perf_counter() - started) * 1000.0)
+    breakdown = {
+        "patch_id": str(patch_id),
+        "run_id": str(run_id),
+        "stages": [
+            {
+                "stage": str(item.get("stage", "")),
+                "status": str(item.get("status", "")),
+                "duration_ms": float(item.get("duration_ms", 0.0) or 0.0),
+                "runtime": dict(item.get("runtime") or {}),
+            }
+            for item in out
+        ],
+        "total_runtime_ms": float(total_runtime_ms),
+    }
+    pipeline.write_json(pipeline.patch_root(out_root, run_id, patch_id) / "runtime_breakdown.json", breakdown)
     return out
 
 

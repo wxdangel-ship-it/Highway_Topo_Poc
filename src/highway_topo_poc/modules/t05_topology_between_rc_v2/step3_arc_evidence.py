@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from shapely.geometry import LineString, Point
 
 from .io import write_json, write_lines_geojson
-from .models import CorridorWitness, Segment, coords_to_line, line_to_coords
+from .models import Segment, coords_to_line, line_to_coords
+from .step3_corridor_identity import build_patch_geometry_cache, build_prior_reference_index
 
 
 def _pipeline():
@@ -35,6 +37,24 @@ def _trajectory_points(traj: Any) -> list[tuple[float, float]]:
     if xyz is None:
         return []
     return [(float(row[0]), float(row[1])) for row in xyz if row is not None and len(row) >= 2]
+
+
+def _bbox_intersects(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
+    return not (
+        float(a[2]) < float(b[0])
+        or float(b[2]) < float(a[0])
+        or float(a[3]) < float(b[1])
+        or float(b[3]) < float(a[1])
+    )
+
+
+def _expand_bounds(bounds: tuple[float, float, float, float], buffer_m: float) -> tuple[float, float, float, float]:
+    return (
+        float(bounds[0]) - float(buffer_m),
+        float(bounds[1]) - float(buffer_m),
+        float(bounds[2]) + float(buffer_m),
+        float(bounds[3]) + float(buffer_m),
+    )
 
 
 def _group_projected_spans(
@@ -76,47 +96,37 @@ def _group_projected_spans(
     return out
 
 
-def _trajectory_support_spans(
-    *,
-    arc_line: LineString,
-    traj: Any,
-    buffer_m: float,
-    min_span_ratio: float,
-    min_span_length_m: float,
-    max_seq_gap: int,
-    max_proj_gap_m: float,
-) -> list[dict[str, Any]]:
-    points_xy = _trajectory_points(traj)
-    if len(points_xy) < 2 or arc_line.is_empty or arc_line.length <= 1e-6:
-        return []
-    projected_rows: list[tuple[int, float]] = []
-    for idx, (x, y) in enumerate(points_xy):
-        if float(arc_line.distance(Point(float(x), float(y)))) > float(buffer_m):
-            continue
-        projected_rows.append((int(idx), float(arc_line.project(Point(float(x), float(y))))))
-    return _group_projected_spans(
-        projected_rows=projected_rows,
-        max_seq_gap=max_seq_gap,
-        max_proj_gap_m=max_proj_gap_m,
-        arc_length_m=float(arc_line.length),
-        min_span_ratio=min_span_ratio,
-        min_span_length_m=min_span_length_m,
-    )
+def _ordered_terminal_hit(hit_positions_by_node: dict[int, tuple[int, ...]], src_nodeid: int, dst_nodeid: int) -> bool:
+    src_positions = hit_positions_by_node.get(int(src_nodeid), tuple())
+    dst_positions = hit_positions_by_node.get(int(dst_nodeid), tuple())
+    if not src_positions or not dst_positions:
+        return False
+    dst_idx = 0
+    for src_pos in src_positions:
+        while dst_idx < len(dst_positions) and int(dst_positions[dst_idx]) <= int(src_pos):
+            dst_idx += 1
+        if dst_idx < len(dst_positions):
+            return True
+    return False
 
 
-def _terminal_crossing_support(
+def _build_trajectory_attach_cache(
     *,
-    src_nodeid: int,
-    dst_nodeid: int,
     inputs: Any,
     frame: Any,
     params: dict[str, Any],
-) -> dict[str, Any]:
+    divstrip_buffer: Any | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     pipeline = _pipeline()
-    divstrip_buffer = pipeline.load_divstrip_buffer(inputs.divstrip_zone_metric, float(params["DIVSTRIP_BUFFER_M"]))
     hit_buffer = float(params["TRAJ_XSEC_HIT_BUFFER_M"])
-    traj_ids: list[str] = []
+    started = perf_counter()
+    rows: list[dict[str, Any]] = []
+    total_points = 0
     for traj in getattr(inputs, "trajectories", []) or []:
+        coords = _trajectory_points(traj)
+        points = tuple(Point(float(x), float(y)) for x, y in coords)
+        line = LineString(coords) if len(coords) >= 2 else None
+        bbox = tuple(line.bounds) if line is not None and not line.is_empty else (0.0, 0.0, 0.0, 0.0)
         events = pipeline._trajectory_events(
             traj,
             frame,
@@ -124,20 +134,37 @@ def _terminal_crossing_support(
             drivezone=inputs.drivezone_zone_metric,
             divstrip_buffer=divstrip_buffer,
         )
-        ordered_hits = [int(event.get("nodeid", 0)) for event in events]
-        found = False
-        for idx, nodeid in enumerate(ordered_hits):
-            if int(nodeid) != int(src_nodeid):
-                continue
-            if any(int(next_nodeid) == int(dst_nodeid) for next_nodeid in ordered_hits[idx + 1 :]):
-                found = True
-                break
-        if found:
-            traj_ids.append(str(getattr(traj, "traj_id", "")))
-    return {"traj_ids": sorted(set(traj_ids)), "count": int(len(set(traj_ids)))}
+        hit_positions_by_node: dict[int, list[int]] = defaultdict(list)
+        for idx, event in enumerate(events):
+            hit_positions_by_node[int(event.get("nodeid", 0))].append(int(idx))
+        rows.append(
+            {
+                "traj_id": str(getattr(traj, "traj_id", "")),
+                "points": points,
+                "line": line,
+                "bbox": bbox,
+                "hit_positions_by_node": {int(nodeid): tuple(vals) for nodeid, vals in hit_positions_by_node.items()},
+            }
+        )
+        total_points += int(len(points))
+    return rows, {
+        "trajectory_cache_time_ms": float((perf_counter() - started) * 1000.0),
+        "trajectory_cache_traj_count": int(len(rows)),
+        "trajectory_cache_point_count": int(total_points),
+    }
 
 
-def _prior_support_type(*, src_nodeid: int, dst_nodeid: int, prior_roads: list[Any]) -> tuple[str, bool]:
+def _prior_support_type(
+    *,
+    src_nodeid: int,
+    dst_nodeid: int,
+    prior_roads: list[Any],
+    prior_index: dict[tuple[int, int], list[Any]] | None = None,
+) -> tuple[str, bool]:
+    if prior_index is not None:
+        if prior_index.get((int(src_nodeid), int(dst_nodeid))) or prior_index.get((int(dst_nodeid), int(src_nodeid))):
+            return "prior_fallback_support", True
+        return "no_support", False
     for road in prior_roads:
         snodeid = int(getattr(road, "snodeid", 0))
         enodeid = int(getattr(road, "enodeid", 0))
@@ -148,13 +175,67 @@ def _prior_support_type(*, src_nodeid: int, dst_nodeid: int, prior_roads: list[A
     return "no_support", False
 
 
+def _prefilter_traj_rows(
+    *,
+    arc_line: LineString,
+    traj_rows: list[dict[str, Any]],
+    buffer_m: float,
+) -> list[dict[str, Any]]:
+    if arc_line.is_empty or arc_line.length <= 1e-6:
+        return []
+    expanded_bounds = _expand_bounds(tuple(arc_line.bounds), float(buffer_m))
+    candidate_rows: list[dict[str, Any]] = []
+    for traj_row in traj_rows:
+        traj_line = traj_row.get("line")
+        if traj_line is None or traj_line.is_empty:
+            continue
+        if not _bbox_intersects(expanded_bounds, tuple(traj_row.get("bbox", (0.0, 0.0, 0.0, 0.0)))):
+            continue
+        if float(traj_line.distance(arc_line)) > float(buffer_m):
+            continue
+        candidate_rows.append(traj_row)
+    return candidate_rows
+
+
+def _scan_arc_traj_support(
+    *,
+    arc_line: LineString,
+    arc_length_m: float,
+    traj_row: dict[str, Any],
+    src_nodeid: int,
+    dst_nodeid: int,
+    buffer_m: float,
+    min_span_ratio: float,
+    min_span_length_m: float,
+    max_seq_gap: int,
+    max_proj_gap_m: float,
+) -> dict[str, Any]:
+    projected_rows: list[tuple[int, float]] = []
+    for idx, point in enumerate(traj_row.get("points", tuple())):
+        if float(arc_line.distance(point)) > float(buffer_m):
+            continue
+        projected_rows.append((int(idx), float(arc_line.project(point))))
+    return {
+        "traj_id": str(traj_row.get("traj_id", "")),
+        "terminal_supported": bool(_ordered_terminal_hit(traj_row.get("hit_positions_by_node", {}), int(src_nodeid), int(dst_nodeid))),
+        "spans": _group_projected_spans(
+            projected_rows=projected_rows,
+            max_seq_gap=max_seq_gap,
+            max_proj_gap_m=max_proj_gap_m,
+            arc_length_m=float(arc_length_m),
+            min_span_ratio=min_span_ratio,
+            min_span_length_m=min_span_length_m,
+        ),
+    }
+
+
 def _support_type_for_arc(
     *,
     row: dict[str, Any],
     arc_line: LineString | None,
-    inputs: Any,
-    frame: Any,
     prior_roads: list[Any],
+    prior_index: dict[tuple[int, int], list[Any]] | None,
+    candidate_traj_rows: list[dict[str, Any]],
     params: dict[str, Any],
 ) -> dict[str, Any]:
     buffer_m = float(params.get("ARC_EVIDENCE_BUFFER_M", 8.0))
@@ -169,6 +250,7 @@ def _support_type_for_arc(
         src_nodeid=int(row["src"]),
         dst_nodeid=int(row["dst"]),
         prior_roads=prior_roads,
+        prior_index=prior_index,
     )
     if arc_line is None:
         return {
@@ -181,33 +263,33 @@ def _support_type_for_arc(
             "prior_support_available": bool(prior_available),
         }
 
-    terminal = _terminal_crossing_support(
-        src_nodeid=int(row["src"]),
-        dst_nodeid=int(row["dst"]),
-        inputs=inputs,
-        frame=frame,
-        params=params,
-    )
+    terminal_traj_ids: list[str] = []
     span_rows: list[dict[str, Any]] = []
     span_traj_ids: list[str] = []
-    for traj in getattr(inputs, "trajectories", []) or []:
-        spans = _trajectory_support_spans(
+    for traj_row in candidate_traj_rows:
+        support = _scan_arc_traj_support(
             arc_line=arc_line,
-            traj=traj,
+            arc_length_m=float(arc_line.length),
+            traj_row=traj_row,
+            src_nodeid=int(row["src"]),
+            dst_nodeid=int(row["dst"]),
             buffer_m=buffer_m,
             min_span_ratio=min_span_ratio,
             min_span_length_m=min_span_length_m,
             max_seq_gap=max_seq_gap,
             max_proj_gap_m=max_proj_gap_m,
         )
+        if bool(support["terminal_supported"]):
+            terminal_traj_ids.append(str(support["traj_id"]))
+        spans = list(support["spans"])
         if not spans:
             continue
-        traj_id = str(getattr(traj, "traj_id", ""))
+        traj_id = str(support["traj_id"])
         span_traj_ids.append(traj_id)
         for span in spans:
             span_rows.append({**dict(span), "traj_id": traj_id})
-    traj_ids = sorted(set(list(terminal["traj_ids"]) + span_traj_ids))
-    if terminal["count"] > 0:
+    traj_ids = sorted(set([*terminal_traj_ids, *span_traj_ids]))
+    if terminal_traj_ids:
         coverage_ratio = 1.0 if arc_line.length > 1e-6 else 0.0
         return {
             "traj_support_type": "terminal_crossing_support",
@@ -238,7 +320,7 @@ def _support_type_for_arc(
             merged.append([start_s, end_s])
             continue
         merged[-1][1] = max(float(merged[-1][1]), end_s)
-    covered_length = float(sum(max(0.0, row[1] - row[0]) for row in merged))
+    covered_length = float(sum(max(0.0, item[1] - item[0]) for item in merged))
     coverage_ratio = float(covered_length / max(float(arc_line.length), 1e-6))
     endpoint_margin = float(arc_line.length) * float(endpoint_margin_ratio)
     covers_start = bool(merged and float(merged[0][0]) <= endpoint_margin)
@@ -268,13 +350,12 @@ def _support_source_modes(traj_support_type: str, prior_support_type: str) -> tu
 def _support_formation_reason(traj_support_type: str, prior_support_type: str, selected_segment_id: str) -> str:
     if str(selected_segment_id):
         return "arc_first_selected_segment"
-    if str(traj_support_type):
-        if str(traj_support_type) == "terminal_crossing_support":
-            return "arc_first_terminal_support"
-        if str(traj_support_type) == "partial_arc_support":
-            return "arc_first_partial_support"
-        if str(traj_support_type) == "stitched_arc_support":
-            return "arc_first_stitched_support"
+    if str(traj_support_type) == "terminal_crossing_support":
+        return "arc_first_terminal_support"
+    if str(traj_support_type) == "partial_arc_support":
+        return "arc_first_partial_support"
+    if str(traj_support_type) == "stitched_arc_support":
+        return "arc_first_stitched_support"
     if str(prior_support_type) == "prior_fallback_support":
         return "arc_first_prior_fallback"
     return "arc_first_no_support"
@@ -286,6 +367,7 @@ def _materialize_working_segment(
     selected_segment: Segment | None,
     inputs: Any,
     params: dict[str, Any],
+    divstrip_buffer: Any | None,
 ) -> Segment:
     pipeline = _pipeline()
     if selected_segment is not None:
@@ -330,7 +412,6 @@ def _materialize_working_segment(
     arc_line = _arc_line(row)
     if arc_line is None:
         raise ValueError(f"arc_line_missing:{row.get('topology_arc_id', '')}")
-    divstrip_buffer = pipeline.load_divstrip_buffer(inputs.divstrip_zone_metric, float(params["DIVSTRIP_BUFFER_M"]))
     drivezone_ratio = float(pipeline._drivezone_ratio(arc_line, inputs.drivezone_zone_metric))
     crosses_divstrip = bool(divstrip_buffer is not None and (not divstrip_buffer.is_empty) and arc_line.intersects(divstrip_buffer))
     support_ids = tuple(sorted(str(v) for v in row.get("traj_support_ids", [])))
@@ -382,6 +463,23 @@ def build_arc_evidence_attach(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     selected_by_arc = {str(segment.topology_arc_id): segment for segment in selected_segments if str(segment.topology_arc_id)}
+    patch_geometry_cache = build_patch_geometry_cache(inputs, params)
+    divstrip_buffer = patch_geometry_cache.get("divstrip_buffer")
+    prior_index = build_prior_reference_index(prior_roads)
+    traj_rows, traj_runtime = _build_trajectory_attach_cache(
+        inputs=inputs,
+        frame=frame,
+        params=params,
+        divstrip_buffer=divstrip_buffer,
+    )
+    runtime_totals = {
+        **dict(traj_runtime),
+        "trajectory_prefilter_time_ms": 0.0,
+        "support_attach_core_loop_time_ms": 0.0,
+        "terminal_partial_stitched_aggregation_time_ms": 0.0,
+        "working_segment_materialize_time_ms": 0.0,
+    }
+    prefilter_stats = {"arc_count": 0, "candidate_traj_total": 0, "candidate_traj_max": 0, "candidate_traj_hist": Counter()}
     rows: list[dict[str, Any]] = []
     working_segments: list[Segment] = []
     support_debug_rows: list[dict[str, Any]] = []
@@ -389,14 +487,34 @@ def build_arc_evidence_attach(
         current = dict(row)
         selected_segment = selected_by_arc.get(str(current.get("topology_arc_id", "")))
         arc_line = _arc_line(current)
+        prefilter_started = perf_counter()
+        candidate_traj_rows = (
+            _prefilter_traj_rows(
+                arc_line=arc_line,
+                traj_rows=traj_rows,
+                buffer_m=float(params.get("ARC_EVIDENCE_BUFFER_M", 8.0)),
+            )
+            if arc_line is not None
+            else []
+        )
+        runtime_totals["trajectory_prefilter_time_ms"] += float((perf_counter() - prefilter_started) * 1000.0)
+        prefilter_stats["arc_count"] += 1
+        prefilter_stats["candidate_traj_total"] += int(len(candidate_traj_rows))
+        prefilter_stats["candidate_traj_max"] = max(int(prefilter_stats["candidate_traj_max"]), int(len(candidate_traj_rows)))
+        prefilter_stats["candidate_traj_hist"][int(len(candidate_traj_rows))] += 1
+
+        core_started = perf_counter()
         support = _support_type_for_arc(
             row=current,
             arc_line=arc_line,
-            inputs=inputs,
-            frame=frame,
             prior_roads=prior_roads,
+            prior_index=prior_index,
+            candidate_traj_rows=candidate_traj_rows,
             params=params,
         )
+        runtime_totals["support_attach_core_loop_time_ms"] += float((perf_counter() - core_started) * 1000.0)
+
+        aggregation_started = perf_counter()
         current.update(
             {
                 "traj_support_type": str(support["traj_support_type"]),
@@ -408,24 +526,35 @@ def build_arc_evidence_attach(
                 "prior_support_available": bool(support["prior_support_available"]),
             }
         )
+        runtime_totals["terminal_partial_stitched_aggregation_time_ms"] += float((perf_counter() - aggregation_started) * 1000.0)
+
         if bool(current.get("entered_main_flow", False)):
+            materialize_started = perf_counter()
             working_segment = _materialize_working_segment(
                 row=current,
                 selected_segment=selected_segment,
                 inputs=inputs,
                 params=params,
+                divstrip_buffer=divstrip_buffer,
             )
             current["working_segment_id"] = str(working_segment.segment_id)
-            current["working_segment_source"] = "step2_selected_segment" if selected_segment is not None else "arc_first_support_attach"
+            current["working_segment_source"] = "step2_selected_segment" if selected_segment is not None else "arc_first_materialized_segment"
             current["entered_main_flow"] = True
-            current["unbuilt_stage"] = "step3_no_support" if str(current["traj_support_type"]) == "no_support" and str(current["prior_support_type"]) != "prior_fallback_support" else ""
+            current["unbuilt_stage"] = (
+                "step3_no_support"
+                if str(current["traj_support_type"]) == "no_support" and str(current["prior_support_type"]) != "prior_fallback_support"
+                else ""
+            )
             current["unbuilt_reason"] = "no_traj_support" if str(current["unbuilt_stage"]) == "step3_no_support" else ""
             working_segments.append(working_segment)
+            runtime_totals["working_segment_materialize_time_ms"] += float((perf_counter() - materialize_started) * 1000.0)
+
         support_debug_rows.append(
             {
                 "pair": str(current["pair"]),
                 "topology_arc_id": str(current["topology_arc_id"]),
                 "entered_main_flow": bool(current.get("entered_main_flow", False)),
+                "prefilter_candidate_traj_count": int(len(candidate_traj_rows)),
                 "selected_segment_count": int(current.get("selected_segment_count", 0)),
                 "traj_support_type": str(current["traj_support_type"]),
                 "traj_support_ids": [str(v) for v in current["traj_support_ids"]],
@@ -454,6 +583,12 @@ def build_arc_evidence_attach(
             "working_segment_count": int(len(working_segments)),
         },
         "audit_rows": support_debug_rows,
+        "runtime": {
+            **runtime_totals,
+            "prefilter_avg_candidate_traj_count": float(float(prefilter_stats["candidate_traj_total"]) / max(1, int(prefilter_stats["arc_count"]))),
+            "prefilter_candidate_traj_max": int(prefilter_stats["candidate_traj_max"]),
+            "prefilter_candidate_traj_hist": {str(key): int(value) for key, value in sorted(prefilter_stats["candidate_traj_hist"].items())},
+        },
     }
 
 
@@ -484,7 +619,9 @@ def run_witness_stage(
     from .step3_corridor_identity import build_witness_for_segment
 
     pipeline = _pipeline()
+    stage_started = perf_counter()
     inputs, frame, prior_roads = pipeline.load_inputs_and_frame(data_root, patch_id, params=params)
+    patch_geometry_cache = build_patch_geometry_cache(inputs, params)
     segments_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step2_segment")
     selected_segments = [Segment.from_dict(item) for item in segments_payload.get("segments", [])]
     full_registry_rows = list(segments_payload.get("full_legal_arc_registry", []))
@@ -496,22 +633,65 @@ def run_witness_stage(
         prior_roads=prior_roads,
         params=params,
     )
-    row_by_segment_id = {
-        str(row.get("working_segment_id", "")): row
-        for row in evidence["rows"]
-        if str(row.get("working_segment_id", ""))
+    row_by_segment_id = {str(row.get("working_segment_id", "")): row for row in evidence["rows"] if str(row.get("working_segment_id", ""))}
+    witness_started = perf_counter()
+    witnesses = [
+        build_witness_for_segment(
+            segment,
+            inputs,
+            params,
+            drivable_surface=patch_geometry_cache.get("drivable_surface"),
+        )
+        for segment in evidence["working_segments"]
+    ]
+    runtime = {
+        **dict(evidence.get("runtime", {})),
+        "witness_build_time_ms": float((perf_counter() - witness_started) * 1000.0),
+        "stage_runtime_ms": float((perf_counter() - stage_started) * 1000.0),
     }
-    witnesses = [build_witness_for_segment(segment, inputs, params) for segment in evidence["working_segments"]]
     artifact = {
         "witnesses": [witness.to_dict() for witness in witnesses],
         "working_segments": [segment.to_dict() for segment in evidence["working_segments"]],
         "full_legal_arc_registry": list(evidence["rows"]),
         "legal_arc_funnel": dict(evidence["summary"]),
         "arc_evidence_attach_audit": list(evidence["audit_rows"]),
+        "runtime": runtime,
     }
     dbg_dir = pipeline.debug_dir(out_root, run_id, patch_id)
     write_json(pipeline._artifact_path(out_root, run_id, patch_id, "step3_witness"), artifact)
-    write_json(dbg_dir / "arc_evidence_attach.json", {"arcs": evidence["audit_rows"], "summary": evidence["summary"]})
+    write_json(dbg_dir / "arc_evidence_attach.json", {"arcs": evidence["audit_rows"], "summary": evidence["summary"], "runtime": runtime})
+    write_json(
+        dbg_dir / "prefilter_stats.json",
+        {
+            "summary": {
+                "trajectory_prefilter_time_ms": float(runtime.get("trajectory_prefilter_time_ms", 0.0)),
+                "support_attach_core_loop_time_ms": float(runtime.get("support_attach_core_loop_time_ms", 0.0)),
+                "terminal_partial_stitched_aggregation_time_ms": float(runtime.get("terminal_partial_stitched_aggregation_time_ms", 0.0)),
+                "prefilter_avg_candidate_traj_count": float(runtime.get("prefilter_avg_candidate_traj_count", 0.0)),
+                "prefilter_candidate_traj_max": int(runtime.get("prefilter_candidate_traj_max", 0)),
+            },
+            "hist": dict(runtime.get("prefilter_candidate_traj_hist", {})),
+        },
+    )
+    write_json(
+        dbg_dir / "step3_attach_hotspots.json",
+        {
+            "runtime": runtime,
+            "top_arcs": sorted(
+                [
+                    {
+                        "pair": str(item.get("pair", "")),
+                        "topology_arc_id": str(item.get("topology_arc_id", "")),
+                        "prefilter_candidate_traj_count": int(item.get("prefilter_candidate_traj_count", 0)),
+                        "traj_support_type": str(item.get("traj_support_type", "")),
+                        "traj_support_coverage_ratio": float(item.get("traj_support_coverage_ratio", 0.0)),
+                    }
+                    for item in evidence["audit_rows"]
+                ],
+                key=lambda item: (-int(item["prefilter_candidate_traj_count"]), -float(item["traj_support_coverage_ratio"]), str(item["topology_arc_id"])),
+            )[:20],
+        },
+    )
     write_lines_geojson(
         dbg_dir / "arc_first_working_segments.geojson",
         [_segment_feature(segment, row_by_segment_id.get(str(segment.segment_id), {})) for segment in evidence["working_segments"]],
@@ -522,6 +702,7 @@ def run_witness_stage(
         "frame": frame,
         "segments": evidence["working_segments"],
         "witnesses": witnesses,
+        "runtime": runtime,
         "reason": "witness_ready",
     }
 

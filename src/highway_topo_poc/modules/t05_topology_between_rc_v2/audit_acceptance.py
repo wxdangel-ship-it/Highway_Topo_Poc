@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from .io import read_json, write_json
@@ -64,11 +65,22 @@ _ARC_LEGALITY_REASONS = {
     "synthetic_arc_not_allowed",
 }
 
+_PATCH_JSON_CACHE: dict[str, dict[str, Any]] = {}
+
 
 def _safe_read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     return read_json(path)
+
+
+def _cached_patch_json(path: Path) -> dict[str, Any]:
+    key = str(path.resolve())
+    cached = _PATCH_JSON_CACHE.get(key)
+    if cached is None:
+        cached = _safe_read_json(path)
+        _PATCH_JSON_CACHE[key] = cached
+    return cached
 
 
 def _pair_id_text(src_nodeid: int, dst_nodeid: int) -> str:
@@ -126,8 +138,8 @@ def _find_pair_row(rows: list[dict[str, Any]], pair_id: str) -> dict[str, Any] |
 
 
 def _road_segment_map(patch_dir: Path) -> tuple[dict[str, dict[str, Any]], set[str]]:
-    segments_payload = _safe_read_json(patch_dir / "step2" / "segments.json")
-    roads_payload = _safe_read_json(patch_dir / "step6" / "final_roads.json")
+    segments_payload = _cached_patch_json(patch_dir / "step2" / "segments.json")
+    roads_payload = _cached_patch_json(patch_dir / "step6" / "final_roads.json")
     segments = {str(item.get("segment_id", "")): dict(item) for item in segments_payload.get("segments", [])}
     built_pairs = set(_built_pairs(roads_payload))
     return segments, built_pairs
@@ -143,9 +155,9 @@ def _pair_rows_by_id(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
 
 def evaluate_patch_acceptance(run_root: Path | str, patch_id: str) -> dict[str, Any]:
     patch_dir = _patch_dir(run_root, patch_id)
-    metrics = _safe_read_json(patch_dir / "metrics.json")
-    gate = _safe_read_json(patch_dir / "gate.json")
-    roads_payload = _safe_read_json(patch_dir / "step6" / "final_roads.json")
+    metrics = _cached_patch_json(patch_dir / "metrics.json")
+    gate = _cached_patch_json(patch_dir / "gate.json")
+    roads_payload = _cached_patch_json(patch_dir / "step6" / "final_roads.json")
     expected_pairs = list(_SIMPLE_PATCH_ACCEPTANCE_REGISTRY.get(str(patch_id), {}).get("targets", []))
     built_pairs = _built_pairs(roads_payload)
     built_pair_set = set(built_pairs)
@@ -202,12 +214,12 @@ def evaluate_patch_acceptance(run_root: Path | str, patch_id: str) -> dict[str, 
 
 def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[str, Any]:
     patch_dir = _patch_dir(run_root, complex_patch_id)
-    segments_payload = _safe_read_json(patch_dir / "step2" / "segments.json")
+    segments_payload = _cached_patch_json(patch_dir / "step2" / "segments.json")
     metrics_payload = _patch_metrics(run_root, complex_patch_id)
-    roads_payload = _safe_read_json(patch_dir / "step6" / "final_roads.json")
-    should_not_payload = _safe_read_json(patch_dir / "debug" / "step2_segment_should_not_exist.json")
-    topology_pairs_payload = _safe_read_json(patch_dir / "debug" / "step2_topology_pairs.json")
-    bridge_audit_payload = _safe_read_json(patch_dir / "debug" / "step2_blocked_pair_bridge_audit.json")
+    roads_payload = _cached_patch_json(patch_dir / "step6" / "final_roads.json")
+    should_not_payload = _cached_patch_json(patch_dir / "debug" / "step2_segment_should_not_exist.json")
+    topology_pairs_payload = _cached_patch_json(patch_dir / "debug" / "step2_topology_pairs.json")
+    bridge_audit_payload = _cached_patch_json(patch_dir / "debug" / "step2_blocked_pair_bridge_audit.json")
 
     built_pair_set = set(_built_pairs(roads_payload))
     selected_rows = _pair_rows_by_id(list(segments_payload.get("segments", [])))
@@ -294,8 +306,8 @@ def build_arc_legality_audit(run_root: Path | str, patch_ids: list[str]) -> dict
     selected_segment_rows: list[dict[str, Any]] = []
     for patch_id in patch_ids:
         patch_dir = _patch_dir(run_root, patch_id)
-        segments_payload = _safe_read_json(patch_dir / "step2" / "segments.json")
-        roads_payload = _safe_read_json(patch_dir / "step6" / "final_roads.json")
+        segments_payload = _cached_patch_json(patch_dir / "step2" / "segments.json")
+        roads_payload = _cached_patch_json(patch_dir / "step6" / "final_roads.json")
         segment_map = {
             str(item.get("segment_id", "")): dict(item)
             for item in segments_payload.get("segments", [])
@@ -584,6 +596,38 @@ def _render_summary_markdown(
     return "\n".join(lines) + "\n"
 
 
+def _render_runtime_before_after_markdown(runtime_breakdown: dict[str, Any]) -> str:
+    lines = [
+        "# Runtime Before/After",
+        "",
+        "- before: unavailable in local writer unless an older bundle/runtime file already exists on inner network",
+        "",
+        "## Current",
+        "",
+    ]
+    for patch in runtime_breakdown.get("patches", []):
+        lines.append(
+            f"- patch `{patch.get('patch_id','')}` total_runtime_ms={float(patch.get('total_runtime_ms', 0.0) or 0.0):.1f}"
+        )
+        for stage in patch.get("stages", []):
+            stage_name = str(stage.get("stage", ""))
+            duration_ms = float(stage.get("duration_ms", 0.0) or 0.0)
+            runtime = dict(stage.get("runtime") or {})
+            if stage_name == "step3_witness":
+                lines.append(
+                    "  "
+                    f"step3_witness={duration_ms:.1f}ms "
+                    f"prefilter={float(runtime.get('trajectory_prefilter_time_ms', 0.0)):.1f}ms "
+                    f"attach={float(runtime.get('support_attach_core_loop_time_ms', 0.0)):.1f}ms "
+                    f"aggregate={float(runtime.get('terminal_partial_stitched_aggregation_time_ms', 0.0)):.1f}ms "
+                    f"witness_build={float(runtime.get('witness_build_time_ms', 0.0)):.1f}ms"
+                )
+            else:
+                lines.append(f"  {stage_name}={duration_ms:.1f}ms")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def write_arc_legality_fix_review(
     *,
     run_root: Path | str,
@@ -677,8 +721,8 @@ def build_arc_legality_audit(run_root: Path | str, patch_ids: list[str]) -> dict
     selected_segment_rows: list[dict[str, Any]] = []
     for patch_id in patch_ids:
         patch_dir = _patch_dir(run_root, patch_id)
-        segments_payload = _safe_read_json(patch_dir / "step2" / "segments.json")
-        roads_payload = _safe_read_json(patch_dir / "step6" / "final_roads.json")
+        segments_payload = _cached_patch_json(patch_dir / "step2" / "segments.json")
+        roads_payload = _cached_patch_json(patch_dir / "step6" / "final_roads.json")
         segment_map = {
             str(item.get("segment_id", "")): dict(item)
             for item in segments_payload.get("segments", [])
@@ -763,7 +807,7 @@ def build_arc_legality_audit(run_root: Path | str, patch_ids: list[str]) -> dict
 
 
 def _patch_metrics(run_root: Path | str, patch_id: str) -> dict[str, Any]:
-    return _safe_read_json(_patch_dir(run_root, patch_id) / "metrics.json")
+    return _cached_patch_json(_patch_dir(run_root, patch_id) / "metrics.json")
 
 
 def _patch_full_registry_rows(run_root: Path | str, patch_id: str) -> list[dict[str, Any]]:
@@ -771,7 +815,7 @@ def _patch_full_registry_rows(run_root: Path | str, patch_id: str) -> list[dict[
     rows = list(metrics.get("full_legal_arc_registry", []))
     if rows:
         return rows
-    step4_payload = _safe_read_json(_patch_dir(run_root, patch_id) / "step4" / "corridor_identity.json")
+    step4_payload = _cached_patch_json(_patch_dir(run_root, patch_id) / "step4" / "corridor_identity.json")
     rows = list(step4_payload.get("full_legal_arc_registry", []))
     if rows:
         return rows
@@ -790,7 +834,7 @@ def _patch_full_registry_rows(run_root: Path | str, patch_id: str) -> list[dict[
             }
             for row in legacy_rows
         ]
-    step2_payload = _safe_read_json(_patch_dir(run_root, patch_id) / "step2" / "segments.json")
+    step2_payload = _cached_patch_json(_patch_dir(run_root, patch_id) / "step2" / "segments.json")
     return [
         {
             "pair": _pair_id_text(int(row.get("src_nodeid", 0)), int(row.get("dst_nodeid", 0))),
@@ -831,17 +875,68 @@ def _patch_funnel(run_root: Path | str, patch_id: str) -> dict[str, Any]:
     funnel = dict(metrics.get("legal_arc_funnel", {}))
     if funnel:
         return funnel
-    step4_payload = _safe_read_json(_patch_dir(run_root, patch_id) / "step4" / "corridor_identity.json")
+    step4_payload = _cached_patch_json(_patch_dir(run_root, patch_id) / "step4" / "corridor_identity.json")
     return dict(step4_payload.get("legal_arc_funnel", {}))
 
 
 def _patch_arc_evidence_attach(run_root: Path | str, patch_id: str) -> list[dict[str, Any]]:
-    payload = _safe_read_json(_patch_dir(run_root, patch_id) / "step3" / "witness.json")
+    payload = _cached_patch_json(_patch_dir(run_root, patch_id) / "step3" / "witness.json")
     rows = list(payload.get("arc_evidence_attach_audit", []))
     if rows:
         return rows
-    debug_payload = _safe_read_json(_patch_dir(run_root, patch_id) / "debug" / "arc_evidence_attach.json")
-    return list(debug_payload.get("rows", []))
+    debug_payload = _cached_patch_json(_patch_dir(run_root, patch_id) / "debug" / "arc_evidence_attach.json")
+    return list(debug_payload.get("rows", [])) or list(debug_payload.get("arcs", []))
+
+
+def _patch_runtime_breakdown(run_root: Path | str, patch_id: str) -> dict[str, Any]:
+    patch_dir = _patch_dir(run_root, patch_id)
+    payload = _cached_patch_json(patch_dir / "runtime_breakdown.json")
+    if payload:
+        return payload
+    stages: list[dict[str, Any]] = []
+    total_runtime_ms = 0.0
+    for stage_name, dir_name in [
+        ("step1_input_frame", "step1"),
+        ("step2_segment", "step2"),
+        ("step3_witness", "step3"),
+        ("step4_corridor_identity", "step4"),
+        ("step5_slot_mapping", "step5"),
+        ("step6_build_road", "step6"),
+    ]:
+        state = _cached_patch_json(patch_dir / dir_name / "step_state.json")
+        if not state:
+            continue
+        duration_ms = float(state.get("duration_ms", 0.0) or 0.0)
+        total_runtime_ms += duration_ms
+        stages.append(
+            {
+                "stage": str(stage_name),
+                "status": "ok" if bool(state.get("ok")) else "failed",
+                "duration_ms": float(duration_ms),
+                "runtime": dict(state.get("runtime") or {}),
+            }
+        )
+    return {"patch_id": str(patch_id), "stages": stages, "total_runtime_ms": float(total_runtime_ms)}
+
+
+def build_runtime_breakdown(
+    run_root: Path | str,
+    patch_ids: list[str],
+    *,
+    review_runtime_ms: float = 0.0,
+) -> dict[str, Any]:
+    patches: list[dict[str, Any]] = []
+    total_runtime_ms = float(review_runtime_ms)
+    for patch_id in patch_ids:
+        payload = dict(_patch_runtime_breakdown(run_root, patch_id))
+        total_runtime_ms += float(payload.get("total_runtime_ms", 0.0) or 0.0)
+        patches.append(payload)
+    return {
+        "evaluated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "patches": patches,
+        "review_runtime_ms": float(review_runtime_ms),
+        "total_runtime_ms": float(total_runtime_ms),
+    }
 
 
 def _registry_example(row: dict[str, Any]) -> dict[str, Any]:
@@ -893,7 +988,7 @@ def build_legal_arc_coverage(run_root: Path | str, patch_ids: list[str]) -> dict
     for patch_id in patch_ids:
         registry_rows = [dict(item) for item in _patch_full_registry_rows(run_root, patch_id)]
         funnel = dict(_patch_funnel(run_root, patch_id))
-        roads_payload = _safe_read_json(_patch_dir(run_root, patch_id) / "step6" / "final_roads.json")
+        roads_payload = _cached_patch_json(_patch_dir(run_root, patch_id) / "step6" / "final_roads.json")
         built_segment_ids = {str(item.get("segment_id", "")) for item in roads_payload.get("roads", []) if str(item.get("segment_id", ""))}
         for row in registry_rows:
             row_segment_ids = [str(v) for v in row.get("selected_segment_ids", []) if str(v)]
@@ -1157,6 +1252,7 @@ def write_arc_first_attach_evidence_review(
     simple_patch_ids: list[str] | None = None,
     complex_patch_id: str = "5417632623039346",
 ) -> dict[str, Any]:
+    started = perf_counter()
     run_root_path = Path(run_root)
     output_root_path = Path(output_root)
     output_root_path.mkdir(parents=True, exist_ok=True)
@@ -1175,6 +1271,13 @@ def write_arc_first_attach_evidence_review(
         arc_legality_audit=arc_legality_audit,
         simple_patch_regression=simple_patch_regression,
     )
+    review_runtime_ms = float((perf_counter() - started) * 1000.0)
+    runtime_breakdown = build_runtime_breakdown(run_root_path, all_patch_ids, review_runtime_ms=review_runtime_ms)
+    complex_runtime = next(
+        (dict(item) for item in runtime_breakdown.get("patches", []) if str(item.get("patch_id", "")) == str(complex_patch_id)),
+        {},
+    )
+    complex_perf_review = {**dict(complex_review), "runtime": complex_runtime}
     full_registry_payload = {
         "evaluated_at_utc": legal_arc_coverage.get("evaluated_at_utc", ""),
         "patches": [
@@ -1209,13 +1312,19 @@ def write_arc_first_attach_evidence_review(
     write_json(output_root_path / "arc_evidence_attach_audit.json", arc_evidence_attach_audit)
     write_json(output_root_path / "pair_decisions.json", pair_decisions)
     write_json(output_root_path / "arc_legality_audit.json", arc_legality_audit)
+    write_json(output_root_path / "runtime_breakdown.json", runtime_breakdown)
     write_json(output_root_path / "legal_arc_coverage.json", legal_arc_coverage)
     write_json(output_root_path / "simple_patch_acceptance.json", simple_patch_acceptance)
     write_json(output_root_path / "simple_patch_regression.json", simple_patch_regression)
     write_json(output_root_path / "complex_patch_coverage_review.json", complex_review)
+    write_json(output_root_path / "complex_patch_perf_review.json", complex_perf_review)
     write_json(output_root_path / "complex_patch_funnel_review.json", complex_review)
     write_json(output_root_path / "complex_patch_legality_review.json", complex_review)
     write_json(output_root_path / "strong_constraint_status.json", strong_constraint_status)
+    (output_root_path / "runtime_before_after.md").write_text(
+        _render_runtime_before_after_markdown(runtime_breakdown),
+        encoding="utf-8",
+    )
     (output_root_path / "SUMMARY.md").write_text(
         _render_summary_markdown(
             run_root=run_root_path,
@@ -1232,12 +1341,14 @@ def write_arc_first_attach_evidence_review(
         "acceptance": acceptance_results,
         "pair_decisions": pair_decisions,
         "arc_legality_audit": arc_legality_audit,
+        "runtime_breakdown": runtime_breakdown,
         "legal_arc_coverage": legal_arc_coverage,
         "arc_evidence_attach_audit": arc_evidence_attach_audit,
         "simple_patch_acceptance": simple_patch_acceptance,
         "simple_patch_regression": simple_patch_regression,
         "complex_patch_legality_review": complex_review,
         "complex_patch_coverage_review": complex_review,
+        "complex_patch_perf_review": complex_perf_review,
         "strong_constraint_status": strong_constraint_status,
     }
 
@@ -1287,6 +1398,21 @@ def write_bridge_trial_review(
     )
 
 
+def write_perf_opt_arc_first_review(
+    *,
+    run_root: Path | str,
+    output_root: Path | str,
+    simple_patch_ids: list[str] | None = None,
+    complex_patch_id: str = "5417632623039346",
+) -> dict[str, Any]:
+    return write_arc_first_attach_evidence_review(
+        run_root=run_root,
+        output_root=output_root,
+        simple_patch_ids=simple_patch_ids,
+        complex_patch_id=complex_patch_id,
+    )
+
+
 __all__ = [
     "build_arc_evidence_attach_audit",
     "build_arc_legality_audit",
@@ -1302,4 +1428,5 @@ __all__ = [
     "write_arc_legality_fix_review",
     "write_bridge_trial_review",
     "write_legal_arc_coverage_review",
+    "write_perf_opt_arc_first_review",
 ]
