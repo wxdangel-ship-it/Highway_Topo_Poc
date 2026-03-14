@@ -12,6 +12,8 @@ from shapely.geometry import LineString, Point, Polygon
 
 from highway_topo_poc.modules.t05_topology_between_rc_v2.io import InputFrame, PatchInputs
 from highway_topo_poc.modules.t05_topology_between_rc_v2.audit_acceptance import (
+    build_arc_obligation_registry,
+    build_competing_arc_review,
     build_arc_legality_audit,
     build_pair_decisions,
 )
@@ -40,6 +42,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.review import (
     write_arc_first_attach_evidence_review,
     write_arc_legality_fix_review,
     write_arc_obligation_closure_review,
+    write_competing_arc_closure_review,
     write_legal_arc_coverage_review,
     write_perf_opt_arc_first_review,
     write_semantic_fix_after_perf_review,
@@ -3027,12 +3030,14 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     obligation_registry = _read_json(output_root_obligation / "arc_obligation_registry.json")
     obligation_by_pair = {str(item["pair"]): item for item in obligation_registry["rows"]}
     assert obligation_by_pair["760239:6963539359479390368"]["obligation_status"] == "must_build_now"
-    assert obligation_by_pair["55353246:37687913"]["obligation_status"] == "root_cause_confirm_first"
-    assert obligation_by_pair["55353246:37687913"]["blocking_reason"].startswith("competing_arc_")
+    assert obligation_by_pair["55353246:37687913"]["obligation_status"] == "must_remain_blocked"
+    assert obligation_by_pair["55353246:37687913"]["blocking_layer"] == "business_rule"
+    assert obligation_by_pair["55353246:37687913"]["blocking_reason"] == "competing_arc_requires_new_pair_selection_rule"
     assert obligation_by_pair["21779764:785642"]["current_status"] == "observation_only"
     competing = _read_json(output_root_obligation / "competing_arc_review.json")
     competing_by_pair = {str(item["pair"]): item for item in competing["rows"]}
     assert competing_by_pair["55353246:37687913"]["root_cause_code"].startswith("competing_arc_")
+    assert len(competing_by_pair["55353246:37687913"]["competing_siblings"]) >= 2
     assert competing_by_pair["21779764:785642"]["root_cause_code"] == "multi_arc_no_selection_rule"
     assert "arc_obligation_registry" in obligation
     assert "competing_arc_review" in obligation
@@ -3046,6 +3051,11 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     strict_vs_visual_alias = _read_json(output_root_alias / "strict_vs_visual_gap_summary.json")
     assert "alias_normalized_review" in strict_vs_visual_alias
     assert "alias_normalization_review" in alias_summary
+
+    output_root_competing = tmp_path / "bundle_competing"
+    competing_summary = write_competing_arc_closure_review(run_root=run_root, output_root=output_root_competing)
+    assert (output_root_competing / "complex_patch_competing_arc_closure_review.json").exists()
+    assert "complex_patch_competing_arc_closure_review" in competing_summary
 
 
 def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
@@ -3102,6 +3112,79 @@ def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
     assert decisions["55353246:37687913"]["reason"] == "gap_competing_arc_conflict"
     assert decisions["791871:37687913"]["decision"] == "gap_ambiguous_need_more_constraints"
     assert decisions["791871:37687913"]["reason"] == "gap_competing_arc_conflict"
+
+
+def test_t05v2_competing_arc_closure_finalizes_obligation_statuses() -> None:
+    topology_gap_review = {
+        "patch_id": "5417632623039346",
+        "rows": [
+            {
+                "patch_id": "5417632623039346",
+                "pair": "55353246:37687913",
+                "src": 55353246,
+                "dst": 37687913,
+                "topology_arc_id": "arc_gap_a",
+                "gap_classification": "gap_ambiguous_need_more_constraints",
+                "gap_reason": "gap_competing_arc_conflict",
+                "traj_support_type": "terminal_crossing_support",
+                "traj_support_count": 1,
+                "traj_support_coverage_ratio": 0.82,
+                "support_total_length_m": 92.0,
+                "corridor_identity": "witness_based",
+                "slot_status": "resolved",
+                "built_final_road": False,
+                "drivezone_overlap_ratio": 0.95,
+                "divstrip_overlap_ratio": 0.0,
+                "src_anchor_source": "support_anchor",
+                "dst_anchor_source": "support_anchor",
+            },
+            {
+                "patch_id": "5417632623039346",
+                "pair": "791871:37687913",
+                "src": 791871,
+                "dst": 37687913,
+                "topology_arc_id": "arc_gap_b",
+                "gap_classification": "gap_ambiguous_need_more_constraints",
+                "gap_reason": "gap_competing_arc_conflict",
+                "traj_support_type": "terminal_crossing_support",
+                "traj_support_count": 1,
+                "traj_support_coverage_ratio": 0.79,
+                "support_total_length_m": 60.0,
+                "corridor_identity": "witness_based",
+                "slot_status": "resolved",
+                "built_final_road": False,
+                "drivezone_overlap_ratio": 0.94,
+                "divstrip_overlap_ratio": 0.0,
+                "src_anchor_source": "support_anchor",
+                "dst_anchor_source": "support_anchor",
+            },
+        ],
+    }
+    same_pair_multi_arc_observation = {"patch_id": "5417632623039346", "rows": []}
+
+    obligation = build_arc_obligation_registry(
+        complex_patch_id="5417632623039346",
+        topology_gap_review=topology_gap_review,
+        same_pair_multi_arc_observation=same_pair_multi_arc_observation,
+    )
+    obligation_by_pair = {str(item["pair"]): item for item in obligation["rows"]}
+    assert obligation_by_pair["55353246:37687913"]["obligation_status"] == "must_remain_blocked"
+    assert obligation_by_pair["55353246:37687913"]["blocking_layer"] == "business_rule"
+    assert obligation_by_pair["55353246:37687913"]["blocking_reason"] == "competing_arc_requires_new_pair_selection_rule"
+    assert obligation_by_pair["791871:37687913"]["obligation_status"] == "must_remain_blocked"
+    assert obligation_by_pair["791871:37687913"]["blocking_layer"] == "support_ranking"
+    assert obligation_by_pair["791871:37687913"]["blocking_reason"] == "competing_arc_support_weaker_below_selection_threshold"
+
+    competing = build_competing_arc_review(
+        complex_patch_id="5417632623039346",
+        topology_gap_review=topology_gap_review,
+        same_pair_multi_arc_observation=same_pair_multi_arc_observation,
+    )
+    competing_by_pair = {str(item["pair"]): item for item in competing["rows"]}
+    assert competing_by_pair["55353246:37687913"]["root_cause_code"] == "competing_arc_requires_new_pair_selection_rule"
+    assert competing_by_pair["791871:37687913"]["root_cause_code"] == "competing_arc_support_weaker_below_selection_threshold"
+    assert competing_by_pair["791871:37687913"]["strongest_peer_pair"] == "55353246:37687913"
+    assert len(competing_by_pair["791871:37687913"]["competing_siblings"]) == 2
 
 
 def test_t05v2_arc_legality_audit_uses_full_registry_for_arc_first_built_segment(tmp_path: Path) -> None:

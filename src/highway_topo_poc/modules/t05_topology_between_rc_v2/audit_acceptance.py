@@ -47,6 +47,10 @@ _STABLE_BLOCKED_PAIRS = [
     "791871:37687913",
     "55353246:37687913",
 ]
+_COMPETING_ARC_CLOSURE_TARGET_PAIRS = [
+    "55353246:37687913",
+    "791871:37687913",
+]
 
 _BRIDGE_TARGET_PAIR = "5395717732638194:37687913"
 _REFERENCE_PAIR = "5395717732638194:29626540"
@@ -92,6 +96,35 @@ def _cached_patch_json(path: Path) -> dict[str, Any]:
 
 def _pair_id_text(src_nodeid: int, dst_nodeid: int) -> str:
     return f"{int(src_nodeid)}:{int(dst_nodeid)}"
+
+
+def _support_type_rank(row: dict[str, Any]) -> float:
+    support_type = str(row.get("traj_support_type", "no_support"))
+    if support_type in {"terminal_crossing_support", "stitched_arc_support"}:
+        return 3.0
+    if support_type == "partial_arc_support":
+        return 2.0
+    if support_type != "no_support":
+        return 1.0
+    if str(row.get("prior_support_type", "no_support")) == "prior_fallback_support":
+        return 0.5
+    return 0.0
+
+
+def _support_strength_score(row: dict[str, Any]) -> float:
+    coverage_ratio = float(row.get("traj_support_coverage_ratio", 0.0) or 0.0)
+    support_length = float(row.get("support_total_length_m", 0.0) or 0.0)
+    support_count = int(row.get("traj_support_count", 0) or 0)
+    slot_bonus = 3.0 if str(row.get("slot_status", "")) == "resolved" else 0.0
+    corridor_bonus = 2.0 if str(row.get("corridor_identity", "")) in {"witness_based", "prior_based"} else 0.0
+    return float(
+        (_support_type_rank(row) * 100.0)
+        + (coverage_ratio * 100.0)
+        + (min(support_length, 250.0) * 0.4)
+        + (support_count * 6.0)
+        + slot_bonus
+        + corridor_bonus
+    )
 
 
 def _patch_dir(run_root: Path | str, patch_id: str) -> Path:
@@ -1600,37 +1633,133 @@ def build_strong_constraint_status(
     }
 
 
-def _gap_blocking_reason(
+def _competing_arc_side_by_side_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "pair": str(row.get("pair", "")),
+        "topology_arc_id": str(row.get("topology_arc_id", "")),
+        "chord_summary": (
+            f"{str(row.get('src_anchor_source', '') or '-')}->{str(row.get('dst_anchor_source', '') or '-')}"
+        ),
+        "traj_support_type": str(row.get("traj_support_type", "no_support")),
+        "traj_support_count": int(row.get("traj_support_count", 0) or 0),
+        "traj_support_coverage_ratio": float(row.get("traj_support_coverage_ratio", 0.0) or 0.0),
+        "support_total_length_m": float(row.get("support_total_length_m", 0.0) or 0.0),
+        "corridor_identity": str(row.get("corridor_identity", "unresolved")),
+        "slot_status": str(row.get("slot_status", "unresolved")),
+        "built_final_road": bool(row.get("built_final_road", False)),
+        "drivezone_overlap_ratio": float(row.get("drivezone_overlap_ratio", 0.0) or 0.0),
+        "divstrip_overlap_ratio": float(row.get("divstrip_overlap_ratio", 0.0) or 0.0),
+        "support_strength_score": float(_support_strength_score(row)),
+    }
+
+
+def _competing_arc_analysis(
     row: dict[str, Any],
     *,
     competing_rows: list[dict[str, Any]],
-) -> str:
-    if float(row.get("divstrip_overlap_ratio", 0.0)) > 0.10:
-        return "competing_arc_crosses_divstrip"
-    built_peer = any(
-        bool(peer.get("built_final_road", False))
-        for peer in competing_rows
-        if str(peer.get("pair", "")) != str(row.get("pair", ""))
-    )
-    stronger_peer = any(
-        (
-            float(peer.get("traj_support_coverage_ratio", 0.0)) > float(row.get("traj_support_coverage_ratio", 0.0)) + 0.05
-            or float(peer.get("support_total_length_m", 0.0)) > float(row.get("support_total_length_m", 0.0)) + 10.0
-            or int(peer.get("traj_support_count", 0)) > int(row.get("traj_support_count", 0))
+) -> dict[str, Any]:
+    pair_id = str(row.get("pair", ""))
+    peer_rows = [dict(peer) for peer in competing_rows if str(peer.get("pair", "")) != pair_id]
+    current_score = float(_support_strength_score(row))
+    peer_summaries = [_competing_arc_side_by_side_row(peer) for peer in peer_rows]
+    current_summary = _competing_arc_side_by_side_row(row)
+    side_by_side = [current_summary, *peer_summaries]
+    side_by_side.sort(
+        key=lambda item: (
+            -int(bool(item.get("built_final_road", False))),
+            -float(item.get("support_strength_score", 0.0)),
+            str(item.get("pair", "")),
         )
-        for peer in competing_rows
-        if str(peer.get("pair", "")) != str(row.get("pair", ""))
     )
-    slot_available = str(row.get("slot_status", "")) == "resolved"
-    if built_peer:
-        return "competing_arc_slot_conflict_with_built_sibling"
-    if stronger_peer and slot_available:
-        return "competing_arc_support_weaker_but_slot_available"
-    if stronger_peer:
-        return "competing_arc_support_weaker"
-    if int(len(competing_rows)) >= 2:
-        return "competing_arc_requires_new_pair_selection_rule"
-    return "competing_arc_business_rule_not_decided"
+
+    strongest_peer = max(peer_summaries, key=lambda item: float(item.get("support_strength_score", 0.0)), default=None)
+    strongest_peer_score = float(strongest_peer.get("support_strength_score", 0.0)) if strongest_peer else 0.0
+    strongest_peer_pair = str(strongest_peer.get("pair", "")) if strongest_peer else ""
+    score_gap_to_best = float(strongest_peer_score - current_score) if strongest_peer else 0.0
+    slot_resolved = str(row.get("slot_status", "")) == "resolved"
+    resolved_peer_exists = any(str(peer.get("slot_status", "")) == "resolved" for peer in peer_rows)
+    built_peer = next((item for item in peer_summaries if bool(item.get("built_final_road", False))), None)
+    stronger_peer = bool(strongest_peer and score_gap_to_best >= 2.0)
+
+    root_cause_code = "competing_arc_business_rule_not_decided"
+    blocking_layer = "business_rule"
+    next_action = "confirm_business_rule_before_release"
+    root_cause_detail = "the business rule for choosing among competing destination arcs is still not decided"
+
+    if float(row.get("divstrip_overlap_ratio", 0.0) or 0.0) > 0.10:
+        root_cause_code = "competing_arc_crosses_divstrip"
+        blocking_layer = "geometry"
+        next_action = "keep_blocked_until_corridor_stays_on_non_divstrip_side"
+        root_cause_detail = (
+            "candidate witness still overlaps divstrip, so the competing arc cannot be released without violating physical separation"
+        )
+    elif built_peer is not None:
+        if stronger_peer and str(built_peer.get("pair", "")) == strongest_peer_pair:
+            root_cause_code = "competing_arc_support_weaker_than_built_sibling"
+            blocking_layer = "support_ranking"
+            next_action = "compare_competing_arc_support_weight_before_release"
+            root_cause_detail = (
+                "a built competing sibling already occupies the destination branch and this arc is weaker on support evidence"
+            )
+        else:
+            root_cause_code = "competing_arc_slot_conflict_with_built_sibling"
+            blocking_layer = "slot"
+            next_action = "compare_competing_arc_slot_against_built_sibling_before_release"
+            root_cause_detail = (
+                "this arc conflicts with an already-built competing sibling on the same downstream destination slot"
+            )
+    elif not slot_resolved and resolved_peer_exists:
+        root_cause_code = "competing_arc_no_independent_slot"
+        blocking_layer = "slot"
+        next_action = "verify_whether_an_independent_destination_slot_exists"
+        root_cause_detail = (
+            "a competing peer already has a resolved downstream slot while this arc still lacks an independently established slot"
+        )
+    elif stronger_peer:
+        blocking_layer = "support_ranking"
+        next_action = "compare_competing_arc_support_weight_before_release"
+        if score_gap_to_best >= 2.0:
+            root_cause_code = "competing_arc_support_weaker_below_selection_threshold"
+            root_cause_detail = (
+                "this arc is measurably weaker than its strongest competing peer and currently falls below the pair-selection support threshold"
+            )
+        elif slot_resolved:
+            root_cause_code = "competing_arc_support_weaker_but_slot_available"
+            root_cause_detail = (
+                "this arc has an available slot but still loses to a stronger competing peer on support evidence"
+            )
+        else:
+            root_cause_code = "competing_arc_support_weaker_below_selection_threshold"
+            root_cause_detail = (
+                "this arc is weaker than its strongest competing peer and cannot be released under the current support-ranking threshold"
+            )
+    elif len(peer_rows) >= 1:
+        root_cause_code = "competing_arc_requires_new_pair_selection_rule"
+        blocking_layer = "business_rule"
+        next_action = "define_pair_selection_rule_for_shared_destination"
+        root_cause_detail = (
+            "multiple topology-gap arcs compete for the same destination and release now requires an explicit pair-selection rule"
+        )
+
+    selected_by_support_ranking = bool(
+        strongest_peer is None
+        or current_score > strongest_peer_score + 2.0
+    )
+    independent_slot_available = bool(slot_resolved and built_peer is None)
+    return {
+        "root_cause_code": str(root_cause_code),
+        "blocking_layer": str(blocking_layer),
+        "next_action": str(next_action),
+        "root_cause_detail": str(root_cause_detail),
+        "support_strength_score": float(current_score),
+        "strongest_peer_pair": str(strongest_peer_pair),
+        "strongest_peer_support_score": float(strongest_peer_score),
+        "support_score_gap_to_best": float(score_gap_to_best),
+        "has_built_sibling": bool(built_peer is not None),
+        "independent_slot_available": bool(independent_slot_available),
+        "selected_by_support_ranking": bool(selected_by_support_ranking),
+        "competing_siblings": side_by_side,
+    }
 
 
 def build_arc_obligation_registry(
@@ -1671,23 +1800,12 @@ def build_arc_obligation_registry(
             blocking_reason = str(row.get("gap_reason", "") or row.get("unbuilt_reason", ""))
             next_action = "keep_blocked_until_business_rule_changes"
         else:
-            obligation_status = "root_cause_confirm_first"
+            analysis = _competing_arc_analysis(row, competing_rows=competing_rows)
+            obligation_status = "must_remain_blocked"
             current_status = "blocked"
-            blocking_layer = "pair_identity"
-            blocking_reason = _gap_blocking_reason(row, competing_rows=competing_rows)
-            next_action = (
-                "compare_competing_arc_slot_against_built_sibling_before_release"
-                if blocking_reason == "competing_arc_slot_conflict_with_built_sibling"
-                else (
-                    "compare_competing_arc_support_weight_before_release"
-                    if blocking_reason in {"competing_arc_support_weaker", "competing_arc_support_weaker_but_slot_available"}
-                    else (
-                        "define_pair_selection_rule_for_shared_destination"
-                        if blocking_reason == "competing_arc_requires_new_pair_selection_rule"
-                        else "confirm_business_rule_before_release"
-                    )
-                )
-            )
+            blocking_layer = str(analysis.get("blocking_layer", "pair_identity"))
+            blocking_reason = str(analysis.get("root_cause_code", "competing_arc_business_rule_not_decided"))
+            next_action = str(analysis.get("next_action", "confirm_business_rule_before_release"))
 
         rows.append(
             {
@@ -1712,6 +1830,7 @@ def build_arc_obligation_registry(
                 "slot_status": str(row.get("slot_status", "unresolved")),
                 "unbuilt_stage": str(row.get("unbuilt_stage", "")),
                 "unbuilt_reason": str(row.get("unbuilt_reason", "")),
+                "support_strength_score": float(_support_strength_score(row)),
             }
         )
 
@@ -1778,7 +1897,7 @@ def build_competing_arc_review(
         if str(row.get("gap_classification", "")) != "gap_ambiguous_need_more_constraints":
             continue
         competing_rows = list(gap_rows_by_dst.get(str(row.get("dst", "")), []))
-        root_cause_code = _gap_blocking_reason(row, competing_rows=competing_rows)
+        analysis = _competing_arc_analysis(row, competing_rows=competing_rows)
         rows.append(
             {
                 "patch_id": str(complex_patch_id),
@@ -1790,46 +1909,24 @@ def build_competing_arc_review(
                 "competing_pairs": [str(item.get("pair", "")) for item in competing_rows],
                 "traj_support_type": str(row.get("traj_support_type", "no_support")),
                 "traj_support_count": int(row.get("traj_support_count", 0)),
+                "traj_support_coverage_ratio": float(row.get("traj_support_coverage_ratio", 0.0) or 0.0),
                 "support_total_length_m": float(row.get("support_total_length_m", 0.0)),
                 "slot_status": str(row.get("slot_status", "unresolved")),
                 "built_final_road": bool(row.get("built_final_road", False)),
                 "drivezone_overlap_ratio": float(row.get("drivezone_overlap_ratio", 0.0)),
                 "divstrip_overlap_ratio": float(row.get("divstrip_overlap_ratio", 0.0)),
-                "root_cause_code": str(root_cause_code),
-                "root_cause_detail": (
-                    "candidate witness still overlaps divstrip, so the competing arc cannot be released without violating physical separation"
-                    if root_cause_code == "competing_arc_crosses_divstrip"
-                    else (
-                        "this arc conflicts with an already-built competing sibling on the same downstream destination slot"
-                        if root_cause_code == "competing_arc_slot_conflict_with_built_sibling"
-                        else (
-                            "this arc has weaker support than its competing sibling even though slot establishment evidence is present"
-                            if root_cause_code == "competing_arc_support_weaker_but_slot_available"
-                            else (
-                                "multiple topology-gap arcs compete for the same destination and this arc currently has weaker support than its peer"
-                                if root_cause_code == "competing_arc_support_weaker"
-                                else (
-                                    "multiple topology-gap arcs compete for the same destination and release now requires an explicit pair-selection rule"
-                                    if root_cause_code == "competing_arc_requires_new_pair_selection_rule"
-                                    else "the business rule for choosing among competing destination arcs is still not decided"
-                                )
-                            )
-                        )
-                    )
-                ),
-                "next_action": (
-                    "compare_competing_arc_slot_against_built_sibling_before_release"
-                    if root_cause_code == "competing_arc_slot_conflict_with_built_sibling"
-                    else (
-                        "compare_competing_arc_support_weight_before_release"
-                        if root_cause_code in {"competing_arc_support_weaker", "competing_arc_support_weaker_but_slot_available"}
-                        else (
-                            "define_pair_selection_rule_for_shared_destination"
-                            if root_cause_code == "competing_arc_requires_new_pair_selection_rule"
-                            else "confirm_business_rule_before_release"
-                        )
-                    )
-                ),
+                "root_cause_code": str(analysis.get("root_cause_code", "competing_arc_business_rule_not_decided")),
+                "root_cause_detail": str(analysis.get("root_cause_detail", "")),
+                "next_action": str(analysis.get("next_action", "")),
+                "blocking_layer": str(analysis.get("blocking_layer", "")),
+                "support_strength_score": float(analysis.get("support_strength_score", 0.0)),
+                "strongest_peer_pair": str(analysis.get("strongest_peer_pair", "")),
+                "strongest_peer_support_score": float(analysis.get("strongest_peer_support_score", 0.0)),
+                "support_score_gap_to_best": float(analysis.get("support_score_gap_to_best", 0.0)),
+                "has_built_sibling": bool(analysis.get("has_built_sibling", False)),
+                "independent_slot_available": bool(analysis.get("independent_slot_available", False)),
+                "selected_by_support_ranking": bool(analysis.get("selected_by_support_ranking", False)),
+                "competing_siblings": list(analysis.get("competing_siblings", [])),
             }
         )
 
@@ -2253,6 +2350,7 @@ def write_arc_obligation_closure_review(
                 "built_final_road",
                 "traj_support_type",
                 "traj_support_count",
+                "support_strength_score",
                 "corridor_identity",
                 "slot_status",
                 "unbuilt_stage",
@@ -2274,6 +2372,45 @@ def write_arc_obligation_closure_review(
             writer.writerow({key: payload.get(key, "") for key in writer.fieldnames})
 
     write_json(output_root_path / "competing_arc_review.json", competing_arc_review)
+    with (output_root_path / "competing_arc_review.csv").open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "patch_id",
+                "pair",
+                "review_scope",
+                "topology_arc_id",
+                "competing_group_key",
+                "competing_pair_count",
+                "competing_pairs",
+                "traj_support_type",
+                "traj_support_count",
+                "traj_support_coverage_ratio",
+                "support_total_length_m",
+                "slot_status",
+                "built_final_road",
+                "drivezone_overlap_ratio",
+                "divstrip_overlap_ratio",
+                "blocking_layer",
+                "support_strength_score",
+                "strongest_peer_pair",
+                "strongest_peer_support_score",
+                "support_score_gap_to_best",
+                "has_built_sibling",
+                "independent_slot_available",
+                "selected_by_support_ranking",
+                "current_business_status",
+                "next_rule_needed",
+                "root_cause_code",
+                "root_cause_detail",
+                "next_action",
+            ],
+        )
+        writer.writeheader()
+        for row in competing_arc_review.get("rows", []):
+            payload = dict(row)
+            payload["competing_pairs"] = ",".join(str(v) for v in row.get("competing_pairs", []))
+            writer.writerow({key: payload.get(key, "") for key in writer.fieldnames})
     write_json(output_root_path / "complex_patch_arc_obligation_review.json", complex_patch_arc_obligation_review)
     summary_lines = []
     summary_lines.append("")
@@ -2524,6 +2661,72 @@ def write_alias_fix_and_rootcause_push_review(
     }
 
 
+def write_competing_arc_closure_review(
+    *,
+    run_root: Path | str,
+    output_root: Path | str,
+    simple_patch_ids: list[str] | None = None,
+    complex_patch_id: str = "5417632623039346",
+) -> dict[str, Any]:
+    summary = write_arc_obligation_closure_review(
+        run_root=run_root,
+        output_root=output_root,
+        simple_patch_ids=simple_patch_ids,
+        complex_patch_id=complex_patch_id,
+    )
+    output_root_path = Path(output_root)
+    arc_obligation_registry = dict(summary.get("arc_obligation_registry", {}))
+    competing_arc_review = dict(summary.get("competing_arc_review", {}))
+    strict_vs_visual_gap_summary = dict(summary.get("strict_vs_visual_gap_summary", {}))
+
+    obligation_by_pair = {
+        str(row.get("pair", "")): dict(row)
+        for row in arc_obligation_registry.get("rows", [])
+    }
+    competing_by_pair = {
+        str(row.get("pair", "")): dict(row)
+        for row in competing_arc_review.get("rows", [])
+    }
+    target_rows = []
+    for pair_id in _COMPETING_ARC_CLOSURE_TARGET_PAIRS:
+        target_rows.append(
+            {
+                "pair": str(pair_id),
+                "arc_obligation": dict(obligation_by_pair.get(pair_id, {})),
+                "competing_arc_review": dict(competing_by_pair.get(pair_id, {})),
+            }
+        )
+    complex_patch_competing_arc_closure_review = {
+        "patch_id": str(complex_patch_id),
+        "target_pairs": target_rows,
+        "arc_obligation_registry": arc_obligation_registry,
+        "competing_arc_review": competing_arc_review,
+        "strict_vs_visual_gap_summary": strict_vs_visual_gap_summary,
+    }
+    write_json(output_root_path / "complex_patch_competing_arc_closure_review.json", complex_patch_competing_arc_closure_review)
+
+    summary_lines = [
+        "",
+        "## Competing Arc Closure",
+        "",
+    ]
+    for pair_id in _COMPETING_ARC_CLOSURE_TARGET_PAIRS:
+        obligation = dict(obligation_by_pair.get(pair_id, {}))
+        summary_lines.append(
+            f"- `{pair_id}`: obligation=`{obligation.get('obligation_status', '-')}` "
+            f"current=`{obligation.get('current_status', '-')}` "
+            f"reason=`{obligation.get('blocking_reason', '-')}` "
+            f"next=`{obligation.get('next_action', '-')}`"
+        )
+    summary_path = output_root_path / "SUMMARY.md"
+    existing_summary = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
+    summary_path.write_text(existing_summary + "\n".join(summary_lines) + "\n", encoding="utf-8")
+    return {
+        **summary,
+        "complex_patch_competing_arc_closure_review": complex_patch_competing_arc_closure_review,
+    }
+
+
 __all__ = [
     "build_arc_evidence_attach_audit",
     "build_arc_legality_audit",
@@ -2539,6 +2742,7 @@ __all__ = [
     "write_arc_first_attach_evidence_review",
     "write_arc_legality_fix_review",
     "write_bridge_trial_review",
+    "write_competing_arc_closure_review",
     "write_legal_arc_coverage_review",
     "write_perf_opt_arc_first_review",
     "write_arc_obligation_closure_review",
