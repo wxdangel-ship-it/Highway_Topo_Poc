@@ -16,8 +16,12 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.audit_acceptance import
     build_arc_obligation_registry,
     build_arc_legality_audit,
     build_competing_arc_review,
+    build_merge_diverge_review,
     build_multi_arc_review,
     build_pair_decisions,
+)
+from highway_topo_poc.modules.t05_topology_between_rc_v2.arc_selection_rules import (
+    apply_arc_selection_rules,
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.models import (
     BaseCrossSection,
@@ -46,6 +50,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.review import (
     write_arc_obligation_closure_review,
     write_competing_arc_closure_review,
     write_legal_arc_coverage_review,
+    write_merge_diverge_fix_review,
     write_merge_diverge_rules_review,
     write_perf_opt_arc_first_review,
     write_semantic_fix_after_perf_review,
@@ -3140,6 +3145,24 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     assert multi_arc_by_pair["21779764:785642"]["fallback_based_arc_ids"] == ["arc_multi_2"]
     assert "complex_patch_merge_diverge_rules_review" in merge_summary
 
+    merge_fix_review = build_merge_diverge_review(run_root, complex_patch_id="5417632623039346")
+    merge_fix_by_pair = {str(item["pair"]): item for item in merge_fix_review["rows"]}
+    assert merge_fix_by_pair["55353246:37687913"]["detected_structure_type"] == "MERGE_MULTI_UPSTREAM"
+    assert merge_fix_by_pair["55353246:37687913"]["allow_multi_output"] is True
+    assert merge_fix_by_pair["791871:37687913"]["detected_structure_type"] == "MERGE_MULTI_UPSTREAM"
+
+    output_root_merge_fix = tmp_path / "bundle_merge_fix"
+    merge_fix_summary = write_merge_diverge_fix_review(run_root=run_root, output_root=output_root_merge_fix)
+    assert (output_root_merge_fix / "merge_diverge_review.json").exists()
+    assert (output_root_merge_fix / "merge_diverge_review.csv").exists()
+    assert (output_root_merge_fix / "complex_patch_merge_diverge_fix_review.json").exists()
+    merge_fix_payload = _read_json(output_root_merge_fix / "merge_diverge_review.json")
+    merge_fix_rows = {str(item["pair"]): item for item in merge_fix_payload["rows"]}
+    assert merge_fix_rows["55353246:37687913"]["detected_structure_type"] == "MERGE_MULTI_UPSTREAM"
+    assert merge_fix_rows["55353246:37687913"]["allow_multi_output"] is True
+    assert merge_fix_rows["791871:37687913"]["detected_structure_type"] == "MERGE_MULTI_UPSTREAM"
+    assert "complex_patch_merge_diverge_fix_review" in merge_fix_summary
+
 
 def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
     rows = [
@@ -3156,7 +3179,9 @@ def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
             "prior_support_type": "prior_fallback_support",
             "support_anchor_src_coords": [0.0, 2.0],
             "support_anchor_dst_coords": [100.0, 2.0],
-            "node_path": [55353246, 29626540, 37687913],
+            "node_path": [55353246, 310001, 37687913],
+            "edge_ids": ["edge_gap_a_up", "edge_gap_a_down"],
+            "line_coords": [[0.0, 2.0], [65.0, 2.0], [100.0, 0.0]],
         },
         {
             "pair": "791871:37687913",
@@ -3171,7 +3196,9 @@ def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
             "prior_support_type": "prior_fallback_support",
             "support_anchor_src_coords": [0.0, 4.0],
             "support_anchor_dst_coords": [100.0, 4.0],
-            "node_path": [791871, 29626540, 37687913],
+            "node_path": [791871, 310002, 37687913],
+            "edge_ids": ["edge_gap_b_up", "edge_gap_b_down"],
+            "line_coords": [[0.0, 4.0], [68.0, 4.0], [100.0, 0.5]],
         },
         {
             "pair": "760239:6963539359479390368",
@@ -3196,6 +3223,7 @@ def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
     assert decisions["55353246:37687913"]["decision"] == "gap_enter_mainflow"
     assert decisions["55353246:37687913"]["reason"] == "gap_should_enter_mainflow"
     assert decisions["55353246:37687913"]["arc_selection_allow_multi_output"] is True
+    assert "shared_terminal_geometry_signal" in decisions["55353246:37687913"]["arc_selection_shared_downstream_signal"]
     assert decisions["791871:37687913"]["decision"] == "gap_enter_mainflow"
     assert decisions["791871:37687913"]["reason"] == "gap_should_enter_mainflow"
     assert decisions["791871:37687913"]["arc_selection_allow_multi_output"] is True
@@ -3274,6 +3302,48 @@ def test_t05v2_competing_arc_closure_finalizes_obligation_statuses() -> None:
     assert len(competing_by_pair["791871:37687913"]["competing_siblings"]) == 2
 
 
+def test_t05v2_merge_diverge_detection_does_not_require_shared_internal_node_path() -> None:
+    rows = [
+        {
+            "pair": "55353246:37687913",
+            "src": 55353246,
+            "dst": 37687913,
+            "is_direct_legal": True,
+            "is_unique": True,
+            "node_path": [55353246, 310001, 37687913],
+            "edge_ids": ["edge_gap_a_up", "edge_gap_a_down"],
+            "line_coords": [[0.0, 2.0], [65.0, 2.0], [100.0, 0.0]],
+            "traj_support_type": "terminal_crossing_support",
+            "traj_support_ids": ["traj_gap_a"],
+            "traj_support_coverage_ratio": 0.82,
+            "support_anchor_src_coords": [0.0, 2.0],
+            "support_anchor_dst_coords": [100.0, 0.0],
+        },
+        {
+            "pair": "791871:37687913",
+            "src": 791871,
+            "dst": 37687913,
+            "is_direct_legal": True,
+            "is_unique": True,
+            "node_path": [791871, 310002, 37687913],
+            "edge_ids": ["edge_gap_b_up", "edge_gap_b_down"],
+            "line_coords": [[0.0, 4.0], [68.0, 4.0], [100.0, 0.5]],
+            "traj_support_type": "terminal_crossing_support",
+            "traj_support_ids": ["traj_gap_b"],
+            "traj_support_coverage_ratio": 0.79,
+            "support_anchor_src_coords": [0.0, 4.0],
+            "support_anchor_dst_coords": [100.0, 0.5],
+        },
+    ]
+
+    annotated = apply_arc_selection_rules(rows)["rows"]
+    by_pair = {str(item["pair"]): dict(item) for item in annotated}
+    assert by_pair["55353246:37687913"]["arc_structure_type"] == "MERGE_MULTI_UPSTREAM"
+    assert by_pair["791871:37687913"]["arc_structure_type"] == "MERGE_MULTI_UPSTREAM"
+    assert "shared_intermediate_xsec_signal" not in by_pair["55353246:37687913"]["arc_selection_shared_downstream_signal"]
+    assert "shared_terminal_geometry_signal" in by_pair["55353246:37687913"]["arc_selection_shared_downstream_signal"]
+
+
 def test_t05v2_arc_selection_structure_and_multi_arc_review_autofill_structure_annotations(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     patch_id = "patch_merge_diverge"
@@ -3291,7 +3361,9 @@ def test_t05v2_arc_selection_structure_and_multi_arc_review_autofill_structure_a
                     "topology_arc_source_type": "direct_topology_arc",
                     "is_direct_legal": True,
                     "is_unique": True,
-                    "node_path": [55353246, 29626540, 37687913],
+                    "node_path": [55353246, 310001, 37687913],
+                    "edge_ids": ["edge_gap_a_up", "edge_gap_a_down"],
+                    "line_coords": [[0.0, 2.0], [65.0, 2.0], [100.0, 0.0]],
                     "traj_support_type": "terminal_crossing_support",
                     "traj_support_ids": ["traj_gap_a"],
                     "traj_support_coverage_ratio": 0.82,
@@ -3306,7 +3378,9 @@ def test_t05v2_arc_selection_structure_and_multi_arc_review_autofill_structure_a
                     "topology_arc_source_type": "direct_topology_arc",
                     "is_direct_legal": True,
                     "is_unique": True,
-                    "node_path": [791871, 29626540, 37687913],
+                    "node_path": [791871, 310002, 37687913],
+                    "edge_ids": ["edge_gap_b_up", "edge_gap_b_down"],
+                    "line_coords": [[0.0, 4.0], [68.0, 4.0], [100.0, 0.5]],
                     "traj_support_type": "terminal_crossing_support",
                     "traj_support_ids": ["traj_gap_b"],
                     "traj_support_coverage_ratio": 0.79,
@@ -3352,6 +3426,7 @@ def test_t05v2_arc_selection_structure_and_multi_arc_review_autofill_structure_a
         by_pair.setdefault(str(row["pair"]), []).append(dict(row))
     assert by_pair["55353246:37687913"][0]["structure_type"] == "MERGE_MULTI_UPSTREAM"
     assert by_pair["791871:37687913"][0]["structure_type"] == "MERGE_MULTI_UPSTREAM"
+    assert "shared_terminal_geometry_signal" in by_pair["55353246:37687913"][0]["shared_downstream_signal"]
 
     multi_arc_review = build_multi_arc_review(
         run_root,

@@ -442,6 +442,8 @@ def _patch_visual_rows(run_root: Path | str, patch_id: str) -> tuple[list[dict[s
                 "arc_selection_rule_reason": str(current.get("arc_selection_rule_reason", "")),
                 "arc_selection_peer_pairs": list(current.get("arc_selection_peer_pairs", [])),
                 "arc_selection_shared_downstream_nodes": list(current.get("arc_selection_shared_downstream_nodes", [])),
+                "arc_selection_shared_downstream_edge_ids": list(current.get("arc_selection_shared_downstream_edge_ids", [])),
+                "arc_selection_shared_downstream_signal": list(current.get("arc_selection_shared_downstream_signal", [])),
                 "node_path": [int(v) for v in current.get("node_path", []) if v is not None],
                 "traj_support_type": str(current.get("traj_support_type", "no_support")),
                 "traj_support_ids": [str(v) for v in current.get("traj_support_ids", [])],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from math import hypot
 from typing import Any
 
 
@@ -40,6 +41,29 @@ def _internal_nodes(row: dict[str, Any]) -> list[int]:
     return [int(v) for v in path[1:-1]]
 
 
+def _edge_ids(row: dict[str, Any]) -> list[str]:
+    return [str(v) for v in row.get("edge_ids", []) if str(v)]
+
+
+def _line_coords(row: dict[str, Any]) -> list[tuple[float, float]]:
+    out: list[tuple[float, float]] = []
+    for item in row.get("line_coords", []):
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        try:
+            out.append((float(item[0]), float(item[1])))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _terminal_coord(row: dict[str, Any]) -> tuple[float, float] | None:
+    coords = _line_coords(row)
+    if not coords:
+        return None
+    return coords[-1]
+
+
 def _direct_legal_row(row: dict[str, Any]) -> bool:
     return bool(
         row.get("is_direct_legal", row.get("topology_arc_is_direct_legal", False))
@@ -48,6 +72,40 @@ def _direct_legal_row(row: dict[str, Any]) -> bool:
 
 def _unique_row(row: dict[str, Any]) -> bool:
     return bool(row.get("is_unique", row.get("topology_arc_is_unique", False)))
+
+
+def _shared_downstream_signals(
+    row: dict[str, Any],
+    peer: dict[str, Any],
+) -> tuple[list[str], list[int], list[str]]:
+    signals: list[str] = []
+    shared_nodes = sorted(set(_internal_nodes(row)) & set(_internal_nodes(peer)))
+    shared_edges = sorted(set(_edge_ids(row)) & set(_edge_ids(peer)))
+    row_dst = int(row.get("dst", row.get("dst_nodeid", 0)))
+    peer_dst = int(peer.get("dst", peer.get("dst_nodeid", 0)))
+    row_canonical_dst = int(row.get("canonical_dst_xsec_id", row_dst))
+    peer_canonical_dst = int(peer.get("canonical_dst_xsec_id", peer_dst))
+
+    if row_dst == peer_dst:
+        signals.append("same_downstream_destination")
+    if row_canonical_dst == peer_canonical_dst:
+        signals.append("same_canonical_downstream_xsec")
+    if shared_nodes:
+        signals.append("shared_intermediate_xsec_signal")
+    if shared_edges:
+        signals.append("shared_topology_edge_signal")
+
+    row_terminal = _terminal_coord(row)
+    peer_terminal = _terminal_coord(peer)
+    if row_terminal is not None and peer_terminal is not None:
+        if hypot(row_terminal[0] - peer_terminal[0], row_terminal[1] - peer_terminal[1]) <= 5.0:
+            signals.append("shared_terminal_geometry_signal")
+
+    deduped_signals: list[str] = []
+    for signal in signals:
+        if signal not in deduped_signals:
+            deduped_signals.append(signal)
+    return deduped_signals, shared_nodes, shared_edges
 
 
 def _support_signature(row: dict[str, Any]) -> tuple[Any, ...]:
@@ -81,9 +139,10 @@ def detect_diverge_merge_structure(
     dst_nodeid = int(row.get("dst", row.get("dst_nodeid", 0)))
     src_nodeid = int(row.get("src", row.get("src_nodeid", 0)))
     row_pair = _pair(row)
-    row_internal_nodes = set(_internal_nodes(row))
     peer_pairs: set[str] = set()
     shared_downstream_nodes: set[int] = set()
+    shared_downstream_edge_ids: set[str] = set()
+    shared_downstream_signals: list[str] = []
     for peer in rows:
         if _pair(peer) == row_pair:
             continue
@@ -93,18 +152,31 @@ def detect_diverge_merge_structure(
             continue
         if int(peer.get("src", peer.get("src_nodeid", 0))) == src_nodeid:
             continue
-        peer_internal_nodes = set(_internal_nodes(peer))
-        shared_nodes = row_internal_nodes & peer_internal_nodes
-        if not shared_nodes:
+        peer_signals, shared_nodes, shared_edges = _shared_downstream_signals(row, peer)
+        has_nontrivial_shared_downstream_signal = any(
+            signal in {
+                "shared_intermediate_xsec_signal",
+                "shared_topology_edge_signal",
+                "shared_terminal_geometry_signal",
+            }
+            for signal in peer_signals
+        )
+        if not has_nontrivial_shared_downstream_signal:
             continue
         peer_pairs.add(_pair(peer))
         shared_downstream_nodes.update(int(v) for v in shared_nodes)
+        shared_downstream_edge_ids.update(str(v) for v in shared_edges)
+        for signal in peer_signals:
+            if signal not in shared_downstream_signals:
+                shared_downstream_signals.append(signal)
     return {
         "structure_type": (
             STRUCTURE_MERGE_MULTI_UPSTREAM if peer_pairs else STRUCTURE_SINGLE
         ),
         "peer_pairs": sorted(peer_pairs),
         "shared_downstream_nodes": sorted(shared_downstream_nodes),
+        "shared_downstream_edge_ids": sorted(shared_downstream_edge_ids),
+        "shared_downstream_signal": shared_downstream_signals,
     }
 
 
@@ -209,6 +281,8 @@ def apply_arc_selection_rules(
         current["arc_selection_allow_multi_output"] = bool(structure.get("allow_multi_output", False))
         current["arc_selection_peer_pairs"] = list(structure.get("peer_pairs", []))
         current["arc_selection_shared_downstream_nodes"] = list(structure.get("shared_downstream_nodes", []))
+        current["arc_selection_shared_downstream_edge_ids"] = list(structure.get("shared_downstream_edge_ids", []))
+        current["arc_selection_shared_downstream_signal"] = list(structure.get("shared_downstream_signal", []))
         current["arc_selection_same_pair_arc_count"] = int(structure.get("same_pair_arc_count", 0))
         current["arc_selection_same_pair_arc_ids"] = list(structure.get("same_pair_arc_ids", []))
         current["arc_selection_group_key"] = (

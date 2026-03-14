@@ -7,7 +7,11 @@ from typing import Any
 
 from shapely.geometry import LineString, Point
 
-from .arc_selection_rules import apply_arc_selection_rules, apply_diverge_merge_rule
+from .arc_selection_rules import (
+    STRUCTURE_MERGE_MULTI_UPSTREAM,
+    apply_arc_selection_rules,
+    apply_diverge_merge_rule,
+)
 from .io import write_features_geojson, write_json, write_lines_geojson
 from .models import Segment, coords_to_line, line_to_coords
 from .step3_corridor_identity import build_patch_geometry_cache, build_prior_reference_index
@@ -62,7 +66,7 @@ def classify_topology_gap_rows(
         and bool(row.get("is_direct_legal", False))
         and bool(row.get("is_unique", False))
     ]
-    if target_rows and any(not str(row.get("arc_structure_type", "")) for row in target_rows):
+    if target_rows:
         target_rows = list(apply_arc_selection_rules(target_rows).get("rows", []))
     target_count_by_dst = Counter(int(row.get("dst", 0)) for row in target_rows)
     merge_rule_by_pair = apply_diverge_merge_rule(
@@ -92,6 +96,13 @@ def classify_topology_gap_rows(
         elif bool(merge_rule.get("allow_multi_output", False)):
             decision = "gap_enter_mainflow"
             reason = "gap_should_enter_mainflow"
+        elif str(row.get("arc_structure_type", "")) == STRUCTURE_MERGE_MULTI_UPSTREAM:
+            decision = "gap_ambiguous_need_more_constraints"
+            reason = (
+                "gap_merge_support_not_independent"
+                if str(merge_rule.get("rule_reason", "")) == "merge_multi_upstream_support_not_independent"
+                else "gap_merge_rule_not_satisfied"
+            )
         elif int(target_count_by_dst.get(dst_nodeid, 0)) >= 2:
             decision = "gap_ambiguous_need_more_constraints"
             reason = "gap_competing_arc_conflict"
@@ -126,6 +137,18 @@ def classify_topology_gap_rows(
                 merge_rule.get(
                     "shared_downstream_nodes",
                     row.get("arc_selection_shared_downstream_nodes", []),
+                )
+            ),
+            "arc_selection_shared_downstream_edge_ids": list(
+                merge_rule.get(
+                    "shared_downstream_edge_ids",
+                    row.get("arc_selection_shared_downstream_edge_ids", []),
+                )
+            ),
+            "arc_selection_shared_downstream_signal": list(
+                merge_rule.get(
+                    "shared_downstream_signal",
+                    row.get("arc_selection_shared_downstream_signal", []),
                 )
             ),
             "arc_selection_peer_pairs": list(

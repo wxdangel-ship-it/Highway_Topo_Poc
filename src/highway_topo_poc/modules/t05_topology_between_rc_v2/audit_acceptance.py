@@ -11,6 +11,7 @@ from .arc_selection_rules import (
     STRUCTURE_MERGE_MULTI_UPSTREAM,
     STRUCTURE_SAME_PAIR_MULTI_ARC,
     apply_arc_selection_rules,
+    apply_diverge_merge_rule,
     apply_multi_arc_rule,
 )
 from .io import read_json, write_json
@@ -54,6 +55,10 @@ _STABLE_BLOCKED_PAIRS = [
     "55353246:37687913",
 ]
 _COMPETING_ARC_CLOSURE_TARGET_PAIRS = [
+    "55353246:37687913",
+    "791871:37687913",
+]
+_MERGE_DIVERGE_TARGET_PAIRS = [
     "55353246:37687913",
     "791871:37687913",
 ]
@@ -1979,7 +1984,7 @@ def build_arc_selection_structure(
     complex_patch_id: str,
 ) -> dict[str, Any]:
     registry_rows = [dict(row) for row in _patch_full_registry_rows(run_root, complex_patch_id)]
-    if registry_rows and any(not str(row.get("arc_structure_type", "")) for row in registry_rows):
+    if registry_rows:
         registry_rows = list(apply_arc_selection_rules(registry_rows).get("rows", []))
     rows: list[dict[str, Any]] = []
     merge_pairs: set[str] = set()
@@ -1992,6 +1997,8 @@ def build_arc_selection_structure(
         canonical_pair = str(row.get("canonical_pair", pair_id))
         peer_pairs = [str(v) for v in row.get("arc_selection_peer_pairs", []) if str(v)]
         shared_downstream_nodes = [int(v) for v in row.get("arc_selection_shared_downstream_nodes", []) if v is not None]
+        shared_downstream_edge_ids = [str(v) for v in row.get("arc_selection_shared_downstream_edge_ids", []) if str(v)]
+        shared_downstream_signal = [str(v) for v in row.get("arc_selection_shared_downstream_signal", []) if str(v)]
         if structure_type == STRUCTURE_MERGE_MULTI_UPSTREAM:
             merge_pairs.add(pair_id)
         elif structure_type == STRUCTURE_SAME_PAIR_MULTI_ARC:
@@ -2004,11 +2011,15 @@ def build_arc_selection_structure(
                 "canonical_pair": canonical_pair,
                 "topology_arc_id": str(row.get("topology_arc_id", "")),
                 "structure_type": structure_type,
+                "arc_structure_type": structure_type,
                 "selection_rule": str(row.get("arc_selection_rule", "")),
+                "arc_selection_rule": str(row.get("arc_selection_rule", "")),
                 "allow_multi_output": bool(row.get("arc_selection_allow_multi_output", False)),
                 "selection_rule_reason": str(row.get("arc_selection_rule_reason", "")),
                 "peer_pairs": peer_pairs,
                 "shared_downstream_nodes": shared_downstream_nodes,
+                "shared_downstream_edge_ids": shared_downstream_edge_ids,
+                "shared_downstream_signal": shared_downstream_signal,
                 "same_pair_arc_count": int(row.get("arc_selection_same_pair_arc_count", 0)),
                 "same_pair_arc_ids": [str(v) for v in row.get("arc_selection_same_pair_arc_ids", []) if str(v)],
                 "entered_main_flow": bool(row.get("entered_main_flow", False)),
@@ -2025,6 +2036,125 @@ def build_arc_selection_structure(
         "row_count": int(len(rows)),
         "merge_multi_upstream_pair_count": int(len(merge_pairs)),
         "same_pair_multi_arc_pair_count": int(len(same_pair_groups)),
+        "rows": rows,
+    }
+
+
+def build_merge_diverge_review(
+    run_root: Path | str,
+    *,
+    complex_patch_id: str,
+    target_pairs: list[str] | None = None,
+    min_support_coverage_ratio: float = 0.35,
+) -> dict[str, Any]:
+    registry_rows = [dict(row) for row in _patch_full_registry_rows(run_root, complex_patch_id)]
+    if registry_rows:
+        registry_rows = list(apply_arc_selection_rules(registry_rows).get("rows", []))
+    registry_by_pair = _registry_rows_by_pair(registry_rows)
+    merge_rule_by_pair = apply_diverge_merge_rule(
+        registry_rows,
+        min_support_coverage_ratio=float(min_support_coverage_ratio),
+    )
+    pair_decisions = build_pair_decisions(run_root, str(complex_patch_id))
+    decisions_by_pair = {
+        str(row.get("pair", "")): dict(row)
+        for row in pair_decisions.get("pairs", [])
+    }
+    rows: list[dict[str, Any]] = []
+    for pair_id in list(target_pairs or _MERGE_DIVERGE_TARGET_PAIRS):
+        registry_row = dict(_best_registry_row(list(registry_by_pair.get(str(pair_id), []))) or {})
+        decision_row = dict(decisions_by_pair.get(str(pair_id), {}))
+        src_text, dst_text = str(pair_id).split(":", 1)
+        merge_rule = dict(merge_rule_by_pair.get(str(pair_id), {}))
+        detected_structure_type = str(
+            merge_rule.get("structure_type")
+            or registry_row.get("arc_structure_type")
+            or registry_row.get("structure_type")
+            or ""
+        )
+        detected_rule = str(
+            registry_row.get("arc_selection_rule")
+            or ("allow_multiple_upstream_arcs" if detected_structure_type == STRUCTURE_MERGE_MULTI_UPSTREAM else "")
+        )
+        built_final_road = bool(
+            decision_row.get("built_final_road", registry_row.get("built_final_road", False))
+        )
+        entered_main_flow = bool(
+            registry_row.get("entered_main_flow", decision_row.get("entered_main_flow", False))
+        )
+        unbuilt_stage = ""
+        unbuilt_reason = ""
+        if not built_final_road:
+            unbuilt_stage = str(
+                registry_row.get("unbuilt_stage")
+                or decision_row.get("reject_stage")
+                or ""
+            )
+            unbuilt_reason = str(
+                registry_row.get("unbuilt_reason")
+                or decision_row.get("reject_reason")
+                or ""
+            )
+        rows.append(
+            {
+                "patch_id": str(complex_patch_id),
+                "pair": str(pair_id),
+                "src": int(registry_row.get("src", src_text)),
+                "dst": int(registry_row.get("dst", dst_text)),
+                "topology_arc_id": str(registry_row.get("topology_arc_id", "")),
+                "detected_structure_type": detected_structure_type,
+                "detected_rule": detected_rule,
+                "allow_multi_output": bool(
+                    merge_rule.get(
+                        "allow_multi_output",
+                        registry_row.get("arc_selection_allow_multi_output", False),
+                    )
+                ),
+                "shared_downstream_signal": list(
+                    merge_rule.get(
+                        "shared_downstream_signal",
+                        registry_row.get("arc_selection_shared_downstream_signal", []),
+                    )
+                ),
+                "shared_downstream_nodes": list(
+                    merge_rule.get(
+                        "shared_downstream_nodes",
+                        registry_row.get("arc_selection_shared_downstream_nodes", []),
+                    )
+                ),
+                "shared_downstream_edge_ids": list(
+                    merge_rule.get(
+                        "shared_downstream_edge_ids",
+                        registry_row.get("arc_selection_shared_downstream_edge_ids", []),
+                    )
+                ),
+                "independent_support_confirmed": bool(
+                    merge_rule.get("independent_support_available", False)
+                ),
+                "independent_slot_confirmed": str(registry_row.get("slot_status", "")) == "resolved",
+                "entered_main_flow": bool(entered_main_flow),
+                "built": bool(built_final_road),
+                "unbuilt_stage": str(unbuilt_stage),
+                "unbuilt_reason": str(unbuilt_reason),
+                "peer_pairs": list(
+                    merge_rule.get(
+                        "peer_pairs",
+                        registry_row.get("arc_selection_peer_pairs", []),
+                    )
+                ),
+                "rule_reason": str(
+                    merge_rule.get(
+                        "rule_reason",
+                        registry_row.get("arc_selection_rule_reason", ""),
+                    )
+                ),
+            }
+        )
+    return {
+        "patch_id": str(complex_patch_id),
+        "row_count": int(len(rows)),
+        "allow_multi_output_count": int(sum(1 for row in rows if bool(row.get("allow_multi_output", False)))),
+        "built_count": int(sum(1 for row in rows if bool(row.get("built", False)))),
         "rows": rows,
     }
 
@@ -2929,10 +3059,121 @@ def write_merge_diverge_rules_review(
     }
 
 
+def write_merge_diverge_fix_review(
+    *,
+    run_root: Path | str,
+    output_root: Path | str,
+    simple_patch_ids: list[str] | None = None,
+    complex_patch_id: str = "5417632623039346",
+) -> dict[str, Any]:
+    summary = write_competing_arc_closure_review(
+        run_root=run_root,
+        output_root=output_root,
+        simple_patch_ids=simple_patch_ids,
+        complex_patch_id=complex_patch_id,
+    )
+    output_root_path = Path(output_root)
+    arc_selection_structure = build_arc_selection_structure(
+        run_root,
+        complex_patch_id=str(complex_patch_id),
+    )
+    merge_diverge_review = build_merge_diverge_review(
+        run_root,
+        complex_patch_id=str(complex_patch_id),
+    )
+    strict_vs_visual_gap_summary = {
+        **dict(summary.get("strict_vs_visual_gap_summary", {})),
+        "merge_diverge_review": {
+            "row_count": int(merge_diverge_review.get("row_count", 0)),
+            "allow_multi_output_count": int(merge_diverge_review.get("allow_multi_output_count", 0)),
+            "built_count": int(merge_diverge_review.get("built_count", 0)),
+            "pairs": [str(row.get("pair", "")) for row in merge_diverge_review.get("rows", [])],
+        },
+        "arc_selection_structure": {
+            "row_count": int(arc_selection_structure.get("row_count", 0)),
+            "merge_multi_upstream_pair_count": int(arc_selection_structure.get("merge_multi_upstream_pair_count", 0)),
+            "same_pair_multi_arc_pair_count": int(arc_selection_structure.get("same_pair_multi_arc_pair_count", 0)),
+            "allow_multi_output_pairs": sorted(
+                str(row.get("pair", ""))
+                for row in arc_selection_structure.get("rows", [])
+                if bool(row.get("allow_multi_output", False))
+            ),
+        },
+    }
+    complex_patch_merge_diverge_fix_review = {
+        "patch_id": str(complex_patch_id),
+        "arc_selection_structure": arc_selection_structure,
+        "merge_diverge_review": merge_diverge_review,
+        "strict_vs_visual_gap_summary": strict_vs_visual_gap_summary,
+    }
+
+    write_json(output_root_path / "arc_selection_structure.json", arc_selection_structure)
+    write_json(output_root_path / "merge_diverge_review.json", merge_diverge_review)
+    with (output_root_path / "merge_diverge_review.csv").open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "patch_id",
+                "pair",
+                "src",
+                "dst",
+                "topology_arc_id",
+                "detected_structure_type",
+                "detected_rule",
+                "allow_multi_output",
+                "shared_downstream_signal",
+                "shared_downstream_nodes",
+                "shared_downstream_edge_ids",
+                "independent_support_confirmed",
+                "independent_slot_confirmed",
+                "entered_main_flow",
+                "built",
+                "unbuilt_stage",
+                "unbuilt_reason",
+                "peer_pairs",
+                "rule_reason",
+            ],
+        )
+        writer.writeheader()
+        for payload in merge_diverge_review.get("rows", []):
+            row = dict(payload)
+            row["shared_downstream_signal"] = ",".join(str(v) for v in payload.get("shared_downstream_signal", []))
+            row["shared_downstream_nodes"] = ",".join(str(v) for v in payload.get("shared_downstream_nodes", []))
+            row["shared_downstream_edge_ids"] = ",".join(str(v) for v in payload.get("shared_downstream_edge_ids", []))
+            row["peer_pairs"] = ",".join(str(v) for v in payload.get("peer_pairs", []))
+            writer.writerow({key: row.get(key, "") for key in writer.fieldnames})
+    write_json(output_root_path / "strict_vs_visual_gap_summary.json", strict_vs_visual_gap_summary)
+    write_json(output_root_path / "complex_patch_merge_diverge_fix_review.json", complex_patch_merge_diverge_fix_review)
+
+    summary_lines = [
+        "",
+        "## Merge Diverge Fix",
+        "",
+    ]
+    for payload in merge_diverge_review.get("rows", []):
+        summary_lines.append(
+            f"- `{payload.get('pair', '-')}`: structure=`{payload.get('detected_structure_type', '-')}` "
+            f"allow_multi_output=`{str(bool(payload.get('allow_multi_output', False))).lower()}` "
+            f"built=`{str(bool(payload.get('built', False))).lower()}` "
+            f"unbuilt=`{payload.get('unbuilt_stage', '')}/{payload.get('unbuilt_reason', '')}`"
+        )
+    summary_path = output_root_path / "SUMMARY.md"
+    existing_summary = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
+    summary_path.write_text(existing_summary + "\n".join(summary_lines) + "\n", encoding="utf-8")
+    return {
+        **summary,
+        "arc_selection_structure": arc_selection_structure,
+        "merge_diverge_review": merge_diverge_review,
+        "strict_vs_visual_gap_summary": strict_vs_visual_gap_summary,
+        "complex_patch_merge_diverge_fix_review": complex_patch_merge_diverge_fix_review,
+    }
+
+
 __all__ = [
     "build_arc_evidence_attach_audit",
     "build_arc_legality_audit",
     "build_arc_selection_structure",
+    "build_merge_diverge_review",
     "build_complex_patch_coverage_review",
     "build_complex_patch_legality_review",
     "build_legal_arc_coverage",
@@ -2948,6 +3189,7 @@ __all__ = [
     "write_bridge_trial_review",
     "write_competing_arc_closure_review",
     "write_legal_arc_coverage_review",
+    "write_merge_diverge_fix_review",
     "write_merge_diverge_rules_review",
     "write_perf_opt_arc_first_review",
     "write_arc_obligation_closure_review",
