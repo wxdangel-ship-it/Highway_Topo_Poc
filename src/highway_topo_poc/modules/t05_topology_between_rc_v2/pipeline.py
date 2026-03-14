@@ -10,6 +10,7 @@ from shapely.geometry import GeometryCollection, LineString, MultiLineString, Po
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import nearest_points
 
+from .arc_selection_rules import apply_arc_selection_rules
 from .io import (
     InputFrame,
     PatchInputs,
@@ -3611,6 +3612,8 @@ def _stage2_segment(
         segment_should_not_exist=segment_should_not_exist,
         blocked_pair_bridge_audit=blocked_pair_bridge_audit,
     )
+    arc_selection_structure = apply_arc_selection_rules(list(full_arc_registry["rows"]))
+    full_arc_registry["rows"] = list(arc_selection_structure["rows"])
     step2_metrics = {
         **step2_metrics,
         "segment_selected_count_before_topology_gate": int(len(pre_topology_segments)),
@@ -3635,6 +3638,8 @@ def _stage2_segment(
                 > 1
             )
         ),
+        "merge_multi_upstream_pair_count": int(arc_selection_structure["summary"]["merge_multi_upstream_pair_count"]),
+        "same_pair_multi_arc_pair_count": int(arc_selection_structure["summary"]["same_pair_multi_arc_pair_count"]),
     }
     artifact = {
         "segments": [segment.to_dict() for segment in segments],
@@ -3719,6 +3724,10 @@ def _stage2_segment(
         "topology_arcs": topology_arcs_debug,
         "full_legal_arc_registry": list(full_arc_registry["rows"]),
         "legal_arc_funnel": dict(full_arc_registry["summary"]),
+        "arc_selection_structure": {
+            "rows": list(arc_selection_structure["rows"]),
+            "summary": dict(arc_selection_structure["summary"]),
+        },
         "step2_metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics},
     }
     dbg_dir = debug_dir(out_root, run_id, patch_id)
@@ -3783,6 +3792,14 @@ def _stage2_segment(
     write_json(
         dbg_dir / "step2_full_legal_arc_registry.json",
         {"arcs": list(full_arc_registry["rows"]), "summary": dict(full_arc_registry["summary"])},
+    )
+    write_json(
+        dbg_dir / "step2_arc_selection_structure.json",
+        {
+            "rows": list(arc_selection_structure["rows"]),
+            "summary": dict(arc_selection_structure["summary"]),
+            "metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics},
+        },
     )
     return {
         "artifact": artifact,

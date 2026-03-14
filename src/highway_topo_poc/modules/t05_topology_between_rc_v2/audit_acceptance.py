@@ -7,6 +7,12 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+from .arc_selection_rules import (
+    STRUCTURE_MERGE_MULTI_UPSTREAM,
+    STRUCTURE_SAME_PAIR_MULTI_ARC,
+    apply_arc_selection_rules,
+    apply_multi_arc_rule,
+)
 from .io import read_json, write_json
 
 
@@ -1967,6 +1973,123 @@ def build_competing_arc_review(
     }
 
 
+def build_arc_selection_structure(
+    run_root: Path | str,
+    *,
+    complex_patch_id: str,
+) -> dict[str, Any]:
+    registry_rows = [dict(row) for row in _patch_full_registry_rows(run_root, complex_patch_id)]
+    if registry_rows and any(not str(row.get("arc_structure_type", "")) for row in registry_rows):
+        registry_rows = list(apply_arc_selection_rules(registry_rows).get("rows", []))
+    rows: list[dict[str, Any]] = []
+    merge_pairs: set[str] = set()
+    same_pair_groups: set[str] = set()
+    for row in registry_rows:
+        structure_type = str(row.get("arc_structure_type", ""))
+        if structure_type not in {STRUCTURE_MERGE_MULTI_UPSTREAM, STRUCTURE_SAME_PAIR_MULTI_ARC}:
+            continue
+        pair_id = str(_row_pair_id(row))
+        canonical_pair = str(row.get("canonical_pair", pair_id))
+        peer_pairs = [str(v) for v in row.get("arc_selection_peer_pairs", []) if str(v)]
+        shared_downstream_nodes = [int(v) for v in row.get("arc_selection_shared_downstream_nodes", []) if v is not None]
+        if structure_type == STRUCTURE_MERGE_MULTI_UPSTREAM:
+            merge_pairs.add(pair_id)
+        elif structure_type == STRUCTURE_SAME_PAIR_MULTI_ARC:
+            same_pair_groups.add(canonical_pair)
+        rows.append(
+            {
+                "patch_id": str(complex_patch_id),
+                "pair": pair_id,
+                "raw_pair": str(row.get("raw_pair", pair_id)),
+                "canonical_pair": canonical_pair,
+                "topology_arc_id": str(row.get("topology_arc_id", "")),
+                "structure_type": structure_type,
+                "selection_rule": str(row.get("arc_selection_rule", "")),
+                "allow_multi_output": bool(row.get("arc_selection_allow_multi_output", False)),
+                "selection_rule_reason": str(row.get("arc_selection_rule_reason", "")),
+                "peer_pairs": peer_pairs,
+                "shared_downstream_nodes": shared_downstream_nodes,
+                "same_pair_arc_count": int(row.get("arc_selection_same_pair_arc_count", 0)),
+                "same_pair_arc_ids": [str(v) for v in row.get("arc_selection_same_pair_arc_ids", []) if str(v)],
+                "entered_main_flow": bool(row.get("entered_main_flow", False)),
+                "built_final_road": bool(row.get("built_final_road", False)),
+                "topology_arc_is_direct_legal": bool(
+                    row.get("topology_arc_is_direct_legal", row.get("is_direct_legal", False))
+                ),
+                "topology_arc_is_unique": bool(row.get("topology_arc_is_unique", row.get("is_unique", False))),
+            }
+        )
+    rows.sort(key=lambda item: (str(item.get("structure_type", "")), str(item.get("pair", "")), str(item.get("topology_arc_id", ""))))
+    return {
+        "patch_id": str(complex_patch_id),
+        "row_count": int(len(rows)),
+        "merge_multi_upstream_pair_count": int(len(merge_pairs)),
+        "same_pair_multi_arc_pair_count": int(len(same_pair_groups)),
+        "rows": rows,
+    }
+
+
+def build_multi_arc_review(
+    run_root: Path | str,
+    *,
+    complex_patch_id: str,
+    same_pair_multi_arc_observation: dict[str, Any],
+) -> dict[str, Any]:
+    registry_rows = [dict(row) for row in _patch_full_registry_rows(run_root, complex_patch_id)]
+    if registry_rows and any(not str(row.get("arc_structure_type", "")) for row in registry_rows):
+        registry_rows = list(apply_arc_selection_rules(registry_rows).get("rows", []))
+    same_pair_registry_rows = [
+        dict(row)
+        for row in registry_rows
+        if str(row.get("arc_structure_type", "")) == STRUCTURE_SAME_PAIR_MULTI_ARC
+    ]
+    multi_arc_rule = apply_multi_arc_rule(same_pair_registry_rows)
+    observation_by_pair = {
+        str(row.get("pair", "")): dict(row)
+        for row in same_pair_multi_arc_observation.get("rows", [])
+        if str(row.get("patch_id", "")) == str(complex_patch_id)
+    }
+    target_pairs = set(observation_by_pair.keys()) | set(multi_arc_rule.keys())
+    rows: list[dict[str, Any]] = []
+    for pair_id in sorted(target_pairs):
+        observation = dict(observation_by_pair.get(pair_id, {}))
+        rule_row = dict(multi_arc_rule.get(pair_id, {}))
+        allow_multi_output = bool(rule_row.get("allow_multi_output", False))
+        current_business_status = str(observation.get("current_business_status", ""))
+        next_rule_needed = str(observation.get("next_rule_needed", ""))
+        if allow_multi_output:
+            current_business_status = "multi_arc_dual_output_candidate"
+            next_rule_needed = "align_production_output_with_multi_arc_rule"
+        rows.append(
+            {
+                "patch_id": str(complex_patch_id),
+                "pair": str(pair_id),
+                "structure_type": str(rule_row.get("structure_type", STRUCTURE_SAME_PAIR_MULTI_ARC)),
+                "pair_arc_count": int(rule_row.get("pair_arc_count", observation.get("pair_arc_count", 0))),
+                "arc_ids": [str(v) for v in rule_row.get("arc_ids", observation.get("arc_ids", [])) if str(v)],
+                "allow_multi_output": bool(allow_multi_output),
+                "witness_based_arc_ids": [str(v) for v in rule_row.get("witness_based_arc_ids", []) if str(v)],
+                "fallback_based_arc_ids": [str(v) for v in rule_row.get("fallback_based_arc_ids", []) if str(v)],
+                "evidence_modes": dict(rule_row.get("evidence_modes", {})),
+                "rule_reason": str(rule_row.get("rule_reason", "")),
+                "has_built_sibling_arc": bool(observation.get("has_built_sibling_arc", False)),
+                "built_sibling_arc_ids": [str(v) for v in observation.get("built_sibling_arc_ids", []) if str(v)],
+                "excluded_from_unique_denominator_reason": str(
+                    observation.get("excluded_from_unique_denominator_reason", "same_pair_multi_arc")
+                ),
+                "current_business_status": current_business_status,
+                "next_rule_needed": next_rule_needed,
+                "visual_gap_note": str(observation.get("visual_gap_note", "")),
+            }
+        )
+    return {
+        "patch_id": str(complex_patch_id),
+        "row_count": int(len(rows)),
+        "dual_output_candidate_count": int(sum(1 for row in rows if bool(row.get("allow_multi_output", False)))),
+        "rows": rows,
+    }
+
+
 def _render_summary_markdown(
     *,
     run_root: Path,
@@ -2727,12 +2850,93 @@ def write_competing_arc_closure_review(
     }
 
 
+def write_merge_diverge_rules_review(
+    *,
+    run_root: Path | str,
+    output_root: Path | str,
+    simple_patch_ids: list[str] | None = None,
+    complex_patch_id: str = "5417632623039346",
+) -> dict[str, Any]:
+    summary = write_competing_arc_closure_review(
+        run_root=run_root,
+        output_root=output_root,
+        simple_patch_ids=simple_patch_ids,
+        complex_patch_id=complex_patch_id,
+    )
+    output_root_path = Path(output_root)
+    same_pair_multi_arc_observation = dict(summary.get("same_pair_multi_arc_observation", {}))
+    strict_vs_visual_gap_summary = dict(summary.get("strict_vs_visual_gap_summary", {}))
+    arc_selection_structure = build_arc_selection_structure(
+        run_root,
+        complex_patch_id=str(complex_patch_id),
+    )
+    multi_arc_review = build_multi_arc_review(
+        run_root,
+        complex_patch_id=str(complex_patch_id),
+        same_pair_multi_arc_observation=same_pair_multi_arc_observation,
+    )
+    strict_vs_visual_gap_summary = {
+        **strict_vs_visual_gap_summary,
+        "arc_selection_structure": {
+            "row_count": int(arc_selection_structure.get("row_count", 0)),
+            "merge_multi_upstream_pair_count": int(arc_selection_structure.get("merge_multi_upstream_pair_count", 0)),
+            "same_pair_multi_arc_pair_count": int(arc_selection_structure.get("same_pair_multi_arc_pair_count", 0)),
+            "allow_multi_output_pairs": sorted(
+                str(row.get("pair", ""))
+                for row in arc_selection_structure.get("rows", [])
+                if bool(row.get("allow_multi_output", False))
+            ),
+        },
+        "multi_arc_review": {
+            "row_count": int(multi_arc_review.get("row_count", 0)),
+            "dual_output_candidate_count": int(multi_arc_review.get("dual_output_candidate_count", 0)),
+            "pairs": [str(row.get("pair", "")) for row in multi_arc_review.get("rows", [])],
+        },
+    }
+    complex_patch_merge_diverge_rules_review = {
+        "patch_id": str(complex_patch_id),
+        "arc_selection_structure": arc_selection_structure,
+        "multi_arc_review": multi_arc_review,
+        "strict_vs_visual_gap_summary": strict_vs_visual_gap_summary,
+    }
+
+    write_json(output_root_path / "arc_selection_structure.json", arc_selection_structure)
+    write_json(output_root_path / "multi_arc_review.json", multi_arc_review)
+    write_json(output_root_path / "strict_vs_visual_gap_summary.json", strict_vs_visual_gap_summary)
+    write_json(output_root_path / "complex_patch_merge_diverge_rules_review.json", complex_patch_merge_diverge_rules_review)
+
+    summary_lines = [
+        "",
+        "## Merge Diverge Rules",
+        "",
+        (
+            f"- strict_coverage=`{strict_vs_visual_gap_summary.get('strict_coverage', {}).get('built', 0)}"
+            f"/{strict_vs_visual_gap_summary.get('strict_coverage', {}).get('total', 0)}`"
+        ),
+        f"- merge_multi_upstream_pair_count=`{arc_selection_structure.get('merge_multi_upstream_pair_count', 0)}`",
+        f"- same_pair_multi_arc_pair_count=`{arc_selection_structure.get('same_pair_multi_arc_pair_count', 0)}`",
+        f"- multi_arc_rule_row_count=`{multi_arc_review.get('row_count', 0)}`",
+    ]
+    summary_path = output_root_path / "SUMMARY.md"
+    existing_summary = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
+    summary_path.write_text(existing_summary + "\n".join(summary_lines) + "\n", encoding="utf-8")
+    return {
+        **summary,
+        "arc_selection_structure": arc_selection_structure,
+        "multi_arc_review": multi_arc_review,
+        "strict_vs_visual_gap_summary": strict_vs_visual_gap_summary,
+        "complex_patch_merge_diverge_rules_review": complex_patch_merge_diverge_rules_review,
+    }
+
+
 __all__ = [
     "build_arc_evidence_attach_audit",
     "build_arc_legality_audit",
+    "build_arc_selection_structure",
     "build_complex_patch_coverage_review",
     "build_complex_patch_legality_review",
     "build_legal_arc_coverage",
+    "build_multi_arc_review",
     "build_pair_decisions",
     "build_simple_patch_acceptance",
     "build_simple_patch_regression",
@@ -2744,6 +2948,7 @@ __all__ = [
     "write_bridge_trial_review",
     "write_competing_arc_closure_review",
     "write_legal_arc_coverage_review",
+    "write_merge_diverge_rules_review",
     "write_perf_opt_arc_first_review",
     "write_arc_obligation_closure_review",
     "write_semantic_fix_after_perf_review",

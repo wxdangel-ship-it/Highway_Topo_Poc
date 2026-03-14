@@ -7,6 +7,7 @@ from typing import Any
 
 from shapely.geometry import LineString, Point
 
+from .arc_selection_rules import apply_arc_selection_rules, apply_diverge_merge_rule
 from .io import write_features_geojson, write_json, write_lines_geojson
 from .models import Segment, coords_to_line, line_to_coords
 from .step3_corridor_identity import build_patch_geometry_cache, build_prior_reference_index
@@ -61,7 +62,13 @@ def classify_topology_gap_rows(
         and bool(row.get("is_direct_legal", False))
         and bool(row.get("is_unique", False))
     ]
+    if target_rows and any(not str(row.get("arc_structure_type", "")) for row in target_rows):
+        target_rows = list(apply_arc_selection_rules(target_rows).get("rows", []))
     target_count_by_dst = Counter(int(row.get("dst", 0)) for row in target_rows)
+    merge_rule_by_pair = apply_diverge_merge_rule(
+        target_rows,
+        min_support_coverage_ratio=float(coverage_threshold),
+    )
     out: dict[str, dict[str, Any]] = {}
     for row in target_rows:
         pair_id = str(row.get("pair", ""))
@@ -72,6 +79,7 @@ def classify_topology_gap_rows(
         has_src_anchor = row.get("support_anchor_src_coords") is not None
         has_dst_anchor = row.get("support_anchor_dst_coords") is not None
         dst_nodeid = int(row.get("dst", 0))
+        merge_rule = dict(merge_rule_by_pair.get(pair_id) or {})
 
         decision = "gap_remain_blocked"
         reason = "gap_support_insufficient"
@@ -81,6 +89,9 @@ def classify_topology_gap_rows(
         elif not has_src_anchor or not has_dst_anchor:
             decision = "gap_ambiguous_need_more_constraints"
             reason = "gap_anchor_unreliable"
+        elif bool(merge_rule.get("allow_multi_output", False)):
+            decision = "gap_enter_mainflow"
+            reason = "gap_should_enter_mainflow"
         elif int(target_count_by_dst.get(dst_nodeid, 0)) >= 2:
             decision = "gap_ambiguous_need_more_constraints"
             reason = "gap_competing_arc_conflict"
@@ -106,6 +117,23 @@ def classify_topology_gap_rows(
             "traj_support_type": str(traj_support_type),
             "prior_support_type": str(prior_support_type),
             "traj_support_coverage_ratio": float(coverage_ratio),
+            "arc_structure_type": str(row.get("arc_structure_type", "")),
+            "arc_selection_rule": str(row.get("arc_selection_rule", "")),
+            "arc_selection_allow_multi_output": bool(
+                merge_rule.get("allow_multi_output", row.get("arc_selection_allow_multi_output", False))
+            ),
+            "arc_selection_shared_downstream_nodes": list(
+                merge_rule.get(
+                    "shared_downstream_nodes",
+                    row.get("arc_selection_shared_downstream_nodes", []),
+                )
+            ),
+            "arc_selection_peer_pairs": list(
+                merge_rule.get("peer_pairs", row.get("arc_selection_peer_pairs", []))
+            ),
+            "arc_selection_rule_reason": str(
+                merge_rule.get("rule_reason", row.get("arc_selection_rule_reason", ""))
+            ),
         }
     return out
 
@@ -818,6 +846,36 @@ def build_arc_evidence_attach(
             current["topology_gap_decision"] = str(gap_decision.get("decision", ""))
             current["topology_gap_reason"] = str(gap_decision.get("reason", ""))
             current["controlled_entry_allowed"] = bool(gap_decision.get("controlled_entry_allowed", False))
+            current["arc_structure_type"] = str(
+                gap_decision.get("arc_structure_type", current.get("arc_structure_type", ""))
+            )
+            current["arc_selection_rule"] = str(
+                gap_decision.get("arc_selection_rule", current.get("arc_selection_rule", ""))
+            )
+            current["arc_selection_allow_multi_output"] = bool(
+                gap_decision.get(
+                    "arc_selection_allow_multi_output",
+                    current.get("arc_selection_allow_multi_output", False),
+                )
+            )
+            current["arc_selection_shared_downstream_nodes"] = list(
+                gap_decision.get(
+                    "arc_selection_shared_downstream_nodes",
+                    current.get("arc_selection_shared_downstream_nodes", []),
+                )
+            )
+            current["arc_selection_peer_pairs"] = list(
+                gap_decision.get(
+                    "arc_selection_peer_pairs",
+                    current.get("arc_selection_peer_pairs", []),
+                )
+            )
+            current["arc_selection_rule_reason"] = str(
+                gap_decision.get(
+                    "arc_selection_rule_reason",
+                    current.get("arc_selection_rule_reason", ""),
+                )
+            )
             if bool(current.get("controlled_entry_allowed", False)):
                 current["entered_main_flow"] = True
                 current["unbuilt_stage"] = ""

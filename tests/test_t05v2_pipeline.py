@@ -12,9 +12,11 @@ from shapely.geometry import LineString, Point, Polygon
 
 from highway_topo_poc.modules.t05_topology_between_rc_v2.io import InputFrame, PatchInputs
 from highway_topo_poc.modules.t05_topology_between_rc_v2.audit_acceptance import (
+    build_arc_selection_structure,
     build_arc_obligation_registry,
-    build_competing_arc_review,
     build_arc_legality_audit,
+    build_competing_arc_review,
+    build_multi_arc_review,
     build_pair_decisions,
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.models import (
@@ -44,6 +46,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.review import (
     write_arc_obligation_closure_review,
     write_competing_arc_closure_review,
     write_legal_arc_coverage_review,
+    write_merge_diverge_rules_review,
     write_perf_opt_arc_first_review,
     write_semantic_fix_after_perf_review,
     write_topology_gap_controlled_cover_review,
@@ -2732,6 +2735,7 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
                     "prior_support_type": "prior_fallback_support",
                     "support_anchor_src_coords": [0.0, 2.0],
                     "support_anchor_dst_coords": [100.0, 2.0],
+                    "node_path": [55353246, 29626540, 37687913],
                     "line_coords": [[0.0, 2.0], [100.0, 2.0]],
                 },
                 {
@@ -2751,6 +2755,7 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
                     "prior_support_type": "prior_fallback_support",
                     "support_anchor_src_coords": [0.0, 4.0],
                     "support_anchor_dst_coords": [100.0, 4.0],
+                    "node_path": [791871, 29626540, 37687913],
                     "line_coords": [[0.0, 4.0], [100.0, 4.0]],
                 },
                 {
@@ -2783,6 +2788,8 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
                     "is_unique": False,
                     "direct_arc_count_for_pair": 2,
                     "built_final_road": True,
+                    "traj_support_type": "terminal_crossing_support",
+                    "corridor_identity": "witness_based",
                     "support_anchor_src_coords": [0.0, 8.0],
                     "support_anchor_dst_coords": [100.0, 8.0],
                     "line_coords": [[0.0, 8.0], [100.0, 8.0]],
@@ -2798,6 +2805,9 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
                     "is_unique": False,
                     "direct_arc_count_for_pair": 2,
                     "built_final_road": False,
+                    "prior_support_type": "prior_fallback_support",
+                    "drivezone_overlap_ratio": 0.72,
+                    "divstrip_overlap_ratio": 0.0,
                     "support_anchor_src_coords": [0.0, 9.0],
                     "support_anchor_dst_coords": [100.0, 9.0],
                     "line_coords": [[0.0, 9.0], [100.0, 9.0]],
@@ -2813,6 +2823,8 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
                     "is_unique": False,
                     "direct_arc_count_for_pair": 2,
                     "built_final_road": False,
+                    "traj_support_type": "terminal_crossing_support",
+                    "corridor_identity": "witness_based",
                     "support_anchor_src_coords": [0.0, 10.0],
                     "support_anchor_dst_coords": [100.0, 10.0],
                     "line_coords": [[0.0, 10.0], [100.0, 10.0]],
@@ -2828,6 +2840,9 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
                     "is_unique": False,
                     "direct_arc_count_for_pair": 2,
                     "built_final_road": False,
+                    "prior_support_type": "prior_fallback_support",
+                    "drivezone_overlap_ratio": 0.68,
+                    "divstrip_overlap_ratio": 0.0,
                     "support_anchor_src_coords": [0.0, 11.0],
                     "support_anchor_dst_coords": [100.0, 11.0],
                     "line_coords": [[0.0, 11.0], [100.0, 11.0]],
@@ -2866,7 +2881,55 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
                     axis_vector=(0.0, 1.0),
                 ).to_dict()
             ],
-            "arc_evidence_attach_audit": [],
+            "arc_evidence_attach_audit": [
+                {
+                    "pair": "55353246:37687913",
+                    "src": 55353246,
+                    "dst": 37687913,
+                    "topology_arc_id": "arc_gap_a",
+                    "is_direct_legal": True,
+                    "is_unique": True,
+                    "blocked_diagnostic_reason": "topology_gap_unresolved",
+                    "traj_support_type": "terminal_crossing_support",
+                    "traj_support_ids": ["traj_gap_a"],
+                    "traj_support_coverage_ratio": 0.82,
+                    "prior_support_type": "prior_fallback_support",
+                    "support_anchor_src_coords": [0.0, 2.0],
+                    "support_anchor_dst_coords": [100.0, 2.0],
+                    "node_path": [55353246, 29626540, 37687913],
+                },
+                {
+                    "pair": "791871:37687913",
+                    "src": 791871,
+                    "dst": 37687913,
+                    "topology_arc_id": "arc_gap_b",
+                    "is_direct_legal": True,
+                    "is_unique": True,
+                    "blocked_diagnostic_reason": "topology_gap_unresolved",
+                    "traj_support_type": "terminal_crossing_support",
+                    "traj_support_ids": ["traj_gap_b"],
+                    "traj_support_coverage_ratio": 0.79,
+                    "prior_support_type": "prior_fallback_support",
+                    "support_anchor_src_coords": [0.0, 4.0],
+                    "support_anchor_dst_coords": [100.0, 4.0],
+                    "node_path": [791871, 29626540, 37687913],
+                },
+                {
+                    "pair": "760239:6963539359479390368",
+                    "src": 760239,
+                    "dst": 6963539359479390368,
+                    "topology_arc_id": "arc_gap_c",
+                    "is_direct_legal": True,
+                    "is_unique": True,
+                    "blocked_diagnostic_reason": "topology_gap_unresolved",
+                    "traj_support_type": "terminal_crossing_support",
+                    "traj_support_ids": ["traj_gap_c"],
+                    "traj_support_coverage_ratio": 0.91,
+                    "prior_support_type": "prior_fallback_support",
+                    "support_anchor_src_coords": [0.0, 6.0],
+                    "support_anchor_dst_coords": [100.0, 6.0],
+                },
+            ],
         },
     )
     _write_json(
@@ -3002,9 +3065,10 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     gap_by_pair = {str(item["pair"]): item for item in gap_review["rows"]}
     assert gap_by_pair["760239:6963539359479390368"]["gap_classification"] == "gap_enter_mainflow"
     assert gap_by_pair["760239:6963539359479390368"]["gap_reason"] == "gap_should_enter_mainflow"
-    assert gap_by_pair["55353246:37687913"]["gap_classification"] == "gap_ambiguous_need_more_constraints"
-    assert gap_by_pair["55353246:37687913"]["gap_reason"] == "gap_competing_arc_conflict"
-    assert gap_by_pair["791871:37687913"]["gap_classification"] == "gap_ambiguous_need_more_constraints"
+    assert gap_by_pair["55353246:37687913"]["gap_classification"] == "gap_enter_mainflow"
+    assert gap_by_pair["55353246:37687913"]["gap_reason"] == "gap_should_enter_mainflow"
+    assert gap_by_pair["791871:37687913"]["gap_classification"] == "gap_enter_mainflow"
+    assert gap_by_pair["791871:37687913"]["gap_reason"] == "gap_should_enter_mainflow"
     same_pair_obs = _read_json(output_root / "same_pair_multi_arc_observation.json")
     obs_by_pair = {str(item["pair"]): item for item in same_pair_obs["rows"]}
     assert obs_by_pair["21779764:785642"]["pair_arc_count"] == 2
@@ -3030,14 +3094,17 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     obligation_registry = _read_json(output_root_obligation / "arc_obligation_registry.json")
     obligation_by_pair = {str(item["pair"]): item for item in obligation_registry["rows"]}
     assert obligation_by_pair["760239:6963539359479390368"]["obligation_status"] == "must_build_now"
-    assert obligation_by_pair["55353246:37687913"]["obligation_status"] == "must_remain_blocked"
-    assert obligation_by_pair["55353246:37687913"]["blocking_layer"] == "business_rule"
-    assert obligation_by_pair["55353246:37687913"]["blocking_reason"] == "competing_arc_requires_new_pair_selection_rule"
+    assert obligation_by_pair["55353246:37687913"]["obligation_status"] == "must_build_now"
+    assert obligation_by_pair["55353246:37687913"]["current_status"] == "blocked"
+    assert obligation_by_pair["55353246:37687913"]["blocking_layer"] == "entry_gate"
+    assert obligation_by_pair["55353246:37687913"]["blocking_reason"] == "gap_should_enter_mainflow"
+    assert obligation_by_pair["791871:37687913"]["obligation_status"] == "must_build_now"
+    assert obligation_by_pair["791871:37687913"]["blocking_reason"] == "gap_should_enter_mainflow"
     assert obligation_by_pair["21779764:785642"]["current_status"] == "observation_only"
     competing = _read_json(output_root_obligation / "competing_arc_review.json")
     competing_by_pair = {str(item["pair"]): item for item in competing["rows"]}
-    assert competing_by_pair["55353246:37687913"]["root_cause_code"].startswith("competing_arc_")
-    assert len(competing_by_pair["55353246:37687913"]["competing_siblings"]) >= 2
+    assert "55353246:37687913" not in competing_by_pair
+    assert "791871:37687913" not in competing_by_pair
     assert competing_by_pair["21779764:785642"]["root_cause_code"] == "multi_arc_no_selection_rule"
     assert "arc_obligation_registry" in obligation
     assert "competing_arc_review" in obligation
@@ -3057,6 +3124,22 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     assert (output_root_competing / "complex_patch_competing_arc_closure_review.json").exists()
     assert "complex_patch_competing_arc_closure_review" in competing_summary
 
+    output_root_merge = tmp_path / "bundle_merge"
+    merge_summary = write_merge_diverge_rules_review(run_root=run_root, output_root=output_root_merge)
+    assert (output_root_merge / "arc_selection_structure.json").exists()
+    assert (output_root_merge / "multi_arc_review.json").exists()
+    assert (output_root_merge / "complex_patch_merge_diverge_rules_review.json").exists()
+    arc_selection = _read_json(output_root_merge / "arc_selection_structure.json")
+    merge_rows = {str(item["pair"]): item for item in arc_selection["rows"]}
+    assert merge_rows["55353246:37687913"]["structure_type"] == "MERGE_MULTI_UPSTREAM"
+    assert merge_rows["791871:37687913"]["structure_type"] == "MERGE_MULTI_UPSTREAM"
+    multi_arc_review = _read_json(output_root_merge / "multi_arc_review.json")
+    multi_arc_by_pair = {str(item["pair"]): item for item in multi_arc_review["rows"]}
+    assert multi_arc_by_pair["21779764:785642"]["allow_multi_output"] is True
+    assert multi_arc_by_pair["21779764:785642"]["witness_based_arc_ids"] == ["arc_multi_1"]
+    assert multi_arc_by_pair["21779764:785642"]["fallback_based_arc_ids"] == ["arc_multi_2"]
+    assert "complex_patch_merge_diverge_rules_review" in merge_summary
+
 
 def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
     rows = [
@@ -3073,6 +3156,7 @@ def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
             "prior_support_type": "prior_fallback_support",
             "support_anchor_src_coords": [0.0, 2.0],
             "support_anchor_dst_coords": [100.0, 2.0],
+            "node_path": [55353246, 29626540, 37687913],
         },
         {
             "pair": "791871:37687913",
@@ -3087,6 +3171,7 @@ def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
             "prior_support_type": "prior_fallback_support",
             "support_anchor_src_coords": [0.0, 4.0],
             "support_anchor_dst_coords": [100.0, 4.0],
+            "node_path": [791871, 29626540, 37687913],
         },
         {
             "pair": "760239:6963539359479390368",
@@ -3108,10 +3193,12 @@ def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
 
     assert decisions["760239:6963539359479390368"]["decision"] == "gap_enter_mainflow"
     assert decisions["760239:6963539359479390368"]["reason"] == "gap_should_enter_mainflow"
-    assert decisions["55353246:37687913"]["decision"] == "gap_ambiguous_need_more_constraints"
-    assert decisions["55353246:37687913"]["reason"] == "gap_competing_arc_conflict"
-    assert decisions["791871:37687913"]["decision"] == "gap_ambiguous_need_more_constraints"
-    assert decisions["791871:37687913"]["reason"] == "gap_competing_arc_conflict"
+    assert decisions["55353246:37687913"]["decision"] == "gap_enter_mainflow"
+    assert decisions["55353246:37687913"]["reason"] == "gap_should_enter_mainflow"
+    assert decisions["55353246:37687913"]["arc_selection_allow_multi_output"] is True
+    assert decisions["791871:37687913"]["decision"] == "gap_enter_mainflow"
+    assert decisions["791871:37687913"]["reason"] == "gap_should_enter_mainflow"
+    assert decisions["791871:37687913"]["arc_selection_allow_multi_output"] is True
 
 
 def test_t05v2_competing_arc_closure_finalizes_obligation_statuses() -> None:
@@ -3185,6 +3272,115 @@ def test_t05v2_competing_arc_closure_finalizes_obligation_statuses() -> None:
     assert competing_by_pair["791871:37687913"]["root_cause_code"] == "competing_arc_support_weaker_below_selection_threshold"
     assert competing_by_pair["791871:37687913"]["strongest_peer_pair"] == "55353246:37687913"
     assert len(competing_by_pair["791871:37687913"]["competing_siblings"]) == 2
+
+
+def test_t05v2_arc_selection_structure_and_multi_arc_review_autofill_structure_annotations(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    patch_id = "patch_merge_diverge"
+    patch_dir = run_root / "patches" / patch_id
+    _write_json(
+        patch_dir / "metrics.json",
+        {
+            "patch_id": patch_id,
+            "full_legal_arc_registry": [
+                {
+                    "pair": "55353246:37687913",
+                    "src": 55353246,
+                    "dst": 37687913,
+                    "topology_arc_id": "arc_gap_a",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": True,
+                    "node_path": [55353246, 29626540, 37687913],
+                    "traj_support_type": "terminal_crossing_support",
+                    "traj_support_ids": ["traj_gap_a"],
+                    "traj_support_coverage_ratio": 0.82,
+                    "support_anchor_src_coords": [0.0, 2.0],
+                    "support_anchor_dst_coords": [100.0, 2.0],
+                },
+                {
+                    "pair": "791871:37687913",
+                    "src": 791871,
+                    "dst": 37687913,
+                    "topology_arc_id": "arc_gap_b",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": True,
+                    "node_path": [791871, 29626540, 37687913],
+                    "traj_support_type": "terminal_crossing_support",
+                    "traj_support_ids": ["traj_gap_b"],
+                    "traj_support_coverage_ratio": 0.79,
+                    "support_anchor_src_coords": [0.0, 4.0],
+                    "support_anchor_dst_coords": [100.0, 4.0],
+                },
+                {
+                    "pair": "21779764:785642",
+                    "src": 21779764,
+                    "dst": 785642,
+                    "topology_arc_id": "arc_multi_1",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": False,
+                    "corridor_identity": "witness_based",
+                    "traj_support_type": "terminal_crossing_support",
+                    "support_anchor_src_coords": [0.0, 8.0],
+                    "support_anchor_dst_coords": [100.0, 8.0],
+                },
+                {
+                    "pair": "21779764:785642",
+                    "src": 21779764,
+                    "dst": 785642,
+                    "topology_arc_id": "arc_multi_2",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": False,
+                    "prior_support_type": "prior_fallback_support",
+                    "drivezone_overlap_ratio": 0.71,
+                    "divstrip_overlap_ratio": 0.0,
+                    "support_anchor_src_coords": [0.0, 9.0],
+                    "support_anchor_dst_coords": [100.0, 9.0],
+                },
+            ],
+        },
+    )
+
+    arc_selection = build_arc_selection_structure(run_root, complex_patch_id=patch_id)
+    assert int(arc_selection["merge_multi_upstream_pair_count"]) == 2
+    assert int(arc_selection["same_pair_multi_arc_pair_count"]) == 1
+    by_pair = {}
+    for row in arc_selection["rows"]:
+        by_pair.setdefault(str(row["pair"]), []).append(dict(row))
+    assert by_pair["55353246:37687913"][0]["structure_type"] == "MERGE_MULTI_UPSTREAM"
+    assert by_pair["791871:37687913"][0]["structure_type"] == "MERGE_MULTI_UPSTREAM"
+
+    multi_arc_review = build_multi_arc_review(
+        run_root,
+        complex_patch_id=patch_id,
+        same_pair_multi_arc_observation={
+            "patch_id": patch_id,
+            "rows": [
+                {
+                    "patch_id": patch_id,
+                    "pair": "21779764:785642",
+                    "pair_arc_count": 2,
+                    "arc_ids": ["arc_multi_1", "arc_multi_2"],
+                    "has_built_sibling_arc": False,
+                    "built_sibling_arc_ids": [],
+                    "excluded_from_unique_denominator_reason": "same_pair_multi_arc",
+                    "current_business_status": "multi_arc_no_built_sibling_visual_gap_candidate",
+                    "next_rule_needed": "multi_arc_selection_rule",
+                    "visual_gap_note": "no_built_sibling_visual_gap_candidate",
+                }
+            ],
+        },
+    )
+    assert int(multi_arc_review["row_count"]) == 1
+    row = multi_arc_review["rows"][0]
+    assert row["pair"] == "21779764:785642"
+    assert row["allow_multi_output"] is True
+    assert row["witness_based_arc_ids"] == ["arc_multi_1"]
+    assert row["fallback_based_arc_ids"] == ["arc_multi_2"]
+    assert row["rule_reason"] == "same_pair_multi_arc_dual_output_ready"
 
 
 def test_t05v2_arc_legality_audit_uses_full_registry_for_arc_first_built_segment(tmp_path: Path) -> None:
