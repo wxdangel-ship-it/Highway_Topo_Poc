@@ -259,6 +259,100 @@ def _line_overlap_ratio(line: LineString, zone: Any | None) -> float:
     return float(max(0.0, min(1.0, float(getattr(overlap, "length", 0.0)) / max(length, 1e-6))))
 
 
+def _safe_surface(inputs: Any, divstrip_buffer: Any | None) -> Any | None:
+    drivezone = getattr(inputs, "drivezone_zone_metric", None)
+    if drivezone is None or getattr(drivezone, "is_empty", True):
+        return None
+    if divstrip_buffer is None or getattr(divstrip_buffer, "is_empty", True):
+        return drivezone
+    try:
+        safe = drivezone.difference(divstrip_buffer)
+    except Exception:
+        return drivezone
+    if safe is None or getattr(safe, "is_empty", True):
+        return drivezone
+    return safe
+
+
+def _iter_line_components(geometry: Any) -> list[LineString]:
+    if geometry is None or getattr(geometry, "is_empty", True):
+        return []
+    if isinstance(geometry, LineString):
+        return [geometry] if float(geometry.length) > 1e-6 else []
+    components: list[LineString] = []
+    for geom in getattr(geometry, "geoms", []) or []:
+        components.extend(_iter_line_components(geom))
+    return components
+
+
+def _slot_interval_line(slot: SlotInterval) -> LineString | None:
+    interval = slot.interval
+    if interval is None:
+        return None
+    coords = list(getattr(interval, "geometry_coords", ()) or ())
+    return _line_from_coords(coords)
+
+
+def _surface_envelope_core_line(
+    base_line: LineString,
+    safe_surface: Any | None,
+) -> LineString | None:
+    if safe_surface is None or getattr(safe_surface, "is_empty", True):
+        return None
+    try:
+        clipped = base_line.intersection(safe_surface)
+    except Exception:
+        return None
+    components = _iter_line_components(clipped)
+    if not components:
+        return None
+    return max(components, key=lambda item: float(item.length))
+
+
+def _slot_surface_anchor_point(
+    slot: SlotInterval,
+    reference_line: LineString,
+    safe_surface: Any | None,
+) -> Point:
+    slot_line = _slot_interval_line(slot)
+    if slot_line is None:
+        pipeline = _pipeline()
+        return pipeline._midpoint_of_interval(slot.interval)
+    slot_geom = slot_line
+    if safe_surface is not None and not getattr(safe_surface, "is_empty", True):
+        try:
+            clipped = slot_line.intersection(safe_surface)
+        except Exception:
+            clipped = slot_line
+        line_components = _iter_line_components(clipped)
+        if line_components:
+            slot_geom = max(line_components, key=lambda item: float(item.length))
+        elif isinstance(clipped, Point):
+            return clipped
+    try:
+        return nearest_points(slot_geom, reference_line)[0]
+    except Exception:
+        pipeline = _pipeline()
+        return pipeline._midpoint_of_interval(slot.interval)
+
+
+def _surface_envelope_candidate_line(
+    base_line: LineString,
+    src_slot: SlotInterval,
+    dst_slot: SlotInterval,
+    safe_surface: Any | None,
+) -> LineString | None:
+    core_line = _surface_envelope_core_line(base_line, safe_surface)
+    if core_line is None:
+        return None
+    start_anchor = _slot_surface_anchor_point(src_slot, core_line, safe_surface)
+    end_anchor = _slot_surface_anchor_point(dst_slot, core_line, safe_surface)
+    candidate = _anchor_along_base_line(core_line, start_anchor, end_anchor)
+    if candidate.is_empty or float(candidate.length) <= 1e-6:
+        return None
+    return candidate
+
+
 def slot_reference_line(
     *,
     segment: Segment,
@@ -465,6 +559,7 @@ def build_final_road(
         return None, result
     start_pt = pipeline._midpoint_of_interval(src_slot.interval)
     end_pt = pipeline._midpoint_of_interval(dst_slot.interval)
+    safe_surface = _safe_surface(inputs, divstrip_buffer)
     preferred_line, preferred_mode = shape_ref_line(
         segment=segment,
         identity=identity,
@@ -475,6 +570,8 @@ def build_final_road(
         prior_index=prior_index,
     )
     candidate_lines: list[tuple[LineString, str]] = [(preferred_line, str(preferred_mode))]
+    preferred_envelope = _surface_envelope_candidate_line(preferred_line, src_slot, dst_slot, safe_surface)
+    _append_candidate_line(candidate_lines, preferred_envelope, f"{preferred_mode}_safe_envelope", priority=True)
     _append_side_constrained_candidates(
         candidate_lines,
         preferred_line,
@@ -486,6 +583,8 @@ def build_final_road(
     if str(identity.state) == "witness_based":
         legacy_centerline = _legacy_witness_centerline(witness=witness, start_pt=start_pt, end_pt=end_pt)
         _append_candidate_line(candidate_lines, legacy_centerline, "witness_centerline")
+        legacy_envelope = _surface_envelope_candidate_line(legacy_centerline, src_slot, dst_slot, safe_surface)
+        _append_candidate_line(candidate_lines, legacy_envelope, "witness_centerline_safe_envelope")
         _append_side_constrained_candidates(
             candidate_lines,
             legacy_centerline,
@@ -497,6 +596,8 @@ def build_final_road(
     if support_reference_line is not None:
         support_anchor = _anchor_along_base_line(support_reference_line, start_pt, end_pt)
         _append_candidate_line(candidate_lines, support_anchor, "traj_support_slot_anchored")
+        support_envelope = _surface_envelope_candidate_line(support_anchor, src_slot, dst_slot, safe_surface)
+        _append_candidate_line(candidate_lines, support_envelope, "traj_support_slot_anchored_safe_envelope")
         _append_side_constrained_candidates(
             candidate_lines,
             support_anchor,
@@ -506,6 +607,8 @@ def build_final_road(
         )
     segment_projected = _anchor_along_base_line(segment.geometry_metric(), start_pt, end_pt)
     _append_candidate_line(candidate_lines, segment_projected, "segment_support_projected_anchored")
+    segment_envelope = _surface_envelope_candidate_line(segment_projected, src_slot, dst_slot, safe_surface)
+    _append_candidate_line(candidate_lines, segment_envelope, "segment_support_projected_anchored_safe_envelope")
     _append_side_constrained_candidates(
         candidate_lines,
         segment_projected,
@@ -516,6 +619,8 @@ def build_final_road(
     segment_anchor = _replace_endpoints(segment.geometry_metric(), start_pt, end_pt)
     if not segment_anchor.equals(preferred_line):
         _append_candidate_line(candidate_lines, segment_anchor, "segment_support_slot_anchored")
+        segment_anchor_envelope = _surface_envelope_candidate_line(segment_anchor, src_slot, dst_slot, safe_surface)
+        _append_candidate_line(candidate_lines, segment_anchor_envelope, "segment_support_slot_anchored_safe_envelope")
     prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
     if prior_line is not None:
         prior_projected = _anchor_along_base_line(prior_line, start_pt, end_pt)
@@ -523,6 +628,13 @@ def build_final_road(
             candidate_lines,
             prior_projected,
             "prior_reference_projected_anchored",
+            priority=str(identity.state) == "prior_based",
+        )
+        prior_envelope = _surface_envelope_candidate_line(prior_projected, src_slot, dst_slot, safe_surface)
+        _append_candidate_line(
+            candidate_lines,
+            prior_envelope,
+            "prior_reference_projected_anchored_safe_envelope",
             priority=str(identity.state) == "prior_based",
         )
         _append_side_constrained_candidates(
@@ -538,6 +650,13 @@ def build_final_road(
             candidate_lines,
             prior_anchor,
             "prior_reference_slot_anchored",
+            priority=str(identity.state) == "prior_based",
+        )
+        prior_anchor_envelope = _surface_envelope_candidate_line(prior_anchor, src_slot, dst_slot, safe_surface)
+        _append_candidate_line(
+            candidate_lines,
+            prior_anchor_envelope,
+            "prior_reference_slot_anchored_safe_envelope",
             priority=str(identity.state) == "prior_based",
         )
     attempts: list[dict[str, Any]] = []

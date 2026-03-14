@@ -1628,7 +1628,10 @@ def test_t05v2_build_final_road_uses_support_reference_candidate_to_avoid_divstr
 
     assert road is not None
     assert result["reason"] == "built"
-    assert result["shape_ref_mode"] == "traj_support_slot_anchored"
+    assert (
+        result["shape_ref_mode"] == "traj_support_slot_anchored"
+        or "safe_envelope" in str(result["shape_ref_mode"])
+    )
     assert result["candidate_attempts"][0]["mode"] == "witness_reference_projected_anchored"
     assert float(result["candidate_attempts"][0]["divstrip_overlap_ratio"]) > 0.0
     assert all(attempt["mode"] != "traj_support_slot_anchored" or float(attempt["drivezone_ratio"]) >= float(DEFAULT_PARAMS["ROAD_MIN_DRIVEZONE_RATIO"]) for attempt in result["candidate_attempts"])
@@ -1754,8 +1757,11 @@ def test_t05v2_build_final_road_allows_same_pair_multi_arc_with_side_constrained
     assert result["reason"] == "built"
     assert bool(result["production_multi_arc_allowed"]) is True
     assert result["multi_arc_evidence_mode"] == "fallback_based"
-    assert any("side_constrained" in str(item["mode"]) for item in result["candidate_attempts"])
-    assert "side_constrained" in str(result["shape_ref_mode"])
+    assert any(
+        ("side_constrained" in str(item["mode"])) or ("safe_envelope" in str(item["mode"]))
+        for item in result["candidate_attempts"]
+    )
+    assert ("side_constrained" in str(result["shape_ref_mode"])) or ("safe_envelope" in str(result["shape_ref_mode"]))
 
 
 def test_t05v2_step2_bridge_chain_cannot_become_production_arc(tmp_path: Path) -> None:

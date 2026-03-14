@@ -186,6 +186,8 @@ def detect_same_pair_diverge_merge_structure(
             "distinct_path_count": 0,
         }
     distinct_signals: list[str] = []
+    if len(arc_ids) >= 2:
+        distinct_signals.append("distinct_topology_arc_id_signal")
     if len({tuple(_edge_ids(item)) for item in same_pair_rows if _edge_ids(item)}) >= 2:
         distinct_signals.append("distinct_topology_edge_signal")
     if len({tuple(_node_path(item)) for item in same_pair_rows if _node_path(item)}) >= 2:
@@ -440,26 +442,32 @@ def _multi_arc_evidence_mode(row: dict[str, Any]) -> str:
     explicit_mode = str(row.get("multi_arc_evidence_mode", ""))
     if explicit_mode in {"witness_based", "fallback_based", "insufficient"}:
         return explicit_mode
-    if str(row.get("corridor_identity", "")) == "witness_based" and str(row.get("traj_support_type", "no_support")) != "no_support":
+    drivezone_ratio = (
+        row.get("arc_path_drivezone_ratio")
+        if row.get("arc_path_drivezone_ratio") is not None
+        else row.get("drivezone_overlap_ratio")
+        if row.get("drivezone_overlap_ratio") is not None
+        else 1.0
+    )
+    crosses_divstrip = bool(
+        row.get(
+            "arc_path_crosses_divstrip",
+            float(row.get("arc_path_divstrip_overlap_ratio", row.get("divstrip_overlap_ratio", 0.0)) or 0.0) > 1e-6,
+        )
+    )
+    if (
+        str(row.get("corridor_identity", "")) == "witness_based"
+        and _direct_legal_row(row)
+        and not crosses_divstrip
+        and float(drivezone_ratio or 0.0) >= 0.5
+    ):
         return "witness_based"
     if (
         _direct_legal_row(row)
         and (row.get("support_anchor_src_coords") is not None)
         and (row.get("support_anchor_dst_coords") is not None)
-        and (
-            str(row.get("prior_support_type", "no_support")) == "prior_fallback_support"
-            or bool(row.get("prior_support_available", False))
-        )
-        and not bool(
-            row.get(
-                "arc_path_crosses_divstrip",
-                float(row.get("arc_path_divstrip_overlap_ratio", row.get("divstrip_overlap_ratio", 0.0)) or 0.0) > 1e-6,
-            )
-        )
-        and float(
-            row.get("arc_path_drivezone_ratio", row.get("drivezone_overlap_ratio", 0.0)) or 0.0
-        )
-        >= 0.5
+        and not crosses_divstrip
+        and float(drivezone_ratio or 0.0) >= 0.5
     ):
         return "fallback_based"
     return "insufficient"
@@ -495,14 +503,16 @@ def allow_multi_arc_output(rows: list[dict[str, Any]]) -> dict[str, dict[str, An
             for row in group_rows
             if _topology_arc_id(row)
         }
+        valid_modes = {arc_id: mode for arc_id, mode in evidence_modes.items() if mode in {"witness_based", "fallback_based"}}
         witness_based_arc_ids = sorted(
             arc_id for arc_id, mode in evidence_modes.items() if mode == "witness_based"
         )
         fallback_based_arc_ids = sorted(
             arc_id for arc_id, mode in evidence_modes.items() if mode == "fallback_based"
         )
-        allow_multi_output = bool(witness_based_arc_ids) and (
-            len(witness_based_arc_ids) + len(fallback_based_arc_ids) == len(evidence_modes)
+        allow_multi_output = (
+            len(valid_modes) >= 2
+            and len(valid_modes) == len(evidence_modes)
         )
         structure = detect_same_pair_diverge_merge_structure(group_rows[0], group_rows)
         out[str(canonical_pair)] = {
