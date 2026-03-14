@@ -10,7 +10,11 @@ from shapely.geometry import GeometryCollection, LineString, MultiLineString, Po
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import nearest_points
 
-from .arc_selection_rules import apply_arc_selection_rules
+from .arc_selection_rules import (
+    STRUCTURE_SAME_PAIR_MULTI_ARC,
+    apply_arc_selection_rules,
+    detect_same_pair_diverge_merge_structure,
+)
 from .io import (
     InputFrame,
     PatchInputs,
@@ -107,6 +111,9 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "ARC_STITCH_MAX_PROJ_GAP_M": 25.0,
     "ARC_STITCH_MIN_COVERAGE_RATIO": 0.72,
     "ARC_STITCH_ENDPOINT_MARGIN_RATIO": 0.18,
+    "ARC_SUPPORT_MIN_DRIVABLE_RATIO": 0.70,
+    "ARC_SUPPORT_MIN_DRIVEZONE_RATIO": 0.85,
+    "ARC_SUPPORT_MAX_DIVSTRIP_RATIO": 0.05,
     "STEP3_TOPOLOGY_GAP_CONTROL_ENABLE": 1,
     "STEP3_TOPOLOGY_GAP_CONTROL_PAIR_IDS": "55353246:37687913,760239:6963539359479390368,791871:37687913",
     "STEP3_TOPOLOGY_GAP_MIN_SUPPORT_COVERAGE_RATIO": 0.35,
@@ -632,6 +639,103 @@ def _direct_arc_rows(
     ]
 
 
+def _topology_arc_line(arc: dict[str, Any]) -> LineString | None:
+    coords = tuple(
+        (float(item[0]), float(item[1]))
+        for item in arc.get("line_coords", [])
+        if isinstance(item, (list, tuple)) and len(item) >= 2
+    )
+    if len(coords) < 2:
+        return None
+    line = coords_to_line(coords)
+    if line.is_empty or line.length <= 1e-6:
+        return None
+    return line
+
+
+def _same_pair_provisional_allow_context(
+    *,
+    candidate: dict[str, Any],
+    topology: dict[str, Any],
+    direct_arcs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    arcs = [dict(item) for item in (direct_arcs if direct_arcs is not None else _direct_arc_rows(
+        src_nodeid=int(candidate.get("src_nodeid", 0)),
+        dst_nodeid=int(candidate.get("dst_nodeid", 0)),
+        topology=topology,
+    ))]
+    if len(arcs) <= 1:
+        return {
+            "allow": False,
+            "structure_type": "",
+            "distinct_path_signal": [],
+            "pair_arc_count": int(len(arcs)),
+            "arc_ids": [str(item.get("arc_id", "")) for item in arcs if str(item.get("arc_id", ""))],
+        }
+    pseudo_rows = [
+        {
+            "pair": _pair_id_text(int(candidate.get("src_nodeid", 0)), int(candidate.get("dst_nodeid", 0))),
+            "canonical_pair": str(
+                item.get(
+                    "canonical_pair",
+                    _pair_id_text(int(candidate.get("src_nodeid", 0)), int(candidate.get("dst_nodeid", 0))),
+                )
+            ),
+            "src": int(candidate.get("src_nodeid", 0)),
+            "dst": int(candidate.get("dst_nodeid", 0)),
+            "topology_arc_id": str(item.get("arc_id", "")),
+            "node_path": [int(v) for v in item.get("node_path", []) if v is not None],
+            "edge_ids": [str(v) for v in item.get("edge_ids", []) if str(v)],
+            "line_coords": list(item.get("line_coords", [])),
+            "is_direct_legal": True,
+            "is_unique": False,
+        }
+        for item in arcs
+    ]
+    structure = detect_same_pair_diverge_merge_structure(pseudo_rows[0], pseudo_rows)
+    candidate_line = candidate.get("line")
+    allow = bool(
+        isinstance(candidate_line, LineString)
+        and not candidate_line.is_empty
+        and str(structure.get("structure_type", "")) == STRUCTURE_SAME_PAIR_MULTI_ARC
+        and int(structure.get("pair_arc_count", 0)) >= 2
+    )
+    return {
+        "allow": bool(allow),
+        "structure_type": str(structure.get("structure_type", "")),
+        "distinct_path_signal": [str(v) for v in structure.get("distinct_path_signal", []) if str(v)],
+        "pair_arc_count": int(structure.get("pair_arc_count", len(arcs))),
+        "arc_ids": [str(v) for v in structure.get("arc_ids", []) if str(v)],
+        "peer_arc_ids": [str(v) for v in structure.get("peer_arc_ids", []) if str(v)],
+    }
+
+
+def _same_pair_assignment_metrics(
+    *,
+    candidate_line: LineString,
+    arc: dict[str, Any],
+) -> dict[str, Any] | None:
+    arc_line = _topology_arc_line(arc)
+    if arc_line is None:
+        return None
+    candidate_start = Point(float(candidate_line.coords[0][0]), float(candidate_line.coords[0][1]))
+    candidate_end = Point(float(candidate_line.coords[-1][0]), float(candidate_line.coords[-1][1]))
+    arc_start = Point(float(arc_line.coords[0][0]), float(arc_line.coords[0][1]))
+    arc_end = Point(float(arc_line.coords[-1][0]), float(arc_line.coords[-1][1]))
+    line_distance_m = float(candidate_line.hausdorff_distance(arc_line))
+    anchor_fit_m = float(candidate_start.distance(arc_start) + candidate_end.distance(arc_end))
+    geometry_fit_m = float(_line_midpoint(candidate_line).distance(_line_midpoint(arc_line)))
+    length_gap_m = float(abs(candidate_line.length - arc_line.length))
+    return {
+        "arc": dict(arc),
+        "topology_arc_id": str(arc.get("arc_id", "")),
+        "line_distance_m": float(line_distance_m),
+        "anchor_fit_m": float(anchor_fit_m),
+        "geometry_fit_m": float(geometry_fit_m),
+        "length_gap_m": float(length_gap_m),
+    }
+
+
 def _arc_legality_diagnostics(
     *,
     src_nodeid: int,
@@ -698,6 +802,15 @@ def _production_arc_gate_reason(
     candidate["bridge_chain_unique"] = bool(diagnostics["bridge_chain_unique"])
     candidate["bridge_chain_nodes"] = [int(v) for v in diagnostics["bridge_chain_nodes"]]
     candidate["bridge_diagnostic_reason"] = str(diagnostics["bridge_diagnostic_reason"])
+    provisional_context = _same_pair_provisional_allow_context(
+        candidate=candidate,
+        topology=topology,
+        direct_arcs=list(diagnostics.get("direct_arcs", [])),
+    )
+    candidate["same_pair_multi_arc_candidate"] = bool(provisional_context["allow"])
+    candidate["same_pair_provisional_allowed"] = bool(provisional_context["allow"])
+    candidate["same_pair_distinct_path_signal"] = list(provisional_context.get("distinct_path_signal", []))
+    candidate["same_pair_arc_ids"] = list(provisional_context.get("arc_ids", []))
     if str(topology_reason) == "trace_only_reachability":
         return "trace_only_reachability"
     if not bool(diagnostics["topology_arc_is_direct_legal"]):
@@ -709,6 +822,9 @@ def _production_arc_gate_reason(
     if not bool(diagnostics["topology_arc_is_unique"]):
         if str(topology_reason) in {"terminal_owner_mismatch", "ambiguous_terminal_owner"}:
             return str(topology_reason)
+        if bool(provisional_context["allow"]):
+            candidate["topology_arc_provisional_reason"] = "same_pair_multi_arc_candidate_pending_assignment"
+            return None
         return "non_unique_direct_legal_arc"
     return topology_reason
 
@@ -1680,10 +1796,79 @@ def _assign_topology_arc(
     candidate["topology_arc_is_direct_legal"] = bool(len(arcs) > 0)
     candidate["topology_arc_is_unique"] = bool(len(arcs) == 1)
     candidate["topology_arc_candidate_count"] = int(len(arcs))
-    if len(arcs) != 1:
+    if len(arcs) == 0:
         return None
-    chosen = arcs[0]
-    candidate["topology_arc_distance_m"] = 0.0
+    chosen: dict[str, Any] | None = None
+    if len(arcs) == 1:
+        chosen = dict(arcs[0])
+        candidate["topology_arc_assignment_mode"] = "unique_direct_arc"
+        candidate["topology_arc_assignment_line_distance_m"] = 0.0
+        candidate["topology_arc_assignment_anchor_fit_m"] = 0.0
+        candidate["topology_arc_assignment_geometry_fit_m"] = 0.0
+        candidate["topology_arc_assignment_score_gap_m"] = None
+    elif bool(candidate.get("same_pair_provisional_allowed", False)):
+        candidate_line = candidate.get("line")
+        if not isinstance(candidate_line, LineString) or candidate_line.is_empty:
+            return None
+        scored = [
+            item
+            for item in (
+                _same_pair_assignment_metrics(candidate_line=candidate_line, arc=arc)
+                for arc in arcs
+            )
+            if item is not None
+        ]
+        if not scored:
+            return None
+        scored = sorted(
+            scored,
+            key=lambda item: (
+                float(item["line_distance_m"]),
+                float(item["anchor_fit_m"]),
+                float(item["geometry_fit_m"]),
+                float(item["length_gap_m"]),
+                str(item["topology_arc_id"]),
+            ),
+        )
+        best = dict(scored[0])
+        second = dict(scored[1]) if len(scored) >= 2 else None
+        chosen = dict(best["arc"])
+        candidate["topology_arc_assignment_mode"] = "same_pair_line_anchor_geometry_fit"
+        candidate["topology_arc_assignment_line_distance_m"] = float(best["line_distance_m"])
+        candidate["topology_arc_assignment_anchor_fit_m"] = float(best["anchor_fit_m"])
+        candidate["topology_arc_assignment_geometry_fit_m"] = float(best["geometry_fit_m"])
+        candidate["topology_arc_assignment_score_gap_m"] = (
+            None
+            if second is None
+            else float(
+                (
+                    float(second["line_distance_m"]) - float(best["line_distance_m"])
+                )
+                + (
+                    float(second["anchor_fit_m"]) - float(best["anchor_fit_m"])
+                )
+                + (
+                    float(second["geometry_fit_m"]) - float(best["geometry_fit_m"])
+                )
+            )
+        )
+        candidate["topology_arc_assignment_candidates"] = [
+            {
+                "topology_arc_id": str(item["topology_arc_id"]),
+                "line_distance_m": float(item["line_distance_m"]),
+                "anchor_fit_m": float(item["anchor_fit_m"]),
+                "geometry_fit_m": float(item["geometry_fit_m"]),
+                "length_gap_m": float(item["length_gap_m"]),
+            }
+            for item in scored
+        ]
+    else:
+        return None
+    if chosen is None:
+        return None
+    candidate["topology_arc_distance_m"] = (
+        float(candidate.get("topology_arc_assignment_line_distance_m", 0.0) or 0.0)
+    )
     candidate["topology_arc_id"] = str(chosen.get("arc_id", ""))
     candidate["topology_arc_source_type"] = str(chosen.get("source", ""))
     candidate["topology_arc_edge_ids"] = [str(v) for v in chosen.get("edge_ids", [])]
@@ -1777,6 +1962,14 @@ def _candidate_feature_properties(
         "topology_arc_id": str(candidate.get("topology_arc_id", "")),
         "topology_arc_source_type": str(candidate.get("topology_arc_source_type", candidate.get("arc_source_type", ""))),
         "topology_arc_distance_m": candidate.get("topology_arc_distance_m"),
+        "same_pair_multi_arc_candidate": bool(candidate.get("same_pair_multi_arc_candidate", False)),
+        "same_pair_provisional_allowed": bool(candidate.get("same_pair_provisional_allowed", False)),
+        "same_pair_distinct_path_signal": list(candidate.get("same_pair_distinct_path_signal", [])),
+        "topology_arc_assignment_mode": str(candidate.get("topology_arc_assignment_mode", "")),
+        "topology_arc_assignment_line_distance_m": candidate.get("topology_arc_assignment_line_distance_m"),
+        "topology_arc_assignment_anchor_fit_m": candidate.get("topology_arc_assignment_anchor_fit_m"),
+        "topology_arc_assignment_geometry_fit_m": candidate.get("topology_arc_assignment_geometry_fit_m"),
+        "topology_arc_assignment_score_gap_m": candidate.get("topology_arc_assignment_score_gap_m"),
         "topology_arc_is_direct_legal": bool(candidate.get("topology_arc_is_direct_legal", False)),
         "topology_arc_is_unique": bool(candidate.get("topology_arc_is_unique", False)),
         "topology_arc_candidate_count": int(candidate.get("topology_arc_candidate_count", 0)),
@@ -1829,6 +2022,14 @@ def _segment_feature_properties(segment: Segment, *, status: str, reason: str = 
         "topology_arc_source_type": str(segment.topology_arc_source_type),
         "topology_arc_edge_ids": [str(v) for v in segment.topology_arc_edge_ids],
         "topology_arc_node_path": [int(v) for v in segment.topology_arc_node_path],
+        "same_pair_multi_arc_candidate": bool(getattr(segment, "same_pair_multi_arc_candidate", False)),
+        "same_pair_provisional_allowed": bool(getattr(segment, "same_pair_provisional_allowed", False)),
+        "same_pair_distinct_path_signal": list(getattr(segment, "same_pair_distinct_path_signal", ())),
+        "topology_arc_assignment_mode": str(getattr(segment, "topology_arc_assignment_mode", "")),
+        "topology_arc_assignment_line_distance_m": getattr(segment, "topology_arc_assignment_line_distance_m", None),
+        "topology_arc_assignment_anchor_fit_m": getattr(segment, "topology_arc_assignment_anchor_fit_m", None),
+        "topology_arc_assignment_geometry_fit_m": getattr(segment, "topology_arc_assignment_geometry_fit_m", None),
+        "topology_arc_assignment_score_gap_m": getattr(segment, "topology_arc_assignment_score_gap_m", None),
         "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
         "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
         "bridge_candidate_retained": bool(segment.bridge_candidate_retained),
@@ -2556,6 +2757,38 @@ def _cluster_segments(candidates: list[dict[str, Any]], frame: InputFrame, param
                     canonical_dst_xsec_id=int(representative.get("canonical_dst_xsec_id", dst_nodeid)),
                     src_alias_applied=bool(any(bool(item.get("src_alias_applied", False)) for item in cluster)),
                     dst_alias_applied=bool(any(bool(item.get("dst_alias_applied", False)) for item in cluster)),
+                    same_pair_multi_arc_candidate=bool(
+                        any(bool(item.get("same_pair_multi_arc_candidate", False)) for item in cluster)
+                    ),
+                    same_pair_provisional_allowed=bool(
+                        any(bool(item.get("same_pair_provisional_allowed", False)) for item in cluster)
+                    ),
+                    same_pair_distinct_path_signal=tuple(
+                        str(v)
+                        for v in representative.get("same_pair_distinct_path_signal", [])
+                        if str(v)
+                    ),
+                    topology_arc_assignment_mode=str(representative.get("topology_arc_assignment_mode", "")),
+                    topology_arc_assignment_line_distance_m=(
+                        None
+                        if representative.get("topology_arc_assignment_line_distance_m") is None
+                        else float(representative.get("topology_arc_assignment_line_distance_m"))
+                    ),
+                    topology_arc_assignment_anchor_fit_m=(
+                        None
+                        if representative.get("topology_arc_assignment_anchor_fit_m") is None
+                        else float(representative.get("topology_arc_assignment_anchor_fit_m"))
+                    ),
+                    topology_arc_assignment_geometry_fit_m=(
+                        None
+                        if representative.get("topology_arc_assignment_geometry_fit_m") is None
+                        else float(representative.get("topology_arc_assignment_geometry_fit_m"))
+                    ),
+                    topology_arc_assignment_score_gap_m=(
+                        None
+                        if representative.get("topology_arc_assignment_score_gap_m") is None
+                        else float(representative.get("topology_arc_assignment_score_gap_m"))
+                    ),
                 )
             )
     return out
@@ -3686,6 +3919,14 @@ def _stage2_segment(
                 "topology_reverse_owner_src_nodeids": [int(v) for v in item.get("topology_reverse_owner_src_nodeids", [])],
                 "topology_arc_id": str(item.get("topology_arc_id", "")),
                 "arc_source_type": str(item.get("topology_arc_source_type", item.get("arc_source_type", ""))),
+                "same_pair_multi_arc_candidate": bool(item.get("same_pair_multi_arc_candidate", False)),
+                "same_pair_provisional_allowed": bool(item.get("same_pair_provisional_allowed", False)),
+                "same_pair_distinct_path_signal": list(item.get("same_pair_distinct_path_signal", [])),
+                "topology_arc_assignment_mode": str(item.get("topology_arc_assignment_mode", "")),
+                "topology_arc_assignment_line_distance_m": item.get("topology_arc_assignment_line_distance_m"),
+                "topology_arc_assignment_anchor_fit_m": item.get("topology_arc_assignment_anchor_fit_m"),
+                "topology_arc_assignment_geometry_fit_m": item.get("topology_arc_assignment_geometry_fit_m"),
+                "topology_arc_assignment_score_gap_m": item.get("topology_arc_assignment_score_gap_m"),
                 "topology_arc_node_path": [int(v) for v in item.get("topology_arc_node_path", [])],
                 "topology_arc_is_direct_legal": bool(item.get("topology_arc_is_direct_legal", False)),
                 "topology_arc_is_unique": bool(item.get("topology_arc_is_unique", False)),

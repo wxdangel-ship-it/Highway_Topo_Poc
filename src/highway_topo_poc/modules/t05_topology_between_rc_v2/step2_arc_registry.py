@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from .arc_selection_rules import STRUCTURE_SAME_PAIR_MULTI_ARC, apply_arc_selection_rules
+
 
 def _pair_status_indexes(
     *,
@@ -168,6 +170,46 @@ def build_full_legal_arc_registry(
                 "selected_segment_ids": [str(getattr(segment, "segment_id", "")) for segment in attached_segments],
                 "selected_segment_count": int(len(attached_segments)),
                 "selected_segment_id": "" if not attached_segments else str(attached_segments[0].segment_id),
+                "same_pair_multi_arc_candidate": bool(
+                    getattr(selected_segment, "same_pair_multi_arc_candidate", False)
+                )
+                if selected_segment is not None
+                else False,
+                "same_pair_provisional_allowed": bool(
+                    getattr(selected_segment, "same_pair_provisional_allowed", False)
+                )
+                if selected_segment is not None
+                else False,
+                "same_pair_distinct_path_signal": list(
+                    getattr(selected_segment, "same_pair_distinct_path_signal", ())
+                )
+                if selected_segment is not None
+                else [],
+                "topology_arc_assignment_mode": str(
+                    getattr(selected_segment, "topology_arc_assignment_mode", "")
+                )
+                if selected_segment is not None
+                else "",
+                "topology_arc_assignment_line_distance_m": (
+                    getattr(selected_segment, "topology_arc_assignment_line_distance_m", None)
+                    if selected_segment is not None
+                    else None
+                ),
+                "topology_arc_assignment_anchor_fit_m": (
+                    getattr(selected_segment, "topology_arc_assignment_anchor_fit_m", None)
+                    if selected_segment is not None
+                    else None
+                ),
+                "topology_arc_assignment_geometry_fit_m": (
+                    getattr(selected_segment, "topology_arc_assignment_geometry_fit_m", None)
+                    if selected_segment is not None
+                    else None
+                ),
+                "topology_arc_assignment_score_gap_m": (
+                    getattr(selected_segment, "topology_arc_assignment_score_gap_m", None)
+                    if selected_segment is not None
+                    else None
+                ),
                 "traj_support_type": "no_support",
                 "traj_support_ids": [],
                 "traj_support_span_count": 0,
@@ -190,6 +232,28 @@ def build_full_legal_arc_registry(
                 "working_segment_source": "step2_selected_segment" if attached_segments else "",
             }
         )
+
+    rows = list(apply_arc_selection_rules(rows).get("rows", []))
+    for row in rows:
+        selected_segment_count = int(row.get("selected_segment_count", 0))
+        is_same_pair_candidate = bool(selected_segment_count > 0) and (
+            str(row.get("arc_structure_type", "")) == STRUCTURE_SAME_PAIR_MULTI_ARC
+        )
+        row["same_pair_multi_arc_candidate"] = bool(
+            row.get("same_pair_multi_arc_candidate", False) or is_same_pair_candidate
+        )
+        row["same_pair_provisional_allowed"] = bool(
+            row.get("same_pair_provisional_allowed", False) or is_same_pair_candidate
+        )
+        if not is_same_pair_candidate:
+            continue
+        if str(row.get("hard_block_reason", "")) == "non_unique_direct_legal_arc":
+            row["hard_block_reason"] = ""
+        row["entered_main_flow"] = False
+        row["blocked_diagnostic_only"] = False
+        row["blocked_diagnostic_reason"] = ""
+        row["unbuilt_stage"] = "step3_same_pair_evidence_pending"
+        row["unbuilt_reason"] = "same_pair_multi_arc_candidate_pending_step3"
 
     all_direct_legal_arc_count = int(len(rows))
     all_direct_unique_legal_arc_count = int(sum(1 for row in rows if bool(row["is_unique"])))

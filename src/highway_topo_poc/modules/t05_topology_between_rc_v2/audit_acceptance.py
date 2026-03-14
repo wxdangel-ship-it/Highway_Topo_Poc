@@ -229,6 +229,9 @@ def _best_registry_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
             0 if bool(item.get("built_final_road", False)) else 1,
             0 if bool(item.get("controlled_entry_allowed", False)) else 1,
             0 if bool(item.get("entered_main_flow", False)) else 1,
+            0 if bool(item.get("same_pair_provisional_allowed", False)) else 1,
+            0 if int(item.get("selected_segment_count", 0)) > 0 else 1,
+            0 if str(item.get("working_segment_id", "")) else 1,
             0 if bool(item.get("is_direct_legal", item.get("topology_arc_is_direct_legal", False))) else 1,
             0 if bool(item.get("is_unique", item.get("topology_arc_is_unique", False))) else 1,
             str(item.get("working_segment_id", "")),
@@ -311,6 +314,14 @@ def _identity_record_from_row(
             payload.get("topology_arc_is_direct_legal", payload.get("is_direct_legal", False))
         ),
         "topology_arc_is_unique": bool(payload.get("topology_arc_is_unique", payload.get("is_unique", False))),
+        "same_pair_multi_arc_candidate": bool(payload.get("same_pair_multi_arc_candidate", False)),
+        "same_pair_provisional_allowed": bool(payload.get("same_pair_provisional_allowed", False)),
+        "same_pair_distinct_path_signal": list(payload.get("same_pair_distinct_path_signal", [])),
+        "topology_arc_assignment_mode": str(payload.get("topology_arc_assignment_mode", "")),
+        "topology_arc_assignment_line_distance_m": payload.get("topology_arc_assignment_line_distance_m"),
+        "topology_arc_assignment_anchor_fit_m": payload.get("topology_arc_assignment_anchor_fit_m"),
+        "topology_arc_assignment_geometry_fit_m": payload.get("topology_arc_assignment_geometry_fit_m"),
+        "topology_arc_assignment_score_gap_m": payload.get("topology_arc_assignment_score_gap_m"),
         "production_multi_arc_allowed": bool(payload.get("production_multi_arc_allowed", False)),
         "multi_arc_evidence_mode": str(payload.get("multi_arc_evidence_mode", "")),
         "multi_arc_structure_type": str(
@@ -561,6 +572,14 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
                 "topology_arc_source_type": str(resolved.get("topology_arc_source_type", "")),
                 "topology_arc_is_direct_legal": bool(resolved.get("topology_arc_is_direct_legal", False)),
                 "topology_arc_is_unique": bool(resolved.get("topology_arc_is_unique", False)),
+                "same_pair_multi_arc_candidate": bool(resolved.get("same_pair_multi_arc_candidate", False)),
+                "same_pair_provisional_allowed": bool(resolved.get("same_pair_provisional_allowed", False)),
+                "same_pair_distinct_path_signal": list(resolved.get("same_pair_distinct_path_signal", [])),
+                "topology_arc_assignment_mode": str(resolved.get("topology_arc_assignment_mode", "")),
+                "topology_arc_assignment_line_distance_m": resolved.get("topology_arc_assignment_line_distance_m"),
+                "topology_arc_assignment_anchor_fit_m": resolved.get("topology_arc_assignment_anchor_fit_m"),
+                "topology_arc_assignment_geometry_fit_m": resolved.get("topology_arc_assignment_geometry_fit_m"),
+                "topology_arc_assignment_score_gap_m": resolved.get("topology_arc_assignment_score_gap_m"),
                 "production_multi_arc_allowed": bool(resolved.get("production_multi_arc_allowed", False)),
                 "multi_arc_evidence_mode": str(resolved.get("multi_arc_evidence_mode", "")),
                 "multi_arc_structure_type": str(resolved.get("multi_arc_structure_type", "")),
@@ -1165,6 +1184,10 @@ def _patch_metrics(run_root: Path | str, patch_id: str) -> dict[str, Any]:
 def _patch_full_registry_rows(run_root: Path | str, patch_id: str) -> list[dict[str, Any]]:
     metrics = _patch_metrics(run_root, patch_id)
     rows = list(metrics.get("full_legal_arc_registry", []))
+    if rows:
+        return rows
+    step3_payload = _cached_patch_json(_patch_dir(run_root, patch_id) / "step3" / "witnesses.json")
+    rows = list(step3_payload.get("full_legal_arc_registry", []))
     if rows:
         return rows
     step4_payload = _cached_patch_json(_patch_dir(run_root, patch_id) / "step4" / "corridor_identity.json")
@@ -2172,6 +2195,70 @@ def build_merge_diverge_review(
         "row_count": int(len(rows)),
         "allow_multi_output_count": int(sum(1 for row in rows if bool(row.get("allow_multi_output", False)))),
         "built_count": int(sum(1 for row in rows if bool(row.get("built", False)))),
+        "rows": rows,
+    }
+
+
+def build_same_pair_provisional_allow_review(
+    run_root: Path | str,
+    *,
+    complex_patch_id: str,
+) -> dict[str, Any]:
+    registry_rows = [dict(row) for row in _patch_full_registry_rows(run_root, complex_patch_id)]
+    if registry_rows and any(not str(row.get("arc_structure_type", "")) for row in registry_rows):
+        registry_rows = list(apply_arc_selection_rules(registry_rows).get("rows", []))
+    pair_decisions = build_pair_decisions(run_root, str(complex_patch_id))
+    decisions_by_pair = {
+        str(row.get("pair", "")): dict(row)
+        for row in pair_decisions.get("pairs", [])
+    }
+    target_rows = [
+        dict(row)
+        for row in registry_rows
+        if str(row.get("arc_structure_type", "")) == STRUCTURE_SAME_PAIR_MULTI_ARC
+        and (
+            bool(row.get("same_pair_provisional_allowed", False))
+            or bool(row.get("same_pair_multi_arc_candidate", False))
+            or int(row.get("selected_segment_count", 0)) > 0
+            or bool(row.get("production_multi_arc_allowed", False))
+        )
+    ]
+    rows: list[dict[str, Any]] = []
+    for row in sorted(target_rows, key=lambda item: (str(item.get("pair", "")), str(item.get("topology_arc_id", "")))):
+        pair_id = str(row.get("pair", ""))
+        pair_decision = dict(decisions_by_pair.get(pair_id, {}))
+        rows.append(
+            {
+                "patch_id": str(complex_patch_id),
+                "pair": str(pair_id),
+                "topology_arc_id": str(row.get("topology_arc_id", "")),
+                "structure_type": str(row.get("arc_structure_type", "")),
+                "selected_segment_count": int(row.get("selected_segment_count", 0)),
+                "same_pair_multi_arc_candidate": bool(row.get("same_pair_multi_arc_candidate", False)),
+                "same_pair_provisional_allowed": bool(row.get("same_pair_provisional_allowed", False)),
+                "same_pair_distinct_path_signal": list(row.get("same_pair_distinct_path_signal", [])),
+                "topology_arc_assignment_mode": str(row.get("topology_arc_assignment_mode", "")),
+                "topology_arc_assignment_line_distance_m": row.get("topology_arc_assignment_line_distance_m"),
+                "topology_arc_assignment_anchor_fit_m": row.get("topology_arc_assignment_anchor_fit_m"),
+                "topology_arc_assignment_geometry_fit_m": row.get("topology_arc_assignment_geometry_fit_m"),
+                "topology_arc_assignment_score_gap_m": row.get("topology_arc_assignment_score_gap_m"),
+                "multi_arc_evidence_mode": str(
+                    row.get("multi_arc_evidence_mode", pair_decision.get("multi_arc_evidence_mode", ""))
+                ),
+                "production_multi_arc_allowed": bool(
+                    row.get("production_multi_arc_allowed", pair_decision.get("production_multi_arc_allowed", False))
+                ),
+                "entered_main_flow": bool(row.get("entered_main_flow", pair_decision.get("entered_main_flow", False))),
+                "built": bool(row.get("built_final_road", pair_decision.get("built_final_road", False))),
+                "unbuilt_stage": str(row.get("unbuilt_stage", pair_decision.get("unbuilt_stage", ""))),
+                "unbuilt_reason": str(row.get("unbuilt_reason", pair_decision.get("unbuilt_reason", ""))),
+            }
+        )
+    return {
+        "patch_id": str(complex_patch_id),
+        "row_count": int(len(rows)),
+        "provisional_allow_count": int(sum(1 for row in rows if bool(row.get("same_pair_provisional_allowed", False)))),
+        "finalized_allow_count": int(sum(1 for row in rows if bool(row.get("production_multi_arc_allowed", False)))),
         "rows": rows,
     }
 
@@ -3289,6 +3376,10 @@ def write_step5_plus_multiarc_finish_review(
     output_root_path = Path(output_root)
     same_pair_multi_arc_observation = dict(summary.get("same_pair_multi_arc_observation", {}))
     strict_vs_visual_gap_summary = dict(summary.get("strict_vs_visual_gap_summary", {}))
+    same_pair_provisional_allow_review = build_same_pair_provisional_allow_review(
+        run_root,
+        complex_patch_id=str(complex_patch_id),
+    )
     multi_arc_review = build_multi_arc_review(
         run_root,
         complex_patch_id=str(complex_patch_id),
@@ -3301,13 +3392,21 @@ def write_step5_plus_multiarc_finish_review(
             "dual_output_candidate_count": int(multi_arc_review.get("dual_output_candidate_count", 0)),
             "pairs": [str(row.get("pair", "")) for row in multi_arc_review.get("rows", [])],
         },
+        "same_pair_provisional_allow_review": {
+            "row_count": int(same_pair_provisional_allow_review.get("row_count", 0)),
+            "provisional_allow_count": int(same_pair_provisional_allow_review.get("provisional_allow_count", 0)),
+            "finalized_allow_count": int(same_pair_provisional_allow_review.get("finalized_allow_count", 0)),
+            "pairs": [str(row.get("pair", "")) for row in same_pair_provisional_allow_review.get("rows", [])],
+        },
     }
     complex_patch_step5_plus_multiarc_finish_review = {
         "patch_id": str(complex_patch_id),
         "step5_target_review_55353246_37687913": dict(summary.get("step5_target_review_55353246_37687913", {})),
+        "same_pair_provisional_allow_review": same_pair_provisional_allow_review,
         "multi_arc_review": multi_arc_review,
         "strict_vs_visual_gap_summary": strict_vs_visual_gap_summary,
     }
+    write_json(output_root_path / "same_pair_provisional_allow_review.json", same_pair_provisional_allow_review)
     write_json(output_root_path / "multi_arc_review.json", multi_arc_review)
     with (output_root_path / "multi_arc_review.csv").open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(
@@ -3346,6 +3445,7 @@ def write_step5_plus_multiarc_finish_review(
         "",
         "## Step5 Plus Multi-Arc Finish",
         "",
+        f"- same_pair_provisional_allow_row_count=`{same_pair_provisional_allow_review.get('row_count', 0)}`",
         f"- multi_arc_review_row_count=`{multi_arc_review.get('row_count', 0)}`",
         f"- dual_output_candidate_count=`{multi_arc_review.get('dual_output_candidate_count', 0)}`",
     ]
@@ -3354,6 +3454,7 @@ def write_step5_plus_multiarc_finish_review(
     summary_path.write_text(existing_summary + "\n".join(summary_lines) + "\n", encoding="utf-8")
     return {
         **summary,
+        "same_pair_provisional_allow_review": same_pair_provisional_allow_review,
         "multi_arc_review": multi_arc_review,
         "strict_vs_visual_gap_summary": strict_vs_visual_gap_summary,
         "complex_patch_step5_plus_multiarc_finish_review": complex_patch_step5_plus_multiarc_finish_review,
@@ -3369,6 +3470,7 @@ __all__ = [
     "build_complex_patch_legality_review",
     "build_legal_arc_coverage",
     "build_multi_arc_review",
+    "build_same_pair_provisional_allow_review",
     "build_pair_decisions",
     "build_simple_patch_acceptance",
     "build_simple_patch_regression",

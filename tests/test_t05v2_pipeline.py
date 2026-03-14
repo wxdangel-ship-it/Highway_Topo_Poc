@@ -19,6 +19,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.audit_acceptance import
     build_merge_diverge_review,
     build_multi_arc_review,
     build_pair_decisions,
+    build_same_pair_provisional_allow_review,
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.arc_selection_rules import (
     apply_arc_selection_rules,
@@ -939,7 +940,7 @@ def test_t05v2_step2_promotes_missing_rcsd_node_to_pseudo_xsec_and_builds_direct
     assert kept_pairs == {(10, 30), (30, 40)}
 
 
-def test_t05v2_production_arc_rejects_non_unique_direct_legal_arc(tmp_path: Path) -> None:
+def test_t05v2_step2_provisional_allows_same_pair_multi_arc_candidates(tmp_path: Path) -> None:
     patch_id = "same_pair_multi_arc"
     data_root = tmp_path / "data"
     intersection_fc = _fc(
@@ -970,22 +971,81 @@ def test_t05v2_production_arc_rejects_non_unique_direct_legal_arc(tmp_path: Path
     run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_multi_arc", out_root=out_root)
     segments_payload = _read_json(out_root / "run_multi_arc" / "patches" / patch_id / "step2" / "segments.json")
     pair_segments = [item for item in segments_payload["segments"] if int(item["src_nodeid"]) == 1 and int(item["dst_nodeid"]) == 2]
-    assert pair_segments == []
+    assert len(pair_segments) == 2
+    assert {str(item["topology_arc_id"]) for item in pair_segments} == {"arc_1_2_1", "arc_1_2_2"}
+    assert all(bool(item["same_pair_provisional_allowed"]) for item in pair_segments)
+    assert all(str(item["topology_arc_assignment_mode"]) == "same_pair_line_anchor_geometry_fit" for item in pair_segments)
     excluded = [
         item
         for item in segments_payload["excluded_candidates"]
         if int(item["src_nodeid"]) == 1 and int(item["dst_nodeid"]) == 2
     ]
-    assert excluded
-    assert {str(item["reason"]) for item in excluded} == {"non_unique_direct_legal_arc"}
-    assert {str(item["stage"]) for item in excluded} == {"semantic_hard_gate"}
-    topology_arcs_payload = _read_json(out_root / "run_multi_arc" / "patches" / patch_id / "debug" / "step2_topology_arcs.json")
-    arcs = [
+    assert excluded == []
+    registry_rows = [
         item
-        for item in topology_arcs_payload["arcs"]
-        if int(item["src_nodeid"]) == 1 and int(item["dst_nodeid"]) == 2
+        for item in segments_payload["full_legal_arc_registry"]
+        if int(item["src"]) == 1 and int(item["dst"]) == 2
     ]
-    assert len(arcs) == 2
+    assert len(registry_rows) == 2
+    assert all(str(item["arc_structure_type"]) == "SAME_PAIR_MULTI_ARC" for item in registry_rows)
+    assert all(bool(item["same_pair_provisional_allowed"]) for item in registry_rows)
+    assert all(str(item["unbuilt_stage"]) == "step3_same_pair_evidence_pending" for item in registry_rows)
+    assert all(str(item["hard_block_reason"]) == "" for item in registry_rows)
+
+
+def test_t05v2_same_pair_multi_arc_finalizes_in_step3_and_writes_review(tmp_path: Path) -> None:
+    patch_id = "same_pair_multi_arc_step3"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -10.0), (0.0, 10.0)], {"nodeid": 1}),
+            _line_feature([(100.0, -10.0), (100.0, 10.0)], {"nodeid": 2}),
+        ],
+        "EPSG:3857",
+    )
+    drivezone_fc = _fc([_poly_feature([(-5.0, -2.0), (105.0, -2.0), (105.0, 6.0), (-5.0, 6.0)])], "EPSG:3857")
+    road_fc = _fc(
+        [
+            _line_feature([(0.0, 0.0), (100.0, 0.0)], {"snodeid": 1, "enodeid": 2}),
+            _line_feature([(0.0, 4.0), (100.0, 4.0)], {"snodeid": 1, "enodeid": 2}),
+        ],
+        "EPSG:3857",
+    )
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=intersection_fc,
+        drivezone_fc=drivezone_fc,
+        traj_tracks=[
+            [(0.0, 0.0), (100.0, 0.0)],
+            [(0.0, 4.0), (100.0, 4.0)],
+        ],
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_multi_arc_step3", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_multi_arc_step3", out_root=out_root)
+    run_stage(stage="step3_witness", data_root=data_root, patch_id=patch_id, run_id="run_multi_arc_step3", out_root=out_root)
+    run_root = out_root / "run_multi_arc_step3"
+    step3_payload = _read_json(run_root / "patches" / patch_id / "step3" / "witnesses.json")
+    rows = {str(item["topology_arc_id"]): item for item in step3_payload["full_legal_arc_registry"]}
+    assert rows["arc_1_2_1"]["selected_support_traj_id"] == "traj_00"
+    assert rows["arc_1_2_2"]["selected_support_traj_id"] == "traj_01"
+    assert rows["arc_1_2_1"]["production_multi_arc_allowed"] is True
+    assert rows["arc_1_2_2"]["production_multi_arc_allowed"] is True
+    assert rows["arc_1_2_1"]["multi_arc_evidence_mode"] == "fallback_based"
+    assert rows["arc_1_2_2"]["multi_arc_evidence_mode"] == "fallback_based"
+    assert rows["arc_1_2_1"]["entered_main_flow"] is True
+    assert rows["arc_1_2_2"]["entered_main_flow"] is True
+
+    review = build_same_pair_provisional_allow_review(run_root, complex_patch_id=patch_id)
+    assert int(review["row_count"]) == 2
+    assert int(review["provisional_allow_count"]) == 2
+    assert int(review["finalized_allow_count"]) == 2
+    review_by_arc = {str(item["topology_arc_id"]): item for item in review["rows"]}
+    assert review_by_arc["arc_1_2_1"]["topology_arc_assignment_mode"] == "same_pair_line_anchor_geometry_fit"
+    assert review_by_arc["arc_1_2_1"]["multi_arc_evidence_mode"] == "fallback_based"
+    assert review_by_arc["arc_1_2_2"]["multi_arc_evidence_mode"] == "fallback_based"
 
 
 def test_t05v2_step2_writes_traj_crossing_and_support_audits(tmp_path: Path) -> None:
@@ -1256,12 +1316,21 @@ def test_t05v2_arc_first_stitched_support_uses_same_arc_fragments(tmp_path: Path
     run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_arcfirst2", out_root=out_root)
     run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_arcfirst2", out_root=out_root)
     run_stage(stage="step3_witness", data_root=data_root, patch_id=patch_id, run_id="run_arcfirst2", out_root=out_root)
-    step3_payload = _read_json(out_root / "run_arcfirst2" / "patches" / patch_id / "step3" / "witnesses.json")
+    patch_dir = out_root / "run_arcfirst2" / "patches" / patch_id
+    step3_payload = _read_json(patch_dir / "step3" / "witnesses.json")
     row = step3_payload["full_legal_arc_registry"][0]
-    assert row["traj_support_type"] == "stitched_arc_support"
-    assert float(row["traj_support_coverage_ratio"]) >= 0.72
-    assert len(row["traj_support_segments"]) >= 2
-    assert any(bool(item["is_stitched"]) for item in row["traj_support_segments"])
+    assert row["traj_support_type"] == "partial_arc_support"
+    assert row["support_generation_mode"] == "single"
+    assert row["selected_support_traj_id"] in {"traj_00", "traj_01"}
+    assert len(row["traj_support_segments"]) == 1
+    assert all(not bool(item["is_stitched"]) for item in row["traj_support_segments"])
+    assert (patch_dir / "step3" / "preprocessed_traj_lines.geojson").exists()
+    assert (patch_dir / "step3" / "arc_single_traj_support_segments.geojson").exists()
+    assert (patch_dir / "step3" / "arc_stitched_support_segments.geojson").exists()
+    stitched_debug = _read_json(patch_dir / "step3" / "arc_stitched_support_segments.geojson")
+    assert len(stitched_debug["features"]) >= 2
+    assert all(bool(item["properties"]["is_stitched"]) for item in stitched_debug["features"])
+    assert all(not bool(item["properties"]["accepted_for_production"]) for item in stitched_debug["features"])
 
 
 def test_t05v2_arc_first_prefilter_keeps_same_arc_support_and_skips_far_traj(tmp_path: Path) -> None:
@@ -3309,6 +3378,7 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     output_root_step5_plus = tmp_path / "bundle_step5_plus_multiarc"
     step5_plus_summary = write_step5_plus_multiarc_finish_review(run_root=run_root, output_root=output_root_step5_plus)
     assert (output_root_step5_plus / "step5_target_review_55353246_37687913.json").exists()
+    assert (output_root_step5_plus / "same_pair_provisional_allow_review.json").exists()
     assert (output_root_step5_plus / "multi_arc_review.json").exists()
     assert (output_root_step5_plus / "multi_arc_review.csv").exists()
     assert (output_root_step5_plus / "complex_patch_step5_plus_multiarc_finish_review.json").exists()

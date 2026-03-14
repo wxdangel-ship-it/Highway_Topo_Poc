@@ -152,6 +152,14 @@ class Segment:
     canonical_dst_xsec_id: int | None = None
     src_alias_applied: bool = False
     dst_alias_applied: bool = False
+    same_pair_multi_arc_candidate: bool = False
+    same_pair_provisional_allowed: bool = False
+    same_pair_distinct_path_signal: tuple[str, ...] = ()
+    topology_arc_assignment_mode: str = ""
+    topology_arc_assignment_line_distance_m: float | None = None
+    topology_arc_assignment_anchor_fit_m: float | None = None
+    topology_arc_assignment_geometry_fit_m: float | None = None
+    topology_arc_assignment_score_gap_m: float | None = None
     production_multi_arc_allowed: bool = False
     multi_arc_evidence_mode: str = ""
     multi_arc_structure_type: str = ""
@@ -197,6 +205,30 @@ class Segment:
             ),
             "src_alias_applied": bool(self.src_alias_applied),
             "dst_alias_applied": bool(self.dst_alias_applied),
+            "same_pair_multi_arc_candidate": bool(self.same_pair_multi_arc_candidate),
+            "same_pair_provisional_allowed": bool(self.same_pair_provisional_allowed),
+            "same_pair_distinct_path_signal": [str(v) for v in self.same_pair_distinct_path_signal],
+            "topology_arc_assignment_mode": str(self.topology_arc_assignment_mode),
+            "topology_arc_assignment_line_distance_m": (
+                None
+                if self.topology_arc_assignment_line_distance_m is None
+                else float(self.topology_arc_assignment_line_distance_m)
+            ),
+            "topology_arc_assignment_anchor_fit_m": (
+                None
+                if self.topology_arc_assignment_anchor_fit_m is None
+                else float(self.topology_arc_assignment_anchor_fit_m)
+            ),
+            "topology_arc_assignment_geometry_fit_m": (
+                None
+                if self.topology_arc_assignment_geometry_fit_m is None
+                else float(self.topology_arc_assignment_geometry_fit_m)
+            ),
+            "topology_arc_assignment_score_gap_m": (
+                None
+                if self.topology_arc_assignment_score_gap_m is None
+                else float(self.topology_arc_assignment_score_gap_m)
+            ),
             "production_multi_arc_allowed": bool(self.production_multi_arc_allowed),
             "multi_arc_evidence_mode": str(self.multi_arc_evidence_mode),
             "multi_arc_structure_type": str(self.multi_arc_structure_type),
@@ -268,6 +300,30 @@ class Segment:
             ),
             src_alias_applied=bool(payload.get("src_alias_applied", False)),
             dst_alias_applied=bool(payload.get("dst_alias_applied", False)),
+            same_pair_multi_arc_candidate=bool(payload.get("same_pair_multi_arc_candidate", False)),
+            same_pair_provisional_allowed=bool(payload.get("same_pair_provisional_allowed", False)),
+            same_pair_distinct_path_signal=tuple(str(v) for v in payload.get("same_pair_distinct_path_signal", [])),
+            topology_arc_assignment_mode=str(payload.get("topology_arc_assignment_mode", "")),
+            topology_arc_assignment_line_distance_m=(
+                None
+                if payload.get("topology_arc_assignment_line_distance_m") is None
+                else float(payload.get("topology_arc_assignment_line_distance_m"))
+            ),
+            topology_arc_assignment_anchor_fit_m=(
+                None
+                if payload.get("topology_arc_assignment_anchor_fit_m") is None
+                else float(payload.get("topology_arc_assignment_anchor_fit_m"))
+            ),
+            topology_arc_assignment_geometry_fit_m=(
+                None
+                if payload.get("topology_arc_assignment_geometry_fit_m") is None
+                else float(payload.get("topology_arc_assignment_geometry_fit_m"))
+            ),
+            topology_arc_assignment_score_gap_m=(
+                None
+                if payload.get("topology_arc_assignment_score_gap_m") is None
+                else float(payload.get("topology_arc_assignment_score_gap_m"))
+            ),
             production_multi_arc_allowed=bool(payload.get("production_multi_arc_allowed", False)),
             multi_arc_evidence_mode=str(payload.get("multi_arc_evidence_mode", "")),
             multi_arc_structure_type=str(payload.get("multi_arc_structure_type", "")),

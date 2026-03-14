@@ -304,22 +304,74 @@ def _coords_list(line: LineString | None) -> list[list[float]]:
     return [[float(x), float(y)] for x, y, *_ in line.coords]
 
 
+def _line_surface_metrics(
+    line: LineString | None,
+    *,
+    drivezone: Any | None,
+    drivable_surface: Any | None,
+    divstrip_buffer: Any | None,
+) -> dict[str, Any]:
+    if line is None or line.is_empty or line.length <= 1e-6:
+        return {
+            "on_drivable_surface_ratio": 0.0,
+            "drivezone_overlap_ratio": 0.0,
+            "divstrip_overlap_ratio": 0.0,
+        }
+    return {
+        "on_drivable_surface_ratio": float(_line_overlap_ratio(line, drivable_surface)),
+        "drivezone_overlap_ratio": float(_line_overlap_ratio(line, drivezone)),
+        "divstrip_overlap_ratio": float(_line_overlap_ratio(line, divstrip_buffer)),
+    }
+
+
+def _support_surface_consistency(
+    metrics: dict[str, Any],
+    *,
+    params: dict[str, Any],
+) -> tuple[bool, str]:
+    on_drivable_surface_ratio = float(metrics.get("on_drivable_surface_ratio", 0.0) or 0.0)
+    drivezone_overlap_ratio = float(metrics.get("drivezone_overlap_ratio", 0.0) or 0.0)
+    divstrip_overlap_ratio = float(metrics.get("divstrip_overlap_ratio", 0.0) or 0.0)
+    if on_drivable_surface_ratio < float(params.get("ARC_SUPPORT_MIN_DRIVABLE_RATIO", 0.70)):
+        return False, "low_on_drivable_surface_ratio"
+    if drivezone_overlap_ratio < float(params.get("ARC_SUPPORT_MIN_DRIVEZONE_RATIO", 0.85)):
+        return False, "low_drivezone_overlap_ratio"
+    if divstrip_overlap_ratio > float(params.get("ARC_SUPPORT_MAX_DIVSTRIP_RATIO", 0.05)):
+        return False, "high_divstrip_overlap_ratio"
+    return True, ""
+
+
 def _support_segment_payload(
     *,
     traj_id: str,
+    topology_arc_id: str,
     support_type: str,
+    support_mode: str,
     line: LineString | None,
     segment_order: int,
     is_stitched: bool,
     support_score: float,
     source_span_start_idx: int,
     source_span_end_idx: int,
+    drivezone: Any | None,
+    drivable_surface: Any | None,
+    divstrip_buffer: Any | None,
+    params: dict[str, Any],
 ) -> dict[str, Any] | None:
     if line is None or line.is_empty or line.length <= 1e-6:
         return None
+    surface_metrics = _line_surface_metrics(
+        line,
+        drivezone=drivezone,
+        drivable_surface=drivable_surface,
+        divstrip_buffer=divstrip_buffer,
+    )
+    surface_consistent, surface_reject_reason = _support_surface_consistency(surface_metrics, params=params)
     return {
         "traj_id": str(traj_id),
+        "topology_arc_id": str(topology_arc_id),
         "support_type": str(support_type),
+        "support_mode": str(support_mode),
         "segment_order": int(segment_order),
         "is_stitched": bool(is_stitched),
         "support_score": float(support_score),
@@ -329,6 +381,12 @@ def _support_segment_payload(
         "line_coords": _coords_list(line),
         "start_anchor_coords": [float(line.coords[0][0]), float(line.coords[0][1])],
         "end_anchor_coords": [float(line.coords[-1][0]), float(line.coords[-1][1])],
+        "on_drivable_surface_ratio": float(surface_metrics["on_drivable_surface_ratio"]),
+        "drivezone_overlap_ratio": float(surface_metrics["drivezone_overlap_ratio"]),
+        "divstrip_overlap_ratio": float(surface_metrics["divstrip_overlap_ratio"]),
+        "surface_consistent": bool(surface_consistent),
+        "surface_reject_reason": str(surface_reject_reason),
+        "accepted_for_production": False,
     }
 
 
@@ -365,6 +423,44 @@ def _best_support_reference_coords(segments: list[dict[str, Any]]) -> list[list[
         ),
     )
     return list(best[0].get("line_coords", [])) if best else []
+
+
+def _merge_support_spans(
+    span_rows: list[dict[str, Any]],
+    *,
+    max_proj_gap_m: float,
+) -> list[list[float]]:
+    ordered = sorted(
+        [dict(item) for item in span_rows],
+        key=lambda item: (float(item.get("start_s", 0.0)), float(item.get("end_s", 0.0))),
+    )
+    merged: list[list[float]] = []
+    for span in ordered:
+        start_s = float(span.get("start_s", 0.0))
+        end_s = float(span.get("end_s", 0.0))
+        if not merged or start_s > float(merged[-1][1]) + float(max_proj_gap_m):
+            merged.append([start_s, end_s])
+            continue
+        merged[-1][1] = max(float(merged[-1][1]), end_s)
+    return merged
+
+
+def _coverage_ratio_from_spans(
+    span_rows: list[dict[str, Any]],
+    *,
+    arc_length_m: float,
+    max_proj_gap_m: float,
+) -> float:
+    if not span_rows or arc_length_m <= 1e-6:
+        return 0.0
+    merged = _merge_support_spans(span_rows, max_proj_gap_m=max_proj_gap_m)
+    covered_length = float(sum(max(0.0, item[1] - item[0]) for item in merged))
+    return float(covered_length / max(float(arc_length_m), 1e-6))
+
+
+def _mark_support_segments_selected(segments: list[dict[str, Any]]) -> None:
+    for item in segments:
+        item["accepted_for_production"] = True
 
 
 def _build_trajectory_attach_cache(
@@ -495,6 +591,9 @@ def _support_type_for_arc(
     prior_roads: list[Any],
     prior_index: dict[tuple[int, int], list[Any]] | None,
     candidate_traj_rows: list[dict[str, Any]],
+    drivezone: Any | None,
+    drivable_surface: Any | None,
+    divstrip_buffer: Any | None,
     params: dict[str, Any],
 ) -> dict[str, Any]:
     buffer_m = float(params.get("ARC_EVIDENCE_BUFFER_M", 8.0))
@@ -522,14 +621,20 @@ def _support_type_for_arc(
             "support_reference_coords": [],
             "support_anchor_src_coords": None,
             "support_anchor_dst_coords": None,
+            "support_generation_mode": "none",
+            "support_generation_reason": "arc_line_missing",
+            "selected_support_traj_id": "",
+            "single_traj_support_segments": [],
+            "stitched_traj_support_segments": [],
+            "single_traj_candidate_count": int(len(candidate_traj_rows)),
+            "single_traj_surface_consistent_count": 0,
             "prior_support_type": prior_support_type,
             "prior_support_available": bool(prior_available),
         }
 
-    terminal_traj_ids: list[str] = []
-    span_rows: list[dict[str, Any]] = []
-    span_traj_ids: list[str] = []
-    support_segments: list[dict[str, Any]] = []
+    single_traj_support_segments: list[dict[str, Any]] = []
+    single_traj_evals: list[dict[str, Any]] = []
+    all_partial_span_rows: list[dict[str, Any]] = []
     for traj_row in candidate_traj_rows:
         support = _scan_arc_traj_support(
             arc_line=arc_line,
@@ -544,8 +649,11 @@ def _support_type_for_arc(
             max_proj_gap_m=max_proj_gap_m,
         )
         traj_id = str(support["traj_id"])
+        traj_all_segments: list[dict[str, Any]] = []
+        traj_accepted_span_rows: list[dict[str, Any]] = []
+        traj_production_segments: list[dict[str, Any]] = []
+        terminal_payload: dict[str, Any] | None = None
         if bool(support["terminal_supported"]):
-            terminal_traj_ids.append(traj_id)
             terminal_event_pair = _ordered_terminal_event_pair(tuple(traj_row.get("events", tuple())), int(row["src"]), int(row["dst"]))
             if terminal_event_pair is not None:
                 start_event, end_event = terminal_event_pair
@@ -556,22 +664,26 @@ def _support_type_for_arc(
                 )
                 terminal_payload = _support_segment_payload(
                     traj_id=traj_id,
+                    topology_arc_id=str(row.get("topology_arc_id", "")),
                     support_type="terminal_crossing_support",
+                    support_mode="single",
                     line=terminal_line,
-                    segment_order=int(len(support_segments)),
+                    segment_order=int(len(traj_all_segments)),
                     is_stitched=False,
                     support_score=1.0,
                     source_span_start_idx=int(start_event.get("index", 0)),
                     source_span_end_idx=int(end_event.get("index", 0)),
+                    drivezone=drivezone,
+                    drivable_surface=drivable_surface,
+                    divstrip_buffer=divstrip_buffer,
+                    params=params,
                 )
                 if terminal_payload is not None:
-                    support_segments.append(terminal_payload)
+                    traj_all_segments.append(terminal_payload)
         spans = list(support["spans"])
-        if not spans:
-            continue
-        span_traj_ids.append(traj_id)
         for span_order, span in enumerate(spans):
-            span_rows.append({**dict(span), "traj_id": traj_id})
+            span_row = {**dict(span), "traj_id": traj_id}
+            all_partial_span_rows.append(span_row)
             span_line = _subline_from_coords(
                 tuple(traj_row.get("coords", tuple())),
                 int(span.get("source_span_start_idx", 0)),
@@ -579,79 +691,207 @@ def _support_type_for_arc(
             )
             span_payload = _support_segment_payload(
                 traj_id=traj_id,
+                topology_arc_id=str(row.get("topology_arc_id", "")),
                 support_type="partial_arc_support",
+                support_mode="single",
                 line=span_line,
                 segment_order=int(span_order),
                 is_stitched=False,
                 support_score=float(span.get("coverage_ratio", 0.0)),
                 source_span_start_idx=int(span.get("source_span_start_idx", 0)),
                 source_span_end_idx=int(span.get("source_span_end_idx", 0)),
+                drivezone=drivezone,
+                drivable_surface=drivable_surface,
+                divstrip_buffer=divstrip_buffer,
+                params=params,
             )
             if span_payload is not None:
-                support_segments.append(span_payload)
-    traj_ids = sorted(set([*terminal_traj_ids, *span_traj_ids]))
-    support_anchor_src_coords, support_anchor_dst_coords = _support_anchors_from_segments(support_segments)
-    support_reference_coords = _best_support_reference_coords(support_segments)
-    if terminal_traj_ids:
-        coverage_ratio = 1.0 if arc_line.length > 1e-6 else 0.0
-        return {
-            "traj_support_type": "terminal_crossing_support",
-            "traj_support_ids": traj_ids,
-            "traj_support_span_count": int(max(1, len(span_rows))),
-            "traj_support_coverage_ratio": float(coverage_ratio),
-            "traj_support_spans": span_rows,
-            "traj_support_segments": support_segments,
-            "support_reference_coords": support_reference_coords,
-            "support_anchor_src_coords": support_anchor_src_coords,
-            "support_anchor_dst_coords": support_anchor_dst_coords,
-            "prior_support_type": prior_support_type,
-            "prior_support_available": bool(prior_available),
+                traj_all_segments.append(span_payload)
+                if bool(span_payload.get("surface_consistent", False)):
+                    traj_accepted_span_rows.append(span_row)
+        single_traj_support_segments.extend(traj_all_segments)
+        surface_consistent_segments = [
+            item for item in traj_all_segments if bool(item.get("surface_consistent", False))
+        ]
+        if terminal_payload is not None and bool(terminal_payload.get("surface_consistent", False)):
+            traj_production_type = "terminal_crossing_support"
+            traj_production_segments = [terminal_payload]
+            coverage_ratio = 1.0 if arc_line.length > 1e-6 else 0.0
+            traj_support_spans = [dict(item) for item in traj_accepted_span_rows]
+        elif traj_accepted_span_rows:
+            traj_production_type = "partial_arc_support"
+            traj_production_segments = [
+                item
+                for item in traj_all_segments
+                if str(item.get("support_type", "")) == "partial_arc_support"
+                and bool(item.get("surface_consistent", False))
+            ]
+            coverage_ratio = _coverage_ratio_from_spans(
+                traj_accepted_span_rows,
+                arc_length_m=float(arc_line.length),
+                max_proj_gap_m=float(max_proj_gap_m),
+            )
+            traj_support_spans = [dict(item) for item in traj_accepted_span_rows]
+        else:
+            traj_production_type = "no_support"
+            coverage_ratio = 0.0
+            traj_support_spans = []
+        support_anchor_src_coords, support_anchor_dst_coords = _support_anchors_from_segments(traj_production_segments)
+        support_reference_coords = _best_support_reference_coords(traj_production_segments)
+        best_line_distance_m = min(
+            (
+                float(
+                    coords_to_line(
+                        tuple(
+                            (float(coord[0]), float(coord[1]))
+                            for coord in item.get("line_coords", [])
+                            if isinstance(coord, (list, tuple)) and len(coord) >= 2
+                        )
+                    ).hausdorff_distance(arc_line)
+                )
+                for item in traj_production_segments
+                if len(item.get("line_coords", [])) >= 2
+            ),
+            default=float("inf"),
+        )
+        single_traj_evals.append(
+            {
+                "traj_id": str(traj_id),
+                "traj_support_type": str(traj_production_type),
+                "traj_support_ids": [] if str(traj_production_type) == "no_support" else [str(traj_id)],
+                "traj_support_span_count": int(
+                    0
+                    if str(traj_production_type) == "no_support"
+                    else max(1, len(traj_production_segments))
+                ),
+                "traj_support_coverage_ratio": float(coverage_ratio),
+                "traj_support_spans": traj_support_spans,
+                "traj_support_segments": traj_production_segments,
+                "support_reference_coords": support_reference_coords,
+                "support_anchor_src_coords": support_anchor_src_coords,
+                "support_anchor_dst_coords": support_anchor_dst_coords,
+                "all_segments": traj_all_segments,
+                "surface_consistent_segment_count": int(len(surface_consistent_segments)),
+                "best_line_distance_m": float(best_line_distance_m),
+            }
+        )
+
+    stitched_traj_support_segments = [
+        {
+            **dict(item),
+            "support_type": "stitched_arc_support",
+            "support_mode": "stitched",
+            "is_stitched": True,
+            "accepted_for_production": False,
         }
-    if not span_rows:
+        for item in single_traj_support_segments
+        if str(item.get("support_type", "")) == "partial_arc_support"
+    ]
+    qualified_single_evals = [
+        dict(item)
+        for item in single_traj_evals
+        if str(item.get("traj_support_type", "")) != "no_support"
+        and int(item.get("surface_consistent_segment_count", 0)) >= 1
+    ]
+    if qualified_single_evals:
+        best_single = sorted(
+            qualified_single_evals,
+            key=lambda item: (
+                0 if str(item.get("traj_support_type", "")) == "terminal_crossing_support" else 1,
+                float(item.get("best_line_distance_m", float("inf"))),
+                -float(item.get("traj_support_coverage_ratio", 0.0) or 0.0),
+                -int(item.get("surface_consistent_segment_count", 0)),
+                str(item.get("traj_id", "")),
+            ),
+        )[0]
+        _mark_support_segments_selected(list(best_single.get("traj_support_segments", [])))
         return {
-            "traj_support_type": "no_support",
-            "traj_support_ids": [],
-            "traj_support_span_count": 0,
-            "traj_support_coverage_ratio": 0.0,
-            "traj_support_spans": [],
-            "traj_support_segments": [],
-            "support_reference_coords": [],
-            "support_anchor_src_coords": None,
-            "support_anchor_dst_coords": None,
+            "traj_support_type": str(best_single.get("traj_support_type", "no_support")),
+            "traj_support_ids": [str(v) for v in best_single.get("traj_support_ids", [])],
+            "traj_support_span_count": int(best_single.get("traj_support_span_count", 0)),
+            "traj_support_coverage_ratio": float(best_single.get("traj_support_coverage_ratio", 0.0) or 0.0),
+            "traj_support_spans": list(best_single.get("traj_support_spans", [])),
+            "traj_support_segments": list(best_single.get("traj_support_segments", [])),
+            "support_reference_coords": list(best_single.get("support_reference_coords", [])),
+            "support_anchor_src_coords": best_single.get("support_anchor_src_coords"),
+            "support_anchor_dst_coords": best_single.get("support_anchor_dst_coords"),
+            "support_generation_mode": "single",
+            "support_generation_reason": "single_traj_surface_consistent_preferred",
+            "selected_support_traj_id": str(best_single.get("traj_id", "")),
+            "single_traj_support_segments": single_traj_support_segments,
+            "stitched_traj_support_segments": stitched_traj_support_segments,
+            "single_traj_candidate_count": int(len(candidate_traj_rows)),
+            "single_traj_surface_consistent_count": int(len(qualified_single_evals)),
             "prior_support_type": prior_support_type,
             "prior_support_available": bool(prior_available),
         }
 
-    span_rows = sorted(span_rows, key=lambda item: (float(item["start_s"]), float(item["end_s"])))
-    merged: list[list[float]] = []
-    for span in span_rows:
-        start_s = float(span["start_s"])
-        end_s = float(span["end_s"])
-        if not merged or start_s > float(merged[-1][1]) + float(max_proj_gap_m):
-            merged.append([start_s, end_s])
-            continue
-        merged[-1][1] = max(float(merged[-1][1]), end_s)
-    covered_length = float(sum(max(0.0, item[1] - item[0]) for item in merged))
-    coverage_ratio = float(covered_length / max(float(arc_line.length), 1e-6))
+    stitched_coverage_ratio = _coverage_ratio_from_spans(
+        all_partial_span_rows,
+        arc_length_m=float(arc_line.length),
+        max_proj_gap_m=float(max_proj_gap_m),
+    )
+    merged = _merge_support_spans(all_partial_span_rows, max_proj_gap_m=float(max_proj_gap_m))
     endpoint_margin = float(arc_line.length) * float(endpoint_margin_ratio)
     covers_start = bool(merged and float(merged[0][0]) <= endpoint_margin)
     covers_end = bool(merged and float(merged[-1][1]) >= float(arc_line.length) - endpoint_margin)
-    stitched = bool(len(span_rows) >= 2 and covers_start and covers_end and coverage_ratio >= stitched_min_ratio)
-    if stitched:
-        for item in support_segments:
-            if str(item.get("support_type", "")) == "partial_arc_support":
-                item["support_type"] = "stitched_arc_support"
-                item["is_stitched"] = True
+    stitched_ready = bool(
+        len(stitched_traj_support_segments) >= 2
+        and covers_start
+        and covers_end
+        and stitched_coverage_ratio >= stitched_min_ratio
+    )
+    stitched_surface_consistent = bool(
+        stitched_ready
+        and stitched_traj_support_segments
+        and all(bool(item.get("surface_consistent", False)) for item in stitched_traj_support_segments)
+    )
+    if stitched_surface_consistent:
+        _mark_support_segments_selected(stitched_traj_support_segments)
+        support_anchor_src_coords, support_anchor_dst_coords = _support_anchors_from_segments(stitched_traj_support_segments)
+        support_reference_coords = _best_support_reference_coords(stitched_traj_support_segments)
+        return {
+            "traj_support_type": "stitched_arc_support",
+            "traj_support_ids": sorted({str(item.get("traj_id", "")) for item in stitched_traj_support_segments if str(item.get("traj_id", ""))}),
+            "traj_support_span_count": int(len(stitched_traj_support_segments)),
+            "traj_support_coverage_ratio": float(stitched_coverage_ratio),
+            "traj_support_spans": [dict(item) for item in all_partial_span_rows],
+            "traj_support_segments": stitched_traj_support_segments,
+            "support_reference_coords": support_reference_coords,
+            "support_anchor_src_coords": support_anchor_src_coords,
+            "support_anchor_dst_coords": support_anchor_dst_coords,
+            "support_generation_mode": "stitched",
+            "support_generation_reason": "zero_surface_consistent_single_traj_support",
+            "selected_support_traj_id": "",
+            "single_traj_support_segments": single_traj_support_segments,
+            "stitched_traj_support_segments": stitched_traj_support_segments,
+            "single_traj_candidate_count": int(len(candidate_traj_rows)),
+            "single_traj_surface_consistent_count": 0,
+            "prior_support_type": prior_support_type,
+            "prior_support_available": bool(prior_available),
+        }
+
     return {
-        "traj_support_type": "stitched_arc_support" if stitched else "partial_arc_support",
-        "traj_support_ids": traj_ids,
-        "traj_support_span_count": int(len(span_rows)),
-        "traj_support_coverage_ratio": float(coverage_ratio),
-        "traj_support_spans": span_rows,
-        "traj_support_segments": support_segments,
-        "support_reference_coords": support_reference_coords,
-        "support_anchor_src_coords": support_anchor_src_coords,
-        "support_anchor_dst_coords": support_anchor_dst_coords,
+        "traj_support_type": "no_support",
+        "traj_support_ids": [],
+        "traj_support_span_count": 0,
+        "traj_support_coverage_ratio": 0.0,
+        "traj_support_spans": [],
+        "traj_support_segments": [],
+        "support_reference_coords": [],
+        "support_anchor_src_coords": None,
+        "support_anchor_dst_coords": None,
+        "support_generation_mode": "none",
+        "support_generation_reason": (
+            "stitched_support_surface_inconsistent"
+            if stitched_ready and stitched_traj_support_segments
+            else "no_surface_consistent_single_or_stitched_support"
+        ),
+        "selected_support_traj_id": "",
+        "single_traj_support_segments": single_traj_support_segments,
+        "stitched_traj_support_segments": stitched_traj_support_segments,
+        "single_traj_candidate_count": int(len(candidate_traj_rows)),
+        "single_traj_surface_consistent_count": 0,
         "prior_support_type": prior_support_type,
         "prior_support_available": bool(prior_available),
     }
@@ -736,6 +976,14 @@ def _materialize_working_segment(
             canonical_dst_xsec_id=getattr(selected_segment, "canonical_dst_xsec_id", selected_segment.dst_nodeid),
             src_alias_applied=bool(getattr(selected_segment, "src_alias_applied", False)),
             dst_alias_applied=bool(getattr(selected_segment, "dst_alias_applied", False)),
+            same_pair_multi_arc_candidate=bool(getattr(selected_segment, "same_pair_multi_arc_candidate", False)),
+            same_pair_provisional_allowed=bool(getattr(selected_segment, "same_pair_provisional_allowed", False)),
+            same_pair_distinct_path_signal=tuple(getattr(selected_segment, "same_pair_distinct_path_signal", ())),
+            topology_arc_assignment_mode=str(getattr(selected_segment, "topology_arc_assignment_mode", "")),
+            topology_arc_assignment_line_distance_m=getattr(selected_segment, "topology_arc_assignment_line_distance_m", None),
+            topology_arc_assignment_anchor_fit_m=getattr(selected_segment, "topology_arc_assignment_anchor_fit_m", None),
+            topology_arc_assignment_geometry_fit_m=getattr(selected_segment, "topology_arc_assignment_geometry_fit_m", None),
+            topology_arc_assignment_score_gap_m=getattr(selected_segment, "topology_arc_assignment_score_gap_m", None),
             production_multi_arc_allowed=bool(
                 row.get(
                     "production_multi_arc_allowed",
@@ -822,6 +1070,14 @@ def _materialize_working_segment(
         canonical_dst_xsec_id=row.get("canonical_dst_xsec_id", row["dst"]),
         src_alias_applied=bool(row.get("src_alias_applied", False)),
         dst_alias_applied=bool(row.get("dst_alias_applied", False)),
+        same_pair_multi_arc_candidate=bool(row.get("same_pair_multi_arc_candidate", False)),
+        same_pair_provisional_allowed=bool(row.get("same_pair_provisional_allowed", False)),
+        same_pair_distinct_path_signal=tuple(str(v) for v in row.get("same_pair_distinct_path_signal", [])),
+        topology_arc_assignment_mode=str(row.get("topology_arc_assignment_mode", "")),
+        topology_arc_assignment_line_distance_m=row.get("topology_arc_assignment_line_distance_m"),
+        topology_arc_assignment_anchor_fit_m=row.get("topology_arc_assignment_anchor_fit_m"),
+        topology_arc_assignment_geometry_fit_m=row.get("topology_arc_assignment_geometry_fit_m"),
+        topology_arc_assignment_score_gap_m=row.get("topology_arc_assignment_score_gap_m"),
         production_multi_arc_allowed=bool(row.get("production_multi_arc_allowed", False)),
         multi_arc_evidence_mode=str(row.get("multi_arc_evidence_mode", "")),
         multi_arc_structure_type=str(row.get("multi_arc_structure_type", "")),
@@ -851,6 +1107,30 @@ def build_arc_evidence_attach(
         params=params,
         divstrip_buffer=divstrip_buffer,
     )
+    preprocessed_traj_rows: list[dict[str, Any]] = []
+    for traj_row in traj_rows:
+        traj_line = traj_row.get("line")
+        surface_metrics = _line_surface_metrics(
+            traj_line,
+            drivezone=inputs.drivezone_zone_metric,
+            drivable_surface=patch_geometry_cache.get("drivable_surface"),
+            divstrip_buffer=divstrip_buffer,
+        )
+        surface_consistent, surface_reject_reason = _support_surface_consistency(surface_metrics, params=params)
+        preprocessed_traj_rows.append(
+            {
+                "traj_id": str(traj_row.get("traj_id", "")),
+                "line_coords": _coords_list(traj_line),
+                "support_mode": "preprocessed",
+                "topology_arc_id": "",
+                "on_drivable_surface_ratio": float(surface_metrics["on_drivable_surface_ratio"]),
+                "drivezone_overlap_ratio": float(surface_metrics["drivezone_overlap_ratio"]),
+                "divstrip_overlap_ratio": float(surface_metrics["divstrip_overlap_ratio"]),
+                "surface_consistent": bool(surface_consistent),
+                "surface_reject_reason": str(surface_reject_reason),
+                "accepted_for_production": bool(surface_consistent),
+            }
+        )
     runtime_totals = {
         **dict(traj_runtime),
         "trajectory_prefilter_time_ms": 0.0,
@@ -890,6 +1170,9 @@ def build_arc_evidence_attach(
             prior_roads=prior_roads,
             prior_index=prior_index,
             candidate_traj_rows=candidate_traj_rows,
+            drivezone=inputs.drivezone_zone_metric,
+            drivable_surface=patch_geometry_cache.get("drivable_surface"),
+            divstrip_buffer=divstrip_buffer,
             params=params,
         )
         runtime_totals["support_attach_core_loop_time_ms"] += float((perf_counter() - core_started) * 1000.0)
@@ -903,9 +1186,16 @@ def build_arc_evidence_attach(
                 "traj_support_coverage_ratio": float(support["traj_support_coverage_ratio"]),
                 "traj_support_spans": list(support["traj_support_spans"]),
                 "traj_support_segments": list(support.get("traj_support_segments", [])),
+                "single_traj_support_segments": list(support.get("single_traj_support_segments", [])),
+                "stitched_traj_support_segments": list(support.get("stitched_traj_support_segments", [])),
                 "support_reference_coords": list(support.get("support_reference_coords", [])),
                 "support_anchor_src_coords": support.get("support_anchor_src_coords"),
                 "support_anchor_dst_coords": support.get("support_anchor_dst_coords"),
+                "support_generation_mode": str(support.get("support_generation_mode", "")),
+                "support_generation_reason": str(support.get("support_generation_reason", "")),
+                "selected_support_traj_id": str(support.get("selected_support_traj_id", "")),
+                "single_traj_candidate_count": int(support.get("single_traj_candidate_count", 0)),
+                "single_traj_surface_consistent_count": int(support.get("single_traj_surface_consistent_count", 0)),
                 "prior_support_type": str(support["prior_support_type"]),
                 "prior_support_available": bool(support["prior_support_available"]),
                 "arc_path_drivezone_ratio": float(
@@ -1061,6 +1351,11 @@ def build_arc_evidence_attach(
                 "traj_support_span_count": int(current["traj_support_span_count"]),
                 "traj_support_coverage_ratio": float(current["traj_support_coverage_ratio"]),
                 "traj_support_segment_count": int(len(current.get("traj_support_segments", []))),
+                "support_generation_mode": str(current.get("support_generation_mode", "")),
+                "support_generation_reason": str(current.get("support_generation_reason", "")),
+                "selected_support_traj_id": str(current.get("selected_support_traj_id", "")),
+                "single_traj_candidate_count": int(current.get("single_traj_candidate_count", 0)),
+                "single_traj_surface_consistent_count": int(current.get("single_traj_surface_consistent_count", 0)),
                 "prior_support_type": str(current["prior_support_type"]),
                 "topology_gap_decision": str(current.get("topology_gap_decision", "")),
                 "topology_gap_reason": str(current.get("topology_gap_reason", "")),
@@ -1092,6 +1387,7 @@ def build_arc_evidence_attach(
             "working_segment_count": int(len(working_segments)),
         },
         "audit_rows": support_debug_rows,
+        "preprocessed_traj_rows": preprocessed_traj_rows,
         "runtime": {
             **runtime_totals,
             "prefilter_avg_candidate_traj_count": float(float(prefilter_stats["candidate_traj_total"]) / max(1, int(prefilter_stats["arc_count"]))),
@@ -1113,6 +1409,49 @@ def _segment_feature(segment: Segment, row: dict[str, Any]) -> tuple[LineString,
             "prior_support_type": str(row.get("prior_support_type", "")),
             "traj_support_coverage_ratio": float(row.get("traj_support_coverage_ratio", 0.0)),
             "working_segment_source": str(row.get("working_segment_source", "")),
+        },
+    )
+
+
+def _support_segment_feature(
+    *,
+    patch_id: str,
+    row: dict[str, Any],
+    item: dict[str, Any],
+) -> tuple[LineString, dict[str, Any]] | None:
+    coords = tuple(
+        (float(coord[0]), float(coord[1]))
+        for coord in item.get("line_coords", [])
+        if isinstance(coord, (list, tuple)) and len(coord) >= 2
+    )
+    if len(coords) < 2:
+        return None
+    line = coords_to_line(coords)
+    if line.is_empty or line.length <= 1e-6:
+        return None
+    return (
+        line,
+        {
+            "patch_id": str(patch_id),
+            "pair": str(row.get("pair", "")),
+            "src": int(row.get("src", 0)),
+            "dst": int(row.get("dst", 0)),
+            "topology_arc_id": str(row.get("topology_arc_id", item.get("topology_arc_id", ""))),
+            "traj_id": str(item.get("traj_id", "")),
+            "support_type": str(item.get("support_type", "")),
+            "support_mode": str(item.get("support_mode", "")),
+            "segment_order": int(item.get("segment_order", 0)),
+            "is_stitched": bool(item.get("is_stitched", False)),
+            "support_score": float(item.get("support_score", 0.0)),
+            "support_length_m": float(item.get("support_length_m", 0.0)),
+            "source_span_start_idx": int(item.get("source_span_start_idx", 0)),
+            "source_span_end_idx": int(item.get("source_span_end_idx", 0)),
+            "on_drivable_surface_ratio": float(item.get("on_drivable_surface_ratio", 0.0) or 0.0),
+            "drivezone_overlap_ratio": float(item.get("drivezone_overlap_ratio", 0.0) or 0.0),
+            "divstrip_overlap_ratio": float(item.get("divstrip_overlap_ratio", 0.0) or 0.0),
+            "surface_consistent": bool(item.get("surface_consistent", False)),
+            "surface_reject_reason": str(item.get("surface_reject_reason", "")),
+            "accepted_for_production": bool(item.get("accepted_for_production", False)),
         },
     )
 
@@ -1167,6 +1506,7 @@ def run_witness_stage(
         "runtime": runtime,
     }
     dbg_dir = pipeline.debug_dir(out_root, run_id, patch_id)
+    step_dir = pipeline.stage_dir(out_root, run_id, patch_id, "step3_witness")
     write_json(pipeline._artifact_path(out_root, run_id, patch_id, "step3_witness"), artifact)
     write_json(dbg_dir / "arc_evidence_attach.json", {"arcs": evidence["audit_rows"], "summary": evidence["summary"], "runtime": runtime})
     write_json(
@@ -1206,7 +1546,7 @@ def run_witness_stage(
         [_segment_feature(segment, row_by_segment_id.get(str(segment.segment_id), {})) for segment in evidence["working_segments"]],
     )
     write_features_geojson(
-        dbg_dir / "arc_traj_support_segments.geojson",
+        step_dir / "preprocessed_traj_lines.geojson",
         [
             (
                 coords_to_line(
@@ -1218,24 +1558,86 @@ def run_witness_stage(
                 ),
                 {
                     "patch_id": str(patch_id),
-                    "src": int(row.get("src", 0)),
-                    "dst": int(row.get("dst", 0)),
-                    "topology_arc_id": str(row.get("topology_arc_id", "")),
                     "traj_id": str(item.get("traj_id", "")),
-                    "support_type": str(item.get("support_type", "")),
-                    "segment_order": int(item.get("segment_order", 0)),
-                    "is_stitched": bool(item.get("is_stitched", False)),
-                    "support_score": float(item.get("support_score", 0.0)),
-                    "support_length_m": float(item.get("support_length_m", 0.0)),
-                    "source_span_start_idx": int(item.get("source_span_start_idx", 0)),
-                    "source_span_end_idx": int(item.get("source_span_end_idx", 0)),
+                    "topology_arc_id": str(item.get("topology_arc_id", "")),
+                    "support_mode": str(item.get("support_mode", "preprocessed")),
+                    "on_drivable_surface_ratio": float(item.get("on_drivable_surface_ratio", 0.0) or 0.0),
+                    "drivezone_overlap_ratio": float(item.get("drivezone_overlap_ratio", 0.0) or 0.0),
+                    "divstrip_overlap_ratio": float(item.get("divstrip_overlap_ratio", 0.0) or 0.0),
+                    "surface_consistent": bool(item.get("surface_consistent", False)),
+                    "surface_reject_reason": str(item.get("surface_reject_reason", "")),
+                    "accepted_for_production": bool(item.get("accepted_for_production", False)),
                 },
             )
-            for row in evidence["rows"]
-            for item in row.get("traj_support_segments", [])
+            for item in evidence.get("preprocessed_traj_rows", [])
             if len(item.get("line_coords", [])) >= 2
         ],
     )
+    single_support_features = [
+        feature
+        for feature in (
+            _support_segment_feature(patch_id=str(patch_id), row=row, item=item)
+            for row in evidence["rows"]
+            for item in row.get("single_traj_support_segments", [])
+        )
+        if feature is not None
+    ]
+    stitched_support_features = [
+        feature
+        for feature in (
+            _support_segment_feature(patch_id=str(patch_id), row=row, item=item)
+            for row in evidence["rows"]
+            for item in row.get("stitched_traj_support_segments", [])
+        )
+        if feature is not None
+    ]
+    production_support_features = [
+        feature
+        for feature in (
+            _support_segment_feature(patch_id=str(patch_id), row=row, item=item)
+            for row in evidence["rows"]
+            for item in row.get("traj_support_segments", [])
+        )
+        if feature is not None
+    ]
+    write_features_geojson(step_dir / "arc_single_traj_support_segments.geojson", single_support_features)
+    write_features_geojson(step_dir / "arc_stitched_support_segments.geojson", stitched_support_features)
+    write_features_geojson(
+        dbg_dir / "arc_traj_support_segments.geojson",
+        production_support_features,
+    )
+    target_support_review = next(
+        (dict(row) for row in evidence["rows"] if str(row.get("pair", "")) == "55353246:37687913"),
+        None,
+    )
+    if target_support_review is not None:
+        write_json(
+            step_dir / "support_generation_review_55353246_37687913.json",
+            {
+                "pair": "55353246:37687913",
+                "topology_arc_id": str(target_support_review.get("topology_arc_id", "")),
+                "entered_main_flow": bool(target_support_review.get("entered_main_flow", False)),
+                "support_generation_mode": str(target_support_review.get("support_generation_mode", "")),
+                "support_generation_reason": str(target_support_review.get("support_generation_reason", "")),
+                "traj_support_type": str(target_support_review.get("traj_support_type", "")),
+                "traj_support_ids": [str(v) for v in target_support_review.get("traj_support_ids", [])],
+                "selected_support_traj_id": str(target_support_review.get("selected_support_traj_id", "")),
+                "traj_support_coverage_ratio": float(target_support_review.get("traj_support_coverage_ratio", 0.0) or 0.0),
+                "single_traj_candidate_count": int(target_support_review.get("single_traj_candidate_count", 0)),
+                "single_traj_surface_consistent_count": int(
+                    target_support_review.get("single_traj_surface_consistent_count", 0)
+                ),
+                "single_traj_support_segment_count": int(len(target_support_review.get("single_traj_support_segments", []))),
+                "stitched_traj_support_segment_count": int(len(target_support_review.get("stitched_traj_support_segments", []))),
+                "arc_path_drivezone_ratio": float(target_support_review.get("arc_path_drivezone_ratio", 0.0) or 0.0),
+                "arc_path_divstrip_overlap_ratio": float(
+                    target_support_review.get("arc_path_divstrip_overlap_ratio", 0.0) or 0.0
+                ),
+                "unbuilt_stage": str(target_support_review.get("unbuilt_stage", "")),
+                "unbuilt_reason": str(target_support_review.get("unbuilt_reason", "")),
+                "production_support_segments": list(target_support_review.get("traj_support_segments", [])),
+            },
+        )
     return {
         "artifact": artifact,
         "inputs": inputs,
