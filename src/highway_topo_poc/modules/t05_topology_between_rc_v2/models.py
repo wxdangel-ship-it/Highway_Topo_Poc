@@ -133,6 +133,8 @@ class Segment:
     topology_arc_node_path: tuple[int, ...] = ()
     topology_arc_is_direct_legal: bool = False
     topology_arc_is_unique: bool = False
+    blocked_diagnostic_only: bool = False
+    hard_block_reason: str = ""
     bridge_candidate_retained: bool = False
     bridge_chain_exists: bool = False
     bridge_chain_unique: bool = False
@@ -159,6 +161,8 @@ class Segment:
             "topology_arc_node_path": [int(v) for v in self.topology_arc_node_path],
             "topology_arc_is_direct_legal": bool(self.topology_arc_is_direct_legal),
             "topology_arc_is_unique": bool(self.topology_arc_is_unique),
+            "blocked_diagnostic_only": bool(self.blocked_diagnostic_only),
+            "hard_block_reason": str(self.hard_block_reason),
             "bridge_candidate_retained": bool(self.bridge_candidate_retained),
             "bridge_chain_exists": bool(self.bridge_chain_exists),
             "bridge_chain_unique": bool(self.bridge_chain_unique),
@@ -199,6 +203,8 @@ class Segment:
             topology_arc_node_path=tuple(int(v) for v in payload.get("topology_arc_node_path", [])),
             topology_arc_is_direct_legal=bool(payload.get("topology_arc_is_direct_legal", False)),
             topology_arc_is_unique=bool(payload.get("topology_arc_is_unique", False)),
+            blocked_diagnostic_only=bool(payload.get("blocked_diagnostic_only", False)),
+            hard_block_reason=str(payload.get("hard_block_reason", "")),
             bridge_candidate_retained=bool(payload.get("bridge_candidate_retained", False)),
             bridge_chain_exists=bool(payload.get("bridge_chain_exists", False)),
             bridge_chain_unique=bool(payload.get("bridge_chain_unique", False)),

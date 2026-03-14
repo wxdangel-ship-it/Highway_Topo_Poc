@@ -3331,6 +3331,8 @@ def _stage2_segment(
     full_arc_registry = build_full_legal_arc_registry(
         topology=dict(candidate_bundle.get("topology", {})),
         selected_segments=segments,
+        segment_should_not_exist=segment_should_not_exist,
+        blocked_pair_bridge_audit=blocked_pair_bridge_audit,
     )
     step2_metrics = {
         **step2_metrics,

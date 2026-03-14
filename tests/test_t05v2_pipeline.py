@@ -11,6 +11,7 @@ import pytest
 from shapely.geometry import LineString, Polygon
 
 from highway_topo_poc.modules.t05_topology_between_rc_v2.io import PatchInputs
+from highway_topo_poc.modules.t05_topology_between_rc_v2.audit_acceptance import build_arc_legality_audit
 from highway_topo_poc.modules.t05_topology_between_rc_v2.models import (
     CorridorIdentity,
     CorridorInterval,
@@ -34,6 +35,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.review import (
     write_arc_legality_fix_review,
     write_legal_arc_coverage_review,
     write_perf_opt_arc_first_review,
+    write_semantic_fix_after_perf_review,
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.step2_arc_registry import build_full_legal_arc_registry
 from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_arc_evidence import build_arc_evidence_attach
@@ -1618,7 +1620,8 @@ def test_t05v2_build_final_road_rejects_synthetic_arc_before_geometry() -> None:
     )
 
     assert road is None
-    assert result["reason"] == "synthetic_arc_not_allowed"
+    assert result["reason"] == "final_gate_synthetic_arc_not_allowed"
+    assert result["reject_stage"] == "final_build_gate"
     assert (
         _classify_segment_outcome(
             identity=identity,
@@ -1629,6 +1632,139 @@ def test_t05v2_build_final_road_rejects_synthetic_arc_before_geometry() -> None:
         )
         == "arc_legality_rejected"
     )
+
+
+def test_t05v2_build_full_legal_arc_registry_marks_blocked_diagnostic_only() -> None:
+    topology = {
+        "pair_arcs": {
+            (791871, 37687913): [
+                {
+                    "arc_id": "arc_791871_37687913_1",
+                    "source": "direct_topology_arc",
+                    "node_path": [791871, 37687913],
+                    "edge_ids": ["edge_a"],
+                    "line_coords": [(0.0, 0.0), (10.0, 0.0)],
+                    "chain_len": 1,
+                }
+            ]
+        }
+    }
+    registry = build_full_legal_arc_registry(
+        topology=topology,
+        selected_segments=[],
+        blocked_pair_bridge_audit=[
+            {
+                "pair_id": "791871:37687913",
+                "reject_stage": "pairing_filter",
+                "reject_reason": "non_adjacent_pair_blocked",
+                "bridge_classification": "topology_gap_unresolved",
+            }
+        ],
+    )
+    row = registry["rows"][0]
+    assert bool(row["is_direct_legal"]) is True
+    assert bool(row["is_unique"]) is True
+    assert bool(row["blocked_diagnostic_only"]) is True
+    assert bool(row["entered_main_flow"]) is False
+    assert row["unbuilt_stage"] == "hard_blocked"
+    assert row["unbuilt_reason"] == "topology_gap_unresolved"
+
+
+def test_t05v2_build_final_road_rejects_blocked_diagnostic_only() -> None:
+    segment = Segment(
+        segment_id="seg_blocked",
+        src_nodeid=791871,
+        dst_nodeid=37687913,
+        direction="src->dst",
+        geometry_coords=((0.0, 0.0), (100.0, 0.0)),
+        candidate_ids=("arc::blocked",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_01",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="arc_first_terminal_support",
+        length_m=100.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_791871_37687913_1",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        blocked_diagnostic_only=True,
+    )
+    identity = CorridorIdentity(
+        segment_id="seg_blocked",
+        state="witness_based",
+        reason="terminal_crossing_support",
+        risk_flags=tuple(),
+        witness_interval_rank=0,
+        prior_supported=False,
+    )
+    slot = SlotInterval(
+        segment_id="seg_blocked",
+        endpoint_tag="src",
+        xsec_nodeid=791871,
+        xsec_coords=((0.0, -10.0), (0.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=9.0,
+            end_s=11.0,
+            center_s=10.0,
+            length_m=2.0,
+            rank=0,
+            geometry_coords=((0.0, -1.0), (0.0, 1.0)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    witness = CorridorWitness(
+        segment_id="seg_blocked",
+        status="selected",
+        reason="stable_exclusive_interval",
+        line_coords=((50.0, -2.0), (50.0, 2.0)),
+        sample_s_norm=0.5,
+        intervals=(slot.interval,),
+        selected_interval_rank=0,
+        selected_interval_start_s=9.0,
+        selected_interval_end_s=11.0,
+        exclusive_interval=True,
+        stability_score=1.0,
+        neighbor_match_count=2,
+        axis_vector=(0.0, 1.0),
+    )
+    inputs = PatchInputs(
+        patch_id="blocked_gate",
+        patch_dir=Path("blocked_gate"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, -4.0), (105.0, -4.0), (105.0, 4.0), (-5.0, 4.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+
+    road, result = _build_final_road(
+        patch_id="blocked_gate",
+        segment=segment,
+        identity=identity,
+        witness=witness,
+        src_slot=slot,
+        dst_slot=slot,
+        inputs=inputs,
+        prior_roads=[],
+        params=dict(DEFAULT_PARAMS),
+    )
+
+    assert road is None
+    assert result["reason"] == "final_gate_blocked_diagnostic_only"
+    assert result["reject_stage"] == "final_build_gate"
 
 
 def test_t05v2_corridor_identity_aggregates_within_same_legal_arc() -> None:
@@ -2284,6 +2420,136 @@ def test_t05v2_write_perf_opt_arc_first_review_outputs_runtime_bundle(tmp_path: 
     perf_review = _read_json(output_root / "complex_patch_perf_review.json")
     assert "runtime" in perf_review
     assert "runtime_breakdown" in summary
+
+
+def test_t05v2_write_semantic_fix_after_perf_review_outputs_reports(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    patch_id = "5417632623039346"
+    patch_dir = run_root / "patches" / patch_id
+    _write_json(patch_dir / "metrics.json", {
+        "patch_id": patch_id,
+        "unresolved_segment_count": 0,
+        "segments": [],
+        "full_legal_arc_registry": [
+            {
+                "pair": "791871:37687913",
+                "topology_arc_id": "arc_bad",
+                "topology_arc_source_type": "direct_topology_arc",
+                "is_direct_legal": True,
+                "is_unique": True,
+                "working_segment_id": "arcseg::arc_bad",
+                "blocked_diagnostic_only": True,
+                "blocked_diagnostic_reason": "topology_gap_unresolved",
+                "entered_main_flow": False,
+            },
+            {
+                "pair": "10:20",
+                "topology_arc_id": "arc_good",
+                "topology_arc_source_type": "direct_topology_arc",
+                "is_direct_legal": True,
+                "is_unique": True,
+                "working_segment_id": "arcseg::arc_good",
+                "entered_main_flow": True,
+            },
+        ],
+    })
+    _write_json(patch_dir / "gate.json", {"overall_pass": True, "hard_breakpoints": []})
+    _write_json(patch_dir / "step2" / "segments.json", {"segments": [], "excluded_candidates": []})
+    _write_json(
+        patch_dir / "step4" / "corridor_identity.json",
+        {
+            "full_legal_arc_registry": [
+                {
+                    "pair": "791871:37687913",
+                    "topology_arc_id": "arc_bad",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "topology_arc_is_direct_legal": True,
+                    "topology_arc_is_unique": True,
+                    "working_segment_id": "arcseg::arc_bad",
+                    "blocked_diagnostic_only": True,
+                    "blocked_diagnostic_reason": "topology_gap_unresolved",
+                },
+                {
+                    "pair": "10:20",
+                    "topology_arc_id": "arc_good",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "topology_arc_is_direct_legal": True,
+                    "topology_arc_is_unique": True,
+                    "working_segment_id": "arcseg::arc_good",
+                },
+            ]
+        },
+    )
+    _write_json(
+        patch_dir / "step6" / "final_roads.json",
+        {"roads": [{"road_id": "road_bad", "segment_id": "arcseg::arc_bad", "src_nodeid": 791871, "dst_nodeid": 37687913}]},
+    )
+    _write_json(
+        patch_dir / "debug" / "arc_evidence_attach.json",
+        {"rows": [{"pair": "791871:37687913", "topology_arc_id": "arc_bad", "traj_support_type": "partial_arc_support"}]},
+    )
+    _write_json(
+        patch_dir / "debug" / "step2_blocked_pair_bridge_audit.json",
+        {"pairs": [{"pair_id": "791871:37687913", "bridge_classification": "topology_gap_unresolved"}]},
+    )
+    _write_json(patch_dir / "debug" / "step2_segment_should_not_exist.json", {"pairs": []})
+    _write_json(patch_dir / "debug" / "step2_topology_pairs.json", {"pairs": []})
+    for simple_patch_id in ("5417632690143239", "5417632690143326"):
+        simple_dir = run_root / "patches" / simple_patch_id
+        _write_json(simple_dir / "metrics.json", {"patch_id": simple_patch_id, "unresolved_segment_count": 0, "segments": []})
+        _write_json(simple_dir / "gate.json", {"overall_pass": True, "hard_breakpoints": []})
+        _write_json(simple_dir / "step2" / "segments.json", {"segments": [], "excluded_candidates": []})
+        _write_json(simple_dir / "step4" / "corridor_identity.json", {"full_legal_arc_registry": []})
+        _write_json(simple_dir / "step6" / "final_roads.json", {"roads": []})
+        _write_json(simple_dir / "debug" / "step2_segment_should_not_exist.json", {"pairs": []})
+        _write_json(simple_dir / "debug" / "step2_topology_pairs.json", {"pairs": []})
+        _write_json(simple_dir / "debug" / "step2_blocked_pair_bridge_audit.json", {"pairs": []})
+
+    output_root = tmp_path / "bundle_semantic"
+    summary = write_semantic_fix_after_perf_review(run_root=run_root, output_root=output_root)
+    assert (output_root / "semantic_regression_report.json").exists()
+    assert (output_root / "bad_built_rootcause.json").exists()
+    assert (output_root / "complex_patch_semantic_fix_review.json").exists()
+    semantic = _read_json(output_root / "semantic_regression_report.json")
+    assert bool(semantic["semantic_regression"]) is True
+    assert "blocked_pairs_built" in semantic["semantic_regression_reasons"]
+    rootcause = _read_json(output_root / "bad_built_rootcause.json")
+    assert int(rootcause["bad_built_case_count"]) == 1
+    assert "blocked_diagnostic_only_state_not_respected" in rootcause["cases"][0]["root_causes"]
+    assert "semantic_regression_report" in summary
+
+
+def test_t05v2_arc_legality_audit_uses_full_registry_for_arc_first_built_segment(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    patch_id = "patch_arc_first"
+    patch_dir = run_root / "patches" / patch_id
+    _write_json(
+        patch_dir / "metrics.json",
+        {
+            "patch_id": patch_id,
+            "segments": [],
+            "full_legal_arc_registry": [
+                {
+                    "pair": "10:20",
+                    "topology_arc_id": "arc_good",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": True,
+                    "working_segment_id": "arcseg::arc_good",
+                    "entered_main_flow": True,
+                }
+            ],
+        },
+    )
+    _write_json(patch_dir / "step2" / "segments.json", {"segments": [], "excluded_candidates": []})
+    _write_json(
+        patch_dir / "step6" / "final_roads.json",
+        {"roads": [{"road_id": "road_good", "segment_id": "arcseg::arc_good", "src_nodeid": 10, "dst_nodeid": 20}]},
+    )
+
+    audit = build_arc_legality_audit(run_root, [patch_id])
+    assert int(audit["summary"]["bad_built_arc_count"]) == 0
+    assert bool(audit["summary"]["built_all_direct_unique"]) is True
 
 
 def test_t05v2_scripts_stepwise_state_resume(tmp_path: Path) -> None:
