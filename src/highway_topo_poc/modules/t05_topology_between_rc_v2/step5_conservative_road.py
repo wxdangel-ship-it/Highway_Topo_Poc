@@ -351,6 +351,67 @@ def classify_segment_outcome(
     return "should_be_no_geometry_candidate"
 
 
+def _finalize_full_legal_arc_registry(
+    *,
+    patch_id: str,
+    registry_rows: list[dict[str, Any]],
+    metrics_segments: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    metrics_by_segment = {str(item.get("segment_id", "")): dict(item) for item in metrics_segments if str(item.get("segment_id", ""))}
+    finalized_rows: list[dict[str, Any]] = []
+    for row in registry_rows:
+        current = dict(row)
+        current["patch_id"] = str(patch_id)
+        segment_id = str(current.get("working_segment_id", "") or current.get("segment_id", ""))
+        metric = metrics_by_segment.get(segment_id, {})
+        if metric:
+            built = str(metric.get("failure_classification", "")) == "built"
+            current["corridor_identity"] = str(metric.get("corridor_identity", current.get("corridor_identity", "unresolved")))
+            current["slot_src_resolved"] = bool(metric.get("src_slot_resolved", False))
+            current["slot_dst_resolved"] = bool(metric.get("dst_slot_resolved", False))
+            current["slot_status"] = "resolved" if bool(metric.get("src_slot_resolved", False) and metric.get("dst_slot_resolved", False)) else "unresolved"
+            current["built_final_road"] = bool(built)
+            if built:
+                current["unbuilt_stage"] = ""
+                current["unbuilt_reason"] = ""
+            elif str(current.get("hard_block_reason", "")):
+                current["unbuilt_stage"] = "hard_blocked"
+                current["unbuilt_reason"] = str(current.get("hard_block_reason", ""))
+            elif str(current.get("traj_support_type", "")) == "no_support" and str(current.get("prior_support_type", "")) == "no_support":
+                current["unbuilt_stage"] = "step3_no_support"
+                current["unbuilt_reason"] = "no_traj_support"
+            elif str(current.get("corridor_identity", "")) == "unresolved":
+                current["unbuilt_stage"] = "step3_corridor_unresolved"
+                current["unbuilt_reason"] = str(metric.get("corridor_reason") or metric.get("unresolved_reason") or current.get("corridor_reason", "corridor_identity_unresolved"))
+            elif not bool(metric.get("src_slot_resolved", False) and metric.get("dst_slot_resolved", False)):
+                current["unbuilt_stage"] = "step4_slot_not_established"
+                current["unbuilt_reason"] = "slot_not_established"
+            else:
+                current["unbuilt_stage"] = "step5_geometry_rejected"
+                current["unbuilt_reason"] = str(metric.get("unresolved_reason") or metric.get("failure_classification") or "final_geometry_rejected")
+        else:
+            if str(current.get("hard_block_reason", "")):
+                current["unbuilt_stage"] = "hard_blocked"
+                current["unbuilt_reason"] = str(current.get("hard_block_reason", ""))
+            elif bool(current.get("entered_main_flow", False)):
+                current["unbuilt_stage"] = "step2_not_entered" if not str(current.get("working_segment_id", "")) else "step3_no_support"
+                current["unbuilt_reason"] = str(current.get("unbuilt_reason", "") or "no_traj_support")
+        finalized_rows.append(current)
+
+    entered_rows = [row for row in finalized_rows if bool(row.get("entered_main_flow", False))]
+    funnel = {
+        "all_direct_legal_arc_count": int(len(finalized_rows)),
+        "all_direct_unique_legal_arc_count": int(sum(1 for row in finalized_rows if bool(row.get("is_unique", False)))),
+        "entered_main_flow_arc_count": int(len(entered_rows)),
+        "traj_supported_arc_count": int(sum(1 for row in entered_rows if str(row.get("traj_support_type", "")) != "no_support")),
+        "prior_supported_arc_count": int(sum(1 for row in entered_rows if str(row.get("prior_support_type", "")) == "prior_fallback_support")),
+        "corridor_resolved_arc_count": int(sum(1 for row in entered_rows if str(row.get("corridor_identity", "")) in {"witness_based", "prior_based"})),
+        "slot_established_arc_count": int(sum(1 for row in entered_rows if bool(row.get("slot_src_resolved", False) and row.get("slot_dst_resolved", False)))),
+        "built_arc_count": int(sum(1 for row in entered_rows if bool(row.get("built_final_road", False)))),
+    }
+    return finalized_rows, funnel
+
+
 def write_road_outputs(
     *,
     out_root: Path | str,
@@ -364,6 +425,9 @@ def write_road_outputs(
     road_results: list[dict[str, Any]],
     inputs: Any,
     step2_metrics: dict[str, Any] | None = None,
+    full_registry_rows: list[dict[str, Any]] | None = None,
+    legal_arc_funnel_seed: dict[str, Any] | None = None,
+    arc_evidence_attach_audit: list[dict[str, Any]] | None = None,
 ) -> None:
     pipeline = _pipeline()
     patch_dir = pipeline.patch_root(out_root, run_id, patch_id)
@@ -613,32 +677,13 @@ def write_road_outputs(
         for entry in metrics_segments
         if str(entry["topology_arc_source_type"]) == pipeline._BRIDGE_CHAIN_TOPOLOGY_SOURCE
     ]
-    legal_arc_registry = []
-    for entry in metrics_segments:
-        if not (
-            str(entry["topology_arc_source_type"]) == "direct_topology_arc"
-            and bool(entry["topology_arc_is_direct_legal"])
-            and bool(entry["topology_arc_is_unique"])
-            and str(entry["topology_arc_id"])
-        ):
-            continue
-        legal_arc_registry.append(
-            {
-                "patch_id": str(patch_id),
-                "pair": pipeline._pair_id_text(int(entry["src_nodeid"]), int(entry["dst_nodeid"])),
-                "src": int(entry["src_nodeid"]),
-                "dst": int(entry["dst_nodeid"]),
-                "topology_arc_id": str(entry["topology_arc_id"]),
-                "topology_arc_is_direct_legal": True,
-                "topology_arc_is_unique": True,
-                "segment_count": 1,
-                "segment_id": str(entry["segment_id"]),
-                "built_final_road": str(entry["failure_classification"]) == "built",
-                "hard_block_reason": "",
-                "corridor_identity": str(entry["corridor_identity"]),
-                "unbuilt_reason": "" if str(entry["failure_classification"]) == "built" else str(entry["unresolved_reason"] or entry["failure_classification"]),
-            }
-        )
+    legal_arc_registry, legal_arc_funnel = _finalize_full_legal_arc_registry(
+        patch_id=str(patch_id),
+        registry_rows=list(full_registry_rows or []),
+        metrics_segments=metrics_segments,
+    )
+    if legal_arc_funnel_seed:
+        legal_arc_funnel = {**dict(legal_arc_funnel_seed), **dict(legal_arc_funnel)}
     metrics = {
         "patch_id": str(patch_id),
         "segment_count": int(len(segments)),
@@ -696,12 +741,15 @@ def write_road_outputs(
         "witness_selected_count_total": int(witness_selected_total),
         "witness_selected_count_cross0": int(witness_selected_cross0),
         "witness_selected_count_cross1": int(witness_selected_cross1),
-        "legal_arc_registry": legal_arc_registry,
-        "legal_arc_total": int(len(legal_arc_registry)),
-        "legal_arc_built": int(sum(1 for item in legal_arc_registry if bool(item["built_final_road"]))),
+        "full_legal_arc_registry": legal_arc_registry,
+        "legal_arc_registry": [dict(item) for item in legal_arc_registry if bool(item.get("entered_main_flow", False))],
+        "legal_arc_funnel": legal_arc_funnel,
+        "arc_evidence_attach_audit": list(arc_evidence_attach_audit or []),
+        "legal_arc_total": int(legal_arc_funnel.get("entered_main_flow_arc_count", 0)),
+        "legal_arc_built": int(legal_arc_funnel.get("built_arc_count", 0)),
         "legal_arc_build_rate": float(
-            (sum(1 for item in legal_arc_registry if bool(item["built_final_road"])) / max(1, len(legal_arc_registry)))
-            if legal_arc_registry
+            (int(legal_arc_funnel.get("built_arc_count", 0)) / max(1, int(legal_arc_funnel.get("entered_main_flow_arc_count", 0))))
+            if int(legal_arc_funnel.get("entered_main_flow_arc_count", 0))
             else 0.0
         ),
         "legal_arc_unbuilt_reason_hist": dict(
@@ -760,7 +808,17 @@ def write_road_outputs(
             f"direct_unique_violation={int(metrics.get('production_arc_direct_unique_violation_count', 0))} "
             f"synthetic_arc={int(metrics.get('production_synthetic_arc_count', 0))}"
         ),
-        f"legal_arc_coverage total={int(metrics['legal_arc_total'])} built={int(metrics['legal_arc_built'])} rate={float(metrics['legal_arc_build_rate']):.3f}",
+        (
+            "legal_arc_funnel: "
+            f"all_direct={int(legal_arc_funnel.get('all_direct_legal_arc_count', 0))} "
+            f"direct_unique={int(legal_arc_funnel.get('all_direct_unique_legal_arc_count', 0))} "
+            f"entered={int(legal_arc_funnel.get('entered_main_flow_arc_count', 0))} "
+            f"traj_supported={int(legal_arc_funnel.get('traj_supported_arc_count', 0))} "
+            f"prior_supported={int(legal_arc_funnel.get('prior_supported_arc_count', 0))} "
+            f"corridor_resolved={int(legal_arc_funnel.get('corridor_resolved_arc_count', 0))} "
+            f"slot_established={int(legal_arc_funnel.get('slot_established_arc_count', 0))} "
+            f"built={int(legal_arc_funnel.get('built_arc_count', 0))}"
+        ),
         (
             "road_summary: "
             f"built={len(roads)} "
@@ -832,12 +890,13 @@ def run_slot_mapping_stage(
     pipeline = _pipeline()
     inputs, frame, prior_roads = pipeline.load_inputs_and_frame(data_root, patch_id, params=params)
     xsec_map = pipeline._xsec_map(frame)
-    segments_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step2_segment")
     witnesses_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step3_witness")
     identities_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step4_corridor_identity")
-    segments = [Segment.from_dict(item) for item in segments_payload.get("segments", [])]
+    segments = [Segment.from_dict(item) for item in identities_payload.get("working_segments", [])]
     witnesses = {str(item.segment_id): item for item in (CorridorWitness.from_dict(v) for v in witnesses_payload.get("witnesses", []))}
     identities = {str(item.segment_id): item for item in (CorridorIdentity.from_dict(v) for v in identities_payload.get("corridor_identities", []))}
+    full_registry_rows = list(identities_payload.get("full_legal_arc_registry", []))
+    legal_arc_funnel = dict(identities_payload.get("legal_arc_funnel", {}))
     slot_map: dict[str, dict[str, SlotInterval]] = {}
     debug_features: list[tuple[LineString, dict[str, Any]]] = []
     for segment in segments:
@@ -900,7 +959,10 @@ def run_slot_mapping_stage(
         "slot_mapping": {
             segment_id: {"src": values["src"].to_dict(), "dst": values["dst"].to_dict()}
             for segment_id, values in slot_map.items()
-        }
+        },
+        "working_segments": [segment.to_dict() for segment in segments],
+        "full_legal_arc_registry": full_registry_rows,
+        "legal_arc_funnel": legal_arc_funnel,
     }
     dbg_dir = pipeline.debug_dir(out_root, run_id, patch_id)
     write_json(pipeline._artifact_path(out_root, run_id, patch_id, "step5_slot_mapping"), artifact)
@@ -913,6 +975,8 @@ def run_slot_mapping_stage(
         "witnesses": witnesses,
         "identities": identities,
         "slots": slot_map,
+        "full_legal_arc_registry": full_registry_rows,
+        "legal_arc_funnel": legal_arc_funnel,
         "reason": "slot_mapping_ready",
     }
 
@@ -932,13 +996,16 @@ def run_build_road_stage(
     witnesses_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step3_witness")
     identities_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step4_corridor_identity")
     slots_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step5_slot_mapping")
-    segments = [Segment.from_dict(item) for item in segments_payload.get("segments", [])]
+    segments = [Segment.from_dict(item) for item in identities_payload.get("working_segments", [])]
     witnesses = {str(item.segment_id): item for item in (CorridorWitness.from_dict(v) for v in witnesses_payload.get("witnesses", []))}
     identities = {str(item.segment_id): item for item in (CorridorIdentity.from_dict(v) for v in identities_payload.get("corridor_identities", []))}
     slot_map: dict[str, dict[str, SlotInterval]] = {
         str(segment_id): {"src": SlotInterval.from_dict(value["src"]), "dst": SlotInterval.from_dict(value["dst"])}
         for segment_id, value in (slots_payload.get("slot_mapping") or {}).items()
     }
+    full_registry_rows = list(identities_payload.get("full_legal_arc_registry", []))
+    legal_arc_funnel_seed = dict(identities_payload.get("legal_arc_funnel", {}))
+    arc_evidence_attach_audit = list(witnesses_payload.get("arc_evidence_attach_audit", []))
     roads: list[FinalRoad] = []
     road_results: list[dict[str, Any]] = []
     for segment in segments:
@@ -970,6 +1037,9 @@ def run_build_road_stage(
         road_results=road_results,
         inputs=inputs,
         step2_metrics=step2_metrics,
+        full_registry_rows=full_registry_rows,
+        legal_arc_funnel_seed=legal_arc_funnel_seed,
+        arc_evidence_attach_audit=arc_evidence_attach_audit,
     )
     return {"artifact": artifact, "roads": roads, "reason": "road_ready" if roads else "no_geometry_candidate"}
 

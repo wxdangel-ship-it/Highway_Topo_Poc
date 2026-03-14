@@ -355,9 +355,13 @@ def build_corridor_identities(
     segments: list[Segment],
     witnesses: list[CorridorWitness],
     prior_roads: list[Any],
+    full_registry_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[list[CorridorIdentity], list[dict[str, Any]]]:
     witness_map = {str(item.segment_id): item for item in witnesses}
-    registry_rows = build_legal_arc_registry(segments=segments, witnesses=witness_map, prior_roads=prior_roads)
+    if full_registry_rows:
+        registry_rows = [dict(item) for item in full_registry_rows]
+    else:
+        registry_rows = build_legal_arc_registry(segments=segments, witnesses=witness_map, prior_roads=prior_roads)
     registry_by_arc = {str(item["topology_arc_id"]): item for item in registry_rows}
     identities: list[CorridorIdentity] = []
     for segment in segments:
@@ -372,14 +376,92 @@ def build_corridor_identities(
                 )
             )
             continue
+        arc_segments = [item for item in segments if str(item.topology_arc_id) == str(segment.topology_arc_id)]
+        arc_witnesses = [witness_map.get(str(item.segment_id), make_missing_witness(item)) for item in arc_segments]
+        legacy_selected_rows = [
+            (arc_segment, witness_map.get(str(arc_segment.segment_id), make_missing_witness(arc_segment)))
+            for arc_segment in arc_segments
+            if str(witness_map.get(str(arc_segment.segment_id), make_missing_witness(arc_segment)).status) == "selected"
+            and bool(witness_map.get(str(arc_segment.segment_id), make_missing_witness(arc_segment)).exclusive_interval)
+        ]
+        traj_support_type = str(registry.get("traj_support_type", "no_support"))
+        prior_support_type = str(registry.get("prior_support_type", "no_support"))
+        coverage_ratio = float(registry.get("traj_support_coverage_ratio", 0.0))
+        if str(registry.get("hard_block_reason", "")):
+            state = "unresolved"
+            reason = str(registry.get("hard_block_reason", "corridor_identity_unresolved"))
+            risk_flags: tuple[str, ...] = tuple()
+            witness_rank = None
+        elif "traj_support_type" not in registry and "prior_support_type" not in registry:
+            chosen = _pick_best_arc_witness(legacy_selected_rows)
+            if chosen is not None:
+                _segment, selected_witness = chosen
+                state = "witness_based"
+                reason = "stable_same_arc_witness"
+                risk_flags = tuple()
+                witness_rank = selected_witness.selected_interval_rank
+            elif bool(registry.get("prior_available", False)):
+                state = "prior_based"
+                reason = "same_arc_prior_fallback"
+                risk_flags = ("prior_fallback",)
+                witness_rank = None
+            else:
+                state = "unresolved"
+                reason = _arc_unresolved_reason(arc_witnesses, bool(registry.get("prior_available", False)))
+                risk_flags = tuple()
+                witness_rank = None
+        elif traj_support_type == "terminal_crossing_support":
+            state = "witness_based"
+            reason = "terminal_crossing_support"
+            risk_flags = tuple()
+            witness_rank = witness.selected_interval_rank
+        elif traj_support_type == "partial_arc_support":
+            if str(witness.status) == "selected" or coverage_ratio >= 0.45:
+                state = "witness_based"
+                reason = "partial_arc_support"
+                risk_flags = tuple()
+                witness_rank = witness.selected_interval_rank
+            else:
+                state = "unresolved"
+                reason = "insufficient_partial_support"
+                risk_flags = tuple()
+                witness_rank = witness.selected_interval_rank
+        elif traj_support_type == "stitched_arc_support":
+            if str(witness.status) == "selected" or coverage_ratio >= 0.72:
+                state = "witness_based"
+                reason = "stitched_arc_support"
+                risk_flags = ("stitched_support",)
+                witness_rank = witness.selected_interval_rank
+            else:
+                state = "unresolved"
+                reason = "stitch_failed"
+                risk_flags = ("stitched_support",)
+                witness_rank = witness.selected_interval_rank
+        elif prior_support_type == "prior_fallback_support":
+            state = "prior_based"
+            reason = "same_arc_prior_fallback"
+            risk_flags = ("prior_fallback",)
+            witness_rank = witness.selected_interval_rank
+        else:
+            state = "unresolved"
+            if str(witness.reason) == "drivable_surface_empty":
+                reason = "drivezone_support_insufficient"
+            else:
+                reason = "no_traj_support"
+            risk_flags = tuple()
+            witness_rank = witness.selected_interval_rank
+        registry["corridor_identity"] = str(state)
+        registry["corridor_reason"] = str(reason)
+        registry["witness_interval_rank"] = witness_rank
+        registry["risk_flags"] = list(risk_flags)
         identities.append(
             CorridorIdentity(
                 segment_id=str(segment.segment_id),
-                state=str(registry["corridor_identity"]),
-                reason=str(registry["corridor_reason"]),
-                risk_flags=tuple(str(v) for v in registry.get("risk_flags", [])),
-                witness_interval_rank=registry.get("witness_interval_rank"),
-                prior_supported=bool(segment.prior_supported or registry.get("prior_available", False)),
+                state=str(state),
+                reason=str(reason),
+                risk_flags=tuple(str(v) for v in risk_flags),
+                witness_interval_rank=witness_rank,
+                prior_supported=bool(segment.prior_supported or registry.get("prior_support_available", False)),
             )
         )
     return identities, registry_rows
@@ -463,14 +545,25 @@ def run_corridor_identity_stage(
 ) -> dict[str, Any]:
     pipeline = _pipeline()
     _inputs, _frame, prior_roads = pipeline.load_inputs_and_frame(data_root, patch_id, params=params)
-    segments_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step2_segment")
     witnesses_payload = pipeline._load_stage_payload(out_root, run_id, patch_id, "step3_witness")
-    segments = [Segment.from_dict(item) for item in segments_payload.get("segments", [])]
+    segments = [Segment.from_dict(item) for item in witnesses_payload.get("working_segments", [])]
     witnesses = [CorridorWitness.from_dict(item) for item in witnesses_payload.get("witnesses", [])]
-    identities, registry_rows = build_corridor_identities(segments=segments, witnesses=witnesses, prior_roads=prior_roads)
+    full_registry_rows = list(witnesses_payload.get("full_legal_arc_registry", []))
+    identities, registry_rows = build_corridor_identities(
+        segments=segments,
+        witnesses=witnesses,
+        prior_roads=prior_roads,
+        full_registry_rows=full_registry_rows,
+    )
+    corridor_resolved_arc_count = int(sum(1 for item in registry_rows if str(item.get("corridor_identity", "")) in {"witness_based", "prior_based"}))
+    legal_arc_funnel = dict(witnesses_payload.get("legal_arc_funnel", {}))
+    legal_arc_funnel["corridor_resolved_arc_count"] = corridor_resolved_arc_count
     artifact = {
         "corridor_identities": [identity.to_dict() for identity in identities],
-        "legal_arc_registry": registry_rows,
+        "legal_arc_registry": [dict(item) for item in registry_rows if bool(item.get("entered_main_flow", False))],
+        "full_legal_arc_registry": registry_rows,
+        "working_segments": [segment.to_dict() for segment in segments],
+        "legal_arc_funnel": legal_arc_funnel,
     }
     dbg_dir = pipeline.debug_dir(out_root, run_id, patch_id)
     write_json(pipeline._artifact_path(out_root, run_id, patch_id, "step4_corridor_identity"), artifact)

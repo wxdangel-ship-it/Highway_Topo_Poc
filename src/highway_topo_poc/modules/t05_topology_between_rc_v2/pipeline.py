@@ -31,9 +31,10 @@ from .models import (
     coords_to_line,
     line_to_coords,
 )
+from .step2_arc_registry import build_full_legal_arc_registry
+from .step3_arc_evidence import run_witness_stage as _step3_run_arc_evidence_stage
 from .step3_corridor_identity import (
     run_corridor_identity_stage as _step3_run_corridor_identity_stage,
-    run_witness_stage as _step3_run_witness_stage,
 )
 from .step5_conservative_road import (
     build_final_road as _step5_build_final_road,
@@ -95,6 +96,13 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "WITNESS_MIN_STABILITY_SCORE": 0.55,
     "INTERVAL_MIN_LEN_M": 1.0,
     "ROAD_MIN_DRIVEZONE_RATIO": 0.85,
+    "ARC_EVIDENCE_BUFFER_M": 8.0,
+    "ARC_PARTIAL_MIN_COVERAGE_RATIO": 0.18,
+    "ARC_PARTIAL_MIN_LENGTH_M": 12.0,
+    "ARC_STITCH_MAX_SEQ_GAP": 12,
+    "ARC_STITCH_MAX_PROJ_GAP_M": 25.0,
+    "ARC_STITCH_MIN_COVERAGE_RATIO": 0.72,
+    "ARC_STITCH_ENDPOINT_MARGIN_RATIO": 0.18,
 }
 
 
@@ -3320,11 +3328,18 @@ def _stage2_segment(
     segment_should_not_exist = _build_segment_should_not_exist(rejected, topology=dict(candidate_bundle.get("topology", {})))
     topology_pairs_debug = _build_topology_pairs_debug(dict(candidate_bundle.get("topology", {})))
     topology_arcs_debug = _build_topology_arcs_debug(dict(candidate_bundle.get("topology", {})))
+    full_arc_registry = build_full_legal_arc_registry(
+        topology=dict(candidate_bundle.get("topology", {})),
+        selected_segments=segments,
+    )
     step2_metrics = {
         **step2_metrics,
         "segment_selected_count_before_topology_gate": int(len(pre_topology_segments)),
         "segment_selected_count_after_topology_gate": int(len(clustered_segments)),
         "topology_arc_count": int(len(topology_arcs_debug)),
+        "all_direct_legal_arc_count": int(full_arc_registry["summary"]["all_direct_legal_arc_count"]),
+        "all_direct_unique_legal_arc_count": int(full_arc_registry["summary"]["all_direct_unique_legal_arc_count"]),
+        "entered_main_flow_arc_count": int(full_arc_registry["summary"]["entered_main_flow_arc_count"]),
         "blocked_pair_bridge_audit_count": int(len(blocked_pair_bridge_audit)),
         "topology_multi_arc_pair_count": int(
             sum(
@@ -3412,6 +3427,8 @@ def _stage2_segment(
         "segment_should_not_exist": segment_should_not_exist,
         "topology_pairs": topology_pairs_debug,
         "topology_arcs": topology_arcs_debug,
+        "full_legal_arc_registry": list(full_arc_registry["rows"]),
+        "legal_arc_funnel": dict(full_arc_registry["summary"]),
         "step2_metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics},
     }
     dbg_dir = debug_dir(out_root, run_id, patch_id)
@@ -3473,6 +3490,10 @@ def _stage2_segment(
         dbg_dir / "step2_topology_arcs.json",
         {"arcs": topology_arcs_debug, "metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics}},
     )
+    write_json(
+        dbg_dir / "step2_full_legal_arc_registry.json",
+        {"arcs": list(full_arc_registry["rows"]), "summary": dict(full_arc_registry["summary"])},
+    )
     return {
         "artifact": artifact,
         "inputs": inputs,
@@ -3482,156 +3503,7 @@ def _stage2_segment(
     }
 
 
-def _stage3_witness(
-    *,
-    data_root: Path | str,
-    patch_id: str,
-    run_id: str,
-    out_root: Path | str,
-    params: dict[str, Any],
-) -> dict[str, Any]:
-    return _step3_run_witness_stage(
-        data_root=data_root,
-        patch_id=patch_id,
-        run_id=run_id,
-        out_root=out_root,
-        params=params,
-    )
-
-
-def _stage4_corridor_identity(
-    *,
-    data_root: Path | str,
-    patch_id: str,
-    run_id: str,
-    out_root: Path | str,
-    params: dict[str, Any],
-) -> dict[str, Any]:
-    return _step3_run_corridor_identity_stage(
-        data_root=data_root,
-        patch_id=patch_id,
-        run_id=run_id,
-        out_root=out_root,
-        params=params,
-    )
-
-
-def _stage5_slot_mapping(
-    *,
-    data_root: Path | str,
-    patch_id: str,
-    run_id: str,
-    out_root: Path | str,
-    params: dict[str, Any],
-) -> dict[str, Any]:
-    return _step5_run_slot_mapping_stage(
-        data_root=data_root,
-        patch_id=patch_id,
-        run_id=run_id,
-        out_root=out_root,
-        params=params,
-    )
-
-
-def _stage6_build_road(
-    *,
-    data_root: Path | str,
-    patch_id: str,
-    run_id: str,
-    out_root: Path | str,
-    params: dict[str, Any],
-) -> dict[str, Any]:
-    return _step5_run_build_road_stage(
-        data_root=data_root,
-        patch_id=patch_id,
-        run_id=run_id,
-        out_root=out_root,
-        params=params,
-    )
-
-
-def run_stage(
-    *,
-    stage: str,
-    data_root: Path | str,
-    patch_id: str,
-    run_id: str,
-    out_root: Path | str,
-    force: bool = False,
-    params: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    stage_name = str(stage)
-    if stage_name not in STAGES:
-        raise ValueError(f"unknown_stage:{stage_name}")
-    merged_params = _merge_params(params)
-    patch_dir = patch_root(out_root, run_id, patch_id)
-    patch_dir.mkdir(parents=True, exist_ok=True)
-    dbg_dir = debug_dir(out_root, run_id, patch_id)
-    dbg_dir.mkdir(parents=True, exist_ok=True)
-    existing_state = _load_previous_state(out_root, run_id, patch_id, stage_name)
-    if existing_state is not None and bool(existing_state.get("ok")) and not bool(force):
-        return {"stage": stage_name, "status": "skipped", "reason": "already_completed"}
-    _require_previous_stage(out_root, run_id, patch_id, stage_name)
-    runner = {
-        "step1_input_frame": _stage1_input_frame,
-        "step2_segment": _stage2_segment,
-        "step3_witness": _stage3_witness,
-        "step4_corridor_identity": _stage4_corridor_identity,
-        "step5_slot_mapping": _stage5_slot_mapping,
-        "step6_build_road": _stage6_build_road,
-    }[stage_name]
-    try:
-        result = runner(data_root=data_root, patch_id=patch_id, run_id=run_id, out_root=out_root, params=merged_params)
-    except Exception as exc:
-        reason = _trim_reason(str(exc) or type(exc).__name__)
-        write_step_state(
-            step_dir=stage_dir(out_root, run_id, patch_id, stage_name),
-            step=stage_name,
-            ok=False,
-            reason=reason,
-            run_id=run_id,
-            patch_id=patch_id,
-            data_root=data_root,
-            out_root=out_root,
-        )
-        raise
-    write_step_state(
-        step_dir=stage_dir(out_root, run_id, patch_id, stage_name),
-        step=stage_name,
-        ok=True,
-        reason=str(result.get("reason", "ok")),
-        run_id=run_id,
-        patch_id=patch_id,
-        data_root=data_root,
-        out_root=out_root,
-    )
-    return {"stage": stage_name, "status": "ok", "reason": str(result.get("reason", "ok"))}
-
-
-def run_full_pipeline(
-    *,
-    data_root: Path | str,
-    patch_id: str,
-    run_id: str,
-    out_root: Path | str,
-    force: bool = False,
-    params: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    merged_params = _merge_params(params)
-    out: list[dict[str, Any]] = []
-    for stage in STAGES:
-        out.append(
-            run_stage(
-                stage=stage,
-                data_root=data_root,
-                patch_id=patch_id,
-                run_id=run_id,
-                out_root=out_root,
-                force=force,
-                params=merged_params,
-            )
-        )
-    return out
+from .runner import run_full_pipeline, run_stage
 
 
 __all__ = ["DEFAULT_PARAMS", "STAGES", "run_full_pipeline", "run_stage"]

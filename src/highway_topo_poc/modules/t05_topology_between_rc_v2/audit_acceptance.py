@@ -203,6 +203,7 @@ def evaluate_patch_acceptance(run_root: Path | str, patch_id: str) -> dict[str, 
 def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[str, Any]:
     patch_dir = _patch_dir(run_root, complex_patch_id)
     segments_payload = _safe_read_json(patch_dir / "step2" / "segments.json")
+    metrics_payload = _patch_metrics(run_root, complex_patch_id)
     roads_payload = _safe_read_json(patch_dir / "step6" / "final_roads.json")
     should_not_payload = _safe_read_json(patch_dir / "debug" / "step2_segment_should_not_exist.json")
     topology_pairs_payload = _safe_read_json(patch_dir / "debug" / "step2_topology_pairs.json")
@@ -214,6 +215,7 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
     should_not_rows = list(should_not_payload.get("pairs", []))
     topology_rows = list(topology_pairs_payload.get("pairs", []))
     bridge_rows = list(bridge_audit_payload.get("pairs", []))
+    registry_rows = list(metrics_payload.get("full_legal_arc_registry", []))
 
     decisions: list[dict[str, Any]] = []
     target_pairs = [*_FALSE_POSITIVE_PAIRS, *_STABLE_BLOCKED_PAIRS, _BRIDGE_TARGET_PAIR, _REFERENCE_PAIR]
@@ -223,12 +225,24 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
         should_not_row = _find_pair_row(should_not_rows, pair_id)
         topology_row = _find_pair_row(topology_rows, pair_id)
         bridge_row = _find_pair_row(bridge_rows, pair_id)
-        source_row = selected or excluded or topology_row or should_not_row or bridge_row or {}
+        registry_row = _find_pair_row(registry_rows, pair_id)
+        source_row = selected or registry_row or excluded or topology_row or should_not_row or bridge_row or {}
         reject_stage = ""
         reject_reason = ""
         if not bool(pair_id in built_pair_set) and not selected:
-            reject_stage = str((excluded or {}).get("stage") or (bridge_row or {}).get("reject_stage") or "")
-            reject_reason = str((excluded or {}).get("reason") or (bridge_row or {}).get("reject_reason") or "")
+            reject_stage = str(
+                (excluded or {}).get("stage")
+                or (registry_row or {}).get("unbuilt_stage")
+                or (bridge_row or {}).get("reject_stage")
+                or ""
+            )
+            reject_reason = str(
+                (excluded or {}).get("reason")
+                or (registry_row or {}).get("hard_block_reason")
+                or (registry_row or {}).get("unbuilt_reason")
+                or (bridge_row or {}).get("reject_reason")
+                or ""
+            )
         decisions.append(
             {
                 "patch_id": str(complex_patch_id),
@@ -256,6 +270,13 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
                 "should_not_reason": str((should_not_row or {}).get("reason", "")),
                 "topology_sources": list((topology_row or {}).get("topology_sources", [])),
                 "topology_paths": list((topology_row or {}).get("topology_paths", [])),
+                "entered_main_flow": bool(source_row.get("entered_main_flow", False)),
+                "traj_support_type": str(source_row.get("traj_support_type", "")),
+                "prior_support_type": str(source_row.get("prior_support_type", "")),
+                "corridor_identity": str(source_row.get("corridor_identity", "")),
+                "slot_status": str(source_row.get("slot_status", "")),
+                "unbuilt_stage": str(source_row.get("unbuilt_stage", "")),
+                "unbuilt_reason": str(source_row.get("unbuilt_reason", "")),
                 "built_final_road": bool(pair_id in built_pair_set),
                 "segment_id": str((selected or {}).get("segment_id", "")),
                 "selected_segment": bool(selected is not None),
@@ -741,95 +762,176 @@ def build_arc_legality_audit(run_root: Path | str, patch_ids: list[str]) -> dict
     }
 
 
+def _patch_metrics(run_root: Path | str, patch_id: str) -> dict[str, Any]:
+    return _safe_read_json(_patch_dir(run_root, patch_id) / "metrics.json")
+
+
+def _patch_full_registry_rows(run_root: Path | str, patch_id: str) -> list[dict[str, Any]]:
+    metrics = _patch_metrics(run_root, patch_id)
+    rows = list(metrics.get("full_legal_arc_registry", []))
+    if rows:
+        return rows
+    step4_payload = _safe_read_json(_patch_dir(run_root, patch_id) / "step4" / "corridor_identity.json")
+    rows = list(step4_payload.get("full_legal_arc_registry", []))
+    if rows:
+        return rows
+    legacy_rows = list(step4_payload.get("legal_arc_registry", []))
+    if legacy_rows:
+        return [
+            {
+                **dict(row),
+                "entered_main_flow": bool(row.get("entered_main_flow", True)),
+                "is_direct_legal": bool(row.get("is_direct_legal", row.get("topology_arc_is_direct_legal", True))),
+                "is_unique": bool(row.get("is_unique", row.get("topology_arc_is_unique", True))),
+                "built_final_road": bool(row.get("built_final_road", False)),
+                "slot_status": str(row.get("slot_status", "unresolved")),
+                "unbuilt_stage": str(row.get("unbuilt_stage", "")),
+                "unbuilt_reason": str(row.get("unbuilt_reason", "")),
+            }
+            for row in legacy_rows
+        ]
+    step2_payload = _safe_read_json(_patch_dir(run_root, patch_id) / "step2" / "segments.json")
+    return [
+        {
+            "pair": _pair_id_text(int(row.get("src_nodeid", 0)), int(row.get("dst_nodeid", 0))),
+            "src": int(row.get("src_nodeid", 0)),
+            "dst": int(row.get("dst_nodeid", 0)),
+            "topology_arc_id": str(row.get("topology_arc_id", "")),
+            "topology_arc_source_type": str(row.get("topology_arc_source_type", "")),
+            "is_direct_legal": bool(row.get("topology_arc_is_direct_legal", False)),
+            "is_unique": bool(row.get("topology_arc_is_unique", False)),
+            "entered_main_flow": bool(
+                row.get("topology_arc_is_direct_legal", False)
+                and row.get("topology_arc_is_unique", False)
+                and str(row.get("topology_arc_id", ""))
+            ),
+            "selected_segment_ids": [str(row.get("segment_id", ""))] if str(row.get("segment_id", "")) else [],
+            "selected_segment_count": 1 if str(row.get("segment_id", "")) else 0,
+            "selected_segment_id": str(row.get("segment_id", "")),
+            "working_segment_id": str(row.get("segment_id", "")),
+            "working_segment_source": "step2_selected_segment" if str(row.get("segment_id", "")) else "",
+            "traj_support_type": "no_support",
+            "prior_support_type": "no_support",
+            "corridor_identity": "unresolved",
+            "slot_status": "unresolved",
+            "built_final_road": False,
+            "unbuilt_stage": "",
+            "unbuilt_reason": "",
+        }
+        for row in step2_payload.get("segments", [])
+        if str(row.get("topology_arc_source_type", "")) == _DIRECT_TOPOLOGY_ARC_SOURCE
+        and bool(row.get("topology_arc_is_direct_legal", False))
+        and bool(row.get("topology_arc_is_unique", False))
+        and bool(str(row.get("topology_arc_id", "")))
+    ]
+
+
+def _patch_funnel(run_root: Path | str, patch_id: str) -> dict[str, Any]:
+    metrics = _patch_metrics(run_root, patch_id)
+    funnel = dict(metrics.get("legal_arc_funnel", {}))
+    if funnel:
+        return funnel
+    step4_payload = _safe_read_json(_patch_dir(run_root, patch_id) / "step4" / "corridor_identity.json")
+    return dict(step4_payload.get("legal_arc_funnel", {}))
+
+
+def _patch_arc_evidence_attach(run_root: Path | str, patch_id: str) -> list[dict[str, Any]]:
+    payload = _safe_read_json(_patch_dir(run_root, patch_id) / "step3" / "witness.json")
+    rows = list(payload.get("arc_evidence_attach_audit", []))
+    if rows:
+        return rows
+    debug_payload = _safe_read_json(_patch_dir(run_root, patch_id) / "debug" / "arc_evidence_attach.json")
+    return list(debug_payload.get("rows", []))
+
+
+def _registry_example(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "pair": str(row.get("pair", "")),
+        "topology_arc_id": str(row.get("topology_arc_id", "")),
+        "traj_support_type": str(row.get("traj_support_type", "no_support")),
+        "prior_support_type": str(row.get("prior_support_type", "no_support")),
+        "corridor_identity": str(row.get("corridor_identity", "unresolved")),
+        "slot_status": str(row.get("slot_status", "unresolved")),
+        "built_final_road": bool(row.get("built_final_road", False)),
+        "unbuilt_stage": str(row.get("unbuilt_stage", "")),
+        "unbuilt_reason": str(row.get("unbuilt_reason", "")),
+        "working_segment_source": str(row.get("working_segment_source", "")),
+        "selected_segment_count": int(row.get("selected_segment_count", 0)),
+        "traj_support_coverage_ratio": float(row.get("traj_support_coverage_ratio", 0.0)),
+    }
+
+
+def build_arc_evidence_attach_audit(run_root: Path | str, patch_ids: list[str]) -> dict[str, Any]:
+    patch_rows: list[dict[str, Any]] = []
+    all_rows: list[dict[str, Any]] = []
+    for patch_id in patch_ids:
+        rows = [dict(item) for item in _patch_arc_evidence_attach(run_root, patch_id)]
+        all_rows.extend([{**dict(item), "patch_id": str(patch_id)} for item in rows])
+        patch_rows.append(
+            {
+                "patch_id": str(patch_id),
+                "row_count": int(len(rows)),
+                "entered_main_flow_count": int(sum(1 for item in rows if bool(item.get("entered_main_flow", False)))),
+                "traj_support_type_hist": dict(Counter(str(item.get("traj_support_type", "no_support")) for item in rows)),
+                "terminal_crossing_support_count": int(sum(1 for item in rows if str(item.get("traj_support_type", "")) == "terminal_crossing_support")),
+                "partial_arc_support_count": int(sum(1 for item in rows if str(item.get("traj_support_type", "")) == "partial_arc_support")),
+                "stitched_arc_support_count": int(sum(1 for item in rows if str(item.get("traj_support_type", "")) == "stitched_arc_support")),
+                "prior_fallback_support_count": int(sum(1 for item in rows if str(item.get("prior_support_type", "")) == "prior_fallback_support")),
+                "top_examples": [_registry_example(item) for item in rows[:5]],
+            }
+        )
+    return {
+        "evaluated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "patches": patch_rows,
+        "rows": all_rows,
+    }
+
+
 def build_legal_arc_coverage(run_root: Path | str, patch_ids: list[str]) -> dict[str, Any]:
     patch_rows: list[dict[str, Any]] = []
     legal_arc_rows: list[dict[str, Any]] = []
     for patch_id in patch_ids:
-        patch_dir = _patch_dir(run_root, patch_id)
-        segments_payload = _safe_read_json(patch_dir / "step2" / "segments.json")
-        metrics_payload = _safe_read_json(patch_dir / "metrics.json")
-        step4_payload = _safe_read_json(patch_dir / "step4" / "corridor_identity.json")
-        roads_payload = _safe_read_json(patch_dir / "step6" / "final_roads.json")
+        registry_rows = [dict(item) for item in _patch_full_registry_rows(run_root, patch_id)]
+        funnel = dict(_patch_funnel(run_root, patch_id))
+        roads_payload = _safe_read_json(_patch_dir(run_root, patch_id) / "step6" / "final_roads.json")
         built_segment_ids = {str(item.get("segment_id", "")) for item in roads_payload.get("roads", []) if str(item.get("segment_id", ""))}
-        metrics_by_segment = {
-            str(item.get("segment_id", "")): dict(item)
-            for item in metrics_payload.get("segments", [])
-            if str(item.get("segment_id", ""))
-        }
-        registry_rows = list(step4_payload.get("legal_arc_registry", []))
-        if not registry_rows:
-            registry_rows = [
-                {
-                    "src": int(segment.get("src_nodeid", 0)),
-                    "dst": int(segment.get("dst_nodeid", 0)),
-                    "pair": _pair_id_text(int(segment.get("src_nodeid", 0)), int(segment.get("dst_nodeid", 0))),
-                    "topology_arc_id": str(segment.get("topology_arc_id", "")),
-                    "topology_arc_is_direct_legal": bool(segment.get("topology_arc_is_direct_legal", False)),
-                    "topology_arc_is_unique": bool(segment.get("topology_arc_is_unique", False)),
-                    "segment_ids": [str(segment.get("segment_id", ""))],
-                    "segment_count": 1,
-                    "prior_available": False,
-                    "corridor_identity": str(metrics_by_segment.get(str(segment.get("segment_id", "")), {}).get("corridor_identity", "unresolved")),
-                    "corridor_reason": str(metrics_by_segment.get(str(segment.get("segment_id", "")), {}).get("corridor_reason", "")),
-                }
-                for segment in segments_payload.get("segments", [])
-                if str(segment.get("topology_arc_source_type", "")) == _DIRECT_TOPOLOGY_ARC_SOURCE
-                and bool(segment.get("topology_arc_is_direct_legal", False))
-                and bool(segment.get("topology_arc_is_unique", False))
-                and bool(str(segment.get("topology_arc_id", "")))
-            ]
-        patch_arc_rows: list[dict[str, Any]] = []
         for row in registry_rows:
-            if not (
-                bool(row.get("topology_arc_is_direct_legal", False))
-                and bool(row.get("topology_arc_is_unique", False))
-                and bool(str(row.get("topology_arc_id", "")))
-            ):
-                continue
-            segment_ids = [str(v) for v in row.get("segment_ids", []) if str(v)] or ([str(row.get("segment_id", ""))] if str(row.get("segment_id", "")) else [])
-            metric_row = next((metrics_by_segment.get(segment_id, {}) for segment_id in segment_ids if metrics_by_segment.get(segment_id)), {})
-            built_final_road = bool(any(segment_id in built_segment_ids for segment_id in segment_ids))
-            unresolved_reason = ""
-            if not built_final_road:
-                unresolved_reason = str(
-                    row.get("unbuilt_reason")
-                    or metric_row.get("unresolved_reason")
-                    or metric_row.get("no_geometry_candidate_reason")
-                    or row.get("corridor_reason")
-                    or metric_row.get("failure_classification")
-                    or "corridor_identity_unresolved"
-                )
-            patch_arc_rows.append(
-                {
-                    "patch_id": str(patch_id),
-                    "pair": str(row.get("pair", "")),
-                    "src": int(row.get("src", 0)),
-                    "dst": int(row.get("dst", 0)),
-                    "topology_arc_id": str(row.get("topology_arc_id", "")),
-                    "topology_arc_is_direct_legal": True,
-                    "topology_arc_is_unique": True,
-                    "segment_count": int(row.get("segment_count", len(segment_ids) or 1)),
-                    "segment_ids": list(segment_ids),
-                    "built_final_road": built_final_road,
-                    "hard_block_reason": "",
-                    "corridor_identity": str(row.get("corridor_identity") or metric_row.get("corridor_identity") or "unresolved"),
-                    "unbuilt_reason": str(unresolved_reason),
-                }
-            )
-        patch_arc_rows = sorted(patch_arc_rows, key=lambda item: (str(item["pair"]), str(item["topology_arc_id"])))
-        legal_arc_rows.extend(patch_arc_rows)
-        legal_arc_total = int(len(patch_arc_rows))
-        legal_arc_built = int(sum(1 for item in patch_arc_rows if bool(item["built_final_road"])))
+            row_segment_ids = [str(v) for v in row.get("selected_segment_ids", []) if str(v)]
+            working_segment_id = str(row.get("working_segment_id", ""))
+            if working_segment_id:
+                row_segment_ids.append(working_segment_id)
+            if not bool(row.get("built_final_road", False)) and any(segment_id in built_segment_ids for segment_id in row_segment_ids):
+                row["built_final_road"] = True
+                row["unbuilt_stage"] = ""
+                row["unbuilt_reason"] = ""
+        entered_rows = [row for row in registry_rows if bool(row.get("entered_main_flow", False))]
+        entered_rows = sorted(entered_rows, key=lambda item: (str(item.get("pair", "")), str(item.get("topology_arc_id", ""))))
+        legal_arc_rows.extend([{**dict(row), "patch_id": str(patch_id)} for row in entered_rows])
+        legal_arc_total = int(funnel.get("entered_main_flow_arc_count", len(entered_rows)))
+        legal_arc_built = int(funnel.get("built_arc_count", sum(1 for row in entered_rows if bool(row.get("built_final_road", False)))))
+        unbuilt_rows = [row for row in entered_rows if not bool(row.get("built_final_road", False))]
         patch_rows.append(
             {
                 "patch_id": str(patch_id),
+                "all_direct_legal_arc_count": int(funnel.get("all_direct_legal_arc_count", len(registry_rows))),
+                "all_direct_unique_legal_arc_count": int(funnel.get("all_direct_unique_legal_arc_count", sum(1 for row in registry_rows if bool(row.get("is_unique", False))))),
+                "entered_main_flow_arc_count": int(legal_arc_total),
+                "traj_supported_arc_count": int(funnel.get("traj_supported_arc_count", sum(1 for row in entered_rows if str(row.get("traj_support_type", "no_support")) != "no_support"))),
+                "prior_supported_arc_count": int(funnel.get("prior_supported_arc_count", sum(1 for row in entered_rows if str(row.get("prior_support_type", "")) == "prior_fallback_support"))),
+                "corridor_resolved_arc_count": int(funnel.get("corridor_resolved_arc_count", sum(1 for row in entered_rows if str(row.get("corridor_identity", "")) in {"witness_based", "prior_based"}))),
+                "slot_established_arc_count": int(funnel.get("slot_established_arc_count", sum(1 for row in entered_rows if str(row.get("slot_status", "")) == "resolved"))),
                 "legal_arc_total": legal_arc_total,
                 "legal_arc_built": legal_arc_built,
                 "legal_arc_build_rate": float((legal_arc_built / max(1, legal_arc_total)) if legal_arc_total else 0.0),
-                "unbuilt_reason_hist": dict(
-                    Counter(str(item["unbuilt_reason"]) for item in patch_arc_rows if not bool(item["built_final_road"]) and str(item["unbuilt_reason"]))
-                ),
-                "top_unbuilt_examples": [dict(item) for item in patch_arc_rows if not bool(item["built_final_road"])][:5],
+                "traj_support_type_hist": dict(Counter(str(row.get("traj_support_type", "no_support")) for row in entered_rows)),
+                "unbuilt_reason_hist": dict(Counter(str(row.get("unbuilt_reason", "")) for row in unbuilt_rows if str(row.get("unbuilt_reason", "")))),
+                "unbuilt_stage_hist": dict(Counter(str(row.get("unbuilt_stage", "")) for row in unbuilt_rows if str(row.get("unbuilt_stage", "")))),
+                "top_unbuilt_examples": [_registry_example(row) for row in unbuilt_rows[:8]],
+                "top_recovered_examples": [
+                    _registry_example(row)
+                    for row in entered_rows
+                    if str(row.get("working_segment_source", "")) == "arc_first_materialized_segment"
+                ][:8],
             }
         )
     return {
@@ -856,6 +958,12 @@ def build_simple_patch_acceptance(
                 "target_count": int(item.get("target_count", 0)),
                 "failed_target_ids": failed_targets,
                 "unexpected_built_pairs": list(item.get("unexpected_built_pairs", [])),
+                "all_direct_legal_arc_count": int(coverage.get("all_direct_legal_arc_count", 0)),
+                "all_direct_unique_legal_arc_count": int(coverage.get("all_direct_unique_legal_arc_count", 0)),
+                "entered_main_flow_arc_count": int(coverage.get("entered_main_flow_arc_count", 0)),
+                "traj_supported_arc_count": int(coverage.get("traj_supported_arc_count", 0)),
+                "corridor_resolved_arc_count": int(coverage.get("corridor_resolved_arc_count", 0)),
+                "slot_established_arc_count": int(coverage.get("slot_established_arc_count", 0)),
                 "legal_arc_total": int(coverage.get("legal_arc_total", 0)),
                 "legal_arc_built": int(coverage.get("legal_arc_built", 0)),
                 "legal_arc_build_rate": float(coverage.get("legal_arc_build_rate", 0.0)),
@@ -904,11 +1012,21 @@ def build_complex_patch_coverage_review(
         "reference_pair": reference,
         "false_positive_pairs": false_positive_rows,
         "stable_blocked_pairs": blocked_rows,
+        "all_direct_legal_arc_count": int(complex_coverage.get("all_direct_legal_arc_count", 0)),
+        "all_direct_unique_legal_arc_count": int(complex_coverage.get("all_direct_unique_legal_arc_count", 0)),
+        "entered_main_flow_arc_count": int(complex_coverage.get("entered_main_flow_arc_count", 0)),
+        "traj_supported_arc_count": int(complex_coverage.get("traj_supported_arc_count", 0)),
+        "prior_supported_arc_count": int(complex_coverage.get("prior_supported_arc_count", 0)),
+        "corridor_resolved_arc_count": int(complex_coverage.get("corridor_resolved_arc_count", 0)),
+        "slot_established_arc_count": int(complex_coverage.get("slot_established_arc_count", 0)),
         "legal_arc_total": int(complex_coverage.get("legal_arc_total", 0)),
         "legal_arc_built": int(complex_coverage.get("legal_arc_built", 0)),
         "legal_arc_build_rate": float(complex_coverage.get("legal_arc_build_rate", 0.0)),
+        "traj_support_type_hist": dict(complex_coverage.get("traj_support_type_hist", {})),
         "unbuilt_reason_hist": dict(complex_coverage.get("unbuilt_reason_hist", {})),
+        "unbuilt_stage_hist": dict(complex_coverage.get("unbuilt_stage_hist", {})),
         "top_unbuilt_examples": list(complex_coverage.get("top_unbuilt_examples", [])),
+        "top_recovered_examples": list(complex_coverage.get("top_recovered_examples", [])),
         "built_legal_arc_pairs": [str(item.get("pair", "")) for item in complex_legal_arcs if bool(item.get("built_final_road", False))],
         "target_pair_correctly_blocked": bool(
             target
@@ -945,16 +1063,15 @@ def build_strong_constraint_status(
     return {
         "evaluated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "kept_in_this_round": [
-            {"constraint": "strict_adjacent_pairing_default_not_relaxed", "status": "kept", "evidence": "stable blocked pairs remain non_adjacent_pair_blocked and are not built"},
-            {"constraint": "topology_gate_direction_and_terminal_ownership", "status": "kept", "evidence": "false positive pairs remain blocked and built=false"},
-            {"constraint": "trace_audit_only_not_production_legality", "status": "kept", "evidence": "trace-only false positive pair remains built=false"},
-            {"constraint": "segment_grouping_and_same_pair_topk_still_arc_scoped", "status": "kept", "evidence": "simple patch acceptance remains pass and legal arc coverage is arc-scoped"},
-            {"constraint": "synthetic_bridge_arc_removed_from_production", "status": "kept", "evidence": "arc_legality_audit.summary.synthetic_arc_in_production=false"},
-            {"constraint": "all_built_roads_direct_unique", "status": "kept", "evidence": f"bad_built_arc_count={int(summary.get('bad_built_arc_count', 0))}"},
+            {"constraint": "production_arc_direct_unique_only", "status": "kept", "evidence": f"bad_built_arc_count={int(summary.get('bad_built_arc_count', 0))}"},
+            {"constraint": "strict_adjacent_pairing_default_not_relaxed", "status": "kept", "evidence": "stable blocked pairs remain diagnostic-only"},
+            {"constraint": "trace_audit_only_not_production_legality", "status": "kept", "evidence": "false positive trace-only pair remains built=false"},
+            {"constraint": "synthetic_bridge_arc_removed_from_production", "status": "kept", "evidence": "synthetic_arc_in_production=false"},
+            {"constraint": "traj_prior_attach_as_evidence_not_legality", "status": "kept", "evidence": "legal arc audit still derives from direct+unique topology arc"},
         ],
         "partially_closed_but_not_fixed": [
             {"constraint": "shared_intersection_nodeids_semantics", "status": "partial", "note": "still partial inheritance; not expanded in this round"},
-            {"constraint": "step2_topology_first_architecture", "status": "partial", "note": "Step2 hard-gates production arc legality, but the whole pipeline is not fully topology-first"},
+            {"constraint": "step2_not_full_topology_first", "status": "partial", "note": "full registry is arc-first now, but the whole pipeline is not a full topology-first rewrite"},
             {"constraint": "drivezone_full_containment_construction", "status": "partial", "note": "DriveZone remains posterior ratio/constraint check, not full-containment constructor"},
         ],
         "explicitly_not_touched": [
@@ -983,7 +1100,7 @@ def _render_summary_markdown(
     reference = dict(by_pair.get(_REFERENCE_PAIR, {}))
     audit_summary = dict(arc_legality_audit.get("summary", {}))
     lines = [
-        "# T05 v2 Legal Arc Coverage Summary",
+        "# T05 v2 Arc-First Attach-Evidence Summary",
         "",
         f"- `run_root`: `{run_root}`",
         f"- `generated_at_utc`: `{datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}`",
@@ -994,7 +1111,7 @@ def _render_summary_markdown(
     for item in simple_patch_acceptance.get("patches", []):
         lines.append(
             f"- `{item['patch_id']}`: acceptance_pass={str(item['acceptance_pass']).lower()} "
-            f"legal_arc_total={item['legal_arc_total']} built={item['legal_arc_built']} rate={float(item['legal_arc_build_rate']):.3f}"
+            f"direct_unique={item['entered_main_flow_arc_count']} built={item['legal_arc_built']} rate={float(item['legal_arc_build_rate']):.3f}"
         )
     lines.extend(
         [
@@ -1004,13 +1121,24 @@ def _render_summary_markdown(
             f"- built_arc_count=`{int(audit_summary.get('built_arc_count', 0))}`",
             f"- bad_built_arc_count=`{int(audit_summary.get('bad_built_arc_count', 0))}`",
             f"- built_all_direct_unique=`{str(bool(audit_summary.get('built_all_direct_unique', False))).lower()}`",
+            f"- audit_summary_inconsistent=`{str(bool(audit_summary.get('audit_summary_inconsistent', False))).lower()}`",
             f"- synthetic_arc_in_production=`{str(bool(audit_summary.get('synthetic_arc_in_production', False))).lower()}`",
             "",
-            "## Complex Patch",
+            "## Complex Patch Funnel",
+            "",
+            f"- all_direct={int(complex_review.get('all_direct_legal_arc_count', 0))}",
+            f"- direct_unique={int(complex_review.get('all_direct_unique_legal_arc_count', 0))}",
+            f"- entered_main_flow={int(complex_review.get('entered_main_flow_arc_count', 0))}",
+            f"- traj_supported={int(complex_review.get('traj_supported_arc_count', 0))}",
+            f"- prior_supported={int(complex_review.get('prior_supported_arc_count', 0))}",
+            f"- corridor_resolved={int(complex_review.get('corridor_resolved_arc_count', 0))}",
+            f"- slot_established={int(complex_review.get('slot_established_arc_count', 0))}",
+            f"- built={int(complex_review.get('legal_arc_built', 0))}",
+            "",
+            "## Key Pairs",
             "",
             f"- target `{_BRIDGE_TARGET_PAIR}`: built={str(bool(target.get('built_final_road', False))).lower()} reject=`{target.get('reject_stage', '')}/{target.get('reject_reason', '')}`",
             f"- reference `{_REFERENCE_PAIR}`: built={str(bool(reference.get('built_final_road', False))).lower()} arc=`{reference.get('topology_arc_id', '')}`",
-            f"- complex legal_arc_total={int(complex_review.get('legal_arc_total', 0))} built={int(complex_review.get('legal_arc_built', 0))} rate={float(complex_review.get('legal_arc_build_rate', 0.0)):.3f}",
             "",
             "## Strong Constraints",
             "",
@@ -1022,7 +1150,7 @@ def _render_summary_markdown(
     return "\n".join(lines) + "\n"
 
 
-def write_legal_arc_coverage_review(
+def write_arc_first_attach_evidence_review(
     *,
     run_root: Path | str,
     output_root: Path | str,
@@ -1033,10 +1161,12 @@ def write_legal_arc_coverage_review(
     output_root_path = Path(output_root)
     output_root_path.mkdir(parents=True, exist_ok=True)
     patch_ids = list(simple_patch_ids or ["5417632690143239", "5417632690143326"])
+    all_patch_ids = [*patch_ids, str(complex_patch_id)]
     acceptance_results = [evaluate_patch_acceptance(run_root_path, patch_id) for patch_id in patch_ids]
     pair_decisions = build_pair_decisions(run_root_path, complex_patch_id)
-    arc_legality_audit = build_arc_legality_audit(run_root_path, [*patch_ids, str(complex_patch_id)])
-    legal_arc_coverage = build_legal_arc_coverage(run_root_path, [*patch_ids, str(complex_patch_id)])
+    arc_legality_audit = build_arc_legality_audit(run_root_path, all_patch_ids)
+    legal_arc_coverage = build_legal_arc_coverage(run_root_path, all_patch_ids)
+    arc_evidence_attach_audit = build_arc_evidence_attach_audit(run_root_path, all_patch_ids)
     simple_patch_acceptance = build_simple_patch_acceptance(acceptance_results, legal_arc_coverage)
     simple_patch_regression = build_simple_patch_regression(simple_patch_acceptance)
     complex_review = build_complex_patch_coverage_review(pair_decisions, arc_legality_audit, legal_arc_coverage)
@@ -1045,14 +1175,45 @@ def write_legal_arc_coverage_review(
         arc_legality_audit=arc_legality_audit,
         simple_patch_regression=simple_patch_regression,
     )
+    full_registry_payload = {
+        "evaluated_at_utc": legal_arc_coverage.get("evaluated_at_utc", ""),
+        "patches": [
+            {
+                "patch_id": str(item.get("patch_id", "")),
+                "rows": [dict(row) for row in _patch_full_registry_rows(run_root_path, str(item.get("patch_id", "")))],
+            }
+            for item in legal_arc_coverage.get("patches", [])
+        ],
+    }
+    funnel_payload = {
+        "evaluated_at_utc": legal_arc_coverage.get("evaluated_at_utc", ""),
+        "patches": [
+            {
+                "patch_id": str(item.get("patch_id", "")),
+                "all_direct_legal_arc_count": int(item.get("all_direct_legal_arc_count", 0)),
+                "all_direct_unique_legal_arc_count": int(item.get("all_direct_unique_legal_arc_count", 0)),
+                "entered_main_flow_arc_count": int(item.get("entered_main_flow_arc_count", 0)),
+                "traj_supported_arc_count": int(item.get("traj_supported_arc_count", 0)),
+                "prior_supported_arc_count": int(item.get("prior_supported_arc_count", 0)),
+                "corridor_resolved_arc_count": int(item.get("corridor_resolved_arc_count", 0)),
+                "slot_established_arc_count": int(item.get("slot_established_arc_count", 0)),
+                "built_arc_count": int(item.get("legal_arc_built", 0)),
+            }
+            for item in legal_arc_coverage.get("patches", [])
+        ],
+    }
     for item in acceptance_results:
         write_json(output_root_path / f"acceptance_{item['patch_id']}.json", item)
+    write_json(output_root_path / "full_legal_arc_registry.json", full_registry_payload)
+    write_json(output_root_path / "legal_arc_funnel.json", funnel_payload)
+    write_json(output_root_path / "arc_evidence_attach_audit.json", arc_evidence_attach_audit)
     write_json(output_root_path / "pair_decisions.json", pair_decisions)
     write_json(output_root_path / "arc_legality_audit.json", arc_legality_audit)
     write_json(output_root_path / "legal_arc_coverage.json", legal_arc_coverage)
     write_json(output_root_path / "simple_patch_acceptance.json", simple_patch_acceptance)
     write_json(output_root_path / "simple_patch_regression.json", simple_patch_regression)
     write_json(output_root_path / "complex_patch_coverage_review.json", complex_review)
+    write_json(output_root_path / "complex_patch_funnel_review.json", complex_review)
     write_json(output_root_path / "complex_patch_legality_review.json", complex_review)
     write_json(output_root_path / "strong_constraint_status.json", strong_constraint_status)
     (output_root_path / "SUMMARY.md").write_text(
@@ -1072,12 +1233,28 @@ def write_legal_arc_coverage_review(
         "pair_decisions": pair_decisions,
         "arc_legality_audit": arc_legality_audit,
         "legal_arc_coverage": legal_arc_coverage,
+        "arc_evidence_attach_audit": arc_evidence_attach_audit,
         "simple_patch_acceptance": simple_patch_acceptance,
         "simple_patch_regression": simple_patch_regression,
         "complex_patch_legality_review": complex_review,
         "complex_patch_coverage_review": complex_review,
         "strong_constraint_status": strong_constraint_status,
     }
+
+
+def write_legal_arc_coverage_review(
+    *,
+    run_root: Path | str,
+    output_root: Path | str,
+    simple_patch_ids: list[str] | None = None,
+    complex_patch_id: str = "5417632623039346",
+) -> dict[str, Any]:
+    return write_arc_first_attach_evidence_review(
+        run_root=run_root,
+        output_root=output_root,
+        simple_patch_ids=simple_patch_ids,
+        complex_patch_id=complex_patch_id,
+    )
 
 
 def write_arc_legality_fix_review(
@@ -1087,7 +1264,7 @@ def write_arc_legality_fix_review(
     simple_patch_ids: list[str] | None = None,
     complex_patch_id: str = "5417632623039346",
 ) -> dict[str, Any]:
-    return write_legal_arc_coverage_review(
+    return write_arc_first_attach_evidence_review(
         run_root=run_root,
         output_root=output_root,
         simple_patch_ids=simple_patch_ids,
@@ -1102,7 +1279,7 @@ def write_bridge_trial_review(
     simple_patch_ids: list[str] | None = None,
     complex_patch_id: str = "5417632623039346",
 ) -> dict[str, Any]:
-    return write_legal_arc_coverage_review(
+    return write_arc_first_attach_evidence_review(
         run_root=run_root,
         output_root=output_root,
         simple_patch_ids=simple_patch_ids,
@@ -1111,6 +1288,7 @@ def write_bridge_trial_review(
 
 
 __all__ = [
+    "build_arc_evidence_attach_audit",
     "build_arc_legality_audit",
     "build_complex_patch_coverage_review",
     "build_complex_patch_legality_review",
@@ -1120,6 +1298,7 @@ __all__ = [
     "build_simple_patch_regression",
     "build_strong_constraint_status",
     "evaluate_patch_acceptance",
+    "write_arc_first_attach_evidence_review",
     "write_arc_legality_fix_review",
     "write_bridge_trial_review",
     "write_legal_arc_coverage_review",

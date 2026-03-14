@@ -30,9 +30,11 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.pipeline import (
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.review import (
     evaluate_patch_acceptance,
+    write_arc_first_attach_evidence_review,
     write_arc_legality_fix_review,
     write_legal_arc_coverage_review,
 )
+from highway_topo_poc.modules.t05_topology_between_rc_v2.step2_arc_registry import build_full_legal_arc_registry
 from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_corridor_identity import build_corridor_identities
 
 
@@ -1012,12 +1014,14 @@ def test_t05v2_missing_previous_stage_reports_expected_paths(tmp_path: Path) -> 
 def test_t05v2_unique_witness_based_full_pipeline(tmp_path: Path) -> None:
     patch_id = "unique_corridor"
     data_root = tmp_path / "data"
+    road_fc = _fc([_line_feature([(0.0, 0.0), (100.0, 0.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
     _write_patch(
         data_root,
         patch_id=patch_id,
         intersection_fc=_simple_intersections(),
         drivezone_fc=_fc([_poly_feature([(-5.0, -4.0), (105.0, -4.0), (105.0, 4.0), (-5.0, 4.0)])], "EPSG:3857"),
         traj_tracks=[[(0.0, 0.0), (20.0, 0.0), (50.0, 0.0), (80.0, 0.0), (100.0, 0.0)]],
+        road_fc=road_fc,
     )
     out_root = tmp_path / "out"
     run_full_pipeline(data_root=data_root, patch_id=patch_id, run_id="run3", out_root=out_root)
@@ -1083,9 +1087,10 @@ def test_t05v2_prior_based_for_short_prior_segment(tmp_path: Path) -> None:
     assert any(bp["reason"] == "prior_based_fallback" for bp in gate["soft_breakpoints"])
 
 
-def test_t05v2_unresolved_when_short_segment_has_no_prior(tmp_path: Path) -> None:
+def test_t05v2_short_direct_arc_with_terminal_support_can_build(tmp_path: Path) -> None:
     patch_id = "short_unresolved"
     data_root = tmp_path / "data"
+    road_fc = _fc([_line_feature([(0.0, 0.0), (8.0, 0.0)], {"snodeid": 10, "enodeid": 20})], "EPSG:3857")
     intersection_fc = _fc(
         [
             _line_feature([(0.0, -8.0), (0.0, 8.0)], {"nodeid": 10}),
@@ -1100,6 +1105,7 @@ def test_t05v2_unresolved_when_short_segment_has_no_prior(tmp_path: Path) -> Non
         intersection_fc=intersection_fc,
         drivezone_fc=drivezone_fc,
         traj_tracks=[[(0.0, 0.0), (4.0, 0.0), (8.0, 0.0)]],
+        road_fc=road_fc,
     )
     out_root = tmp_path / "out"
     run_full_pipeline(data_root=data_root, patch_id=patch_id, run_id="run5", out_root=out_root)
@@ -1107,21 +1113,18 @@ def test_t05v2_unresolved_when_short_segment_has_no_prior(tmp_path: Path) -> Non
     gate = _read_json(out_root / "run5" / "patches" / patch_id / "gate.json")
     roads = _read_json(out_root / "run5" / "patches" / patch_id / "Road.geojson")
     reason_trace = _read_json(out_root / "run5" / "patches" / patch_id / "debug" / "reason_trace.json")
-    assert metrics["segments"][0]["corridor_identity"] == "unresolved"
-    assert int(metrics["no_geometry_candidate_count"]) == 1
-    assert str(metrics["no_geometry_candidate_reason"]) != ""
-    assert bool(metrics["segments"][0]["no_geometry_candidate"]) is True
-    assert str(metrics["segments"][0]["no_geometry_candidate_reason"]) != ""
-    assert metrics["segments"][0]["failure_classification"] == "unresolved_corridor"
-    assert reason_trace["road_results"][0]["failure_classification"] == "unresolved_corridor"
-    assert len(roads["features"]) == 0
-    assert bool(gate["overall_pass"]) is False
-    assert gate["hard_breakpoints"]
+    assert metrics["segments"][0]["corridor_identity"] == "witness_based"
+    assert int(metrics["no_geometry_candidate_count"]) == 0
+    assert metrics["segments"][0]["failure_classification"] == "built"
+    assert reason_trace["road_results"][0]["failure_classification"] == "built"
+    assert len(roads["features"]) == 1
+    assert bool(gate["overall_pass"]) is True
 
 
 def test_t05v2_slot_mapping_uses_witness_fraction_not_nearest_point(tmp_path: Path) -> None:
     patch_id = "slot_fraction"
     data_root = tmp_path / "data"
+    road_fc = _fc([_line_feature([(0.0, -6.0), (100.0, 6.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
     drivezone_fc = _fc(
         [
             _poly_feature([(-5.0, 4.0), (105.0, 4.0), (105.0, 8.0), (-5.0, 8.0)]),
@@ -1136,6 +1139,7 @@ def test_t05v2_slot_mapping_uses_witness_fraction_not_nearest_point(tmp_path: Pa
         intersection_fc=_simple_intersections(),
         drivezone_fc=drivezone_fc,
         traj_tracks=[[(0.0, -6.0), (20.0, -6.0), (30.0, 0.0), (40.0, 6.0), (70.0, 6.0), (100.0, 6.0)]],
+        road_fc=road_fc,
     )
     out_root = tmp_path / "out"
     run_full_pipeline(data_root=data_root, patch_id=patch_id, run_id="run6", out_root=out_root)
@@ -1145,6 +1149,80 @@ def test_t05v2_slot_mapping_uses_witness_fraction_not_nearest_point(tmp_path: Pa
     assert metrics["segments"][0]["corridor_identity"] == "witness_based"
     assert start_y > 4.0
     assert abs(start_y - (-6.0)) > 5.0
+
+
+def test_t05v2_arc_first_registry_enters_direct_unique_arc_without_selected_segment() -> None:
+    topology = {
+        "pair_arcs": {
+            (1, 2): [
+                {
+                    "arc_id": "arc_1_2_1",
+                    "source": "direct_topology_arc",
+                    "node_path": [1, 2],
+                    "edge_ids": ["edge_12"],
+                    "line_coords": [(0.0, 0.0), (100.0, 0.0)],
+                    "chain_len": 1,
+                }
+            ]
+        }
+    }
+    registry = build_full_legal_arc_registry(topology=topology, selected_segments=[])
+    assert int(registry["summary"]["all_direct_legal_arc_count"]) == 1
+    assert int(registry["summary"]["all_direct_unique_legal_arc_count"]) == 1
+    assert int(registry["summary"]["entered_main_flow_arc_count"]) == 1
+    row = registry["rows"][0]
+    assert bool(row["entered_main_flow"]) is True
+    assert int(row["selected_segment_count"]) == 0
+    assert row["working_segment_source"] == ""
+
+
+def test_t05v2_arc_first_partial_support_recovers_same_arc_without_terminal_crossing(tmp_path: Path) -> None:
+    patch_id = "arc_first_partial"
+    data_root = tmp_path / "data"
+    road_fc = _fc([_line_feature([(0.0, 0.0), (100.0, 0.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=_simple_intersections(),
+        drivezone_fc=_fc([_poly_feature([(-5.0, -4.0), (105.0, -4.0), (105.0, 4.0), (-5.0, 4.0)])], "EPSG:3857"),
+        traj_tracks=[[(20.0, 0.0), (40.0, 0.0), (60.0, 0.0), (80.0, 0.0)]],
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_arcfirst1", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_arcfirst1", out_root=out_root)
+    run_stage(stage="step3_witness", data_root=data_root, patch_id=patch_id, run_id="run_arcfirst1", out_root=out_root)
+    step3_payload = _read_json(out_root / "run_arcfirst1" / "patches" / patch_id / "step3" / "witnesses.json")
+    row = step3_payload["full_legal_arc_registry"][0]
+    assert bool(row["entered_main_flow"]) is True
+    assert row["traj_support_type"] == "partial_arc_support"
+    assert float(row["traj_support_coverage_ratio"]) > 0.18
+    assert row["working_segment_source"] in {"arc_first_materialized_segment", "step2_selected_segment"}
+
+
+def test_t05v2_arc_first_stitched_support_uses_same_arc_fragments(tmp_path: Path) -> None:
+    patch_id = "arc_first_stitched"
+    data_root = tmp_path / "data"
+    road_fc = _fc([_line_feature([(0.0, 0.0), (100.0, 0.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=_simple_intersections(),
+        drivezone_fc=_fc([_poly_feature([(-5.0, -4.0), (105.0, -4.0), (105.0, 4.0), (-5.0, 4.0)])], "EPSG:3857"),
+        traj_tracks=[
+            [(5.0, 0.0), (20.0, 0.0), (35.0, 0.0), (45.0, 0.0)],
+            [(55.0, 0.0), (70.0, 0.0), (85.0, 0.0), (95.0, 0.0)],
+        ],
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_arcfirst2", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_arcfirst2", out_root=out_root)
+    run_stage(stage="step3_witness", data_root=data_root, patch_id=patch_id, run_id="run_arcfirst2", out_root=out_root)
+    step3_payload = _read_json(out_root / "run_arcfirst2" / "patches" / patch_id / "step3" / "witnesses.json")
+    row = step3_payload["full_legal_arc_registry"][0]
+    assert row["traj_support_type"] == "stitched_arc_support"
+    assert float(row["traj_support_coverage_ratio"]) >= 0.72
 
 
 def test_t05v2_divstrip_blocks_final_road(tmp_path: Path) -> None:
@@ -1910,15 +1988,19 @@ def test_t05v2_review_writes_arc_legality_bundle(tmp_path: Path) -> None:
     assert bool(acceptance["acceptance_pass"]) is True
 
     output_root = tmp_path / "bundle"
-    summary = write_arc_legality_fix_review(run_root=run_root, output_root=output_root)
+    summary = write_arc_first_attach_evidence_review(run_root=run_root, output_root=output_root)
     assert (output_root / "acceptance_5417632690143239.json").exists()
     assert (output_root / "acceptance_5417632690143326.json").exists()
+    assert (output_root / "full_legal_arc_registry.json").exists()
+    assert (output_root / "legal_arc_funnel.json").exists()
+    assert (output_root / "arc_evidence_attach_audit.json").exists()
     assert (output_root / "pair_decisions.json").exists()
     assert (output_root / "arc_legality_audit.json").exists()
     assert (output_root / "legal_arc_coverage.json").exists()
     assert (output_root / "simple_patch_acceptance.json").exists()
     assert (output_root / "strong_constraint_status.json").exists()
     assert (output_root / "simple_patch_regression.json").exists()
+    assert (output_root / "complex_patch_funnel_review.json").exists()
     assert (output_root / "complex_patch_legality_review.json").exists()
     assert (output_root / "complex_patch_coverage_review.json").exists()
     assert (output_root / "SUMMARY.md").exists()
@@ -1999,8 +2081,12 @@ def test_t05v2_write_legal_arc_coverage_review_outputs_new_bundle(tmp_path: Path
 
     output_root = tmp_path / "bundle_new"
     summary = write_legal_arc_coverage_review(run_root=run_root, output_root=output_root)
+    assert (output_root / "full_legal_arc_registry.json").exists()
+    assert (output_root / "legal_arc_funnel.json").exists()
+    assert (output_root / "arc_evidence_attach_audit.json").exists()
     assert (output_root / "legal_arc_coverage.json").exists()
     assert (output_root / "simple_patch_acceptance.json").exists()
+    assert (output_root / "complex_patch_funnel_review.json").exists()
     assert (output_root / "complex_patch_coverage_review.json").exists()
     assert "legal_arc_coverage" in summary
 
@@ -2009,12 +2095,14 @@ def test_t05v2_scripts_stepwise_state_resume(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     patch_id = "script_resume"
     data_root = tmp_path / "data"
+    road_fc = _fc([_line_feature([(0.0, 0.0), (100.0, 0.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
     _write_patch(
         data_root,
         patch_id=patch_id,
         intersection_fc=_simple_intersections(),
         drivezone_fc=_fc([_poly_feature([(-5.0, -4.0), (105.0, -4.0), (105.0, 4.0), (-5.0, 4.0)])], "EPSG:3857"),
         traj_tracks=[[(0.0, 0.0), (20.0, 0.0), (50.0, 0.0), (100.0, 0.0)]],
+        road_fc=road_fc,
     )
     out_root = tmp_path / "out"
     run_id = "script_run"
