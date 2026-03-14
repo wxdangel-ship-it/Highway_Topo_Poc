@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from shapely.geometry import LineString, mapping, shape
 from shapely.geometry.base import BaseGeometry
@@ -38,6 +38,10 @@ class TrajectoryData:
     xyz_metric: tuple[tuple[float, float, float], ...]
     seq: tuple[int, ...]
     source_path: Path
+    source_traj_id: str = ""
+    segment_index: int = 1
+    timestamps_s: tuple[float, ...] = ()
+    split_applied: bool = False
 
 
 @dataclass(frozen=True)
@@ -106,6 +110,227 @@ class InputFrame:
             node_count=int(payload.get("node_count", 0)),
             input_summary=dict(payload.get("input_summary") or {}),
         )
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        return int(value)
+    except Exception:
+        return None
+
+
+def _to_float(value: Any) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float("nan")
+
+
+def _extract_seq(props: dict[str, Any], *, fallback_idx: int) -> int:
+    for key in ("seq", "frame_id", "idx", "index"):
+        if key not in props:
+            continue
+        seq_i = _safe_int(props.get(key))
+        if seq_i is not None:
+            return int(seq_i)
+        seq_f = _to_float(props.get(key))
+        if math.isfinite(seq_f):
+            return int(round(float(seq_f)))
+    ts_s = _extract_timestamp_s(props)
+    if ts_s is not None and math.isfinite(float(ts_s)):
+        return int(round(float(ts_s) * 1000.0))
+    return int(fallback_idx)
+
+
+def _extract_timestamp_s(props: dict[str, Any]) -> float | None:
+    for key in ("time_stamp", "timestamp", "ts", "time", "timeStamp"):
+        if key not in props:
+            continue
+        ts_s = _parse_timestamp_s(props.get(key))
+        if ts_s is not None and math.isfinite(float(ts_s)):
+            return float(ts_s)
+    return None
+
+
+def _parse_timestamp_s(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        fv = float(value)
+        if math.isfinite(fv):
+            return _normalize_epoch_seconds(fv)
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    numeric = _to_float(text)
+    if math.isfinite(numeric):
+        return _normalize_epoch_seconds(float(numeric))
+    try:
+        return float(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+    except Exception:
+        return None
+
+
+def _normalize_epoch_seconds(value: float) -> float:
+    abs_value = abs(float(value))
+    if abs_value > 1e14:
+        return float(value) / 1_000_000.0
+    if abs_value > 1e11:
+        return float(value) / 1000.0
+    return float(value)
+
+
+def _init_traj_split_stats() -> dict[str, Any]:
+    return {
+        "traj_source_count": 0,
+        "traj_segment_count": 0,
+        "traj_split_source_count": 0,
+        "traj_split_by_distance_count": 0,
+        "traj_split_by_time_count": 0,
+        "traj_split_by_seq_count": 0,
+        "_distance_gaps": [],
+        "_time_gaps": [],
+        "_seq_gaps": [],
+        "_split_examples": [],
+    }
+
+
+def _safe_percentile_value(values: Sequence[float] | Sequence[int], q: float) -> float | None:
+    cleaned = sorted(float(v) for v in values if math.isfinite(float(v)))
+    if not cleaned:
+        return None
+    if len(cleaned) == 1:
+        return float(cleaned[0])
+    q_clamped = max(0.0, min(100.0, float(q)))
+    rank = (len(cleaned) - 1) * (q_clamped / 100.0)
+    lo = int(math.floor(rank))
+    hi = int(math.ceil(rank))
+    if lo == hi:
+        return float(cleaned[lo])
+    weight = float(rank - lo)
+    return float(cleaned[lo] * (1.0 - weight) + cleaned[hi] * weight)
+
+
+def _safe_max_value(values: Sequence[float] | Sequence[int]) -> float | None:
+    cleaned = [float(v) for v in values if math.isfinite(float(v))]
+    if not cleaned:
+        return None
+    return float(max(cleaned))
+
+
+def _finalize_traj_split_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    out = {k: v for k, v in stats.items() if not str(k).startswith("_")}
+    out["traj_split_distance_gap_m_p50"] = _safe_percentile_value(stats.get("_distance_gaps", []), 50.0)
+    out["traj_split_distance_gap_m_p90"] = _safe_percentile_value(stats.get("_distance_gaps", []), 90.0)
+    out["traj_split_distance_gap_m_max"] = _safe_max_value(stats.get("_distance_gaps", []))
+    out["traj_split_time_gap_s_p50"] = _safe_percentile_value(stats.get("_time_gaps", []), 50.0)
+    out["traj_split_time_gap_s_p90"] = _safe_percentile_value(stats.get("_time_gaps", []), 90.0)
+    out["traj_split_time_gap_s_max"] = _safe_max_value(stats.get("_time_gaps", []))
+    out["traj_split_seq_gap_p50"] = _safe_percentile_value(stats.get("_seq_gaps", []), 50.0)
+    out["traj_split_seq_gap_p90"] = _safe_percentile_value(stats.get("_seq_gaps", []), 90.0)
+    out["traj_split_seq_gap_max"] = _safe_max_value(stats.get("_seq_gaps", []))
+    out["traj_split_examples"] = list(stats.get("_split_examples", []))[:20]
+    return out
+
+
+def _split_ordered_trajectory(
+    *,
+    coords: list[tuple[float, float, float]],
+    seq: list[int],
+    timestamps_s: list[float],
+    source_traj_id: str,
+    source_path: Path,
+    traj_split_max_gap_m: float,
+    traj_split_max_time_gap_s: float,
+    traj_split_max_seq_gap: int,
+    split_stats: dict[str, Any],
+) -> list[TrajectoryData]:
+    if len(coords) < 2:
+        return []
+    split_points: list[int] = [0]
+    source_split = False
+    for idx in range(1, len(coords)):
+        prev = coords[idx - 1]
+        curr = coords[idx]
+        dist_gap_m = math.hypot(float(curr[0]) - float(prev[0]), float(curr[1]) - float(prev[1]))
+        ts_prev = float(timestamps_s[idx - 1]) if idx - 1 < len(timestamps_s) else float("nan")
+        ts_curr = float(timestamps_s[idx]) if idx < len(timestamps_s) else float("nan")
+        time_gap_s = float(ts_curr - ts_prev) if math.isfinite(ts_prev) and math.isfinite(ts_curr) else float("nan")
+        seq_gap = int(seq[idx] - seq[idx - 1]) if idx < len(seq) else 0
+        effective_dist_threshold_m = float(traj_split_max_gap_m)
+        if not math.isfinite(time_gap_s) and abs(int(seq_gap)) <= 1:
+            effective_dist_threshold_m = max(float(traj_split_max_gap_m), float(traj_split_max_gap_m) * 2.5)
+        reasons: list[str] = []
+        if math.isfinite(dist_gap_m) and dist_gap_m > float(effective_dist_threshold_m):
+            reasons.append("distance")
+            split_stats["traj_split_by_distance_count"] += 1
+            split_stats["_distance_gaps"].append(float(dist_gap_m))
+        if math.isfinite(time_gap_s) and time_gap_s > float(traj_split_max_time_gap_s):
+            reasons.append("time")
+            split_stats["traj_split_by_time_count"] += 1
+            split_stats["_time_gaps"].append(float(time_gap_s))
+        if int(seq_gap) > int(traj_split_max_seq_gap):
+            reasons.append("seq")
+            split_stats["traj_split_by_seq_count"] += 1
+            split_stats["_seq_gaps"].append(int(seq_gap))
+        if not reasons:
+            continue
+        source_split = True
+        split_points.append(int(idx))
+        split_stats["_split_examples"].append(
+            {
+                "source_traj_id": str(source_traj_id),
+                "break_after_segment_index": int(len(split_points) - 1),
+                "source_path": source_path.as_posix(),
+                "reason": "+".join(reasons),
+                "distance_gap_m": round(float(dist_gap_m), 3) if math.isfinite(dist_gap_m) else None,
+                "time_gap_s": round(float(time_gap_s), 3) if math.isfinite(time_gap_s) else None,
+                "seq_gap": int(seq_gap),
+                "prev_seq": int(seq[idx - 1]),
+                "next_seq": int(seq[idx]),
+            }
+        )
+    split_points.append(int(len(coords)))
+    if source_split:
+        split_stats["traj_split_source_count"] += 1
+    out: list[TrajectoryData] = []
+    for seg_idx, (start_idx, end_idx) in enumerate(zip(split_points[:-1], split_points[1:]), start=1):
+        seg_coords = tuple(coords[start_idx:end_idx])
+        if len(seg_coords) < 2:
+            continue
+        out.append(
+            TrajectoryData(
+                traj_id=f"{source_traj_id}__seg{seg_idx:04d}",
+                xyz_metric=seg_coords,
+                seq=tuple(int(v) for v in seq[start_idx:end_idx]),
+                source_path=source_path,
+                source_traj_id=str(source_traj_id),
+                segment_index=int(seg_idx),
+                timestamps_s=tuple(float(v) for v in timestamps_s[start_idx:end_idx]),
+                split_applied=bool(source_split),
+            )
+        )
+        split_stats["traj_segment_count"] += 1
+    if out:
+        return out
+    split_stats["traj_segment_count"] += 1
+    return [
+        TrajectoryData(
+            traj_id=str(source_traj_id),
+            xyz_metric=tuple(coords),
+            seq=tuple(int(v) for v in seq),
+            source_path=source_path,
+            source_traj_id=str(source_traj_id),
+            segment_index=1,
+            timestamps_s=tuple(float(v) for v in timestamps_s),
+            split_applied=False,
+        )
+    ]
 
 
 def resolve_repo_root(start: Path) -> Path:
@@ -400,16 +625,27 @@ def _extract_polygon_union(payload: dict[str, Any]) -> BaseGeometry | None:
     return None if merged is None or merged.is_empty else merged
 
 
-def _load_trajectories(traj_dir: Path, *, dst_crs: str) -> tuple[TrajectoryData, ...]:
+def _load_trajectories(
+    traj_dir: Path,
+    *,
+    dst_crs: str,
+    traj_split_max_gap_m: float,
+    traj_split_max_time_gap_s: float,
+    traj_split_max_seq_gap: int,
+) -> tuple[tuple[TrajectoryData, ...], dict[str, Any]]:
     if not traj_dir.is_dir():
         raise InputDataError(f"trajectory_dir_missing:{traj_dir}")
     out: list[TrajectoryData] = []
+    split_stats = _init_traj_split_stats()
     for path in sorted(traj_dir.glob(f"*/{_TRAJ_FILE_NAME}")):
         try:
             payload = _load_fc(path, src_hint="auto", dst_crs=dst_crs)
         except Exception:
             continue
-        pts: list[tuple[float, float, float, int]] = []
+        split_stats["traj_source_count"] += 1
+        pts: list[tuple[float, float, float]] = []
+        seqs: list[int] = []
+        timestamps_s: list[float] = []
         for idx, feat in enumerate(payload.get("features", [])):
             try:
                 geom = shape(feat.get("geometry"))
@@ -418,20 +654,32 @@ def _load_trajectories(traj_dir: Path, *, dst_crs: str) -> tuple[TrajectoryData,
             if geom.is_empty or geom.geom_type != "Point":
                 continue
             props = feat.get("properties") or {}
-            seq = props.get("seq", props.get("frame_id", props.get("index", idx)))
-            try:
-                seq_i = int(seq)
-            except Exception:
-                seq_i = int(idx)
+            seq_i = _extract_seq(props, fallback_idx=idx)
+            ts_s = _extract_timestamp_s(props)
             z = float(geom.z) if getattr(geom, "has_z", False) else 0.0
-            pts.append((float(geom.x), float(geom.y), float(z), seq_i))
-        pts.sort(key=lambda item: int(item[3]))
-        coords = tuple((float(x), float(y), float(z)) for x, y, z, _seq in pts)
-        seqs = tuple(int(seq) for *_xyz, seq in pts)
-        if len(coords) < 2:
+            pts.append((float(geom.x), float(geom.y), float(z)))
+            seqs.append(int(seq_i))
+            timestamps_s.append(float(ts_s) if ts_s is not None and math.isfinite(float(ts_s)) else float("nan"))
+        if len(pts) < 2:
             continue
-        out.append(TrajectoryData(traj_id=str(path.parent.name), xyz_metric=coords, seq=seqs, source_path=path))
-    return tuple(out)
+        ordered_rows = sorted(zip(seqs, pts, timestamps_s), key=lambda item: int(item[0]))
+        ordered_seqs = [int(item[0]) for item in ordered_rows]
+        ordered_pts = [tuple(float(v) for v in item[1]) for item in ordered_rows]
+        ordered_ts = [float(item[2]) for item in ordered_rows]
+        out.extend(
+            _split_ordered_trajectory(
+                coords=ordered_pts,
+                seq=ordered_seqs,
+                timestamps_s=ordered_ts,
+                source_traj_id=str(path.parent.name),
+                source_path=path,
+                traj_split_max_gap_m=float(traj_split_max_gap_m),
+                traj_split_max_time_gap_s=float(traj_split_max_time_gap_s),
+                traj_split_max_seq_gap=int(traj_split_max_seq_gap),
+                split_stats=split_stats,
+            )
+        )
+    return tuple(out), _finalize_traj_split_stats(split_stats)
 
 
 def load_divstrip_buffer(divstrip_zone_metric: BaseGeometry | None, gore_buffer_m: float) -> BaseGeometry | None:
@@ -486,7 +734,13 @@ def load_inputs_and_frame(
         raise InputDataError(f"drivezone_empty:{drivezone_path}")
     lane_lines = _extract_line_strings(lane_fc)
     divstrip = _extract_polygon_union(div_fc)
-    trajectories = _load_trajectories(traj_dir, dst_crs="EPSG:3857")
+    trajectories, traj_split_stats = _load_trajectories(
+        traj_dir,
+        dst_crs="EPSG:3857",
+        traj_split_max_gap_m=float(params.get("TRAJ_SPLIT_MAX_GAP_M", 10.0)),
+        traj_split_max_time_gap_s=float(params.get("TRAJ_SPLIT_MAX_TIME_GAP_S", 1.0)),
+        traj_split_max_seq_gap=int(params.get("TRAJ_SPLIT_MAX_SEQ_GAP", 20000000)),
+    )
     if not trajectories:
         raise InputDataError(f"trajectory_missing:{traj_dir}")
     prior_roads: list[Any] = []
@@ -526,6 +780,7 @@ def load_inputs_and_frame(
             "road_prior_count": int(len(prior_roads)),
             "node_count": int(len(node_records)),
             "pseudo_xsec_count": int(pseudo_xsec_count),
+            **dict(traj_split_stats),
         },
     )
     frame = InputFrame(

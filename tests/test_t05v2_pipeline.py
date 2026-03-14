@@ -1048,6 +1048,158 @@ def test_t05v2_same_pair_multi_arc_finalizes_in_step3_and_writes_review(tmp_path
     assert review_by_arc["arc_1_2_2"]["multi_arc_evidence_mode"] == "fallback_based"
 
 
+def test_t05v2_step1_splits_large_gap_trajectory_and_step3_writes_split_preprocessed_lines(tmp_path: Path) -> None:
+    patch_id = "traj_split_preprocessed"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -10.0), (0.0, 10.0)], {"nodeid": 1}),
+            _line_feature([(45.0, -10.0), (45.0, 10.0)], {"nodeid": 2}),
+        ],
+        "EPSG:3857",
+    )
+    road_fc = _fc([_line_feature([(0.0, 0.0), (45.0, 0.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=intersection_fc,
+        drivezone_fc=_fc([_poly_feature([(-5.0, -4.0), (50.0, -4.0), (50.0, 4.0), (-5.0, 4.0)])], "EPSG:3857"),
+        traj_tracks=[[(0.0, 0.0), (5.0, 0.0), (40.0, 0.0), (45.0, 0.0)]],
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_split", out_root=out_root)
+    frame_payload = _read_json(out_root / "run_split" / "patches" / patch_id / "step1" / "input_frame.json")
+    assert int(frame_payload["input_frame"]["trajectory_count"]) == 2
+    input_summary = frame_payload["input_frame"]["input_summary"]
+    assert int(input_summary["traj_source_count"]) == 1
+    assert int(input_summary["traj_segment_count"]) == 2
+    assert int(input_summary["traj_split_source_count"]) == 1
+
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_split", out_root=out_root)
+    run_stage(stage="step3_witness", data_root=data_root, patch_id=patch_id, run_id="run_split", out_root=out_root)
+    preprocessed = _read_json(out_root / "run_split" / "patches" / patch_id / "step3" / "preprocessed_traj_lines.geojson")
+    assert len(preprocessed["features"]) == 2
+    traj_ids = {str(item["properties"]["traj_id"]) for item in preprocessed["features"]}
+    assert traj_ids == {"traj_00__seg0001", "traj_00__seg0002"}
+    assert {int(item["properties"]["segment_index"]) for item in preprocessed["features"]} == {1, 2}
+    assert all(str(item["properties"]["source_traj_id"]) == "traj_00" for item in preprocessed["features"])
+
+
+def test_t05v2_arc_first_partial_support_uses_effective_points_without_internal_flyline(tmp_path: Path) -> None:
+    patch_id = "arc_first_partial_clean_points"
+    data_root = tmp_path / "data"
+    road_fc = _fc([_line_feature([(0.0, 0.0), (100.0, 0.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=_simple_intersections(),
+        drivezone_fc=_fc([_poly_feature([(-5.0, -4.0), (105.0, -4.0), (105.0, 4.0), (-5.0, 4.0)])], "EPSG:3857"),
+        traj_tracks=[[(20.0, 0.0), (40.0, 0.0), (50.0, 20.0), (60.0, 0.0), (80.0, 0.0)]],
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_partial_clean", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_partial_clean", out_root=out_root)
+    run_stage(stage="step3_witness", data_root=data_root, patch_id=patch_id, run_id="run_partial_clean", out_root=out_root)
+    step3_payload = _read_json(out_root / "run_partial_clean" / "patches" / patch_id / "step3" / "witnesses.json")
+    row = step3_payload["full_legal_arc_registry"][0]
+    assert row["traj_support_type"] == "partial_arc_support"
+    assert row["traj_support_segments"]
+    line_coords = row["traj_support_segments"][0]["line_coords"]
+    assert {round(float(coord[1]), 6) for coord in line_coords} == {0.0}
+
+
+def test_t05v2_same_pair_support_deconflict_assigns_distinct_support_sides(tmp_path: Path) -> None:
+    from highway_topo_poc.modules.t05_topology_between_rc_v2 import pipeline as pipeline_module
+
+    patch_id = "same_pair_support_deconflict"
+    data_root = tmp_path / "data"
+    intersection_fc = _fc(
+        [
+            _line_feature([(0.0, -10.0), (0.0, 10.0)], {"nodeid": 1}),
+            _line_feature([(100.0, -10.0), (100.0, 10.0)], {"nodeid": 2}),
+        ],
+        "EPSG:3857",
+    )
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=intersection_fc,
+        drivezone_fc=_fc([_poly_feature([(-5.0, -2.0), (105.0, -2.0), (105.0, 6.0), (-5.0, 6.0)])], "EPSG:3857"),
+        traj_tracks=[
+            [(0.0, 0.0), (100.0, 0.0)],
+            [(0.0, 4.0), (100.0, 4.0)],
+        ],
+        road_fc=_fc(
+            [
+                _line_feature([(0.0, 2.0), (100.0, 2.0)], {"snodeid": 1, "enodeid": 2}),
+            ],
+            "EPSG:3857",
+        ),
+    )
+    inputs, frame, prior_roads = pipeline_module.load_inputs_and_frame(data_root, patch_id, params=DEFAULT_PARAMS)
+    full_registry_rows = [
+        {
+            "pair": "1:2",
+            "canonical_pair": "1:2",
+            "src": 1,
+            "dst": 2,
+            "topology_arc_id": "arc_1_2_1",
+            "topology_arc_source_type": "direct_topology_arc",
+            "edge_ids": ["edge_low"],
+            "node_path": [1, 10, 2],
+            "line_coords": [[0.0, 2.0], [100.0, 2.0]],
+            "is_direct_legal": True,
+            "is_unique": False,
+            "entered_main_flow": False,
+            "selected_segment_count": 0,
+            "same_pair_multi_arc_candidate": True,
+            "same_pair_provisional_allowed": True,
+            "same_pair_distinct_path_signal": ["distinct_topology_edge_signal"],
+            "topology_arc_assignment_mode": "same_pair_line_anchor_geometry_fit",
+            "working_segment_source": "",
+            "unbuilt_stage": "step3_same_pair_evidence_pending",
+            "unbuilt_reason": "same_pair_multi_arc_candidate_pending_step3",
+        },
+        {
+            "pair": "1:2",
+            "canonical_pair": "1:2",
+            "src": 1,
+            "dst": 2,
+            "topology_arc_id": "arc_1_2_2",
+            "topology_arc_source_type": "direct_topology_arc",
+            "edge_ids": ["edge_high"],
+            "node_path": [1, 11, 2],
+            "line_coords": [[0.0, 2.0], [100.0, 2.0]],
+            "is_direct_legal": True,
+            "is_unique": False,
+            "entered_main_flow": False,
+            "selected_segment_count": 0,
+            "same_pair_multi_arc_candidate": True,
+            "same_pair_provisional_allowed": True,
+            "same_pair_distinct_path_signal": ["distinct_topology_edge_signal"],
+            "topology_arc_assignment_mode": "same_pair_line_anchor_geometry_fit",
+            "working_segment_source": "",
+            "unbuilt_stage": "step3_same_pair_evidence_pending",
+            "unbuilt_reason": "same_pair_multi_arc_candidate_pending_step3",
+        },
+    ]
+    evidence = build_arc_evidence_attach(
+        full_registry_rows=full_registry_rows,
+        selected_segments=[],
+        inputs=inputs,
+        frame=frame,
+        prior_roads=prior_roads,
+        params=DEFAULT_PARAMS,
+    )
+    rows = {str(item["topology_arc_id"]): item for item in evidence["rows"]}
+    assert rows["arc_1_2_1"]["selected_support_traj_id"] != rows["arc_1_2_2"]["selected_support_traj_id"]
+    assert rows["arc_1_2_1"]["support_surface_side_signature"] != rows["arc_1_2_2"]["support_surface_side_signature"]
+    assert rows["arc_1_2_1"]["production_multi_arc_allowed"] is True
+    assert rows["arc_1_2_2"]["production_multi_arc_allowed"] is True
+
+
 def test_t05v2_step2_writes_traj_crossing_and_support_audits(tmp_path: Path) -> None:
     patch_id = "traj_audit"
     data_root = tmp_path / "data"

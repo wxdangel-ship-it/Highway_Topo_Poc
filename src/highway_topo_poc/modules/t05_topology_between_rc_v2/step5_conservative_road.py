@@ -329,6 +329,9 @@ def _slot_surface_anchor_point(
             slot_geom = max(line_components, key=lambda item: float(item.length))
         elif isinstance(clipped, Point):
             return clipped
+    if str(getattr(slot, "method", "")) == "fraction_match":
+        if isinstance(slot_geom, LineString) and float(slot_geom.length) > 1e-6:
+            return slot_geom.interpolate(0.5, normalized=True)
     try:
         return nearest_points(slot_geom, reference_line)[0]
     except Exception:

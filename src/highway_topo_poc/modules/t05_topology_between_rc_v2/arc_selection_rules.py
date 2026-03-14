@@ -120,6 +120,8 @@ def _support_signature(row: dict[str, Any]) -> tuple[Any, ...]:
         tuple(sorted(str(v) for v in row.get("traj_support_ids", []))),
         src_anchor,
         dst_anchor,
+        tuple(row.get("support_corridor_signature") or []),
+        tuple(row.get("support_surface_side_signature") or []),
     )
 
 
@@ -144,6 +146,10 @@ def _same_pair_path_distinguishable(row: dict[str, Any], peer: dict[str, Any]) -
     if tuple(_node_path(row)) != tuple(_node_path(peer)):
         return True
     if _line_signature(row) != _line_signature(peer):
+        return True
+    if tuple(row.get("support_corridor_signature") or []) != tuple(peer.get("support_corridor_signature") or []):
+        return True
+    if tuple(row.get("support_surface_side_signature") or []) != tuple(peer.get("support_surface_side_signature") or []):
         return True
     return (
         tuple(row.get("support_anchor_src_coords") or []) != tuple(peer.get("support_anchor_src_coords") or [])
@@ -205,6 +211,10 @@ def detect_same_pair_diverge_merge_structure(
         }
     ) >= 2:
         distinct_signals.append("distinct_anchor_path_signal")
+    if len({tuple(item.get("support_corridor_signature") or []) for item in same_pair_rows if item.get("support_corridor_signature")}) >= 2:
+        distinct_signals.append("distinct_support_corridor_signal")
+    if len({tuple(item.get("support_surface_side_signature") or []) for item in same_pair_rows if item.get("support_surface_side_signature")}) >= 2:
+        distinct_signals.append("distinct_support_side_signal")
     path_signature_count = int(len({_same_pair_path_signature(item) for item in same_pair_rows}))
     peer_arc_ids = sorted(
         {

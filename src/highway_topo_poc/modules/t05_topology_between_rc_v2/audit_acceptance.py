@@ -2242,6 +2242,13 @@ def build_same_pair_provisional_allow_review(
                 "topology_arc_assignment_anchor_fit_m": row.get("topology_arc_assignment_anchor_fit_m"),
                 "topology_arc_assignment_geometry_fit_m": row.get("topology_arc_assignment_geometry_fit_m"),
                 "topology_arc_assignment_score_gap_m": row.get("topology_arc_assignment_score_gap_m"),
+                "selected_support_traj_id": str(row.get("selected_support_traj_id", "")),
+                "selected_support_segment_traj_id": str(
+                    row.get("selected_support_segment_traj_id", row.get("selected_support_traj_id", ""))
+                ),
+                "support_corridor_signature": list(row.get("support_corridor_signature", [])),
+                "support_surface_side_signature": list(row.get("support_surface_side_signature", [])),
+                "same_pair_support_deconflict_reason": str(row.get("same_pair_support_deconflict_reason", "")),
                 "multi_arc_evidence_mode": str(
                     row.get("multi_arc_evidence_mode", pair_decision.get("multi_arc_evidence_mode", ""))
                 ),
@@ -2348,6 +2355,21 @@ def build_multi_arc_review(
                 "witness_based_arc_ids": [str(v) for v in (rule_row.get("witness_based_arc_ids") or witness_based_arc_ids) if str(v)],
                 "fallback_based_arc_ids": [str(v) for v in (rule_row.get("fallback_based_arc_ids") or fallback_based_arc_ids) if str(v)],
                 "evidence_modes": dict(rule_row.get("evidence_modes", evidence_modes)),
+                "support_corridor_signatures": {
+                    str(row.get("topology_arc_id", "")): list(row.get("support_corridor_signature", []))
+                    for row in pair_registry_rows
+                    if str(row.get("topology_arc_id", ""))
+                },
+                "support_surface_side_signatures": {
+                    str(row.get("topology_arc_id", "")): list(row.get("support_surface_side_signature", []))
+                    for row in pair_registry_rows
+                    if str(row.get("topology_arc_id", ""))
+                },
+                "same_pair_support_deconflict_reasons": {
+                    str(row.get("topology_arc_id", "")): str(row.get("same_pair_support_deconflict_reason", ""))
+                    for row in pair_registry_rows
+                    if str(row.get("topology_arc_id", ""))
+                },
                 "rule_reason": str(rule_row.get("rule_reason", "")),
                 "entered_main_flow": bool(entered_main_flow),
                 "built": bool(built_final_road),
