@@ -152,6 +152,10 @@ class Segment:
     canonical_dst_xsec_id: int | None = None
     src_alias_applied: bool = False
     dst_alias_applied: bool = False
+    production_multi_arc_allowed: bool = False
+    multi_arc_evidence_mode: str = ""
+    multi_arc_structure_type: str = ""
+    multi_arc_rule_reason: str = ""
     same_pair_rank: int | None = None
     kept_reason: str = ""
 
@@ -193,6 +197,10 @@ class Segment:
             ),
             "src_alias_applied": bool(self.src_alias_applied),
             "dst_alias_applied": bool(self.dst_alias_applied),
+            "production_multi_arc_allowed": bool(self.production_multi_arc_allowed),
+            "multi_arc_evidence_mode": str(self.multi_arc_evidence_mode),
+            "multi_arc_structure_type": str(self.multi_arc_structure_type),
+            "multi_arc_rule_reason": str(self.multi_arc_rule_reason),
             "geometry_coords": [[float(x), float(y)] for x, y in self.geometry_coords],
             "candidate_ids": [str(v) for v in self.candidate_ids],
             "source_modes": [str(v) for v in self.source_modes],
@@ -260,6 +268,10 @@ class Segment:
             ),
             src_alias_applied=bool(payload.get("src_alias_applied", False)),
             dst_alias_applied=bool(payload.get("dst_alias_applied", False)),
+            production_multi_arc_allowed=bool(payload.get("production_multi_arc_allowed", False)),
+            multi_arc_evidence_mode=str(payload.get("multi_arc_evidence_mode", "")),
+            multi_arc_structure_type=str(payload.get("multi_arc_structure_type", "")),
+            multi_arc_rule_reason=str(payload.get("multi_arc_rule_reason", "")),
             geometry_coords=coords,
             candidate_ids=tuple(str(v) for v in payload.get("candidate_ids", [])),
             source_modes=tuple(str(v) for v in payload.get("source_modes", [])),

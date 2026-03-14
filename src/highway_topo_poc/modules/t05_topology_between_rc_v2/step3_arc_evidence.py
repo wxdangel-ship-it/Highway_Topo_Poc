@@ -9,8 +9,10 @@ from shapely.geometry import LineString, Point
 
 from .arc_selection_rules import (
     STRUCTURE_MERGE_MULTI_UPSTREAM,
+    STRUCTURE_SAME_PAIR_MULTI_ARC,
     apply_arc_selection_rules,
     apply_diverge_merge_rule,
+    apply_multi_arc_rule,
 )
 from .io import write_features_geojson, write_json, write_lines_geojson
 from .models import Segment, coords_to_line, line_to_coords
@@ -173,6 +175,19 @@ def _arc_line(row: dict[str, Any]) -> LineString | None:
     if line.is_empty or line.length <= 1e-6:
         return None
     return line
+
+
+def _line_overlap_ratio(line: LineString | None, zone: Any | None) -> float:
+    if line is None or zone is None or getattr(zone, "is_empty", True):
+        return 0.0
+    length = float(getattr(line, "length", 0.0))
+    if length <= 1e-6:
+        return 0.0
+    try:
+        overlap = line.intersection(zone)
+    except Exception:
+        return 0.0
+    return float(max(0.0, min(1.0, float(getattr(overlap, "length", 0.0)) / max(length, 1e-6))))
 
 
 def _trajectory_points(traj: Any) -> list[tuple[float, float]]:
@@ -721,8 +736,40 @@ def _materialize_working_segment(
             canonical_dst_xsec_id=getattr(selected_segment, "canonical_dst_xsec_id", selected_segment.dst_nodeid),
             src_alias_applied=bool(getattr(selected_segment, "src_alias_applied", False)),
             dst_alias_applied=bool(getattr(selected_segment, "dst_alias_applied", False)),
-            same_pair_rank=1,
-            kept_reason="arc_first_main_flow",
+            production_multi_arc_allowed=bool(
+                row.get(
+                    "production_multi_arc_allowed",
+                    getattr(selected_segment, "production_multi_arc_allowed", False),
+                )
+            ),
+            multi_arc_evidence_mode=str(
+                row.get(
+                    "multi_arc_evidence_mode",
+                    getattr(selected_segment, "multi_arc_evidence_mode", ""),
+                )
+            ),
+            multi_arc_structure_type=str(
+                row.get(
+                    "multi_arc_structure_type",
+                    getattr(selected_segment, "multi_arc_structure_type", ""),
+                )
+            ),
+            multi_arc_rule_reason=str(
+                row.get(
+                    "multi_arc_rule_reason",
+                    getattr(selected_segment, "multi_arc_rule_reason", ""),
+                )
+            ),
+            same_pair_rank=int(
+                row.get(
+                    "same_pair_rank",
+                    getattr(selected_segment, "same_pair_rank", 1) or 1,
+                )
+            ),
+            kept_reason=str(
+                row.get("kept_reason", getattr(selected_segment, "kept_reason", "arc_first_main_flow"))
+                or "arc_first_main_flow"
+            ),
         )
 
     arc_line = _arc_line(row)
@@ -775,8 +822,12 @@ def _materialize_working_segment(
         canonical_dst_xsec_id=row.get("canonical_dst_xsec_id", row["dst"]),
         src_alias_applied=bool(row.get("src_alias_applied", False)),
         dst_alias_applied=bool(row.get("dst_alias_applied", False)),
-        same_pair_rank=1,
-        kept_reason="arc_first_main_flow",
+        production_multi_arc_allowed=bool(row.get("production_multi_arc_allowed", False)),
+        multi_arc_evidence_mode=str(row.get("multi_arc_evidence_mode", "")),
+        multi_arc_structure_type=str(row.get("multi_arc_structure_type", "")),
+        multi_arc_rule_reason=str(row.get("multi_arc_rule_reason", "")),
+        same_pair_rank=int(row.get("same_pair_rank", 1) or 1),
+        kept_reason=str(row.get("kept_reason", "arc_first_main_flow") or "arc_first_main_flow"),
     )
 
 
@@ -789,6 +840,7 @@ def build_arc_evidence_attach(
     prior_roads: list[Any],
     params: dict[str, Any],
 ) -> dict[str, Any]:
+    pipeline = _pipeline()
     selected_by_arc = {str(segment.topology_arc_id): segment for segment in selected_segments if str(segment.topology_arc_id)}
     patch_geometry_cache = build_patch_geometry_cache(inputs, params)
     divstrip_buffer = patch_geometry_cache.get("divstrip_buffer")
@@ -856,11 +908,24 @@ def build_arc_evidence_attach(
                 "support_anchor_dst_coords": support.get("support_anchor_dst_coords"),
                 "prior_support_type": str(support["prior_support_type"]),
                 "prior_support_available": bool(support["prior_support_available"]),
+                "arc_path_drivezone_ratio": float(
+                    pipeline._drivezone_ratio(arc_line, inputs.drivezone_zone_metric)
+                    if arc_line is not None
+                    else 0.0
+                ),
+                "arc_path_divstrip_overlap_ratio": float(_line_overlap_ratio(arc_line, divstrip_buffer)),
+                "arc_path_crosses_divstrip": bool(
+                    arc_line is not None
+                    and divstrip_buffer is not None
+                    and (not divstrip_buffer.is_empty)
+                    and arc_line.intersects(divstrip_buffer)
+                ),
             }
         )
         runtime_totals["terminal_partial_stitched_aggregation_time_ms"] += float((perf_counter() - aggregation_started) * 1000.0)
         rows.append(current)
 
+    rows = list(apply_arc_selection_rules(rows).get("rows", []))
     topology_gap_decisions = classify_topology_gap_rows(rows, params=params)
     for current in rows:
         pair_id = str(current.get("pair", ""))
@@ -913,6 +978,54 @@ def build_arc_evidence_attach(
                 current["unbuilt_reason"] = str(current.get("topology_gap_reason", ""))
                 current["blocked_diagnostic_reason"] = str(current.get("topology_gap_reason", ""))
 
+    same_pair_rule = apply_multi_arc_rule(rows)
+    same_pair_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for current in rows:
+        canonical_pair = str(current.get("canonical_pair", current.get("pair", "")))
+        rule_row = dict(same_pair_rule.get(canonical_pair, {}))
+        if str(current.get("arc_structure_type", "")) != STRUCTURE_SAME_PAIR_MULTI_ARC:
+            continue
+        topology_arc_id = str(current.get("topology_arc_id", ""))
+        evidence_modes = dict(rule_row.get("evidence_modes", {}))
+        current["multi_arc_structure_type"] = str(rule_row.get("structure_type", STRUCTURE_SAME_PAIR_MULTI_ARC))
+        current["multi_arc_rule_reason"] = str(rule_row.get("rule_reason", ""))
+        current["multi_arc_evidence_mode"] = str(evidence_modes.get(topology_arc_id, "insufficient"))
+        current["multi_arc_allow_multi_output"] = bool(rule_row.get("allow_multi_output", False))
+        current["production_multi_arc_allowed"] = bool(
+            current.get("multi_arc_allow_multi_output", False)
+            and str(current.get("multi_arc_evidence_mode", "")) in {"witness_based", "fallback_based"}
+        )
+        if bool(current.get("production_multi_arc_allowed", False)):
+            current["entered_main_flow"] = True
+            current["blocked_diagnostic_only"] = False
+            current["blocked_diagnostic_reason"] = ""
+            current["hard_block_reason"] = ""
+            current["unbuilt_stage"] = ""
+            current["unbuilt_reason"] = ""
+            current["working_segment_source"] = "arc_first_multi_arc_segment"
+            same_pair_groups[canonical_pair].append(current)
+        elif not bool(current.get("entered_main_flow", False)):
+            current["unbuilt_stage"] = str(current.get("unbuilt_stage", "") or "step3_multi_arc_rule_blocked")
+            current["unbuilt_reason"] = str(
+                current.get("unbuilt_reason", "")
+                or current.get("multi_arc_rule_reason", "")
+                or "same_pair_multi_arc_evidence_not_sufficient"
+            )
+
+    for _canonical_pair, group_rows in same_pair_groups.items():
+        ranked_rows = sorted(
+            group_rows,
+            key=lambda item: (
+                0 if str(item.get("multi_arc_evidence_mode", "")) == "witness_based" else 1,
+                -float(item.get("traj_support_coverage_ratio", 0.0) or 0.0),
+                str(item.get("topology_arc_id", "")),
+            ),
+        )
+        for rank, current in enumerate(ranked_rows, start=1):
+            current["same_pair_rank"] = int(rank)
+            current["kept_reason"] = "same_pair_multi_arc_allowed"
+
+    for current in rows:
         selected_segment = selected_by_arc.get(str(current.get("topology_arc_id", "")))
         if bool(current.get("entered_main_flow", False)):
             materialize_started = perf_counter()
@@ -952,6 +1065,8 @@ def build_arc_evidence_attach(
                 "topology_gap_decision": str(current.get("topology_gap_decision", "")),
                 "topology_gap_reason": str(current.get("topology_gap_reason", "")),
                 "controlled_entry_allowed": bool(current.get("controlled_entry_allowed", False)),
+                "multi_arc_evidence_mode": str(current.get("multi_arc_evidence_mode", "")),
+                "production_multi_arc_allowed": bool(current.get("production_multi_arc_allowed", False)),
                 "working_segment_id": str(current.get("working_segment_id", "")),
                 "working_segment_source": str(current.get("working_segment_source", "")),
             }

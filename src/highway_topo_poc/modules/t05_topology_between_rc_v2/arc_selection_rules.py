@@ -45,6 +45,10 @@ def _edge_ids(row: dict[str, Any]) -> list[str]:
     return [str(v) for v in row.get("edge_ids", []) if str(v)]
 
 
+def _topology_arc_id(row: dict[str, Any]) -> str:
+    return str(row.get("topology_arc_id", ""))
+
+
 def _line_coords(row: dict[str, Any]) -> list[tuple[float, float]]:
     out: list[tuple[float, float]] = []
     for item in row.get("line_coords", []):
@@ -119,6 +123,34 @@ def _support_signature(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _line_signature(row: dict[str, Any]) -> tuple[tuple[float, float], ...]:
+    coords = _line_coords(row)
+    return tuple((round(x, 2), round(y, 2)) for x, y in coords)
+
+
+def _same_pair_path_signature(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        tuple(_edge_ids(row)),
+        tuple(_node_path(row)),
+        _line_signature(row),
+    )
+
+
+def _same_pair_path_distinguishable(row: dict[str, Any], peer: dict[str, Any]) -> bool:
+    if _topology_arc_id(row) == _topology_arc_id(peer):
+        return False
+    if tuple(_edge_ids(row)) != tuple(_edge_ids(peer)):
+        return True
+    if tuple(_node_path(row)) != tuple(_node_path(peer)):
+        return True
+    if _line_signature(row) != _line_signature(peer):
+        return True
+    return (
+        tuple(row.get("support_anchor_src_coords") or []) != tuple(peer.get("support_anchor_src_coords") or [])
+        or tuple(row.get("support_anchor_dst_coords") or []) != tuple(peer.get("support_anchor_dst_coords") or [])
+    )
+
+
 def _has_independent_traj_support(row: dict[str, Any], *, min_coverage_ratio: float) -> bool:
     traj_support_type = str(row.get("traj_support_type", "no_support"))
     if traj_support_type == "no_support":
@@ -130,6 +162,74 @@ def _has_independent_traj_support(row: dict[str, Any], *, min_coverage_ratio: fl
     if coverage_ratio < float(min_coverage_ratio):
         return False
     return row.get("support_anchor_src_coords") is not None and row.get("support_anchor_dst_coords") is not None
+
+
+def detect_same_pair_diverge_merge_structure(
+    row: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    canonical_pair = _canonical_pair(row)
+    same_pair_rows = [
+        dict(item)
+        for item in rows
+        if _canonical_pair(item) == canonical_pair and _direct_legal_row(item)
+    ]
+    arc_ids = sorted({_topology_arc_id(item) for item in same_pair_rows if _topology_arc_id(item)})
+    if len(arc_ids) <= 1:
+        return {
+            "structure_type": STRUCTURE_SINGLE,
+            "pair_arc_count": int(len(arc_ids)),
+            "arc_ids": arc_ids,
+            "peer_pairs": [],
+            "peer_arc_ids": [],
+            "distinct_path_signal": [],
+            "distinct_path_count": 0,
+        }
+    distinct_signals: list[str] = []
+    if len({tuple(_edge_ids(item)) for item in same_pair_rows if _edge_ids(item)}) >= 2:
+        distinct_signals.append("distinct_topology_edge_signal")
+    if len({tuple(_node_path(item)) for item in same_pair_rows if _node_path(item)}) >= 2:
+        distinct_signals.append("distinct_topology_node_path_signal")
+    if len({_line_signature(item) for item in same_pair_rows if _line_signature(item)}) >= 2:
+        distinct_signals.append("distinct_geometry_path_signal")
+    if len(
+        {
+            (
+                tuple(item.get("support_anchor_src_coords") or []),
+                tuple(item.get("support_anchor_dst_coords") or []),
+            )
+            for item in same_pair_rows
+            if item.get("support_anchor_src_coords") is not None and item.get("support_anchor_dst_coords") is not None
+        }
+    ) >= 2:
+        distinct_signals.append("distinct_anchor_path_signal")
+    path_signature_count = int(len({_same_pair_path_signature(item) for item in same_pair_rows}))
+    peer_arc_ids = sorted(
+        {
+            _topology_arc_id(item)
+            for item in same_pair_rows
+            if _same_pair_path_distinguishable(row, item) and _topology_arc_id(item)
+        }
+    )
+    if (path_signature_count <= 1 and not distinct_signals) or not peer_arc_ids:
+        return {
+            "structure_type": STRUCTURE_SINGLE,
+            "pair_arc_count": int(len(arc_ids)),
+            "arc_ids": arc_ids,
+            "peer_pairs": [canonical_pair],
+            "peer_arc_ids": peer_arc_ids,
+            "distinct_path_signal": distinct_signals,
+            "distinct_path_count": path_signature_count,
+        }
+    return {
+        "structure_type": STRUCTURE_SAME_PAIR_MULTI_ARC,
+        "pair_arc_count": int(len(arc_ids)),
+        "arc_ids": arc_ids,
+        "peer_pairs": [canonical_pair],
+        "peer_arc_ids": peer_arc_ids,
+        "distinct_path_signal": distinct_signals,
+        "distinct_path_count": path_signature_count,
+    }
 
 
 def detect_diverge_merge_structure(
@@ -236,13 +336,17 @@ def classify_arc_structure(
         for item in rows
         if _canonical_pair(item) == canonical_pair and _direct_legal_row(item)
     ]
-    if len(same_pair_rows) > 1:
+    same_pair_structure = detect_same_pair_diverge_merge_structure(row, rows)
+    if str(same_pair_structure.get("structure_type", STRUCTURE_SINGLE)) == STRUCTURE_SAME_PAIR_MULTI_ARC:
         return {
             "structure_type": STRUCTURE_SAME_PAIR_MULTI_ARC,
-            "peer_pairs": sorted({_pair(item) for item in same_pair_rows}),
+            "peer_pairs": list(same_pair_structure.get("peer_pairs", [canonical_pair])),
+            "peer_arc_ids": list(same_pair_structure.get("peer_arc_ids", [])),
             "shared_downstream_nodes": [],
-            "same_pair_arc_count": int(len(same_pair_rows)),
-            "same_pair_arc_ids": sorted(str(item.get("topology_arc_id", "")) for item in same_pair_rows if str(item.get("topology_arc_id", ""))),
+            "same_pair_arc_count": int(same_pair_structure.get("pair_arc_count", len(same_pair_rows))),
+            "same_pair_arc_ids": list(same_pair_structure.get("arc_ids", [])),
+            "same_pair_distinct_path_signal": list(same_pair_structure.get("distinct_path_signal", [])),
+            "same_pair_distinct_path_count": int(same_pair_structure.get("distinct_path_count", 0)),
             "rule_name": "apply_multi_arc_rule",
             "allow_multi_output": True,
         }
@@ -285,6 +389,13 @@ def apply_arc_selection_rules(
         current["arc_selection_shared_downstream_signal"] = list(structure.get("shared_downstream_signal", []))
         current["arc_selection_same_pair_arc_count"] = int(structure.get("same_pair_arc_count", 0))
         current["arc_selection_same_pair_arc_ids"] = list(structure.get("same_pair_arc_ids", []))
+        current["arc_selection_same_pair_peer_arc_ids"] = list(structure.get("peer_arc_ids", []))
+        current["arc_selection_same_pair_distinct_path_signal"] = list(
+            structure.get("same_pair_distinct_path_signal", [])
+        )
+        current["arc_selection_same_pair_distinct_path_count"] = int(
+            structure.get("same_pair_distinct_path_count", 0)
+        )
         current["arc_selection_group_key"] = (
             f"same_pair:{_canonical_pair(current)}"
             if structure_type == STRUCTURE_SAME_PAIR_MULTI_ARC
@@ -326,42 +437,82 @@ def apply_diverge_merge_rule(
 
 
 def _multi_arc_evidence_mode(row: dict[str, Any]) -> str:
+    explicit_mode = str(row.get("multi_arc_evidence_mode", ""))
+    if explicit_mode in {"witness_based", "fallback_based", "insufficient"}:
+        return explicit_mode
     if str(row.get("corridor_identity", "")) == "witness_based" and str(row.get("traj_support_type", "no_support")) != "no_support":
         return "witness_based"
     if (
         _direct_legal_row(row)
         and (row.get("support_anchor_src_coords") is not None)
         and (row.get("support_anchor_dst_coords") is not None)
-        and str(row.get("prior_support_type", "no_support")) == "prior_fallback_support"
-        and float(row.get("divstrip_overlap_ratio", 0.0) or 0.0) <= 0.12
-        and float(row.get("drivezone_overlap_ratio", 0.0) or 0.0) >= 0.5
+        and (
+            str(row.get("prior_support_type", "no_support")) == "prior_fallback_support"
+            or bool(row.get("prior_support_available", False))
+        )
+        and not bool(
+            row.get(
+                "arc_path_crosses_divstrip",
+                float(row.get("arc_path_divstrip_overlap_ratio", row.get("divstrip_overlap_ratio", 0.0)) or 0.0) > 1e-6,
+            )
+        )
+        and float(
+            row.get("arc_path_drivezone_ratio", row.get("drivezone_overlap_ratio", 0.0)) or 0.0
+        )
+        >= 0.5
     ):
         return "fallback_based"
     return "insufficient"
 
 
-def apply_multi_arc_rule(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def allow_multi_arc_output(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        if str(row.get("arc_structure_type", "")) == STRUCTURE_SAME_PAIR_MULTI_ARC:
-            groups[_canonical_pair(row)].append(dict(row))
+        structure = detect_same_pair_diverge_merge_structure(row, rows)
+        same_pair_direct_rows = [
+            dict(item)
+            for item in rows
+            if _canonical_pair(item) == _canonical_pair(row) and _direct_legal_row(item)
+        ]
+        explicit_multi_arc = (
+            len({_topology_arc_id(item) for item in same_pair_direct_rows if _topology_arc_id(item)}) > 1
+            and any(
+                bool(item.get("production_multi_arc_allowed", False))
+                or str(item.get("multi_arc_evidence_mode", "")) in {"witness_based", "fallback_based"}
+                for item in same_pair_direct_rows
+            )
+        )
+        if (
+            str(structure.get("structure_type", STRUCTURE_SINGLE)) != STRUCTURE_SAME_PAIR_MULTI_ARC
+            and not explicit_multi_arc
+        ):
+            continue
+        groups[_canonical_pair(row)].append(dict(row))
     out: dict[str, dict[str, Any]] = {}
     for canonical_pair, group_rows in groups.items():
         evidence_modes = {
-            str(row.get("topology_arc_id", "")): _multi_arc_evidence_mode(row)
+            _topology_arc_id(row): _multi_arc_evidence_mode(row)
             for row in group_rows
-            if str(row.get("topology_arc_id", ""))
+            if _topology_arc_id(row)
         }
-        witness_based_arc_ids = sorted(arc_id for arc_id, mode in evidence_modes.items() if mode == "witness_based")
-        fallback_based_arc_ids = sorted(arc_id for arc_id, mode in evidence_modes.items() if mode == "fallback_based")
+        witness_based_arc_ids = sorted(
+            arc_id for arc_id, mode in evidence_modes.items() if mode == "witness_based"
+        )
+        fallback_based_arc_ids = sorted(
+            arc_id for arc_id, mode in evidence_modes.items() if mode == "fallback_based"
+        )
         allow_multi_output = bool(witness_based_arc_ids) and (
             len(witness_based_arc_ids) + len(fallback_based_arc_ids) == len(evidence_modes)
         )
+        structure = detect_same_pair_diverge_merge_structure(group_rows[0], group_rows)
         out[str(canonical_pair)] = {
             "pair": str(canonical_pair),
             "structure_type": STRUCTURE_SAME_PAIR_MULTI_ARC,
-            "pair_arc_count": int(len(group_rows)),
-            "arc_ids": sorted(str(row.get("topology_arc_id", "")) for row in group_rows if str(row.get("topology_arc_id", ""))),
+            "pair_arc_count": int(structure.get("pair_arc_count", len(group_rows))),
+            "arc_ids": list(structure.get("arc_ids", [])),
+            "peer_arc_ids": list(structure.get("peer_arc_ids", [])),
+            "distinct_path_signal": list(structure.get("distinct_path_signal", [])),
+            "distinct_path_count": int(structure.get("distinct_path_count", 0)),
             "allow_multi_output": bool(allow_multi_output),
             "witness_based_arc_ids": witness_based_arc_ids,
             "fallback_based_arc_ids": fallback_based_arc_ids,
@@ -375,14 +526,20 @@ def apply_multi_arc_rule(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     return out
 
 
+def apply_multi_arc_rule(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return allow_multi_arc_output(rows)
+
+
 __all__ = [
     "STRUCTURE_SINGLE",
     "STRUCTURE_MERGE_MULTI_UPSTREAM",
     "STRUCTURE_SAME_PAIR_MULTI_ARC",
+    "allow_multi_arc_output",
     "allow_multiple_upstream_arcs",
     "apply_arc_selection_rules",
     "apply_diverge_merge_rule",
     "apply_multi_arc_rule",
     "classify_arc_structure",
     "detect_diverge_merge_structure",
+    "detect_same_pair_diverge_merge_structure",
 ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from math import hypot
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -74,6 +75,132 @@ def _anchor_along_base_line(base_line: LineString, start_pt: Point, end_pt: Poin
     if len(deduped) < 2:
         deduped = [(float(start_pt.x), float(start_pt.y)), (float(end_pt.x), float(end_pt.y))]
     return LineString(deduped)
+
+
+def _translate_line(line: LineString, dx: float, dy: float) -> LineString | None:
+    coords = [(float(x) + float(dx), float(y) + float(dy)) for x, y, *_ in line.coords]
+    if len(coords) < 2:
+        return None
+    translated = LineString(coords)
+    if translated.is_empty or translated.length <= 1e-6:
+        return None
+    return translated
+
+
+def _slot_side_shift_vector(
+    base_line: LineString,
+    start_pt: Point,
+    end_pt: Point,
+) -> tuple[float, float] | None:
+    if base_line.is_empty or base_line.length <= 1e-6:
+        return None
+    try:
+        start_proj = base_line.interpolate(float(base_line.project(start_pt)))
+        end_proj = base_line.interpolate(float(base_line.project(end_pt)))
+    except Exception:
+        return None
+    shift_dx = ((float(start_pt.x) - float(start_proj.x)) + (float(end_pt.x) - float(end_proj.x))) / 2.0
+    shift_dy = ((float(start_pt.y) - float(start_proj.y)) + (float(end_pt.y) - float(end_proj.y))) / 2.0
+    if hypot(float(shift_dx), float(shift_dy)) > 0.25:
+        return float(shift_dx), float(shift_dy)
+    coords = list(base_line.coords)
+    if len(coords) < 3:
+        return None
+    start_inner = coords[1]
+    end_inner = coords[-2]
+    shift_dx = ((float(start_pt.x) - float(start_inner[0])) + (float(end_pt.x) - float(end_inner[0]))) / 2.0
+    shift_dy = ((float(start_pt.y) - float(start_inner[1])) + (float(end_pt.y) - float(end_inner[1]))) / 2.0
+    if hypot(float(shift_dx), float(shift_dy)) <= 0.25:
+        return None
+    return float(shift_dx), float(shift_dy)
+
+
+def _slot_side_translated_line(
+    base_line: LineString,
+    start_pt: Point,
+    end_pt: Point,
+) -> LineString | None:
+    if base_line.is_empty or base_line.length <= 1e-6:
+        return None
+    shift = _slot_side_shift_vector(base_line, start_pt, end_pt)
+    if shift is None:
+        return None
+    shift_dx, shift_dy = shift
+    translated = _translate_line(base_line, shift_dx, shift_dy)
+    if translated is None:
+        return None
+    return _anchor_along_base_line(translated, start_pt, end_pt)
+
+
+def _scaled_slot_side_translated_line(
+    base_line: LineString,
+    start_pt: Point,
+    end_pt: Point,
+    *,
+    scale: float,
+) -> LineString | None:
+    if base_line.is_empty or base_line.length <= 1e-6:
+        return None
+    shift = _slot_side_shift_vector(base_line, start_pt, end_pt)
+    if shift is None:
+        return None
+    base_shift_dx, base_shift_dy = shift
+    shift_dx = float(base_shift_dx) * float(scale)
+    shift_dy = float(base_shift_dy) * float(scale)
+    if hypot(float(shift_dx), float(shift_dy)) <= 0.25:
+        return None
+    translated = _translate_line(base_line, shift_dx, shift_dy)
+    if translated is None:
+        return None
+    return _anchor_along_base_line(translated, start_pt, end_pt)
+
+
+def _append_candidate_line(
+    candidate_lines: list[tuple[LineString, str]],
+    line: LineString | None,
+    mode: str,
+    *,
+    priority: bool = False,
+) -> None:
+    if line is None:
+        return
+    if any(line.equals(existing_line) for existing_line, _ in candidate_lines):
+        return
+    item = (line, str(mode))
+    if priority:
+        candidate_lines.insert(1 if candidate_lines else 0, item)
+    else:
+        candidate_lines.append(item)
+
+
+def _append_side_constrained_candidates(
+    candidate_lines: list[tuple[LineString, str]],
+    base_line: LineString | None,
+    base_mode: str,
+    *,
+    start_pt: Point,
+    end_pt: Point,
+    prefer_early: bool = False,
+) -> None:
+    if base_line is None:
+        return
+    inserted = False
+    for scale in (1.0, 0.75, 1.25, 1.5):
+        translated = _scaled_slot_side_translated_line(
+            base_line,
+            start_pt,
+            end_pt,
+            scale=float(scale),
+        )
+        if translated is None:
+            continue
+        _append_candidate_line(
+            candidate_lines,
+            translated,
+            f"{base_mode}_side_constrained_{str(scale).rstrip('0').rstrip('.')}",
+            priority=bool(prefer_early and not inserted),
+        )
+        inserted = True
 
 
 def _selected_witness_interval(witness: CorridorWitness | None):
@@ -282,6 +409,10 @@ def build_final_road(
         "topology_arc_source_type": str(segment.topology_arc_source_type),
         "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
         "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
+        "production_multi_arc_allowed": bool(segment.production_multi_arc_allowed),
+        "multi_arc_evidence_mode": str(segment.multi_arc_evidence_mode),
+        "multi_arc_structure_type": str(segment.multi_arc_structure_type),
+        "multi_arc_rule_reason": str(segment.multi_arc_rule_reason),
         "blocked_diagnostic_only": bool(segment.blocked_diagnostic_only),
         "controlled_entry_allowed": bool(segment.controlled_entry_allowed),
         "hard_block_reason": str(segment.hard_block_reason),
@@ -299,7 +430,7 @@ def build_final_road(
         final_gate_reason = "final_gate_synthetic_arc_not_allowed"
     elif has_topology_assignment and not bool(segment.topology_arc_is_direct_legal):
         final_gate_reason = "final_gate_not_direct_legal"
-    elif has_topology_assignment and not bool(segment.topology_arc_is_unique):
+    elif has_topology_assignment and not bool(segment.topology_arc_is_unique) and not bool(segment.production_multi_arc_allowed):
         final_gate_reason = "final_gate_non_unique_arc"
     elif has_topology_assignment and not str(segment.topology_arc_id):
         final_gate_reason = "final_gate_arc_unique_connectivity_violation"
@@ -344,44 +475,82 @@ def build_final_road(
         prior_index=prior_index,
     )
     candidate_lines: list[tuple[LineString, str]] = [(preferred_line, str(preferred_mode))]
+    _append_side_constrained_candidates(
+        candidate_lines,
+        preferred_line,
+        str(preferred_mode),
+        start_pt=start_pt,
+        end_pt=end_pt,
+        prefer_early=True,
+    )
     if str(identity.state) == "witness_based":
         legacy_centerline = _legacy_witness_centerline(witness=witness, start_pt=start_pt, end_pt=end_pt)
-        if legacy_centerline is not None and not any(legacy_centerline.equals(item[0]) for item in candidate_lines):
-            candidate_lines.append((legacy_centerline, "witness_centerline"))
+        _append_candidate_line(candidate_lines, legacy_centerline, "witness_centerline")
+        _append_side_constrained_candidates(
+            candidate_lines,
+            legacy_centerline,
+            "witness_centerline",
+            start_pt=start_pt,
+            end_pt=end_pt,
+        )
     support_reference_line = _line_from_coords(list((arc_row or {}).get("support_reference_coords", [])))
     if support_reference_line is not None:
         support_anchor = _anchor_along_base_line(support_reference_line, start_pt, end_pt)
-        if not any(support_anchor.equals(item[0]) for item in candidate_lines):
-            candidate_lines.append((support_anchor, "traj_support_slot_anchored"))
+        _append_candidate_line(candidate_lines, support_anchor, "traj_support_slot_anchored")
+        _append_side_constrained_candidates(
+            candidate_lines,
+            support_anchor,
+            "traj_support_slot_anchored",
+            start_pt=start_pt,
+            end_pt=end_pt,
+        )
     segment_projected = _anchor_along_base_line(segment.geometry_metric(), start_pt, end_pt)
-    if not any(segment_projected.equals(item[0]) for item in candidate_lines):
-        candidate_lines.append((segment_projected, "segment_support_projected_anchored"))
+    _append_candidate_line(candidate_lines, segment_projected, "segment_support_projected_anchored")
+    _append_side_constrained_candidates(
+        candidate_lines,
+        segment_projected,
+        "segment_support_projected_anchored",
+        start_pt=start_pt,
+        end_pt=end_pt,
+    )
     segment_anchor = _replace_endpoints(segment.geometry_metric(), start_pt, end_pt)
     if not segment_anchor.equals(preferred_line):
-        candidate_lines.append((segment_anchor, "segment_support_slot_anchored"))
+        _append_candidate_line(candidate_lines, segment_anchor, "segment_support_slot_anchored")
     prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
     if prior_line is not None:
         prior_projected = _anchor_along_base_line(prior_line, start_pt, end_pt)
-        if not any(prior_projected.equals(item[0]) for item in candidate_lines):
-            if str(identity.state) == "prior_based":
-                candidate_lines.insert(1, (prior_projected, "prior_reference_projected_anchored"))
-            else:
-                candidate_lines.append((prior_projected, "prior_reference_projected_anchored"))
+        _append_candidate_line(
+            candidate_lines,
+            prior_projected,
+            "prior_reference_projected_anchored",
+            priority=str(identity.state) == "prior_based",
+        )
+        _append_side_constrained_candidates(
+            candidate_lines,
+            prior_projected,
+            "prior_reference_projected_anchored",
+            start_pt=start_pt,
+            end_pt=end_pt,
+            prefer_early=str(identity.state) == "prior_based",
+        )
         prior_anchor = _replace_endpoints(prior_line, start_pt, end_pt)
-        if not any(prior_anchor.equals(item[0]) for item in candidate_lines):
-            if str(identity.state) == "prior_based":
-                candidate_lines.insert(1, (prior_anchor, "prior_reference_slot_anchored"))
-            else:
-                candidate_lines.append((prior_anchor, "prior_reference_slot_anchored"))
+        _append_candidate_line(
+            candidate_lines,
+            prior_anchor,
+            "prior_reference_slot_anchored",
+            priority=str(identity.state) == "prior_based",
+        )
     attempts: list[dict[str, Any]] = []
     selected_candidate: tuple[LineString, str, float, float, bool] | None = None
     best_candidate: tuple[LineString, str, float, float, bool] | None = None
+    attempted_side_constrained = False
     for line, mode in candidate_lines:
         drivezone_ratio = pipeline._drivezone_ratio(line, inputs.drivezone_zone_metric)
         divstrip_overlap_ratio = _line_overlap_ratio(line, divstrip_buffer)
         road_intersects_divstrip = bool(
             divstrip_buffer is not None and (not divstrip_buffer.is_empty) and line.intersects(divstrip_buffer)
         )
+        attempted_side_constrained = attempted_side_constrained or ("side_constrained" in str(mode))
         attempts.append(
             {
                 "mode": str(mode),
@@ -419,10 +588,18 @@ def build_final_road(
     result["road_intersects_divstrip"] = bool(road_intersects_divstrip)
     if selected_candidate is None:
         if road_intersects_divstrip:
-            result["reason"] = "bridge_divstrip_conflict" if bridge_retained else "road_crosses_divstrip"
+            result["reason"] = (
+                "bridge_divstrip_conflict_after_side_constrained_generation"
+                if bridge_retained and attempted_side_constrained
+                else "bridge_divstrip_conflict"
+                if bridge_retained
+                else "road_crosses_divstrip_after_side_constrained_generation"
+                if attempted_side_constrained
+                else "road_crosses_divstrip"
+            )
             if bridge_retained:
                 result["bridge_decision_stage"] = "bridge_final_decision"
-                result["bridge_decision_reason"] = "bridge_divstrip_conflict"
+                result["bridge_decision_reason"] = str(result["reason"])
         else:
             unresolved_reason = "bridge_prior_discontinuous" if bridge_retained and str(identity.state) == "prior_based" else (
                 "bridge_corridor_insufficient" if bridge_retained else "road_outside_drivezone"
@@ -607,6 +784,10 @@ def write_road_outputs(
                     "topology_arc_source_type": str(segment.topology_arc_source_type),
                     "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
                     "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
+                    "production_multi_arc_allowed": bool(segment.production_multi_arc_allowed),
+                    "multi_arc_evidence_mode": str(segment.multi_arc_evidence_mode),
+                    "multi_arc_structure_type": str(segment.multi_arc_structure_type),
+                    "multi_arc_rule_reason": str(segment.multi_arc_rule_reason),
                     "blocked_diagnostic_only": bool(segment.blocked_diagnostic_only),
                     "controlled_entry_allowed": bool(segment.controlled_entry_allowed),
                     "hard_block_reason": str(segment.hard_block_reason),
@@ -660,6 +841,10 @@ def write_road_outputs(
                         "topology_arc_source_type": str(segment.topology_arc_source_type),
                         "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
                         "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
+                        "production_multi_arc_allowed": bool(segment.production_multi_arc_allowed),
+                        "multi_arc_evidence_mode": str(segment.multi_arc_evidence_mode),
+                        "multi_arc_structure_type": str(segment.multi_arc_structure_type),
+                        "multi_arc_rule_reason": str(segment.multi_arc_rule_reason),
                         "blocked_diagnostic_only": bool(segment.blocked_diagnostic_only),
                         "controlled_entry_allowed": bool(segment.controlled_entry_allowed),
                         "hard_block_reason": str(segment.hard_block_reason),
@@ -696,6 +881,10 @@ def write_road_outputs(
                 "topology_arc_source_type": str(segment.topology_arc_source_type),
                 "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
                 "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
+                "production_multi_arc_allowed": bool(segment.production_multi_arc_allowed),
+                "multi_arc_evidence_mode": str(segment.multi_arc_evidence_mode),
+                "multi_arc_structure_type": str(segment.multi_arc_structure_type),
+                "multi_arc_rule_reason": str(segment.multi_arc_rule_reason),
                 "blocked_diagnostic_only": bool(segment.blocked_diagnostic_only),
                 "controlled_entry_allowed": bool(segment.controlled_entry_allowed),
                 "hard_block_reason": str(segment.hard_block_reason),
@@ -748,6 +937,10 @@ def write_road_outputs(
             "topology_arc_source_type": str(segment.topology_arc_source_type),
             "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
             "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
+            "production_multi_arc_allowed": bool(segment.production_multi_arc_allowed),
+            "multi_arc_evidence_mode": str(segment.multi_arc_evidence_mode),
+            "multi_arc_structure_type": str(segment.multi_arc_structure_type),
+            "multi_arc_rule_reason": str(segment.multi_arc_rule_reason),
             "blocked_diagnostic_only": bool(segment.blocked_diagnostic_only),
             "controlled_entry_allowed": bool(segment.controlled_entry_allowed),
             "hard_block_reason": str(segment.hard_block_reason),
@@ -825,7 +1018,13 @@ def write_road_outputs(
         for entry in metrics_segments
         if (
             bool(entry["topology_arc_id"] or entry["topology_arc_source_type"])
-            and ((not bool(entry["topology_arc_is_direct_legal"])) or (not bool(entry["topology_arc_is_unique"])))
+            and (
+                (not bool(entry["topology_arc_is_direct_legal"]))
+                or (
+                    (not bool(entry["topology_arc_is_unique"]))
+                    and not bool(entry.get("production_multi_arc_allowed", False))
+                )
+            )
         )
     ]
     synthetic_production_arc_entries = [

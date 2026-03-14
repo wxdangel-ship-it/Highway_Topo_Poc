@@ -55,6 +55,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.review import (
     write_perf_opt_arc_first_review,
     write_semantic_fix_after_perf_review,
     write_step5_finish_review,
+    write_step5_plus_multiarc_finish_review,
     write_topology_gap_controlled_cover_review,
     write_witness_vis_step5_recovery_review,
 )
@@ -1633,6 +1634,130 @@ def test_t05v2_build_final_road_uses_support_reference_candidate_to_avoid_divstr
     assert all(attempt["mode"] != "traj_support_slot_anchored" or float(attempt["drivezone_ratio"]) >= float(DEFAULT_PARAMS["ROAD_MIN_DRIVEZONE_RATIO"]) for attempt in result["candidate_attempts"])
 
 
+def test_t05v2_build_final_road_allows_same_pair_multi_arc_with_side_constrained_candidate() -> None:
+    segment = Segment(
+        segment_id="seg_multi_arc",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 0.0), (50.0, 0.0), (100.0, 0.0)),
+        candidate_ids=("cand_multi",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_multi",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=True,
+        formation_reason="same_pair_multi_arc_allowed",
+        length_m=100.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=True,
+        topology_arc_id="arc_multi_fallback",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=False,
+        production_multi_arc_allowed=True,
+        multi_arc_evidence_mode="fallback_based",
+        multi_arc_structure_type="SAME_PAIR_MULTI_ARC",
+        multi_arc_rule_reason="same_pair_multi_arc_dual_output_ready",
+        same_pair_rank=2,
+        kept_reason="same_pair_multi_arc_allowed",
+    )
+    witness = CorridorWitness(
+        segment_id="seg_multi_arc",
+        status="selected",
+        reason="witness_interval_selected",
+        line_coords=((0.0, 0.0), (50.0, 0.0), (100.0, 0.0)),
+        sample_s_norm=0.5,
+        intervals=tuple(),
+        selected_interval_rank=None,
+        selected_interval_start_s=None,
+        selected_interval_end_s=None,
+        exclusive_interval=True,
+        stability_score=1.0,
+        neighbor_match_count=1,
+        axis_vector=(0.0, 1.0),
+    )
+    identity = CorridorIdentity(
+        segment_id="seg_multi_arc",
+        state="witness_based",
+        reason="witness_selected",
+        risk_flags=tuple(),
+        witness_interval_rank=None,
+        prior_supported=True,
+    )
+    src_slot = SlotInterval(
+        segment_id="seg_multi_arc",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, -10.0), (0.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=12.5,
+            end_s=13.5,
+            center_s=13.0,
+            length_m=1.0,
+            rank=0,
+            geometry_coords=((0.0, 2.5), (0.0, 3.5)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    dst_slot = SlotInterval(
+        segment_id="seg_multi_arc",
+        endpoint_tag="dst",
+        xsec_nodeid=20,
+        xsec_coords=((100.0, -10.0), (100.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=12.5,
+            end_s=13.5,
+            center_s=13.0,
+            length_m=1.0,
+            rank=0,
+            geometry_coords=((100.0, 2.5), (100.0, 3.5)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    inputs = PatchInputs(
+        patch_id="same_pair_multi_arc_case",
+        patch_dir=Path("same_pair_multi_arc_case"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, 2.0), (105.0, 2.0), (105.0, 4.5), (-5.0, 4.5)]),
+        divstrip_zone_metric=Polygon([(45.0, -1.0), (55.0, -1.0), (55.0, 1.0), (45.0, 1.0)]),
+        road_prior_path=None,
+        input_summary={},
+    )
+
+    road, result = _build_final_road(
+        patch_id="same_pair_multi_arc_case",
+        segment=segment,
+        identity=identity,
+        witness=witness,
+        src_slot=src_slot,
+        dst_slot=dst_slot,
+        inputs=inputs,
+        prior_roads=[],
+        params=dict(DEFAULT_PARAMS),
+        divstrip_buffer=Polygon([(45.0, -1.5), (55.0, -1.5), (55.0, 1.5), (45.0, 1.5)]),
+    )
+
+    assert road is not None
+    assert result["reason"] == "built"
+    assert bool(result["production_multi_arc_allowed"]) is True
+    assert result["multi_arc_evidence_mode"] == "fallback_based"
+    assert any("side_constrained" in str(item["mode"]) for item in result["candidate_attempts"])
+    assert "side_constrained" in str(result["shape_ref_mode"])
+
+
 def test_t05v2_step2_bridge_chain_cannot_become_production_arc(tmp_path: Path) -> None:
     patch_id = "bridge_pair_scoped_retain"
     data_root = tmp_path / "data"
@@ -3175,6 +3300,18 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     assert "after" in target_review
     assert "step5_target_review_55353246_37687913" in step5_finish_summary
 
+    output_root_step5_plus = tmp_path / "bundle_step5_plus_multiarc"
+    step5_plus_summary = write_step5_plus_multiarc_finish_review(run_root=run_root, output_root=output_root_step5_plus)
+    assert (output_root_step5_plus / "step5_target_review_55353246_37687913.json").exists()
+    assert (output_root_step5_plus / "multi_arc_review.json").exists()
+    assert (output_root_step5_plus / "multi_arc_review.csv").exists()
+    assert (output_root_step5_plus / "complex_patch_step5_plus_multiarc_finish_review.json").exists()
+    combined_multi_arc = _read_json(output_root_step5_plus / "multi_arc_review.json")
+    combined_multi_arc_by_pair = {str(item["pair"]): item for item in combined_multi_arc["rows"]}
+    assert combined_multi_arc_by_pair["21779764:785642"]["witness_based_arc_ids"] == ["arc_multi_1"]
+    assert combined_multi_arc_by_pair["21779764:785642"]["fallback_based_arc_ids"] == ["arc_multi_2"]
+    assert "complex_patch_step5_plus_multiarc_finish_review" in step5_plus_summary
+
 
 def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
     rows = [
@@ -3470,6 +3607,85 @@ def test_t05v2_arc_selection_structure_and_multi_arc_review_autofill_structure_a
     assert row["rule_reason"] == "same_pair_multi_arc_dual_output_ready"
 
 
+def test_t05v2_multi_arc_review_prefers_step3_evidence_mode_fields(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    patch_id = "patch_multi_arc_step3"
+    patch_dir = run_root / "patches" / patch_id
+    _write_json(
+        patch_dir / "metrics.json",
+        {
+            "patch_id": patch_id,
+            "full_legal_arc_registry": [
+                {
+                    "pair": "791873:791871",
+                    "src": 791873,
+                    "dst": 791871,
+                    "topology_arc_id": "arc_multi_a",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": False,
+                    "arc_structure_type": "SAME_PAIR_MULTI_ARC",
+                    "entered_main_flow": True,
+                    "built_final_road": True,
+                    "production_multi_arc_allowed": True,
+                    "multi_arc_evidence_mode": "witness_based",
+                    "multi_arc_structure_type": "SAME_PAIR_MULTI_ARC",
+                    "multi_arc_rule_reason": "same_pair_multi_arc_dual_output_ready",
+                },
+                {
+                    "pair": "791873:791871",
+                    "src": 791873,
+                    "dst": 791871,
+                    "topology_arc_id": "arc_multi_b",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": False,
+                    "arc_structure_type": "SAME_PAIR_MULTI_ARC",
+                    "entered_main_flow": True,
+                    "built_final_road": False,
+                    "production_multi_arc_allowed": True,
+                    "multi_arc_evidence_mode": "fallback_based",
+                    "multi_arc_structure_type": "SAME_PAIR_MULTI_ARC",
+                    "multi_arc_rule_reason": "same_pair_multi_arc_dual_output_ready",
+                    "unbuilt_stage": "step5_geometry_rejected",
+                    "unbuilt_reason": "road_crosses_divstrip",
+                },
+            ],
+        },
+    )
+
+    multi_arc_review = build_multi_arc_review(
+        run_root,
+        complex_patch_id=patch_id,
+        same_pair_multi_arc_observation={
+            "patch_id": patch_id,
+            "rows": [
+                {
+                    "patch_id": patch_id,
+                    "pair": "791873:791871",
+                    "pair_arc_count": 2,
+                    "arc_ids": ["arc_multi_a", "arc_multi_b"],
+                    "has_built_sibling_arc": True,
+                    "built_sibling_arc_ids": ["arc_multi_a"],
+                    "excluded_from_unique_denominator_reason": "same_pair_multi_arc",
+                    "current_business_status": "multi_arc_with_built_sibling_under_observation",
+                    "next_rule_needed": "multi_arc_selection_rule",
+                    "visual_gap_note": "built_sibling_present_visual_gap_possible",
+                }
+            ],
+        },
+    )
+
+    assert int(multi_arc_review["row_count"]) == 1
+    row = multi_arc_review["rows"][0]
+    assert row["pair"] == "791873:791871"
+    assert row["allow_multi_output"] is True
+    assert row["witness_based_arc_ids"] == ["arc_multi_a"]
+    assert row["fallback_based_arc_ids"] == ["arc_multi_b"]
+    assert row["entered_main_flow"] is True
+    assert row["built"] is True
+
+
 def test_t05v2_arc_legality_audit_uses_full_registry_for_arc_first_built_segment(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     patch_id = "patch_arc_first"
@@ -3615,6 +3831,101 @@ def test_t05v2_arc_legality_audit_does_not_flag_controlled_entry_built_pair(tmp_
     assert int(audit["summary"]["bad_built_arc_count"]) == 0
     assert bool(audit["summary"]["built_all_direct_unique"]) is True
     assert "760239:6963539359479390368" not in audit["summary"]["violating_built_pairs"]
+
+
+def test_t05v2_arc_legality_audit_allows_built_same_pair_multi_arc_production_exception(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    patch_id = "patch_multi_arc_audit"
+    patch_dir = run_root / "patches" / patch_id
+    _write_json(
+        patch_dir / "metrics.json",
+        {
+            "patch_id": patch_id,
+            "full_legal_arc_registry": [
+                {
+                    "pair": "21779764:785642",
+                    "src": 21779764,
+                    "dst": 785642,
+                    "topology_arc_id": "arc_multi_1",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": False,
+                    "entered_main_flow": True,
+                    "built_final_road": True,
+                    "working_segment_id": "arcseg::arc_multi_1",
+                    "production_multi_arc_allowed": True,
+                    "multi_arc_evidence_mode": "witness_based",
+                    "multi_arc_structure_type": "SAME_PAIR_MULTI_ARC",
+                    "multi_arc_rule_reason": "same_pair_multi_arc_dual_output_ready",
+                },
+                {
+                    "pair": "21779764:785642",
+                    "src": 21779764,
+                    "dst": 785642,
+                    "topology_arc_id": "arc_multi_2",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": False,
+                    "entered_main_flow": True,
+                    "built_final_road": True,
+                    "working_segment_id": "arcseg::arc_multi_2",
+                    "production_multi_arc_allowed": True,
+                    "multi_arc_evidence_mode": "fallback_based",
+                    "multi_arc_structure_type": "SAME_PAIR_MULTI_ARC",
+                    "multi_arc_rule_reason": "same_pair_multi_arc_dual_output_ready",
+                },
+            ],
+        },
+    )
+    _write_json(
+        patch_dir / "step2" / "segments.json",
+        {
+            "segments": [
+                {
+                    "segment_id": "arcseg::arc_multi_1",
+                    "src_nodeid": 21779764,
+                    "dst_nodeid": 785642,
+                    "topology_arc_id": "arc_multi_1",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "topology_arc_is_direct_legal": True,
+                    "topology_arc_is_unique": False,
+                    "production_multi_arc_allowed": True,
+                    "multi_arc_evidence_mode": "witness_based",
+                    "multi_arc_structure_type": "SAME_PAIR_MULTI_ARC",
+                    "multi_arc_rule_reason": "same_pair_multi_arc_dual_output_ready",
+                },
+                {
+                    "segment_id": "arcseg::arc_multi_2",
+                    "src_nodeid": 21779764,
+                    "dst_nodeid": 785642,
+                    "topology_arc_id": "arc_multi_2",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "topology_arc_is_direct_legal": True,
+                    "topology_arc_is_unique": False,
+                    "production_multi_arc_allowed": True,
+                    "multi_arc_evidence_mode": "fallback_based",
+                    "multi_arc_structure_type": "SAME_PAIR_MULTI_ARC",
+                    "multi_arc_rule_reason": "same_pair_multi_arc_dual_output_ready",
+                },
+            ],
+            "excluded_candidates": [],
+        },
+    )
+    _write_json(
+        patch_dir / "step6" / "final_roads.json",
+        {
+            "roads": [
+                {"road_id": "road_multi_1", "segment_id": "arcseg::arc_multi_1", "src_nodeid": 21779764, "dst_nodeid": 785642},
+                {"road_id": "road_multi_2", "segment_id": "arcseg::arc_multi_2", "src_nodeid": 21779764, "dst_nodeid": 785642},
+            ],
+            "road_results": [],
+        },
+    )
+
+    audit = build_arc_legality_audit(run_root, [patch_id])
+    assert int(audit["summary"]["bad_built_arc_count"]) == 0
+    assert bool(audit["summary"]["built_all_direct_unique"]) is True
+    assert audit["built_roads"][0]["production_multi_arc_allowed"] is True
 
 
 def test_t05v2_directed_topology_alias_normalization_promotes_shared_xsec_alias_to_direct_arc(tmp_path: Path) -> None:

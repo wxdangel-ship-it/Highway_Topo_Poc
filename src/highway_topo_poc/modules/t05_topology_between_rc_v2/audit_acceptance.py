@@ -311,6 +311,12 @@ def _identity_record_from_row(
             payload.get("topology_arc_is_direct_legal", payload.get("is_direct_legal", False))
         ),
         "topology_arc_is_unique": bool(payload.get("topology_arc_is_unique", payload.get("is_unique", False))),
+        "production_multi_arc_allowed": bool(payload.get("production_multi_arc_allowed", False)),
+        "multi_arc_evidence_mode": str(payload.get("multi_arc_evidence_mode", "")),
+        "multi_arc_structure_type": str(
+            payload.get("multi_arc_structure_type", payload.get("arc_structure_type", ""))
+        ),
+        "multi_arc_rule_reason": str(payload.get("multi_arc_rule_reason", "")),
         "controlled_entry_allowed": controlled_entry_allowed,
         "topology_gap_decision": str(payload.get("topology_gap_decision", "")),
         "topology_gap_reason": str(payload.get("topology_gap_reason", "")),
@@ -498,6 +504,9 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
                 or str(row.get("topology_gap_decision", ""))
                 or bool(row.get("blocked_diagnostic_only", False))
                 or bool(str(row.get("hard_block_reason", "")))
+                or str(row.get("arc_structure_type", "")) == STRUCTURE_SAME_PAIR_MULTI_ARC
+                or bool(row.get("production_multi_arc_allowed", False))
+                or bool(str(row.get("multi_arc_evidence_mode", "")))
             )
         )
     )
@@ -552,6 +561,10 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
                 "topology_arc_source_type": str(resolved.get("topology_arc_source_type", "")),
                 "topology_arc_is_direct_legal": bool(resolved.get("topology_arc_is_direct_legal", False)),
                 "topology_arc_is_unique": bool(resolved.get("topology_arc_is_unique", False)),
+                "production_multi_arc_allowed": bool(resolved.get("production_multi_arc_allowed", False)),
+                "multi_arc_evidence_mode": str(resolved.get("multi_arc_evidence_mode", "")),
+                "multi_arc_structure_type": str(resolved.get("multi_arc_structure_type", "")),
+                "multi_arc_rule_reason": str(resolved.get("multi_arc_rule_reason", "")),
                 "blocked_diagnostic_only": bool(resolved.get("blocked_diagnostic_only", False)),
                 "blocked_diagnostic_reason": str(resolved.get("blocked_diagnostic_reason", "")),
                 "controlled_entry_allowed": bool(resolved.get("controlled_entry_allowed", False)),
@@ -1003,7 +1016,7 @@ def _production_arc_pass(row: dict[str, Any]) -> bool:
     return bool(
         str(row.get("topology_arc_source_type", "")) == _DIRECT_TOPOLOGY_ARC_SOURCE
         and bool(row.get("topology_arc_is_direct_legal", False))
-        and bool(row.get("topology_arc_is_unique", False))
+        and (bool(row.get("topology_arc_is_unique", False)) or bool(row.get("production_multi_arc_allowed", False)))
         and bool(str(row.get("topology_arc_id", "")))
     )
 
@@ -1025,6 +1038,10 @@ def _registry_row_to_arc_record(row: dict[str, Any]) -> dict[str, Any]:
         "topology_arc_source_type": str(identity.get("topology_arc_source_type", "")),
         "topology_arc_is_direct_legal": bool(identity.get("topology_arc_is_direct_legal", False)),
         "topology_arc_is_unique": bool(identity.get("topology_arc_is_unique", False)),
+        "production_multi_arc_allowed": bool(identity.get("production_multi_arc_allowed", False)),
+        "multi_arc_evidence_mode": str(identity.get("multi_arc_evidence_mode", "")),
+        "multi_arc_structure_type": str(identity.get("multi_arc_structure_type", "")),
+        "multi_arc_rule_reason": str(identity.get("multi_arc_rule_reason", "")),
         "controlled_entry_allowed": bool(identity.get("controlled_entry_allowed", False)),
         "topology_gap_decision": str(identity.get("topology_gap_decision", "")),
         "topology_gap_reason": str(identity.get("topology_gap_reason", "")),
@@ -2171,9 +2188,22 @@ def build_multi_arc_review(
     same_pair_registry_rows = [
         dict(row)
         for row in registry_rows
-        if str(row.get("arc_structure_type", "")) == STRUCTURE_SAME_PAIR_MULTI_ARC
+        if (
+            str(row.get("arc_structure_type", "")) == STRUCTURE_SAME_PAIR_MULTI_ARC
+            or bool(row.get("production_multi_arc_allowed", False))
+            or str(row.get("multi_arc_evidence_mode", "")) in {"witness_based", "fallback_based"}
+        )
     ]
-    multi_arc_rule = apply_multi_arc_rule(same_pair_registry_rows)
+    pair_decisions = build_pair_decisions(run_root, str(complex_patch_id))
+    decisions_by_pair = {
+        str(row.get("pair", "")): dict(row)
+        for row in pair_decisions.get("pairs", [])
+    }
+    explicit_rule_rows: list[dict[str, Any]] = []
+    for row in same_pair_registry_rows:
+        if bool(row.get("production_multi_arc_allowed", False)) or bool(str(row.get("multi_arc_evidence_mode", ""))):
+            explicit_rule_rows.append(dict(row))
+    multi_arc_rule = apply_multi_arc_rule(explicit_rule_rows or same_pair_registry_rows)
     observation_by_pair = {
         str(row.get("pair", "")): dict(row)
         for row in same_pair_multi_arc_observation.get("rows", [])
@@ -2184,6 +2214,36 @@ def build_multi_arc_review(
     for pair_id in sorted(target_pairs):
         observation = dict(observation_by_pair.get(pair_id, {}))
         rule_row = dict(multi_arc_rule.get(pair_id, {}))
+        pair_registry_rows = [dict(row) for row in same_pair_registry_rows if str(row.get("pair", "")) == str(pair_id)]
+        pair_decision = dict(decisions_by_pair.get(pair_id, {}))
+        pair_arc_ids = [str(row.get("topology_arc_id", "")) for row in pair_registry_rows if str(row.get("topology_arc_id", ""))]
+        evidence_modes = {
+            str(row.get("topology_arc_id", "")): str(row.get("multi_arc_evidence_mode", ""))
+            for row in pair_registry_rows
+            if str(row.get("topology_arc_id", ""))
+        }
+        witness_based_arc_ids = [
+            arc_id for arc_id, mode in evidence_modes.items() if str(mode) == "witness_based"
+        ]
+        fallback_based_arc_ids = [
+            arc_id for arc_id, mode in evidence_modes.items() if str(mode) == "fallback_based"
+        ]
+        entered_main_flow = bool(
+            any(bool(row.get("entered_main_flow", False)) for row in pair_registry_rows)
+            or pair_decision.get("entered_main_flow", False)
+        )
+        built_final_road = bool(
+            any(bool(row.get("built_final_road", False)) for row in pair_registry_rows)
+            or pair_decision.get("built_final_road", False)
+        )
+        unbuilt_stage = str(
+            next((str(row.get("unbuilt_stage", "")) for row in pair_registry_rows if str(row.get("unbuilt_stage", ""))), "")
+            or pair_decision.get("unbuilt_stage", "")
+        )
+        unbuilt_reason = str(
+            next((str(row.get("unbuilt_reason", "")) for row in pair_registry_rows if str(row.get("unbuilt_reason", ""))), "")
+            or pair_decision.get("unbuilt_reason", "")
+        )
         allow_multi_output = bool(rule_row.get("allow_multi_output", False))
         current_business_status = str(observation.get("current_business_status", ""))
         next_rule_needed = str(observation.get("next_rule_needed", ""))
@@ -2195,13 +2255,17 @@ def build_multi_arc_review(
                 "patch_id": str(complex_patch_id),
                 "pair": str(pair_id),
                 "structure_type": str(rule_row.get("structure_type", STRUCTURE_SAME_PAIR_MULTI_ARC)),
-                "pair_arc_count": int(rule_row.get("pair_arc_count", observation.get("pair_arc_count", 0))),
-                "arc_ids": [str(v) for v in rule_row.get("arc_ids", observation.get("arc_ids", [])) if str(v)],
+                "pair_arc_count": int(rule_row.get("pair_arc_count", observation.get("pair_arc_count", len(pair_registry_rows)))),
+                "arc_ids": [str(v) for v in (rule_row.get("arc_ids") or pair_arc_ids or observation.get("arc_ids", [])) if str(v)],
                 "allow_multi_output": bool(allow_multi_output),
-                "witness_based_arc_ids": [str(v) for v in rule_row.get("witness_based_arc_ids", []) if str(v)],
-                "fallback_based_arc_ids": [str(v) for v in rule_row.get("fallback_based_arc_ids", []) if str(v)],
-                "evidence_modes": dict(rule_row.get("evidence_modes", {})),
+                "witness_based_arc_ids": [str(v) for v in (rule_row.get("witness_based_arc_ids") or witness_based_arc_ids) if str(v)],
+                "fallback_based_arc_ids": [str(v) for v in (rule_row.get("fallback_based_arc_ids") or fallback_based_arc_ids) if str(v)],
+                "evidence_modes": dict(rule_row.get("evidence_modes", evidence_modes)),
                 "rule_reason": str(rule_row.get("rule_reason", "")),
+                "entered_main_flow": bool(entered_main_flow),
+                "built": bool(built_final_road),
+                "unbuilt_stage": str(unbuilt_stage),
+                "unbuilt_reason": str(unbuilt_reason),
                 "has_built_sibling_arc": bool(observation.get("has_built_sibling_arc", False)),
                 "built_sibling_arc_ids": [str(v) for v in observation.get("built_sibling_arc_ids", []) if str(v)],
                 "excluded_from_unique_denominator_reason": str(
@@ -3209,6 +3273,93 @@ def write_step5_finish_review(
     }
 
 
+def write_step5_plus_multiarc_finish_review(
+    *,
+    run_root: Path | str,
+    output_root: Path | str,
+    simple_patch_ids: list[str] | None = None,
+    complex_patch_id: str = "5417632623039346",
+) -> dict[str, Any]:
+    summary = write_step5_finish_review(
+        run_root=run_root,
+        output_root=output_root,
+        simple_patch_ids=simple_patch_ids,
+        complex_patch_id=complex_patch_id,
+    )
+    output_root_path = Path(output_root)
+    same_pair_multi_arc_observation = dict(summary.get("same_pair_multi_arc_observation", {}))
+    strict_vs_visual_gap_summary = dict(summary.get("strict_vs_visual_gap_summary", {}))
+    multi_arc_review = build_multi_arc_review(
+        run_root,
+        complex_patch_id=str(complex_patch_id),
+        same_pair_multi_arc_observation=same_pair_multi_arc_observation,
+    )
+    strict_vs_visual_gap_summary = {
+        **strict_vs_visual_gap_summary,
+        "multi_arc_review": {
+            "row_count": int(multi_arc_review.get("row_count", 0)),
+            "dual_output_candidate_count": int(multi_arc_review.get("dual_output_candidate_count", 0)),
+            "pairs": [str(row.get("pair", "")) for row in multi_arc_review.get("rows", [])],
+        },
+    }
+    complex_patch_step5_plus_multiarc_finish_review = {
+        "patch_id": str(complex_patch_id),
+        "step5_target_review_55353246_37687913": dict(summary.get("step5_target_review_55353246_37687913", {})),
+        "multi_arc_review": multi_arc_review,
+        "strict_vs_visual_gap_summary": strict_vs_visual_gap_summary,
+    }
+    write_json(output_root_path / "multi_arc_review.json", multi_arc_review)
+    with (output_root_path / "multi_arc_review.csv").open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "patch_id",
+                "pair",
+                "structure_type",
+                "pair_arc_count",
+                "arc_ids",
+                "allow_multi_output",
+                "witness_based_arc_ids",
+                "fallback_based_arc_ids",
+                "rule_reason",
+                "entered_main_flow",
+                "built",
+                "unbuilt_stage",
+                "unbuilt_reason",
+                "current_business_status",
+                "next_rule_needed",
+            ],
+        )
+        writer.writeheader()
+        for payload in multi_arc_review.get("rows", []):
+            row = dict(payload)
+            row["arc_ids"] = ",".join(str(v) for v in payload.get("arc_ids", []))
+            row["witness_based_arc_ids"] = ",".join(str(v) for v in payload.get("witness_based_arc_ids", []))
+            row["fallback_based_arc_ids"] = ",".join(str(v) for v in payload.get("fallback_based_arc_ids", []))
+            writer.writerow({key: row.get(key, "") for key in writer.fieldnames})
+    write_json(output_root_path / "strict_vs_visual_gap_summary.json", strict_vs_visual_gap_summary)
+    write_json(
+        output_root_path / "complex_patch_step5_plus_multiarc_finish_review.json",
+        complex_patch_step5_plus_multiarc_finish_review,
+    )
+    summary_lines = [
+        "",
+        "## Step5 Plus Multi-Arc Finish",
+        "",
+        f"- multi_arc_review_row_count=`{multi_arc_review.get('row_count', 0)}`",
+        f"- dual_output_candidate_count=`{multi_arc_review.get('dual_output_candidate_count', 0)}`",
+    ]
+    summary_path = output_root_path / "SUMMARY.md"
+    existing_summary = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
+    summary_path.write_text(existing_summary + "\n".join(summary_lines) + "\n", encoding="utf-8")
+    return {
+        **summary,
+        "multi_arc_review": multi_arc_review,
+        "strict_vs_visual_gap_summary": strict_vs_visual_gap_summary,
+        "complex_patch_step5_plus_multiarc_finish_review": complex_patch_step5_plus_multiarc_finish_review,
+    }
+
+
 __all__ = [
     "build_arc_evidence_attach_audit",
     "build_arc_legality_audit",
@@ -3237,4 +3388,5 @@ __all__ = [
     "write_semantic_fix_after_perf_review",
     "write_topology_gap_controlled_cover_review",
     "write_witness_vis_step5_recovery_review",
+    "write_step5_plus_multiarc_finish_review",
 ]
