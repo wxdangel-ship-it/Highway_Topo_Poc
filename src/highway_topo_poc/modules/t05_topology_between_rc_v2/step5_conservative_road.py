@@ -85,6 +85,53 @@ def _selected_witness_interval(witness: CorridorWitness | None):
     return None
 
 
+def _legacy_witness_centerline(
+    *,
+    witness: CorridorWitness | None,
+    start_pt: Point,
+    end_pt: Point,
+) -> LineString | None:
+    pipeline = _pipeline()
+    selected = _selected_witness_interval(witness)
+    if selected is None:
+        return None
+    mid_pt = pipeline._midpoint_of_interval(selected)
+    return LineString(
+        [
+            (float(start_pt.x), float(start_pt.y)),
+            (float(mid_pt.x), float(mid_pt.y)),
+            (float(end_pt.x), float(end_pt.y)),
+        ]
+    )
+
+
+def _witness_reference_projected_line(
+    *,
+    witness: CorridorWitness | None,
+    start_pt: Point,
+    end_pt: Point,
+) -> LineString | None:
+    if witness is None:
+        return None
+    witness_line = witness.geometry_metric()
+    if witness_line.is_empty or float(witness_line.length) <= 1e-6:
+        return None
+    return _anchor_along_base_line(witness_line, start_pt, end_pt)
+
+
+def _line_overlap_ratio(line: LineString, zone: Any | None) -> float:
+    if zone is None or getattr(zone, "is_empty", True):
+        return 0.0
+    length = float(getattr(line, "length", 0.0))
+    if length <= 1e-6:
+        return 0.0
+    try:
+        overlap = line.intersection(zone)
+    except Exception:
+        return 0.0
+    return float(max(0.0, min(1.0, float(getattr(overlap, "length", 0.0)) / max(length, 1e-6))))
+
+
 def slot_reference_line(
     *,
     segment: Segment,
@@ -116,19 +163,12 @@ def shape_ref_line(
     start_pt = pipeline._midpoint_of_interval(src_slot.interval)
     end_pt = pipeline._midpoint_of_interval(dst_slot.interval)
     if str(identity.state) == "witness_based":
-        selected = _selected_witness_interval(witness)
-        if selected is not None:
-            mid_pt = pipeline._midpoint_of_interval(selected)
-            return (
-                LineString(
-                    [
-                        (float(start_pt.x), float(start_pt.y)),
-                        (float(mid_pt.x), float(mid_pt.y)),
-                        (float(end_pt.x), float(end_pt.y)),
-                    ]
-                ),
-                "witness_centerline",
-            )
+        witness_reference = _witness_reference_projected_line(witness=witness, start_pt=start_pt, end_pt=end_pt)
+        if witness_reference is not None:
+            return witness_reference, "witness_reference_projected_anchored"
+        legacy_centerline = _legacy_witness_centerline(witness=witness, start_pt=start_pt, end_pt=end_pt)
+        if legacy_centerline is not None:
+            return legacy_centerline, "witness_centerline"
     return _replace_endpoints(base_line, start_pt, end_pt), f"{mode}_slot_anchored"
 
 
@@ -230,6 +270,7 @@ def build_final_road(
         "shape_ref_coords": [],
         "candidate_attempts": [],
         "drivezone_ratio": 0.0,
+        "divstrip_overlap_ratio": 0.0,
         "road_intersects_divstrip": False,
         "reason": "",
         "bridge_candidate_retained": bool(bridge_retained),
@@ -303,6 +344,10 @@ def build_final_road(
         prior_index=prior_index,
     )
     candidate_lines: list[tuple[LineString, str]] = [(preferred_line, str(preferred_mode))]
+    if str(identity.state) == "witness_based":
+        legacy_centerline = _legacy_witness_centerline(witness=witness, start_pt=start_pt, end_pt=end_pt)
+        if legacy_centerline is not None and not any(legacy_centerline.equals(item[0]) for item in candidate_lines):
+            candidate_lines.append((legacy_centerline, "witness_centerline"))
     support_reference_line = _line_from_coords(list((arc_row or {}).get("support_reference_coords", [])))
     if support_reference_line is not None:
         support_anchor = _anchor_along_base_line(support_reference_line, start_pt, end_pt)
@@ -329,10 +374,11 @@ def build_final_road(
             else:
                 candidate_lines.append((prior_anchor, "prior_reference_slot_anchored"))
     attempts: list[dict[str, Any]] = []
-    selected_candidate: tuple[LineString, str, float, bool] | None = None
-    best_candidate: tuple[LineString, str, float, bool] | None = None
+    selected_candidate: tuple[LineString, str, float, float, bool] | None = None
+    best_candidate: tuple[LineString, str, float, float, bool] | None = None
     for line, mode in candidate_lines:
         drivezone_ratio = pipeline._drivezone_ratio(line, inputs.drivezone_zone_metric)
+        divstrip_overlap_ratio = _line_overlap_ratio(line, divstrip_buffer)
         road_intersects_divstrip = bool(
             divstrip_buffer is not None and (not divstrip_buffer.is_empty) and line.intersects(divstrip_buffer)
         )
@@ -340,24 +386,28 @@ def build_final_road(
             {
                 "mode": str(mode),
                 "drivezone_ratio": float(drivezone_ratio),
+                "divstrip_overlap_ratio": float(divstrip_overlap_ratio),
                 "road_intersects_divstrip": bool(road_intersects_divstrip),
             }
         )
-        candidate = (line, str(mode), float(drivezone_ratio), bool(road_intersects_divstrip))
+        candidate = (line, str(mode), float(drivezone_ratio), float(divstrip_overlap_ratio), bool(road_intersects_divstrip))
         if best_candidate is None or (
             int(not road_intersects_divstrip),
+            float(-divstrip_overlap_ratio),
             float(drivezone_ratio),
         ) > (
-            int(not best_candidate[3]),
+            int(not best_candidate[4]),
+            float(-best_candidate[3]),
             float(best_candidate[2]),
         ):
             best_candidate = candidate
         if drivezone_ratio >= float(params["ROAD_MIN_DRIVEZONE_RATIO"]) and not road_intersects_divstrip:
             selected_candidate = candidate
             break
-    chosen_line, chosen_mode, drivezone_ratio, road_intersects_divstrip = selected_candidate or best_candidate or (
+    chosen_line, chosen_mode, drivezone_ratio, divstrip_overlap_ratio, road_intersects_divstrip = selected_candidate or best_candidate or (
         preferred_line,
         str(preferred_mode),
+        0.0,
         0.0,
         False,
     )
@@ -365,6 +415,7 @@ def build_final_road(
     result["shape_ref_mode"] = str(chosen_mode)
     result["shape_ref_coords"] = [[float(x), float(y)] for x, y in line_to_coords(chosen_line)]
     result["drivezone_ratio"] = float(drivezone_ratio)
+    result["divstrip_overlap_ratio"] = float(divstrip_overlap_ratio)
     result["road_intersects_divstrip"] = bool(road_intersects_divstrip)
     if selected_candidate is None:
         if road_intersects_divstrip:

@@ -21,6 +21,8 @@ _STEP5_TARGET_PAIRS = {
     "6460260817894928273:29626540",
 }
 
+_STEP5_FINISH_TARGET_PAIR = "55353246:37687913"
+
 _TOPOLOGY_GAP_TARGET_PAIRS = {
     "55353246:37687913",
     "760239:6963539359479390368",
@@ -69,6 +71,67 @@ def _point_from_coords(coords: Any) -> Point | None:
     if not isinstance(coords, (list, tuple)) or len(coords) < 2:
         return None
     return Point(float(coords[0]), float(coords[1]))
+
+
+def _pair_from_props(props: dict[str, Any]) -> str:
+    return f"{int(props.get('src', 0))}:{int(props.get('dst', 0))}"
+
+
+def _geom_payload(geom: Any) -> dict[str, Any] | None:
+    if geom is None or getattr(geom, "is_empty", True):
+        return None
+    return dict(getattr(geom, "__geo_interface__", {}))
+
+
+def _line_overlap_ratio(line: LineString | None, zone: Any | None) -> float:
+    if line is None or line.is_empty:
+        return 0.0
+    if zone is None or getattr(zone, "is_empty", True):
+        return 0.0
+    length = float(getattr(line, "length", 0.0))
+    if length <= 1e-6:
+        return 0.0
+    try:
+        overlap = line.intersection(zone)
+    except Exception:
+        return 0.0
+    return float(max(0.0, min(1.0, float(getattr(overlap, "length", 0.0)) / max(length, 1e-6))))
+
+
+def _selected_interval(witness: CorridorWitness | None):
+    if witness is None or witness.selected_interval_rank is None:
+        return None
+    for interval in witness.intervals:
+        if int(interval.rank) == int(witness.selected_interval_rank):
+            return interval
+    return None
+
+
+def _legacy_witness_centerline(
+    *,
+    witness: CorridorWitness | None,
+    slots: dict[str, SlotInterval] | None,
+) -> LineString | None:
+    if witness is None or slots is None:
+        return None
+    src_slot = slots.get("src")
+    dst_slot = slots.get("dst")
+    if src_slot is None or dst_slot is None or src_slot.interval is None or dst_slot.interval is None:
+        return None
+    selected = _selected_interval(witness)
+    if selected is None:
+        return None
+    pipeline = _pipeline()
+    start_pt = pipeline._midpoint_of_interval(src_slot.interval)
+    mid_pt = pipeline._midpoint_of_interval(selected)
+    end_pt = pipeline._midpoint_of_interval(dst_slot.interval)
+    return LineString(
+        [
+            (float(start_pt.x), float(start_pt.y)),
+            (float(mid_pt.x), float(mid_pt.y)),
+            (float(end_pt.x), float(end_pt.y)),
+        ]
+    )
 
 
 def _slot_payload_map(payload: dict[str, Any]) -> dict[str, dict[str, SlotInterval]]:
@@ -288,6 +351,7 @@ def _patch_visual_rows(run_root: Path | str, patch_id: str) -> tuple[list[dict[s
     segments = {str(item.segment_id): item for item in (Segment.from_dict(v) for v in step4_payload.get("working_segments", []))}
     slots = _slot_payload_map(step5_payload)
     road_results = {str(item.get("segment_id", "")): dict(item) for item in step6_payload.get("road_results", [])}
+    road_map = {str(item.get("segment_id", "")): dict(item) for item in step6_payload.get("roads", []) if str(item.get("segment_id", ""))}
     built_segments = {str(item.get("segment_id", "")) for item in step6_payload.get("roads", []) if str(item.get("segment_id", ""))}
     rows = list(metrics.get("full_legal_arc_registry", [])) or list(step4_payload.get("full_legal_arc_registry", []))
     xsec_map = dict(context.get("xsec_map") or {})
@@ -314,6 +378,8 @@ def _patch_visual_rows(run_root: Path | str, patch_id: str) -> tuple[list[dict[s
             current["unbuilt_stage"] = ""
             current["unbuilt_reason"] = ""
         build_result = dict(road_results.get(working_segment_id, {}))
+        road_payload = dict(road_map.get(working_segment_id, {}))
+        final_road_line = _line_from_coords(road_payload.get("line_coords", []))
         slot_status = str(current.get("slot_status", ""))
         if not slot_status:
             slot_status = "resolved" if slot_map and slot_map["src"].resolved and slot_map["dst"].resolved else "unresolved"
@@ -375,6 +441,14 @@ def _patch_visual_rows(run_root: Path | str, patch_id: str) -> tuple[list[dict[s
         support_total_length_m = float(sum(float(item.get("support_length_m", 0.0)) for item in current.get("traj_support_segments", [])))
         final_stage = "built" if built_final_road else str(current.get("unbuilt_stage") or build_result.get("reject_stage") or "")
         final_reason = "built" if built_final_road else str(current.get("unbuilt_reason") or build_result.get("reason") or "")
+        current_shape_ref_line = _line_from_coords(build_result.get("shape_ref_coords", []))
+        current_line = final_road_line or current_shape_ref_line
+        road_drivezone_overlap_ratio = (
+            float(pipeline._drivezone_ratio(current_line, drivezone))
+            if current_line is not None and drivezone is not None
+            else float(build_result.get("drivezone_ratio", 0.0) or 0.0)
+        )
+        road_divstrip_overlap_ratio = _line_overlap_ratio(current_line, divstrip)
         witness_line_features.append(
             (
                 witness_line,
@@ -463,6 +537,14 @@ def _patch_visual_rows(run_root: Path | str, patch_id: str) -> tuple[list[dict[s
                 "unbuilt_reason": str(final_reason if not built_final_road else ""),
                 "drivezone_overlap_ratio": float(drivezone_overlap_ratio),
                 "divstrip_overlap_ratio": float(divstrip_overlap_ratio),
+                "working_segment_id": str(working_segment_id),
+                "shape_ref_mode": str(build_result.get("shape_ref_mode", "")),
+                "shape_ref_coords": list(build_result.get("shape_ref_coords", [])),
+                "candidate_attempts": list(build_result.get("candidate_attempts") or []),
+                "current_final_road_coords": list(road_payload.get("line_coords", [])),
+                "road_drivezone_overlap_ratio": float(road_drivezone_overlap_ratio),
+                "road_divstrip_overlap_ratio": float(road_divstrip_overlap_ratio),
+                "road_intersects_divstrip": bool(build_result.get("road_intersects_divstrip", False)),
                 "support_total_length_m": float(support_total_length_m),
                 "support_type_major": str(_support_type_major(current)),
                 "src_anchor_source": str(src_anchor_source),
@@ -619,6 +701,193 @@ def _same_pair_multi_arc_rows(
         )
     rows.sort(key=lambda item: (str(item.get("pair", "")), str(item.get("patch_id", ""))))
     return rows
+
+
+def _feature_payloads_for_pair(
+    features: list[tuple[Any, dict[str, Any]]],
+    pair_id: str,
+) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for geom, props in features:
+        if _pair_from_props(props) != str(pair_id):
+            continue
+        payloads.append(
+            {
+                "geometry": _geom_payload(geom),
+                "properties": dict(props),
+            }
+        )
+    return payloads
+
+
+def _line_overlap_features(
+    *,
+    line: LineString | None,
+    zone: Any | None,
+    properties: dict[str, Any],
+) -> list[tuple[Any, dict[str, Any]]]:
+    if line is None or line.is_empty:
+        return []
+    if zone is None or getattr(zone, "is_empty", True):
+        return []
+    try:
+        overlap = line.intersection(zone)
+    except Exception:
+        return []
+    if overlap is None or getattr(overlap, "is_empty", True):
+        return []
+    geoms: list[Any] = []
+    if overlap.geom_type == "LineString":
+        geoms = [overlap]
+    elif overlap.geom_type == "MultiLineString":
+        geoms = list(overlap.geoms)
+    elif overlap.geom_type == "GeometryCollection":
+        geoms = [geom for geom in overlap.geoms if geom.geom_type in {"LineString", "MultiLineString"} and not geom.is_empty]
+    payloads: list[tuple[Any, dict[str, Any]]] = []
+    for geom in geoms:
+        if geom.geom_type == "MultiLineString":
+            for part in geom.geoms:
+                if not part.is_empty:
+                    payloads.append((part, dict(properties)))
+        elif not geom.is_empty:
+            payloads.append((geom, dict(properties)))
+    return payloads
+
+
+def write_step5_target_finish_review_bundle(
+    *,
+    run_root: Path | str,
+    output_root: Path | str,
+    complex_patch_id: str,
+    target_pair: str = _STEP5_FINISH_TARGET_PAIR,
+) -> dict[str, Any]:
+    output_root_path = Path(output_root)
+    output_root_path.mkdir(parents=True, exist_ok=True)
+
+    context = _patch_context(run_root, complex_patch_id)
+    patch_dir = _patch_dir(run_root, complex_patch_id)
+    step3_payload = _safe_read_json(patch_dir / "step3" / "witness.json")
+    step4_payload = _safe_read_json(patch_dir / "step4" / "corridor_identity.json")
+    step5_payload = _safe_read_json(patch_dir / "step5" / "slot_mapping.json")
+    review_rows, chord_features, support_features, witness_line_features, witness_polygon_features = _patch_visual_rows(
+        run_root,
+        complex_patch_id,
+    )
+    target_row = next((dict(row) for row in review_rows if str(row.get("pair", "")) == str(target_pair)), {})
+    witnesses = {str(item.segment_id): item for item in (CorridorWitness.from_dict(v) for v in step3_payload.get("witnesses", []))}
+    identities = {str(item.segment_id): item for item in (CorridorIdentity.from_dict(v) for v in step4_payload.get("corridor_identities", []))}
+    segments = {str(item.segment_id): item for item in (Segment.from_dict(v) for v in step4_payload.get("working_segments", []))}
+    slots = _slot_payload_map(step5_payload)
+    drivezone = getattr(context.get("inputs"), "drivezone_zone_metric", None)
+    divstrip = (context.get("patch_geometry_cache") or {}).get("divstrip_buffer")
+    params = dict(context.get("params") or {})
+    pipeline = _pipeline()
+
+    before_payload: dict[str, Any] = {
+        "built": False,
+        "stage": "step5_geometry_rejected",
+        "reason": "baseline_not_available",
+        "shape_ref_mode": "legacy_witness_centerline",
+        "drivezone_overlap_ratio": 0.0,
+        "divstrip_overlap_ratio": 0.0,
+        "final_road_length_m": 0.0,
+        "geometry": None,
+    }
+    after_line = _line_from_coords(target_row.get("current_final_road_coords", [])) or _line_from_coords(target_row.get("shape_ref_coords", []))
+    after_payload: dict[str, Any] = {
+        "built": bool(target_row.get("built_final_road", False)),
+        "stage": "" if bool(target_row.get("built_final_road", False)) else str(target_row.get("unbuilt_stage", "")),
+        "reason": "built" if bool(target_row.get("built_final_road", False)) else str(target_row.get("unbuilt_reason", "")),
+        "shape_ref_mode": str(target_row.get("shape_ref_mode", "")),
+        "drivezone_overlap_ratio": float(target_row.get("road_drivezone_overlap_ratio", 0.0)),
+        "divstrip_overlap_ratio": float(target_row.get("road_divstrip_overlap_ratio", 0.0)),
+        "final_road_length_m": float(getattr(after_line, "length", 0.0)),
+        "geometry": _geom_payload(after_line),
+    }
+
+    working_segment_id = str(target_row.get("working_segment_id", ""))
+    legacy_line = None
+    if working_segment_id:
+        legacy_line = _legacy_witness_centerline(
+            witness=witnesses.get(working_segment_id),
+            slots=slots.get(working_segment_id),
+        )
+    if legacy_line is not None:
+        legacy_drivezone_ratio = float(pipeline._drivezone_ratio(legacy_line, drivezone)) if drivezone is not None else 0.0
+        legacy_divstrip_overlap_ratio = _line_overlap_ratio(legacy_line, divstrip)
+        legacy_crosses_divstrip = bool(divstrip is not None and (not divstrip.is_empty) and legacy_line.intersects(divstrip))
+        legacy_built = bool(
+            legacy_drivezone_ratio >= float(params.get("ROAD_MIN_DRIVEZONE_RATIO", 0.85))
+            and not legacy_crosses_divstrip
+        )
+        before_payload = {
+            "built": bool(legacy_built),
+            "stage": "" if legacy_built else "step5_geometry_rejected",
+            "reason": "built" if legacy_built else ("road_crosses_divstrip" if legacy_crosses_divstrip else "road_outside_drivezone"),
+            "shape_ref_mode": "legacy_witness_centerline",
+            "drivezone_overlap_ratio": float(legacy_drivezone_ratio),
+            "divstrip_overlap_ratio": float(legacy_divstrip_overlap_ratio),
+            "final_road_length_m": float(legacy_line.length),
+            "geometry": _geom_payload(legacy_line),
+        }
+
+    line_debug_features: list[tuple[Any, dict[str, Any]]] = []
+    overlap_debug_features: list[tuple[Any, dict[str, Any]]] = []
+    for geom, props in chord_features:
+        if _pair_from_props(props) == str(target_pair):
+            line_debug_features.append((geom, {**dict(props), "layer": "chord"}))
+    for geom, props in support_features:
+        if _pair_from_props(props) == str(target_pair):
+            line_debug_features.append((geom, {**dict(props), "layer": "traj_support"}))
+    for geom, props in witness_line_features:
+        if _pair_from_props(props) == str(target_pair):
+            line_debug_features.append((geom, {**dict(props), "layer": "corridor_witness_line"}))
+    if legacy_line is not None:
+        line_debug_features.append((legacy_line, {"pair": str(target_pair), "layer": "before_legacy_witness_centerline"}))
+        overlap_debug_features.extend(
+            _line_overlap_features(
+                line=legacy_line,
+                zone=divstrip,
+                properties={"pair": str(target_pair), "layer": "before_divstrip_overlap"},
+            )
+        )
+    if after_line is not None:
+        line_debug_features.append((after_line, {"pair": str(target_pair), "layer": "after_current_final_line"}))
+        overlap_debug_features.extend(
+            _line_overlap_features(
+                line=after_line,
+                zone=divstrip,
+                properties={"pair": str(target_pair), "layer": "after_divstrip_overlap"},
+            )
+        )
+
+    target_review = {
+        "patch_id": str(complex_patch_id),
+        "pair": str(target_pair),
+        "src": int(target_row.get("src", 0)),
+        "dst": int(target_row.get("dst", 0)),
+        "topology_arc_id": str(target_row.get("topology_arc_id", "")),
+        "working_segment_id": str(working_segment_id),
+        "chord": _feature_payloads_for_pair(chord_features, target_pair),
+        "traj_support_segments": _feature_payloads_for_pair(support_features, target_pair),
+        "corridor_witness_line": _feature_payloads_for_pair(witness_line_features, target_pair),
+        "corridor_witness_polygon": _feature_payloads_for_pair(witness_polygon_features, target_pair),
+        "shared_downstream_signal": list(target_row.get("arc_selection_shared_downstream_signal", [])),
+        "before": before_payload,
+        "after": after_payload,
+        "candidate_attempts_after": list(target_row.get("candidate_attempts", [])),
+        "divstrip_overlap_segments_before": [
+            {"geometry": _geom_payload(geom), "properties": dict(props)} for geom, props in overlap_debug_features if str(props.get("layer", "")) == "before_divstrip_overlap"
+        ],
+        "divstrip_overlap_segments_after": [
+            {"geometry": _geom_payload(geom), "properties": dict(props)} for geom, props in overlap_debug_features if str(props.get("layer", "")) == "after_divstrip_overlap"
+        ],
+    }
+
+    write_json(output_root_path / "step5_target_review_55353246_37687913.json", target_review)
+    write_features_geojson(output_root_path / "debug" / "step5_target_55353246_37687913_line.geojson", line_debug_features)
+    write_features_geojson(output_root_path / "debug" / "step5_target_55353246_37687913_overlap.geojson", overlap_debug_features)
+    return {"step5_target_review_55353246_37687913": target_review}
 
 
 def write_witness_vis_step5_recovery_bundle(
@@ -860,4 +1129,4 @@ def write_witness_vis_step5_recovery_bundle(
     }
 
 
-__all__ = ["write_witness_vis_step5_recovery_bundle"]
+__all__ = ["write_step5_target_finish_review_bundle", "write_witness_vis_step5_recovery_bundle"]

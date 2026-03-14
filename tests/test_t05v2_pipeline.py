@@ -54,6 +54,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.review import (
     write_merge_diverge_rules_review,
     write_perf_opt_arc_first_review,
     write_semantic_fix_after_perf_review,
+    write_step5_finish_review,
     write_topology_gap_controlled_cover_review,
     write_witness_vis_step5_recovery_review,
 )
@@ -1077,7 +1078,7 @@ def test_t05v2_unique_witness_based_full_pipeline(tmp_path: Path) -> None:
     assert metrics["segments"][0]["slot_dst_status"] == "resolved"
     assert metrics["segments"][0]["failure_classification"] == "built"
     assert float(metrics["segments"][0]["road_in_drivezone_ratio"]) >= 0.99
-    assert metrics["segments"][0]["shape_ref_mode"] == "witness_centerline"
+    assert metrics["segments"][0]["shape_ref_mode"] == "witness_reference_projected_anchored"
     assert bool(gate["overall_pass"]) is True
     assert len(roads["features"]) == 1
     assert len(shape_ref["features"]) == 1
@@ -1379,7 +1380,7 @@ def test_t05v2_divstrip_blocks_final_road(tmp_path: Path) -> None:
         assert reason_trace["road_results"] == []
 
 
-def test_t05v2_build_final_road_falls_back_to_segment_support_when_witness_centerline_leaves_drivezone() -> None:
+def test_t05v2_build_final_road_prefers_projected_witness_reference_before_segment_support() -> None:
     segment = Segment(
         segment_id="seg_fallback",
         src_nodeid=10,
@@ -1496,12 +1497,10 @@ def test_t05v2_build_final_road_falls_back_to_segment_support_when_witness_cente
 
     assert road is not None
     assert result["reason"] == "built"
-    assert result["shape_ref_mode"] == "segment_support_projected_anchored"
-    assert len(result["candidate_attempts"]) == 2
-    assert result["candidate_attempts"][0]["mode"] == "witness_centerline"
-    assert float(result["candidate_attempts"][0]["drivezone_ratio"]) < float(DEFAULT_PARAMS["ROAD_MIN_DRIVEZONE_RATIO"])
-    assert result["candidate_attempts"][1]["mode"] == "segment_support_projected_anchored"
-    assert float(result["candidate_attempts"][1]["drivezone_ratio"]) >= float(DEFAULT_PARAMS["ROAD_MIN_DRIVEZONE_RATIO"])
+    assert result["shape_ref_mode"] == "witness_reference_projected_anchored"
+    assert len(result["candidate_attempts"]) == 1
+    assert result["candidate_attempts"][0]["mode"] == "witness_reference_projected_anchored"
+    assert float(result["candidate_attempts"][0]["drivezone_ratio"]) >= float(DEFAULT_PARAMS["ROAD_MIN_DRIVEZONE_RATIO"])
     assert road.line_coords == ((0.0, 1.0), (50.0, 1.0), (100.0, 1.0))
 
 
@@ -1544,7 +1543,7 @@ def test_t05v2_build_final_road_uses_support_reference_candidate_to_avoid_divstr
         segment_id="seg_support_ref",
         status="selected",
         reason="witness_interval_selected",
-        line_coords=((50.0, -5.0), (50.0, 5.0)),
+        line_coords=((40.0, 0.0), (60.0, 0.0)),
         sample_s_norm=0.5,
         intervals=(witness_interval,),
         selected_interval_rank=0,
@@ -1629,6 +1628,8 @@ def test_t05v2_build_final_road_uses_support_reference_candidate_to_avoid_divstr
     assert road is not None
     assert result["reason"] == "built"
     assert result["shape_ref_mode"] == "traj_support_slot_anchored"
+    assert result["candidate_attempts"][0]["mode"] == "witness_reference_projected_anchored"
+    assert float(result["candidate_attempts"][0]["divstrip_overlap_ratio"]) > 0.0
     assert all(attempt["mode"] != "traj_support_slot_anchored" or float(attempt["drivezone_ratio"]) >= float(DEFAULT_PARAMS["ROAD_MIN_DRIVEZONE_RATIO"]) for attempt in result["candidate_attempts"])
 
 
@@ -3162,6 +3163,17 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     assert merge_fix_rows["55353246:37687913"]["allow_multi_output"] is True
     assert merge_fix_rows["791871:37687913"]["detected_structure_type"] == "MERGE_MULTI_UPSTREAM"
     assert "complex_patch_merge_diverge_fix_review" in merge_fix_summary
+
+    output_root_step5_finish = tmp_path / "bundle_step5_finish"
+    step5_finish_summary = write_step5_finish_review(run_root=run_root, output_root=output_root_step5_finish)
+    assert (output_root_step5_finish / "step5_target_review_55353246_37687913.json").exists()
+    assert (output_root_step5_finish / "debug" / "step5_target_55353246_37687913_line.geojson").exists()
+    assert (output_root_step5_finish / "debug" / "step5_target_55353246_37687913_overlap.geojson").exists()
+    target_review = _read_json(output_root_step5_finish / "step5_target_review_55353246_37687913.json")
+    assert target_review["pair"] == "55353246:37687913"
+    assert "before" in target_review
+    assert "after" in target_review
+    assert "step5_target_review_55353246_37687913" in step5_finish_summary
 
 
 def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:

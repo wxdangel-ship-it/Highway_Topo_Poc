@@ -3169,6 +3169,46 @@ def write_merge_diverge_fix_review(
     }
 
 
+def write_step5_finish_review(
+    *,
+    run_root: Path | str,
+    output_root: Path | str,
+    simple_patch_ids: list[str] | None = None,
+    complex_patch_id: str = "5417632623039346",
+) -> dict[str, Any]:
+    summary = write_merge_diverge_fix_review(
+        run_root=run_root,
+        output_root=output_root,
+        simple_patch_ids=simple_patch_ids,
+        complex_patch_id=complex_patch_id,
+    )
+    from .witness_review import write_step5_target_finish_review_bundle
+
+    step5_target_summary = write_step5_target_finish_review_bundle(
+        run_root=run_root,
+        output_root=output_root,
+        complex_patch_id=str(complex_patch_id),
+    )
+    output_root_path = Path(output_root)
+    target_review = dict(step5_target_summary.get("step5_target_review_55353246_37687913", {}))
+    summary_lines = [
+        "",
+        "## Step5 Finish 55353246 37687913",
+        "",
+        f"- before=`{target_review.get('before', {}).get('stage', '')}/{target_review.get('before', {}).get('reason', '')}`",
+        f"- after=`{target_review.get('after', {}).get('stage', '')}/{target_review.get('after', {}).get('reason', '')}`",
+        f"- after_built=`{str(bool(target_review.get('after', {}).get('built', False))).lower()}`",
+        f"- after_divstrip_overlap_ratio=`{target_review.get('after', {}).get('divstrip_overlap_ratio', 0.0)}`",
+    ]
+    summary_path = output_root_path / "SUMMARY.md"
+    existing_summary = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
+    summary_path.write_text(existing_summary + "\n".join(summary_lines) + "\n", encoding="utf-8")
+    return {
+        **summary,
+        **step5_target_summary,
+    }
+
+
 __all__ = [
     "build_arc_evidence_attach_audit",
     "build_arc_legality_audit",
@@ -3190,6 +3230,7 @@ __all__ = [
     "write_competing_arc_closure_review",
     "write_legal_arc_coverage_review",
     "write_merge_diverge_fix_review",
+    "write_step5_finish_review",
     "write_merge_diverge_rules_review",
     "write_perf_opt_arc_first_review",
     "write_arc_obligation_closure_review",

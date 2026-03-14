@@ -22,6 +22,7 @@ from .audit_acceptance import (
     write_merge_diverge_rules_review,
     write_perf_opt_arc_first_review,
     write_semantic_fix_after_perf_review,
+    write_step5_finish_review,
     write_topology_gap_controlled_cover_review,
     write_witness_vis_step5_recovery_review,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "write_merge_diverge_rules_review",
     "write_perf_opt_arc_first_review",
     "write_semantic_fix_after_perf_review",
+    "write_step5_finish_review",
     "write_topology_gap_controlled_cover_review",
     "write_witness_vis_step5_recovery_review",
 ]
