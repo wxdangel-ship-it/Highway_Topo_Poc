@@ -146,6 +146,12 @@ class Segment:
     bridge_diagnostic_reason: str = ""
     bridge_decision_stage: str = ""
     bridge_decision_reason: str = ""
+    raw_src_nodeid: int | None = None
+    raw_dst_nodeid: int | None = None
+    canonical_src_xsec_id: int | None = None
+    canonical_dst_xsec_id: int | None = None
+    src_alias_applied: bool = False
+    dst_alias_applied: bool = False
     same_pair_rank: int | None = None
     kept_reason: str = ""
 
@@ -177,6 +183,16 @@ class Segment:
             "bridge_diagnostic_reason": str(self.bridge_diagnostic_reason),
             "bridge_decision_stage": str(self.bridge_decision_stage),
             "bridge_decision_reason": str(self.bridge_decision_reason),
+            "raw_src_nodeid": None if self.raw_src_nodeid is None else int(self.raw_src_nodeid),
+            "raw_dst_nodeid": None if self.raw_dst_nodeid is None else int(self.raw_dst_nodeid),
+            "canonical_src_xsec_id": (
+                None if self.canonical_src_xsec_id is None else int(self.canonical_src_xsec_id)
+            ),
+            "canonical_dst_xsec_id": (
+                None if self.canonical_dst_xsec_id is None else int(self.canonical_dst_xsec_id)
+            ),
+            "src_alias_applied": bool(self.src_alias_applied),
+            "dst_alias_applied": bool(self.dst_alias_applied),
             "geometry_coords": [[float(x), float(y)] for x, y in self.geometry_coords],
             "candidate_ids": [str(v) for v in self.candidate_ids],
             "source_modes": [str(v) for v in self.source_modes],
@@ -222,6 +238,28 @@ class Segment:
             bridge_diagnostic_reason=str(payload.get("bridge_diagnostic_reason", "")),
             bridge_decision_stage=str(payload.get("bridge_decision_stage", "")),
             bridge_decision_reason=str(payload.get("bridge_decision_reason", "")),
+            raw_src_nodeid=(
+                None
+                if payload.get("raw_src_nodeid") is None
+                else int(payload.get("raw_src_nodeid"))
+            ),
+            raw_dst_nodeid=(
+                None
+                if payload.get("raw_dst_nodeid") is None
+                else int(payload.get("raw_dst_nodeid"))
+            ),
+            canonical_src_xsec_id=(
+                None
+                if payload.get("canonical_src_xsec_id") is None
+                else int(payload.get("canonical_src_xsec_id"))
+            ),
+            canonical_dst_xsec_id=(
+                None
+                if payload.get("canonical_dst_xsec_id") is None
+                else int(payload.get("canonical_dst_xsec_id"))
+            ),
+            src_alias_applied=bool(payload.get("src_alias_applied", False)),
+            dst_alias_applied=bool(payload.get("dst_alias_applied", False)),
             geometry_coords=coords,
             candidate_ids=tuple(str(v) for v in payload.get("candidate_ids", [])),
             source_modes=tuple(str(v) for v in payload.get("source_modes", [])),

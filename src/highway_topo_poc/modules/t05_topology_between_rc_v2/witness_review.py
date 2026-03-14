@@ -567,6 +567,12 @@ def _same_pair_multi_arc_rows(
                 "pair_arc_count": int(pair_arc_count),
                 "arc_ids": [str(item.get("topology_arc_id", "")) for item in pair_rows if str(item.get("topology_arc_id", ""))],
                 "excluded_from_unique_denominator_reason": "same_pair_multi_arc",
+                "current_business_status": (
+                    "multi_arc_with_built_sibling_under_observation"
+                    if built_rows
+                    else "multi_arc_no_built_sibling_visual_gap_candidate"
+                ),
+                "next_rule_needed": "multi_arc_selection_rule",
                 "has_built_sibling_arc": bool(built_rows),
                 "built_sibling_arc_ids": [str(item.get("topology_arc_id", "")) for item in built_rows if str(item.get("topology_arc_id", ""))],
                 "chord_available": bool(any(str(item.get("src_anchor_source", "")) and str(item.get("dst_anchor_source", "")) for item in pair_rows)),
@@ -590,6 +596,8 @@ def _same_pair_multi_arc_rows(
                 "pair_arc_count": 0,
                 "arc_ids": [],
                 "excluded_from_unique_denominator_reason": "same_pair_multi_arc",
+                "current_business_status": "multi_arc_missing_from_review_rows",
+                "next_rule_needed": "multi_arc_selection_rule",
                 "has_built_sibling_arc": False,
                 "built_sibling_arc_ids": [],
                 "chord_available": False,
@@ -789,6 +797,8 @@ def write_witness_vis_step5_recovery_bundle(
                 "pair_arc_count",
                 "arc_ids",
                 "excluded_from_unique_denominator_reason",
+                "current_business_status",
+                "next_rule_needed",
                 "has_built_sibling_arc",
                 "built_sibling_arc_ids",
                 "chord_available",

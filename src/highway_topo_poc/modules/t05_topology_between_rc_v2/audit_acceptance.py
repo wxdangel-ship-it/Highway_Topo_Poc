@@ -232,10 +232,36 @@ def _identity_record_from_row(
         else str(payload.get("blocked_diagnostic_reason", "") or payload.get("unbuilt_reason", ""))
     )
     topology_arc_source_type = str(payload.get("topology_arc_source_type") or payload.get("arc_source_type") or "")
+    canonical_src_xsec_id = payload.get("canonical_src_xsec_id", payload.get("src", payload.get("src_nodeid")))
+    canonical_dst_xsec_id = payload.get("canonical_dst_xsec_id", payload.get("dst", payload.get("dst_nodeid")))
+    raw_src_nodeid = payload.get("raw_src_nodeid", canonical_src_xsec_id)
+    raw_dst_nodeid = payload.get("raw_dst_nodeid", canonical_dst_xsec_id)
+    raw_pair = (
+        _pair_id_text(int(raw_src_nodeid), int(raw_dst_nodeid))
+        if raw_src_nodeid is not None and raw_dst_nodeid is not None
+        else resolved_pair
+    )
+    canonical_pair = (
+        _pair_id_text(int(canonical_src_xsec_id), int(canonical_dst_xsec_id))
+        if canonical_src_xsec_id is not None and canonical_dst_xsec_id is not None
+        else resolved_pair
+    )
+    src_alias_applied = bool(payload.get("src_alias_applied", raw_src_nodeid != canonical_src_xsec_id))
+    dst_alias_applied = bool(payload.get("dst_alias_applied", raw_dst_nodeid != canonical_dst_xsec_id))
     return {
         "pair": resolved_pair,
+        "raw_pair": str(raw_pair or resolved_pair),
+        "canonical_pair": str(canonical_pair or resolved_pair),
+        "raw_src_nodeid": None if raw_src_nodeid is None else int(raw_src_nodeid),
+        "raw_dst_nodeid": None if raw_dst_nodeid is None else int(raw_dst_nodeid),
+        "canonical_src_xsec_id": None if canonical_src_xsec_id is None else int(canonical_src_xsec_id),
+        "canonical_dst_xsec_id": None if canonical_dst_xsec_id is None else int(canonical_dst_xsec_id),
+        "src_alias_applied": bool(src_alias_applied),
+        "dst_alias_applied": bool(dst_alias_applied),
+        "alias_normalized": bool(src_alias_applied or dst_alias_applied or str(raw_pair) != str(canonical_pair)),
         "working_segment_id": resolved_segment_id,
         "topology_arc_id": str(payload.get("topology_arc_id", "")),
+        "canonical_topology_arc_id": str(payload.get("topology_arc_id", "")),
         "topology_arc_source_type": topology_arc_source_type,
         "topology_arc_is_direct_legal": bool(
             payload.get("topology_arc_is_direct_legal", payload.get("is_direct_legal", False))
@@ -419,6 +445,10 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
         if (
             str(_row_pair_id(row))
             and (
+                bool(row.get("src_alias_applied", False))
+                or bool(row.get("dst_alias_applied", False))
+                or bool(row.get("alias_normalized", False))
+                or
                 bool(row.get("controlled_entry_allowed", False))
                 or bool(row.get("built_final_road", False))
                 or str(row.get("topology_gap_decision", ""))
@@ -464,7 +494,17 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
             {
                 "patch_id": str(complex_patch_id),
                 "pair": str(pair_id),
+                "raw_pair": str(resolved.get("raw_pair", pair_id)),
+                "canonical_pair": str(resolved.get("canonical_pair", pair_id)),
+                "raw_src_nodeid": resolved.get("raw_src_nodeid"),
+                "raw_dst_nodeid": resolved.get("raw_dst_nodeid"),
+                "canonical_src_xsec_id": resolved.get("canonical_src_xsec_id"),
+                "canonical_dst_xsec_id": resolved.get("canonical_dst_xsec_id"),
+                "src_alias_applied": bool(resolved.get("src_alias_applied", False)),
+                "dst_alias_applied": bool(resolved.get("dst_alias_applied", False)),
+                "alias_normalized": bool(resolved.get("alias_normalized", False)),
                 "topology_arc_id": str(resolved.get("topology_arc_id", "")),
+                "canonical_topology_arc_id": str(resolved.get("canonical_topology_arc_id", resolved.get("topology_arc_id", ""))),
                 "topology_arc_source_type": str(resolved.get("topology_arc_source_type", "")),
                 "topology_arc_is_direct_legal": bool(resolved.get("topology_arc_is_direct_legal", False)),
                 "topology_arc_is_unique": bool(resolved.get("topology_arc_is_unique", False)),
@@ -927,7 +967,17 @@ def _production_arc_pass(row: dict[str, Any]) -> bool:
 def _registry_row_to_arc_record(row: dict[str, Any]) -> dict[str, Any]:
     identity = _identity_record_from_row(row)
     return {
+        "raw_pair": str(identity.get("raw_pair", "")),
+        "canonical_pair": str(identity.get("canonical_pair", "")),
+        "raw_src_nodeid": identity.get("raw_src_nodeid"),
+        "raw_dst_nodeid": identity.get("raw_dst_nodeid"),
+        "canonical_src_xsec_id": identity.get("canonical_src_xsec_id"),
+        "canonical_dst_xsec_id": identity.get("canonical_dst_xsec_id"),
+        "src_alias_applied": bool(identity.get("src_alias_applied", False)),
+        "dst_alias_applied": bool(identity.get("dst_alias_applied", False)),
+        "alias_normalized": bool(identity.get("alias_normalized", False)),
         "topology_arc_id": str(identity.get("topology_arc_id", "")),
+        "canonical_topology_arc_id": str(identity.get("canonical_topology_arc_id", identity.get("topology_arc_id", ""))),
         "topology_arc_source_type": str(identity.get("topology_arc_source_type", "")),
         "topology_arc_is_direct_legal": bool(identity.get("topology_arc_is_direct_legal", False)),
         "topology_arc_is_unique": bool(identity.get("topology_arc_is_unique", False)),
@@ -1081,6 +1131,20 @@ def _patch_full_registry_rows(run_root: Path | str, patch_id: str) -> list[dict[
             "pair": _pair_id_text(int(row.get("src_nodeid", 0)), int(row.get("dst_nodeid", 0))),
             "src": int(row.get("src_nodeid", 0)),
             "dst": int(row.get("dst_nodeid", 0)),
+            "raw_src_nodeid": row.get("raw_src_nodeid", row.get("src_nodeid", 0)),
+            "raw_dst_nodeid": row.get("raw_dst_nodeid", row.get("dst_nodeid", 0)),
+            "canonical_src_xsec_id": row.get("canonical_src_xsec_id", row.get("src_nodeid", 0)),
+            "canonical_dst_xsec_id": row.get("canonical_dst_xsec_id", row.get("dst_nodeid", 0)),
+            "src_alias_applied": bool(row.get("src_alias_applied", False)),
+            "dst_alias_applied": bool(row.get("dst_alias_applied", False)),
+            "raw_pair": _pair_id_text(
+                int(row.get("raw_src_nodeid", row.get("src_nodeid", 0))),
+                int(row.get("raw_dst_nodeid", row.get("dst_nodeid", 0))),
+            ),
+            "canonical_pair": _pair_id_text(
+                int(row.get("canonical_src_xsec_id", row.get("src_nodeid", 0))),
+                int(row.get("canonical_dst_xsec_id", row.get("dst_nodeid", 0))),
+            ),
             "topology_arc_id": str(row.get("topology_arc_id", "")),
             "topology_arc_source_type": str(row.get("topology_arc_source_type", "")),
             "is_direct_legal": bool(row.get("topology_arc_is_direct_legal", False)),
@@ -1543,6 +1607,11 @@ def _gap_blocking_reason(
 ) -> str:
     if float(row.get("divstrip_overlap_ratio", 0.0)) > 0.10:
         return "competing_arc_crosses_divstrip"
+    built_peer = any(
+        bool(peer.get("built_final_road", False))
+        for peer in competing_rows
+        if str(peer.get("pair", "")) != str(row.get("pair", ""))
+    )
     stronger_peer = any(
         (
             float(peer.get("traj_support_coverage_ratio", 0.0)) > float(row.get("traj_support_coverage_ratio", 0.0)) + 0.05
@@ -1552,9 +1621,16 @@ def _gap_blocking_reason(
         for peer in competing_rows
         if str(peer.get("pair", "")) != str(row.get("pair", ""))
     )
+    slot_available = str(row.get("slot_status", "")) == "resolved"
+    if built_peer:
+        return "competing_arc_slot_conflict_with_built_sibling"
+    if stronger_peer and slot_available:
+        return "competing_arc_support_weaker_but_slot_available"
     if stronger_peer:
         return "competing_arc_support_weaker"
-    return "competing_arc_slot_conflict"
+    if int(len(competing_rows)) >= 2:
+        return "competing_arc_requires_new_pair_selection_rule"
+    return "competing_arc_business_rule_not_decided"
 
 
 def build_arc_obligation_registry(
@@ -1599,7 +1675,19 @@ def build_arc_obligation_registry(
             current_status = "blocked"
             blocking_layer = "pair_identity"
             blocking_reason = _gap_blocking_reason(row, competing_rows=competing_rows)
-            next_action = "compare_competing_arc_slot_and_support_before_release"
+            next_action = (
+                "compare_competing_arc_slot_against_built_sibling_before_release"
+                if blocking_reason == "competing_arc_slot_conflict_with_built_sibling"
+                else (
+                    "compare_competing_arc_support_weight_before_release"
+                    if blocking_reason in {"competing_arc_support_weaker", "competing_arc_support_weaker_but_slot_available"}
+                    else (
+                        "define_pair_selection_rule_for_shared_destination"
+                        if blocking_reason == "competing_arc_requires_new_pair_selection_rule"
+                        else "confirm_business_rule_before_release"
+                    )
+                )
+            )
 
         rows.append(
             {
@@ -1639,15 +1727,22 @@ def build_arc_obligation_registry(
                 "current_status": "observation_only",
                 "blocking_layer": "pair_identity",
                 "blocking_reason": "multi_arc_excluded_from_unique_denominator",
-                "next_action": (
-                    "compare_multi_arc_candidates_against_business_selection_rule"
-                    if bool(row.get("has_built_sibling_arc", False))
-                    else "define_multi_arc_selection_rule_before_allowing_build"
+                "next_action": str(
+                    row.get(
+                        "next_rule_needed",
+                        (
+                            "compare_multi_arc_candidates_against_business_selection_rule"
+                            if bool(row.get("has_built_sibling_arc", False))
+                            else "define_multi_arc_selection_rule_before_allowing_build"
+                        ),
+                    )
                 ),
                 "pair_arc_count": int(row.get("pair_arc_count", 0)),
                 "arc_ids": [str(v) for v in row.get("arc_ids", [])],
                 "has_built_sibling_arc": bool(row.get("has_built_sibling_arc", False)),
                 "built_sibling_arc_ids": [str(v) for v in row.get("built_sibling_arc_ids", [])],
+                "current_business_status": str(row.get("current_business_status", "")),
+                "next_rule_needed": str(row.get("next_rule_needed", "")),
                 "chord_available": bool(row.get("chord_available", False)),
                 "witness_available": bool(row.get("witness_available", False)),
                 "visual_gap_note": str(row.get("visual_gap_note", "")),
@@ -1696,6 +1791,8 @@ def build_competing_arc_review(
                 "traj_support_type": str(row.get("traj_support_type", "no_support")),
                 "traj_support_count": int(row.get("traj_support_count", 0)),
                 "support_total_length_m": float(row.get("support_total_length_m", 0.0)),
+                "slot_status": str(row.get("slot_status", "unresolved")),
+                "built_final_road": bool(row.get("built_final_road", False)),
                 "drivezone_overlap_ratio": float(row.get("drivezone_overlap_ratio", 0.0)),
                 "divstrip_overlap_ratio": float(row.get("divstrip_overlap_ratio", 0.0)),
                 "root_cause_code": str(root_cause_code),
@@ -1703,12 +1800,36 @@ def build_competing_arc_review(
                     "candidate witness still overlaps divstrip, so the competing arc cannot be released without violating physical separation"
                     if root_cause_code == "competing_arc_crosses_divstrip"
                     else (
-                    "multiple topology-gap arcs compete for the same downstream destination slot; release requires stronger pair identity constraints"
-                    if root_cause_code == "competing_arc_slot_conflict"
-                    else "multiple topology-gap arcs compete for the same destination and this arc currently has weaker support than its peer"
+                        "this arc conflicts with an already-built competing sibling on the same downstream destination slot"
+                        if root_cause_code == "competing_arc_slot_conflict_with_built_sibling"
+                        else (
+                            "this arc has weaker support than its competing sibling even though slot establishment evidence is present"
+                            if root_cause_code == "competing_arc_support_weaker_but_slot_available"
+                            else (
+                                "multiple topology-gap arcs compete for the same destination and this arc currently has weaker support than its peer"
+                                if root_cause_code == "competing_arc_support_weaker"
+                                else (
+                                    "multiple topology-gap arcs compete for the same destination and release now requires an explicit pair-selection rule"
+                                    if root_cause_code == "competing_arc_requires_new_pair_selection_rule"
+                                    else "the business rule for choosing among competing destination arcs is still not decided"
+                                )
+                            )
+                        )
                     )
                 ),
-                "next_action": "compare_competing_arc_slot_and_support_before_release",
+                "next_action": (
+                    "compare_competing_arc_slot_against_built_sibling_before_release"
+                    if root_cause_code == "competing_arc_slot_conflict_with_built_sibling"
+                    else (
+                        "compare_competing_arc_support_weight_before_release"
+                        if root_cause_code in {"competing_arc_support_weaker", "competing_arc_support_weaker_but_slot_available"}
+                        else (
+                            "define_pair_selection_rule_for_shared_destination"
+                            if root_cause_code == "competing_arc_requires_new_pair_selection_rule"
+                            else "confirm_business_rule_before_release"
+                        )
+                    )
+                ),
             }
         )
 
@@ -1725,14 +1846,16 @@ def build_competing_arc_review(
                 "built_sibling_arc_ids": [str(v) for v in row.get("built_sibling_arc_ids", [])],
                 "chord_available": bool(row.get("chord_available", False)),
                 "witness_available": bool(row.get("witness_available", False)),
-                "root_cause_code": "multi_arc_excluded_from_unique_denominator",
+                "current_business_status": str(row.get("current_business_status", "")),
+                "next_rule_needed": str(row.get("next_rule_needed", "")),
+                "root_cause_code": "multi_arc_no_selection_rule",
                 "root_cause_detail": (
-                    "same src/dst has multiple direct arcs; current strict coverage excludes the pair from the unique denominator"
+                    "same src/dst has multiple direct arcs and no business selection rule exists yet, so the pair stays outside the strict unique denominator"
                     if not bool(row.get("has_built_sibling_arc", False))
-                    else "same src/dst has multiple direct arcs; a built sibling exists but this observation pair still requires explicit business selection semantics"
+                    else "same src/dst has multiple direct arcs; a built sibling exists but the non-selected arc still remains outside the strict unique denominator until an explicit selection rule is defined"
                 ),
                 "next_action": (
-                    "define_multi_arc_selection_rule_before_allowing_build"
+                    str(row.get("next_rule_needed", "multi_arc_selection_rule"))
                     if not bool(row.get("has_built_sibling_arc", False))
                     else "compare_built_sibling_and_nonbuilt_arc_before_selection"
                 ),
@@ -2188,6 +2311,219 @@ def write_arc_obligation_closure_review(
     }
 
 
+def build_alias_normalization_review(
+    run_root: Path | str,
+    *,
+    complex_patch_id: str,
+    pair_decisions: dict[str, Any],
+    arc_legality_audit: dict[str, Any],
+) -> dict[str, Any]:
+    registry_rows = _patch_full_registry_rows(run_root, complex_patch_id)
+    decisions_by_pair = {str(row.get("pair", "")): dict(row) for row in pair_decisions.get("pairs", [])}
+    violating_pairs = set(str(v) for v in arc_legality_audit.get("summary", {}).get("violating_built_pairs", []))
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for registry_row in registry_rows:
+        resolved = _identity_record_from_row(
+            registry_row,
+            pair_id=_row_pair_id(registry_row),
+            working_segment_id=str(registry_row.get("working_segment_id", "")),
+            resolution_source="full_legal_arc_registry",
+        )
+        if not bool(resolved.get("alias_normalized", False)):
+            continue
+        canonical_pair = str(resolved.get("canonical_pair", resolved.get("pair", "")))
+        decision_row = dict(decisions_by_pair.get(canonical_pair, {}))
+        key = (
+            str(resolved.get("raw_pair", canonical_pair)),
+            str(resolved.get("canonical_pair", canonical_pair)),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "patch_id": str(complex_patch_id),
+                "raw_src_nodeid": resolved.get("raw_src_nodeid"),
+                "raw_dst_nodeid": resolved.get("raw_dst_nodeid"),
+                "raw_pair": str(resolved.get("raw_pair", canonical_pair)),
+                "canonical_src_xsec_id": resolved.get("canonical_src_xsec_id"),
+                "canonical_dst_xsec_id": resolved.get("canonical_dst_xsec_id"),
+                "canonical_pair": canonical_pair,
+                "src_alias_applied": bool(resolved.get("src_alias_applied", False)),
+                "dst_alias_applied": bool(resolved.get("dst_alias_applied", False)),
+                "alias_normalized": True,
+                "topology_arc_id": str(resolved.get("topology_arc_id", "")),
+                "canonical_topology_arc_id": str(
+                    resolved.get("canonical_topology_arc_id", resolved.get("topology_arc_id", ""))
+                ),
+                "topology_arc_source_type": str(resolved.get("topology_arc_source_type", "")),
+                "topology_arc_is_direct_legal": bool(
+                    decision_row.get("topology_arc_is_direct_legal", resolved.get("topology_arc_is_direct_legal", False))
+                ),
+                "topology_arc_is_unique": bool(
+                    decision_row.get("topology_arc_is_unique", resolved.get("topology_arc_is_unique", False))
+                ),
+                "entered_main_flow": bool(decision_row.get("entered_main_flow", resolved.get("entered_main_flow", False))),
+                "controlled_entry_allowed": bool(
+                    decision_row.get("controlled_entry_allowed", resolved.get("controlled_entry_allowed", False))
+                ),
+                "built_final_road": bool(decision_row.get("built_final_road", resolved.get("built_final_road", False))),
+                "unbuilt_stage": str(decision_row.get("unbuilt_stage", resolved.get("unbuilt_stage", ""))),
+                "unbuilt_reason": str(decision_row.get("unbuilt_reason", resolved.get("unbuilt_reason", ""))),
+                "identity_resolution_source": str(
+                    decision_row.get("identity_resolution_source", resolved.get("identity_resolution_source", ""))
+                ),
+                "audit_violation": bool(canonical_pair in violating_pairs),
+            }
+        )
+    rows.sort(key=lambda item: (str(item.get("raw_pair", "")), str(item.get("canonical_pair", ""))))
+    return {
+        "patch_id": str(complex_patch_id),
+        "row_count": int(len(rows)),
+        "direct_legal_count": int(sum(1 for row in rows if bool(row.get("topology_arc_is_direct_legal", False)))),
+        "entered_main_flow_count": int(sum(1 for row in rows if bool(row.get("entered_main_flow", False)))),
+        "built_count": int(sum(1 for row in rows if bool(row.get("built_final_road", False)))),
+        "rows": rows,
+    }
+
+
+def write_alias_fix_and_rootcause_push_review(
+    *,
+    run_root: Path | str,
+    output_root: Path | str,
+    simple_patch_ids: list[str] | None = None,
+    complex_patch_id: str = "5417632623039346",
+) -> dict[str, Any]:
+    summary = write_arc_obligation_closure_review(
+        run_root=run_root,
+        output_root=output_root,
+        simple_patch_ids=simple_patch_ids,
+        complex_patch_id=complex_patch_id,
+    )
+    output_root_path = Path(output_root)
+    pair_decisions = dict(summary.get("pair_decisions", {}))
+    arc_legality_audit = dict(summary.get("arc_legality_audit", {}))
+    competing_arc_review = dict(summary.get("competing_arc_review", {}))
+    same_pair_multi_arc_observation = dict(summary.get("same_pair_multi_arc_observation", {}))
+    strict_vs_visual_gap_summary = dict(summary.get("strict_vs_visual_gap_summary", {}))
+    alias_normalization_review = build_alias_normalization_review(
+        run_root,
+        complex_patch_id=str(complex_patch_id),
+        pair_decisions=pair_decisions,
+        arc_legality_audit=arc_legality_audit,
+    )
+    strict_vs_visual_gap_summary = {
+        **strict_vs_visual_gap_summary,
+        "alias_normalized_review": {
+            "row_count": int(alias_normalization_review.get("row_count", 0)),
+            "direct_legal_count": int(alias_normalization_review.get("direct_legal_count", 0)),
+            "entered_main_flow_count": int(alias_normalization_review.get("entered_main_flow_count", 0)),
+            "built_count": int(alias_normalization_review.get("built_count", 0)),
+            "raw_pairs": [str(row.get("raw_pair", "")) for row in alias_normalization_review.get("rows", [])],
+            "canonical_pairs": [str(row.get("canonical_pair", "")) for row in alias_normalization_review.get("rows", [])],
+        },
+    }
+    complex_patch_alias_and_competing_review = {
+        "patch_id": str(complex_patch_id),
+        "alias_normalization_review": alias_normalization_review,
+        "competing_arc_review": competing_arc_review,
+        "same_pair_multi_arc_observation": same_pair_multi_arc_observation,
+        "strict_vs_visual_gap_summary": strict_vs_visual_gap_summary,
+    }
+
+    write_json(output_root_path / "alias_normalization_review.json", alias_normalization_review)
+    with (output_root_path / "alias_normalization_review.csv").open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "patch_id",
+                "raw_src_nodeid",
+                "raw_dst_nodeid",
+                "raw_pair",
+                "canonical_src_xsec_id",
+                "canonical_dst_xsec_id",
+                "canonical_pair",
+                "src_alias_applied",
+                "dst_alias_applied",
+                "alias_normalized",
+                "topology_arc_id",
+                "canonical_topology_arc_id",
+                "topology_arc_source_type",
+                "topology_arc_is_direct_legal",
+                "topology_arc_is_unique",
+                "entered_main_flow",
+                "controlled_entry_allowed",
+                "built_final_road",
+                "unbuilt_stage",
+                "unbuilt_reason",
+                "identity_resolution_source",
+                "audit_violation",
+            ],
+        )
+        writer.writeheader()
+        for row in alias_normalization_review.get("rows", []):
+            writer.writerow({key: row.get(key, "") for key in writer.fieldnames})
+    with (output_root_path / "competing_arc_review.csv").open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "patch_id",
+                "pair",
+                "review_scope",
+                "topology_arc_id",
+                "competing_group_key",
+                "competing_pair_count",
+                "competing_pairs",
+                "traj_support_type",
+                "traj_support_count",
+                "support_total_length_m",
+                "slot_status",
+                "built_final_road",
+                "drivezone_overlap_ratio",
+                "divstrip_overlap_ratio",
+                "current_business_status",
+                "next_rule_needed",
+                "root_cause_code",
+                "root_cause_detail",
+                "next_action",
+            ],
+        )
+        writer.writeheader()
+        for row in competing_arc_review.get("rows", []):
+            payload = dict(row)
+            payload["competing_pairs"] = ",".join(str(v) for v in row.get("competing_pairs", []))
+            payload["arc_ids"] = ",".join(str(v) for v in row.get("arc_ids", []))
+            writer.writerow({key: payload.get(key, "") for key in writer.fieldnames})
+    write_json(output_root_path / "strict_vs_visual_gap_summary.json", strict_vs_visual_gap_summary)
+    write_json(output_root_path / "complex_patch_alias_and_competing_review.json", complex_patch_alias_and_competing_review)
+
+    summary_lines = [
+        "",
+        "## Alias Fix And Rootcause Push",
+        "",
+        (
+            f"- strict_coverage=`{strict_vs_visual_gap_summary.get('strict_coverage', {}).get('built', 0)}"
+            f"/{strict_vs_visual_gap_summary.get('strict_coverage', {}).get('total', 0)}`"
+        ),
+        (
+            f"- alias_normalized_row_count=`{alias_normalization_review.get('row_count', 0)}` "
+            f"built=`{alias_normalization_review.get('built_count', 0)}`"
+        ),
+        f"- competing_arc_row_count=`{competing_arc_review.get('row_count', 0)}`",
+        f"- same_pair_multi_arc_observation_count=`{same_pair_multi_arc_observation.get('row_count', 0)}`",
+    ]
+    summary_path = output_root_path / "SUMMARY.md"
+    existing_summary = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
+    summary_path.write_text(existing_summary + "\n".join(summary_lines) + "\n", encoding="utf-8")
+    return {
+        **summary,
+        "alias_normalization_review": alias_normalization_review,
+        "strict_vs_visual_gap_summary": strict_vs_visual_gap_summary,
+        "complex_patch_alias_and_competing_review": complex_patch_alias_and_competing_review,
+    }
+
+
 __all__ = [
     "build_arc_evidence_attach_audit",
     "build_arc_legality_audit",
@@ -2199,6 +2535,7 @@ __all__ = [
     "build_simple_patch_regression",
     "build_strong_constraint_status",
     "evaluate_patch_acceptance",
+    "write_alias_fix_and_rootcause_push_review",
     "write_arc_first_attach_evidence_review",
     "write_arc_legality_fix_review",
     "write_bridge_trial_review",

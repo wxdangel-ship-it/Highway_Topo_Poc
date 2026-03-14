@@ -85,6 +85,9 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "STEP2_PAIR_SCOPED_BRIDGE_RETAIN_PAIR_IDS": "5395717732638194:37687913",
     "STEP2_ENABLE_PSEUDO_RCS_NODE_XSECS": 1,
     "STEP2_PSEUDO_XSEC_HALF_LENGTH_M": 6.0,
+    "STEP2_XSEC_ALIAS_NORMALIZATION_ENABLE": 1,
+    "STEP2_XSEC_ALIAS_ALLOWLIST": "23287538:55353307",
+    "STEP2_XSEC_ALIAS_MAX_NODE_TO_XSEC_DIST_M": 1.5,
     "STEP2_ENABLE_TERMINAL_TRACE_TOPOLOGY": 0,
     "PRIOR_ENDPOINT_ANCHOR_M": 20.0,
     "DIVSTRIP_BUFFER_M": 0.5,
@@ -545,6 +548,43 @@ def _parse_pair_scoped_allowlist(value: Any) -> set[tuple[int, int]]:
     return out
 
 
+def _parse_xsec_alias_allowlist(value: Any) -> dict[int, int]:
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        tokens = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        tokens = [str(part).strip() for part in value if str(part).strip()]
+    else:
+        tokens = [str(value).strip()]
+    out: dict[int, int] = {}
+    for token in tokens:
+        text = str(token).strip()
+        if ":" not in text:
+            continue
+        raw_text, canonical_text = text.split(":", 1)
+        try:
+            raw_nodeid = int(raw_text)
+            canonical_nodeid = int(canonical_text)
+        except Exception:
+            continue
+        if raw_nodeid > 0 and canonical_nodeid > 0 and raw_nodeid != canonical_nodeid:
+            out[int(raw_nodeid)] = int(canonical_nodeid)
+    return out
+
+
+def _canonical_xsec_id(nodeid: int, alias_map: dict[int, int]) -> int:
+    current = int(nodeid)
+    seen: set[int] = set()
+    while current in alias_map and current not in seen:
+        seen.add(current)
+        nxt = int(alias_map.get(current, current))
+        if nxt == current:
+            break
+        current = nxt
+    return int(current)
+
+
 def _pair_id_text(src_nodeid: int, dst_nodeid: int) -> str:
     return f"{int(src_nodeid)}:{int(dst_nodeid)}"
 
@@ -759,9 +799,80 @@ def _directed_road_pair(road: Any) -> tuple[int, int] | None:
     return int(snodeid), int(enodeid)
 
 
+def _build_xsec_alias_map(
+    *,
+    frame: InputFrame,
+    inputs: PatchInputs,
+    prior_roads: list[Any],
+    params: dict[str, Any],
+) -> tuple[dict[int, int], list[dict[str, Any]]]:
+    if not bool(int(params.get("STEP2_XSEC_ALIAS_NORMALIZATION_ENABLE", 1))):
+        return {}, []
+    xsec_map = _xsec_map(frame)
+    alias_map: dict[int, int] = {}
+    alias_rows: list[dict[str, Any]] = []
+    allowlist = _parse_xsec_alias_allowlist(params.get("STEP2_XSEC_ALIAS_ALLOWLIST", ""))
+    for raw_nodeid, canonical_xsec_id in sorted(allowlist.items()):
+        if int(raw_nodeid) in xsec_map or int(canonical_xsec_id) not in xsec_map:
+            continue
+        alias_map[int(raw_nodeid)] = int(canonical_xsec_id)
+        alias_rows.append(
+            {
+                "raw_nodeid": int(raw_nodeid),
+                "canonical_xsec_id": int(canonical_xsec_id),
+                "method": "allowlist",
+            }
+        )
+
+    threshold_m = float(params.get("STEP2_XSEC_ALIAS_MAX_NODE_TO_XSEC_DIST_M", 1.5))
+    node_points = {
+        int(getattr(node, "nodeid", 0)): getattr(node, "point")
+        for node in getattr(inputs, "node_records", ()) or ()
+        if getattr(node, "point", None) is not None
+    }
+    detected: dict[int, set[int]] = defaultdict(set)
+    for road in prior_roads:
+        pair = _directed_road_pair(road)
+        if pair is None:
+            continue
+        src_nodeid, dst_nodeid = pair
+        for raw_nodeid, canonical_xsec_id in (
+            (int(src_nodeid), int(dst_nodeid)),
+            (int(dst_nodeid), int(src_nodeid)),
+        ):
+            if raw_nodeid in xsec_map or canonical_xsec_id not in xsec_map:
+                continue
+            point = node_points.get(int(raw_nodeid))
+            if point is None:
+                continue
+            try:
+                distance_m = float(point.distance(xsec_map[int(canonical_xsec_id)].geometry_metric()))
+            except Exception:
+                continue
+            if distance_m <= threshold_m:
+                detected[int(raw_nodeid)].add(int(canonical_xsec_id))
+    for raw_nodeid, candidates in sorted(detected.items()):
+        if int(raw_nodeid) in alias_map or len(candidates) != 1:
+            continue
+        canonical_xsec_id = next(iter(candidates))
+        alias_map[int(raw_nodeid)] = int(canonical_xsec_id)
+        alias_rows.append(
+            {
+                "raw_nodeid": int(raw_nodeid),
+                "canonical_xsec_id": int(canonical_xsec_id),
+                "method": "incident_xsec_distance",
+            }
+        )
+    alias_rows.sort(key=lambda item: (int(item["raw_nodeid"]), int(item["canonical_xsec_id"]), str(item["method"])))
+    return alias_map, alias_rows
+
+
 def _build_topology_adjacency_edges(
     prior_roads: list[Any],
+    *,
+    alias_map: dict[int, int] | None = None,
 ) -> dict[int, list[dict[str, Any]]]:
+    resolved_alias_map = {int(key): int(value) for key, value in dict(alias_map or {}).items()}
     adjacency_edges: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for idx, road in enumerate(prior_roads):
         pair = _directed_road_pair(road)
@@ -776,12 +887,23 @@ def _build_topology_adjacency_edges(
             direction = 2
         if int(direction) == 3:
             line = _reverse_line(line)
-        src_nodeid, dst_nodeid = pair
+        raw_src_nodeid, raw_dst_nodeid = int(pair[0]), int(pair[1])
+        src_nodeid = _canonical_xsec_id(int(raw_src_nodeid), resolved_alias_map)
+        dst_nodeid = _canonical_xsec_id(int(raw_dst_nodeid), resolved_alias_map)
+        if int(src_nodeid) == int(dst_nodeid):
+            continue
         adjacency_edges[int(src_nodeid)].append(
             {
                 "to": int(dst_nodeid),
                 "edge_id": f"prior_{idx}",
                 "path_nodes": [int(src_nodeid), int(dst_nodeid)],
+                "raw_path_nodes": [int(raw_src_nodeid), int(raw_dst_nodeid)],
+                "raw_src_nodeid": int(raw_src_nodeid),
+                "raw_dst_nodeid": int(raw_dst_nodeid),
+                "canonical_src_xsec_id": int(src_nodeid),
+                "canonical_dst_xsec_id": int(dst_nodeid),
+                "src_alias_applied": bool(int(raw_src_nodeid) != int(src_nodeid)),
+                "dst_alias_applied": bool(int(raw_dst_nodeid) != int(dst_nodeid)),
                 "line_coords": [list(coord) for coord in line_to_coords(line)],
             }
         )
@@ -834,7 +956,10 @@ def _compress_topology_graph(
         for first_edge in src_edges:
             chain_edge_ids: list[str] = []
             path_nodes: list[int] = [int(src)]
+            raw_path_nodes: list[int] = [int(first_edge.get("raw_src_nodeid", src))]
             line_coords: tuple[tuple[float, float], ...] = tuple()
+            src_alias_applied = bool(first_edge.get("src_alias_applied", False))
+            dst_alias_applied = bool(first_edge.get("dst_alias_applied", False))
             visited: set[int] = set()
             edge_cur = dict(first_edge)
             for _ in range(100000):
@@ -842,6 +967,11 @@ def _compress_topology_graph(
                 edge_id = str(edge_cur.get("edge_id") or "")
                 chain_edge_ids.append(edge_id)
                 path_nodes.append(int(dst))
+                raw_dst_nodeid = int(edge_cur.get("raw_dst_nodeid", dst))
+                if not raw_path_nodes or int(raw_path_nodes[-1]) != int(raw_dst_nodeid):
+                    raw_path_nodes.append(int(raw_dst_nodeid))
+                src_alias_applied = bool(src_alias_applied or edge_cur.get("src_alias_applied", False))
+                dst_alias_applied = bool(dst_alias_applied or edge_cur.get("dst_alias_applied", False))
                 line_coords = _merge_line_coords(line_coords, edge_cur.get("line_coords", []))
                 if int(dst) in keep_nodes:
                     break
@@ -865,6 +995,17 @@ def _compress_topology_graph(
                     "to": int(dst_keep),
                     "edge_ids": [str(v) for v in chain_edge_ids],
                     "path_nodes": [int(v) for v in path_nodes],
+                    "raw_path_nodes": [int(v) for v in raw_path_nodes],
+                    "raw_src_nodeid": int(raw_path_nodes[0]) if raw_path_nodes else int(src),
+                    "raw_dst_nodeid": int(raw_path_nodes[-1]) if raw_path_nodes else int(dst_keep),
+                    "canonical_src_xsec_id": int(src),
+                    "canonical_dst_xsec_id": int(dst_keep),
+                    "src_alias_applied": bool(
+                        src_alias_applied or (raw_path_nodes and int(raw_path_nodes[0]) != int(src))
+                    ),
+                    "dst_alias_applied": bool(
+                        dst_alias_applied or (raw_path_nodes and int(raw_path_nodes[-1]) != int(dst_keep))
+                    ),
                     "line_coords": [[float(x), float(y)] for x, y in line_coords],
                 }
             )
@@ -1261,6 +1402,12 @@ def _build_directed_topology(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     xsec_ids = {int(xsec.nodeid) for xsec in frame.base_cross_sections}
+    xsec_alias_map, xsec_alias_rows = _build_xsec_alias_map(
+        frame=frame,
+        inputs=inputs,
+        prior_roads=prior_roads,
+        params=params,
+    )
     allowed_pairs: set[tuple[int, int]] = set()
     incoming: dict[int, set[int]] = defaultdict(set)
     outgoing: dict[int, set[int]] = defaultdict(set)
@@ -1270,7 +1417,7 @@ def _build_directed_topology(
     pair_arcs: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
     trace_only_pair_paths: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
     terminal_trace_paths: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
-    adjacency_edges = _build_topology_adjacency_edges(prior_roads)
+    adjacency_edges = _build_topology_adjacency_edges(prior_roads, alias_map=xsec_alias_map)
     compressed_adj, compress_stats = _compress_topology_graph(adjacency_edges, cross_nodes=xsec_ids)
     for src_nodeid in sorted(xsec_ids):
         for edge in compressed_adj.get(int(src_nodeid), []):
@@ -1295,6 +1442,18 @@ def _build_directed_topology(
                 "arc_id": str(arc_id),
                 "src_nodeid": int(src_nodeid),
                 "dst_nodeid": int(start_to),
+                "raw_src_nodeid": int(edge.get("raw_src_nodeid", src_nodeid)),
+                "raw_dst_nodeid": int(edge.get("raw_dst_nodeid", start_to)),
+                "canonical_src_xsec_id": int(src_nodeid),
+                "canonical_dst_xsec_id": int(start_to),
+                "src_alias_applied": bool(edge.get("src_alias_applied", False)),
+                "dst_alias_applied": bool(edge.get("dst_alias_applied", False)),
+                "raw_pair": _pair_id_text(
+                    int(edge.get("raw_src_nodeid", src_nodeid)),
+                    int(edge.get("raw_dst_nodeid", start_to)),
+                ),
+                "canonical_pair": _pair_id_text(int(src_nodeid), int(start_to)),
+                "raw_node_path": [int(v) for v in edge.get("raw_path_nodes", []) if v is not None],
                 "source": _DIRECT_TOPOLOGY_ARC_SOURCE,
                 "node_path": [int(v) for v in path_nodes],
                 "edge_ids": edge_ids,
@@ -1421,6 +1580,8 @@ def _build_directed_topology(
         "pair_arcs": {pair: list(vals) for pair, vals in pair_arcs.items()},
         "trace_only_pair_paths": {pair: list(vals) for pair, vals in trace_only_pair_paths.items()},
         "terminal_trace_paths": {pair: list(vals) for pair, vals in terminal_trace_paths.items()},
+        "xsec_alias_map": {int(raw): int(canonical) for raw, canonical in xsec_alias_map.items()},
+        "xsec_alias_rows": list(xsec_alias_rows),
         "terminal_nodes": {int(v) for v in terminal_nodes},
         "terminal_direct_ownership": {int(k): dict(v) for k, v in direct_terminal_ownership.items()},
         "terminal_reverse_ownership": {int(k): dict(v) for k, v in terminal_reverse_ownership.items()},
@@ -1526,6 +1687,12 @@ def _assign_topology_arc(
     candidate["topology_arc_source_type"] = str(chosen.get("source", ""))
     candidate["topology_arc_edge_ids"] = [str(v) for v in chosen.get("edge_ids", [])]
     candidate["topology_arc_node_path"] = [int(v) for v in chosen.get("node_path", [])]
+    candidate["canonical_src_xsec_id"] = int(chosen.get("canonical_src_xsec_id", candidate.get("src_nodeid", 0)))
+    candidate["canonical_dst_xsec_id"] = int(chosen.get("canonical_dst_xsec_id", candidate.get("dst_nodeid", 0)))
+    candidate["raw_src_nodeid"] = int(chosen.get("raw_src_nodeid", candidate.get("raw_src_nodeid", candidate.get("src_nodeid", 0))))
+    candidate["raw_dst_nodeid"] = int(chosen.get("raw_dst_nodeid", candidate.get("raw_dst_nodeid", candidate.get("dst_nodeid", 0))))
+    candidate["src_alias_applied"] = bool(chosen.get("src_alias_applied", candidate.get("src_alias_applied", False)))
+    candidate["dst_alias_applied"] = bool(chosen.get("dst_alias_applied", candidate.get("dst_alias_applied", False)))
     return chosen
 
 
@@ -1582,6 +1749,12 @@ def _candidate_feature_properties(
         "source": str(candidate.get("source", "")),
         "src_nodeid": int(candidate.get("src_nodeid", 0)),
         "dst_nodeid": int(candidate.get("dst_nodeid", 0)),
+        "raw_src_nodeid": int(candidate.get("raw_src_nodeid", candidate.get("src_nodeid", 0))),
+        "raw_dst_nodeid": int(candidate.get("raw_dst_nodeid", candidate.get("dst_nodeid", 0))),
+        "canonical_src_xsec_id": int(candidate.get("canonical_src_xsec_id", candidate.get("src_nodeid", 0))),
+        "canonical_dst_xsec_id": int(candidate.get("canonical_dst_xsec_id", candidate.get("dst_nodeid", 0))),
+        "src_alias_applied": bool(candidate.get("src_alias_applied", False)),
+        "dst_alias_applied": bool(candidate.get("dst_alias_applied", False)),
         "stage": str(stage),
         "status": str(status),
         "reason": str(reason),
@@ -1629,6 +1802,16 @@ def _segment_feature_properties(segment: Segment, *, status: str, reason: str = 
         "segment_id": str(segment.segment_id),
         "src_nodeid": int(segment.src_nodeid),
         "dst_nodeid": int(segment.dst_nodeid),
+        "raw_src_nodeid": int(segment.raw_src_nodeid if segment.raw_src_nodeid is not None else segment.src_nodeid),
+        "raw_dst_nodeid": int(segment.raw_dst_nodeid if segment.raw_dst_nodeid is not None else segment.dst_nodeid),
+        "canonical_src_xsec_id": int(
+            segment.canonical_src_xsec_id if segment.canonical_src_xsec_id is not None else segment.src_nodeid
+        ),
+        "canonical_dst_xsec_id": int(
+            segment.canonical_dst_xsec_id if segment.canonical_dst_xsec_id is not None else segment.dst_nodeid
+        ),
+        "src_alias_applied": bool(segment.src_alias_applied),
+        "dst_alias_applied": bool(segment.dst_alias_applied),
         "support_count": int(segment.support_count),
         "dedup_count": int(segment.dedup_count),
         "source_modes": list(segment.source_modes),
@@ -1666,6 +1849,32 @@ def _segment_feature_properties(segment: Segment, *, status: str, reason: str = 
     return props
 
 
+def _apply_candidate_alias_identity(
+    candidate: dict[str, Any],
+    *,
+    xsec_map: dict[int, BaseCrossSection],
+    alias_map: dict[int, int],
+) -> dict[str, Any]:
+    raw_src_nodeid = int(candidate.get("raw_src_nodeid", candidate.get("src_nodeid", 0)))
+    raw_dst_nodeid = int(candidate.get("raw_dst_nodeid", candidate.get("dst_nodeid", 0)))
+    canonical_src_xsec_id = _canonical_xsec_id(int(raw_src_nodeid), alias_map)
+    canonical_dst_xsec_id = _canonical_xsec_id(int(raw_dst_nodeid), alias_map)
+    candidate["raw_src_nodeid"] = int(raw_src_nodeid)
+    candidate["raw_dst_nodeid"] = int(raw_dst_nodeid)
+    candidate["canonical_src_xsec_id"] = int(canonical_src_xsec_id)
+    candidate["canonical_dst_xsec_id"] = int(canonical_dst_xsec_id)
+    candidate["src_alias_applied"] = bool(int(raw_src_nodeid) != int(canonical_src_xsec_id))
+    candidate["dst_alias_applied"] = bool(int(raw_dst_nodeid) != int(canonical_dst_xsec_id))
+    candidate["src_nodeid"] = int(canonical_src_xsec_id)
+    candidate["dst_nodeid"] = int(canonical_dst_xsec_id)
+    candidate["raw_pair"] = _pair_id_text(int(raw_src_nodeid), int(raw_dst_nodeid))
+    candidate["canonical_pair"] = _pair_id_text(int(canonical_src_xsec_id), int(canonical_dst_xsec_id))
+    candidate["pair_midpoint_distance_m"] = float(
+        _pair_midpoint_distance_for_nodes(xsec_map, int(canonical_src_xsec_id), int(canonical_dst_xsec_id))
+    )
+    return candidate
+
+
 def _segment_candidates(
     inputs: PatchInputs,
     frame: InputFrame,
@@ -1674,6 +1883,7 @@ def _segment_candidates(
 ) -> dict[str, Any]:
     xsec_map = _xsec_map(frame)
     topology = _build_directed_topology(frame=frame, inputs=inputs, prior_roads=prior_roads, params=params)
+    alias_map = {int(key): int(value) for key, value in dict(topology.get("xsec_alias_map", {})).items()}
     raw_candidates: list[dict[str, Any]] = []
     pairing_candidates: list[dict[str, Any]] = []
     accepted_before_topology_gate: list[dict[str, Any]] = []
@@ -1774,6 +1984,14 @@ def _segment_candidates(
             "source": str(source),
             "src_nodeid": int(src_nodeid),
             "dst_nodeid": int(dst_nodeid),
+            "raw_src_nodeid": int(src_nodeid),
+            "raw_dst_nodeid": int(dst_nodeid),
+            "canonical_src_xsec_id": int(src_nodeid),
+            "canonical_dst_xsec_id": int(dst_nodeid),
+            "src_alias_applied": False,
+            "dst_alias_applied": False,
+            "raw_pair": _pair_id_text(int(src_nodeid), int(dst_nodeid)),
+            "canonical_pair": _pair_id_text(int(src_nodeid), int(dst_nodeid)),
             "line": line,
             "support_traj_ids": {str(v) for v in support_traj_ids},
             "intermediate_nodeids": [int(v) for v in intermediate_nodeids],
@@ -1888,6 +2106,7 @@ def _segment_candidates(
                     pair_index_gap=int(j - i),
                     pairing_mode="adjacent" if int(j - i) == 1 else "skip_pair",
                 )
+                _apply_candidate_alias_identity(candidate, xsec_map=xsec_map, alias_map=alias_map)
                 candidate["start_event_id"] = str(events[i]["event_id"])
                 candidate["end_event_id"] = str(events[j]["event_id"])
                 raw_candidates.append(candidate)
@@ -1910,9 +2129,10 @@ def _segment_candidates(
             pair_index_gap=0,
             pairing_mode="prior",
         )
+        _apply_candidate_alias_identity(candidate, xsec_map=xsec_map, alias_map=alias_map)
         raw_candidates.append(candidate)
         record(candidate, stage="raw_generated", status="generated", reason="raw_candidate_generated")
-        if src_nodeid not in xsec_map or dst_nodeid not in xsec_map:
+        if int(candidate["src_nodeid"]) not in xsec_map or int(candidate["dst_nodeid"]) not in xsec_map:
             start_pt = Point(float(line.coords[0][0]), float(line.coords[0][1]))
             end_pt = Point(float(line.coords[-1][0]), float(line.coords[-1][1]))
             best_pair = None
@@ -1945,7 +2165,9 @@ def _segment_candidates(
                 reject(candidate, stage="pairing_filter", reason="prior_endpoints_not_anchored")
                 continue
             candidate["src_nodeid"], candidate["dst_nodeid"] = (int(best_pair[0]), int(best_pair[1]))
+            candidate["canonical_src_xsec_id"], candidate["canonical_dst_xsec_id"] = (int(best_pair[0]), int(best_pair[1]))
             candidate["pair_midpoint_distance_m"] = float(_pair_midpoint_distance_for_nodes(xsec_map, int(best_pair[0]), int(best_pair[1])))
+            candidate["canonical_pair"] = _pair_id_text(int(best_pair[0]), int(best_pair[1]))
         pairing_candidates.append(candidate)
         record(candidate, stage="pairing_filter", status="selected", reason="prior_candidate_retained")
     for candidate in raw_candidates:
@@ -2163,6 +2385,15 @@ def _segment_candidates(
         "topology": topology,
         "stats": {
             "raw_candidate_count": int(len(raw_candidates)),
+            "alias_normalized_candidate_count": int(
+                sum(
+                    1
+                    for item in raw_candidates
+                    if bool(item.get("src_alias_applied", False) or item.get("dst_alias_applied", False))
+                )
+            ),
+            "xsec_alias_count": int(len(alias_map)),
+            "xsec_alias_rows": list(topology.get("xsec_alias_rows", [])),
             "candidate_count_after_pairing": int(len(pairing_candidates)),
             "candidate_count_after_topology_gate": int(len(topology_kept_candidates)),
             "candidate_count_after_cross_filter": int(len(accepted)),
@@ -2268,6 +2499,22 @@ def _cluster_segments(candidates: list[dict[str, Any]], frame: InputFrame, param
                 formation_reason = "traj_supported_cluster"
             representative_offset = float(sum(float(item["offset_m"]) for item in cluster) / max(1, len(cluster)))
             arc_token = str(topology_arc_id or "pair")
+            raw_src_nodeid = next(
+                (
+                    int(item.get("raw_src_nodeid", item["src_nodeid"]))
+                    for item in cluster
+                    if bool(item.get("src_alias_applied", False))
+                ),
+                int(representative.get("raw_src_nodeid", representative["src_nodeid"])),
+            )
+            raw_dst_nodeid = next(
+                (
+                    int(item.get("raw_dst_nodeid", item["dst_nodeid"]))
+                    for item in cluster
+                    if bool(item.get("dst_alias_applied", False))
+                ),
+                int(representative.get("raw_dst_nodeid", representative["dst_nodeid"])),
+            )
             out.append(
                 Segment(
                     segment_id=f"seg_{src_nodeid}_{dst_nodeid}_{arc_token}_{rank}",
@@ -2302,6 +2549,12 @@ def _cluster_segments(candidates: list[dict[str, Any]], frame: InputFrame, param
                     bridge_diagnostic_reason=str(representative.get("bridge_diagnostic_reason", "")),
                     bridge_decision_stage=str(representative.get("bridge_decision_stage", "")),
                     bridge_decision_reason=str(representative.get("bridge_decision_reason", "")),
+                    raw_src_nodeid=int(raw_src_nodeid),
+                    raw_dst_nodeid=int(raw_dst_nodeid),
+                    canonical_src_xsec_id=int(representative.get("canonical_src_xsec_id", src_nodeid)),
+                    canonical_dst_xsec_id=int(representative.get("canonical_dst_xsec_id", dst_nodeid)),
+                    src_alias_applied=bool(any(bool(item.get("src_alias_applied", False)) for item in cluster)),
+                    dst_alias_applied=bool(any(bool(item.get("dst_alias_applied", False)) for item in cluster)),
                 )
             )
     return out
@@ -3170,6 +3423,17 @@ def _build_topology_pairs_debug(
                 "src_nodeid": int(pair[0]),
                 "dst_nodeid": int(pair[1]),
                 "pair_id": _pair_id_text(int(pair[0]), int(pair[1])),
+                "raw_pair_ids": sorted(
+                    {
+                        str(item.get("raw_pair", ""))
+                        for item in paths
+                        if str(item.get("raw_pair", ""))
+                    }
+                ),
+                "canonical_pair_id": _pair_id_text(int(pair[0]), int(pair[1])),
+                "alias_normalized": bool(
+                    any(bool(item.get("src_alias_applied", False) or item.get("dst_alias_applied", False)) for item in paths)
+                ),
                 "topology_allowed": True if is_allowed else None,
                 "direction_allowed": True if is_allowed else None,
                 "selected": None,
@@ -3202,6 +3466,12 @@ def _build_topology_arcs_debug(
                     "src_nodeid": int(arc.get("src_nodeid", pair[0])),
                     "dst_nodeid": int(arc.get("dst_nodeid", pair[1])),
                     "pair_id": _pair_id_text(int(pair[0]), int(pair[1])),
+                    "raw_src_nodeid": int(arc.get("raw_src_nodeid", arc.get("src_nodeid", pair[0]))),
+                    "raw_dst_nodeid": int(arc.get("raw_dst_nodeid", arc.get("dst_nodeid", pair[1]))),
+                    "raw_pair": str(arc.get("raw_pair", _pair_id_text(int(pair[0]), int(pair[1])))),
+                    "canonical_pair": str(arc.get("canonical_pair", _pair_id_text(int(pair[0]), int(pair[1])))),
+                    "src_alias_applied": bool(arc.get("src_alias_applied", False)),
+                    "dst_alias_applied": bool(arc.get("dst_alias_applied", False)),
                     "source": str(arc.get("source", "")),
                     "edge_ids": [str(v) for v in arc.get("edge_ids", [])],
                     "node_path": [int(v) for v in arc.get("node_path", []) if v is not None],
@@ -3378,12 +3648,23 @@ def _stage2_segment(
         ],
         "accepted_candidate_count": int(len(accepted)),
         "rejected_candidate_count": int(len(rejected)),
+        "xsec_alias_rows": list(candidate_bundle.get("topology", {}).get("xsec_alias_rows", [])),
         "excluded_candidates": [
             {
                 "candidate_id": str(item["candidate_id"]),
                 "source": str(item["source"]),
                 "src_nodeid": int(item["src_nodeid"]),
                 "dst_nodeid": int(item["dst_nodeid"]),
+                "raw_src_nodeid": int(item.get("raw_src_nodeid", item["src_nodeid"])),
+                "raw_dst_nodeid": int(item.get("raw_dst_nodeid", item["dst_nodeid"])),
+                "canonical_src_xsec_id": int(item.get("canonical_src_xsec_id", item["src_nodeid"])),
+                "canonical_dst_xsec_id": int(item.get("canonical_dst_xsec_id", item["dst_nodeid"])),
+                "src_alias_applied": bool(item.get("src_alias_applied", False)),
+                "dst_alias_applied": bool(item.get("dst_alias_applied", False)),
+                "raw_pair": str(item.get("raw_pair", _pair_id_text(int(item["src_nodeid"]), int(item["dst_nodeid"])))),
+                "canonical_pair": str(
+                    item.get("canonical_pair", _pair_id_text(int(item["src_nodeid"]), int(item["dst_nodeid"])))
+                ),
                 "traj_id": str(item.get("traj_id", "")),
                 "support_traj_ids": sorted(str(v) for v in item.get("support_traj_ids", set())),
                 "reason": str(item.get("reason", "")),

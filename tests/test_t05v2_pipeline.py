@@ -8,14 +8,15 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
-from shapely.geometry import LineString, Polygon
+from shapely.geometry import LineString, Point, Polygon
 
-from highway_topo_poc.modules.t05_topology_between_rc_v2.io import PatchInputs
+from highway_topo_poc.modules.t05_topology_between_rc_v2.io import InputFrame, PatchInputs
 from highway_topo_poc.modules.t05_topology_between_rc_v2.audit_acceptance import (
     build_arc_legality_audit,
     build_pair_decisions,
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.models import (
+    BaseCrossSection,
     CorridorIdentity,
     CorridorInterval,
     CorridorWitness,
@@ -24,6 +25,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.models import (
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.pipeline import (
     DEFAULT_PARAMS,
+    _build_directed_topology,
     _build_final_road,
     _classify_blocked_pair_bridge,
     _classify_segment_outcome,
@@ -34,6 +36,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.pipeline import (
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.review import (
     evaluate_patch_acceptance,
+    write_alias_fix_and_rootcause_push_review,
     write_arc_first_attach_evidence_review,
     write_arc_legality_fix_review,
     write_arc_obligation_closure_review,
@@ -3030,9 +3033,19 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     competing = _read_json(output_root_obligation / "competing_arc_review.json")
     competing_by_pair = {str(item["pair"]): item for item in competing["rows"]}
     assert competing_by_pair["55353246:37687913"]["root_cause_code"].startswith("competing_arc_")
-    assert competing_by_pair["21779764:785642"]["root_cause_code"] == "multi_arc_excluded_from_unique_denominator"
+    assert competing_by_pair["21779764:785642"]["root_cause_code"] == "multi_arc_no_selection_rule"
     assert "arc_obligation_registry" in obligation
     assert "competing_arc_review" in obligation
+
+    output_root_alias = tmp_path / "bundle_alias"
+    alias_summary = write_alias_fix_and_rootcause_push_review(run_root=run_root, output_root=output_root_alias)
+    assert (output_root_alias / "alias_normalization_review.json").exists()
+    assert (output_root_alias / "alias_normalization_review.csv").exists()
+    assert (output_root_alias / "competing_arc_review.csv").exists()
+    assert (output_root_alias / "complex_patch_alias_and_competing_review.json").exists()
+    strict_vs_visual_alias = _read_json(output_root_alias / "strict_vs_visual_gap_summary.json")
+    assert "alias_normalized_review" in strict_vs_visual_alias
+    assert "alias_normalization_review" in alias_summary
 
 
 def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
@@ -3236,6 +3249,121 @@ def test_t05v2_arc_legality_audit_does_not_flag_controlled_entry_built_pair(tmp_
     assert int(audit["summary"]["bad_built_arc_count"]) == 0
     assert bool(audit["summary"]["built_all_direct_unique"]) is True
     assert "760239:6963539359479390368" not in audit["summary"]["violating_built_pairs"]
+
+
+def test_t05v2_directed_topology_alias_normalization_promotes_shared_xsec_alias_to_direct_arc(tmp_path: Path) -> None:
+    params = dict(DEFAULT_PARAMS)
+    frame = InputFrame(
+        patch_id="alias_patch",
+        metric_crs="EPSG:3857",
+        base_cross_sections=(
+            BaseCrossSection(nodeid=55353307, geometry_coords=((0.0, -5.0), (0.0, 5.0)), properties={}),
+            BaseCrossSection(nodeid=765141, geometry_coords=((100.0, -5.0), (100.0, 5.0)), properties={}),
+        ),
+        probe_cross_sections=tuple(),
+        drivezone_area_m2=1000.0,
+        divstrip_present=False,
+        lane_boundary_count=0,
+        trajectory_count=0,
+        road_prior_count=2,
+        node_count=1,
+        input_summary={},
+    )
+    inputs = PatchInputs(
+        patch_id="alias_patch",
+        patch_dir=tmp_path / "alias_patch",
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-10.0, -10.0), (110.0, -10.0), (110.0, 10.0), (-10.0, 10.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        node_records=(SimpleNamespace(nodeid=23287538, point=Point(0.5, 0.0)),),
+        input_summary={},
+    )
+    prior_roads = [
+        SimpleNamespace(line=LineString([(0.0, 0.0), (0.5, 0.0)]), snodeid=55353307, enodeid=23287538, direction=2),
+        SimpleNamespace(line=LineString([(0.5, 0.0), (100.0, 0.0)]), snodeid=23287538, enodeid=765141, direction=2),
+    ]
+
+    topology = _build_directed_topology(frame=frame, inputs=inputs, prior_roads=prior_roads, params=params)
+
+    assert topology["xsec_alias_map"][23287538] == 55353307
+    assert (55353307, 765141) in topology["allowed_pairs"]
+    assert not topology.get("trace_only_pair_paths", {}).get((55353307, 765141))
+    direct_arc = topology["pair_arcs"][(55353307, 765141)][0]
+    assert direct_arc["raw_pair"] == "23287538:765141"
+    assert bool(direct_arc["src_alias_applied"]) is True
+
+
+def test_t05v2_pair_decisions_and_audit_preserve_alias_normalized_identity(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    patch_id = "patch_alias_identity"
+    patch_dir = run_root / "patches" / patch_id
+    _write_json(
+        patch_dir / "metrics.json",
+        {
+            "patch_id": patch_id,
+            "full_legal_arc_registry": [
+                {
+                    "pair": "55353307:765141",
+                    "src": 55353307,
+                    "dst": 765141,
+                    "raw_src_nodeid": 23287538,
+                    "raw_dst_nodeid": 765141,
+                    "canonical_src_xsec_id": 55353307,
+                    "canonical_dst_xsec_id": 765141,
+                    "src_alias_applied": True,
+                    "dst_alias_applied": False,
+                    "raw_pair": "23287538:765141",
+                    "canonical_pair": "55353307:765141",
+                    "topology_arc_id": "arc_alias",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": True,
+                    "entered_main_flow": True,
+                    "working_segment_id": "arcseg::arc_alias",
+                    "built_final_road": True,
+                }
+            ],
+        },
+    )
+    _write_json(patch_dir / "step2" / "segments.json", {"segments": [], "excluded_candidates": []})
+    _write_json(
+        patch_dir / "step6" / "final_roads.json",
+        {
+            "roads": [
+                {
+                    "road_id": "road_alias",
+                    "segment_id": "arcseg::arc_alias",
+                    "src_nodeid": 55353307,
+                    "dst_nodeid": 765141,
+                }
+            ],
+            "road_results": [],
+        },
+    )
+    _write_json(patch_dir / "debug" / "step2_segment_should_not_exist.json", {"pairs": []})
+    _write_json(patch_dir / "debug" / "step2_topology_pairs.json", {"pairs": []})
+    _write_json(patch_dir / "debug" / "step2_blocked_pair_bridge_audit.json", {"pairs": []})
+
+    decisions = build_pair_decisions(run_root, patch_id)
+    row = {str(item.get("pair", "")): item for item in decisions.get("pairs", [])}["55353307:765141"]
+    assert row["raw_pair"] == "23287538:765141"
+    assert row["canonical_pair"] == "55353307:765141"
+    assert bool(row["alias_normalized"]) is True
+    assert bool(row["topology_arc_is_direct_legal"]) is True
+    assert bool(row["topology_arc_is_unique"]) is True
+    assert bool(row["built_final_road"]) is True
+
+    audit = build_arc_legality_audit(run_root, [patch_id])
+    built_row = audit["built_roads"][0]
+    assert built_row["raw_pair"] == "23287538:765141"
+    assert built_row["canonical_pair"] == "55353307:765141"
+    assert bool(built_row["alias_normalized"]) is True
+    assert int(audit["summary"]["bad_built_arc_count"]) == 0
+    assert bool(audit["summary"]["built_all_direct_unique"]) is True
 
 
 def test_t05v2_scripts_stepwise_state_resume(tmp_path: Path) -> None:

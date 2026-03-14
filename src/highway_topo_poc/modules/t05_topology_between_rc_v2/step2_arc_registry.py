@@ -44,6 +44,14 @@ def _direct_topology_arc_rows(topology: dict[str, Any]) -> list[dict[str, Any]]:
                     "pair": f"{src_nodeid}:{dst_nodeid}",
                     "src": src_nodeid,
                     "dst": dst_nodeid,
+                    "raw_src_nodeid": int(arc.get("raw_src_nodeid", src_nodeid)),
+                    "raw_dst_nodeid": int(arc.get("raw_dst_nodeid", dst_nodeid)),
+                    "canonical_src_xsec_id": int(arc.get("canonical_src_xsec_id", src_nodeid)),
+                    "canonical_dst_xsec_id": int(arc.get("canonical_dst_xsec_id", dst_nodeid)),
+                    "src_alias_applied": bool(arc.get("src_alias_applied", False)),
+                    "dst_alias_applied": bool(arc.get("dst_alias_applied", False)),
+                    "raw_pair": str(arc.get("raw_pair", f"{src_nodeid}:{dst_nodeid}")),
+                    "canonical_pair": str(arc.get("canonical_pair", f"{src_nodeid}:{dst_nodeid}")),
                     "topology_arc_id": str(arc.get("arc_id", "")),
                     "topology_arc_source_type": str(arc.get("source", "")),
                     "node_path": [int(v) for v in arc.get("node_path", []) if v is not None],
@@ -81,6 +89,7 @@ def build_full_legal_arc_registry(
     for row in _direct_topology_arc_rows(topology):
         arc_id = str(row["topology_arc_id"])
         attached_segments = list(selected_by_arc.get(arc_id, []))
+        selected_segment = attached_segments[0] if attached_segments else None
         pair_id = str(row["pair"])
         pair_hard_block_reason = "" if attached_segments else str(hard_block_by_pair.get(pair_id, ""))
         blocked_diagnostic_only = bool((not attached_segments) and pair_id in blocked_diag_by_pair)
@@ -97,6 +106,65 @@ def build_full_legal_arc_registry(
                 "controlled_entry_allowed": False,
                 "topology_gap_decision": "",
                 "topology_gap_reason": "",
+                "raw_src_nodeid": int(
+                    (
+                        getattr(selected_segment, "raw_src_nodeid", None)
+                        if selected_segment is not None
+                        else row.get("raw_src_nodeid", row["src"])
+                    )
+                    or row.get("raw_src_nodeid", row["src"])
+                    if selected_segment is not None
+                    else row.get("raw_src_nodeid", row["src"])
+                ),
+                "raw_dst_nodeid": int(
+                    (
+                        getattr(selected_segment, "raw_dst_nodeid", None)
+                        if selected_segment is not None
+                        else row.get("raw_dst_nodeid", row["dst"])
+                    )
+                    or row.get("raw_dst_nodeid", row["dst"])
+                    if selected_segment is not None
+                    else row.get("raw_dst_nodeid", row["dst"])
+                ),
+                "canonical_src_xsec_id": int(
+                    (
+                        getattr(selected_segment, "canonical_src_xsec_id", None)
+                        if selected_segment is not None
+                        else row.get("canonical_src_xsec_id", row["src"])
+                    )
+                    or row.get("canonical_src_xsec_id", row["src"])
+                    if selected_segment is not None
+                    else row.get("canonical_src_xsec_id", row["src"])
+                ),
+                "canonical_dst_xsec_id": int(
+                    (
+                        getattr(selected_segment, "canonical_dst_xsec_id", None)
+                        if selected_segment is not None
+                        else row.get("canonical_dst_xsec_id", row["dst"])
+                    )
+                    or row.get("canonical_dst_xsec_id", row["dst"])
+                    if selected_segment is not None
+                    else row.get("canonical_dst_xsec_id", row["dst"])
+                ),
+                "src_alias_applied": bool(
+                    getattr(selected_segment, "src_alias_applied", row.get("src_alias_applied", False))
+                    if selected_segment is not None
+                    else row.get("src_alias_applied", False)
+                ),
+                "dst_alias_applied": bool(
+                    getattr(selected_segment, "dst_alias_applied", row.get("dst_alias_applied", False))
+                    if selected_segment is not None
+                    else row.get("dst_alias_applied", False)
+                ),
+                "raw_pair": str(
+                    (
+                        f"{int((getattr(selected_segment, 'raw_src_nodeid', None) or row.get('raw_src_nodeid', row['src'])))}:"
+                        f"{int((getattr(selected_segment, 'raw_dst_nodeid', None) or row.get('raw_dst_nodeid', row['dst'])))}"
+                    )
+                    if selected_segment is not None
+                    else row.get("raw_pair", pair_id)
+                ),
+                "canonical_pair": str(row.get("canonical_pair", pair_id)),
                 "selected_segment_ids": [str(getattr(segment, "segment_id", "")) for segment in attached_segments],
                 "selected_segment_count": int(len(attached_segments)),
                 "selected_segment_id": "" if not attached_segments else str(attached_segments[0].segment_id),
