@@ -545,9 +545,74 @@ def _support_surface_side_signature(
     return tuple(fractions)
 
 
+def _support_side_cluster_signature(
+    side_signature: list[float] | tuple[float, ...] | None,
+    *,
+    resolution: float,
+) -> tuple[float, ...]:
+    if side_signature is None or float(resolution) <= 1e-6:
+        return tuple()
+    out: list[float] = []
+    for value in side_signature:
+        try:
+            frac = float(value)
+        except Exception:
+            continue
+        out.append(round(round(frac / float(resolution)) * float(resolution), 3))
+    return tuple(out)
+
+
+def _hashable_support_signature(value: Any) -> Any:
+    if isinstance(value, dict):
+        return tuple((str(key), _hashable_support_signature(val)) for key, val in sorted(value.items(), key=lambda item: str(item[0])))
+    if isinstance(value, (list, tuple)):
+        return tuple(_hashable_support_signature(item) for item in value)
+    if isinstance(value, set):
+        return tuple(sorted(_hashable_support_signature(item) for item in value))
+    return value
+
+
+def _support_candidate_cluster_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
+    corridor_signature = _hashable_support_signature(candidate.get("support_corridor_signature", ()))
+    side_cluster_signature = _support_side_cluster_signature(
+        candidate.get("support_surface_side_signature", ()),
+        resolution=0.1,
+    )
+    if corridor_signature or side_cluster_signature:
+        return ("corridor_side", corridor_signature, side_cluster_signature)
+    return (
+        "anchor",
+        _bucket_point(candidate.get("support_anchor_src_coords"), resolution_m=6.0),
+        _bucket_point(candidate.get("support_anchor_dst_coords"), resolution_m=6.0),
+    )
+
+
+def _annotate_support_candidate_clusters(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    terminal_candidates = [
+        item
+        for item in candidates
+        if bool(item.get("support_full_xsec_crossing", False))
+    ]
+    cluster_counter: Counter[tuple[Any, ...]] = Counter(
+        _support_candidate_cluster_key(item)
+        for item in (terminal_candidates or candidates)
+        if str(item.get("traj_support_type", "")) != "no_support"
+    )
+    dominant_count = max(cluster_counter.values(), default=0)
+    for item in candidates:
+        cluster_key = _support_candidate_cluster_key(item)
+        cluster_count = int(cluster_counter.get(cluster_key, 0))
+        item["support_cluster_key"] = list(cluster_key)
+        item["support_cluster_support_count"] = int(cluster_count)
+        item["support_cluster_is_dominant"] = bool(cluster_count > 0 and cluster_count == dominant_count)
+    return candidates
+
+
 def _support_selection_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
     return (
-        0 if str(candidate.get("traj_support_type", "")) == "terminal_crossing_support" else 1,
+        0 if bool(candidate.get("support_full_xsec_crossing", False)) else 1,
+        0 if bool(candidate.get("support_cluster_is_dominant", False)) else 1,
+        -int(candidate.get("support_cluster_support_count", 0)),
         float(candidate.get("best_line_distance_m", float("inf"))),
         -float(candidate.get("traj_support_coverage_ratio", 0.0) or 0.0),
         -int(candidate.get("surface_consistent_segment_count", 0)),
@@ -574,21 +639,14 @@ def _support_candidate_public_fields(candidate: dict[str, Any]) -> dict[str, Any
         ),
         "support_corridor_signature": list(candidate.get("support_corridor_signature", [])),
         "support_surface_side_signature": list(candidate.get("support_surface_side_signature", [])),
+        "support_full_xsec_crossing": bool(candidate.get("support_full_xsec_crossing", False)),
+        "support_cluster_support_count": int(candidate.get("support_cluster_support_count", 0)),
+        "support_cluster_is_dominant": bool(candidate.get("support_cluster_is_dominant", False)),
     }
 
 
 def _same_pair_support_conflict_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
-    side_signature = tuple(candidate.get("support_surface_side_signature", ()))
-    if side_signature:
-        return ("side", side_signature)
-    corridor_signature = tuple(candidate.get("support_corridor_signature", ()))
-    if corridor_signature:
-        return ("corridor", corridor_signature)
-    return (
-        "anchor",
-        tuple(candidate.get("support_anchor_src_coords") or ()),
-        tuple(candidate.get("support_anchor_dst_coords") or ()),
-    )
+    return _support_candidate_cluster_key(candidate)
 
 
 def _merge_support_spans(
@@ -757,6 +815,8 @@ def _support_type_for_arc(
     *,
     row: dict[str, Any],
     arc_line: LineString | None,
+    src_xsec: LineString | None,
+    dst_xsec: LineString | None,
     prior_roads: list[Any],
     prior_index: dict[tuple[int, int], list[Any]] | None,
     candidate_traj_rows: list[dict[str, Any]],
@@ -797,6 +857,17 @@ def _support_type_for_arc(
             "selected_support_segment_traj_id": "",
             "support_corridor_signature": [],
             "support_surface_side_signature": [],
+            "support_full_xsec_crossing": False,
+            "support_cluster_support_count": 0,
+            "support_cluster_is_dominant": False,
+            "stitched_support_available": False,
+            "stitched_support_ready": False,
+            "stitched_support_coverage_ratio": 0.0,
+            "stitched_support_reference_coords": [],
+            "stitched_support_anchor_src_coords": None,
+            "stitched_support_anchor_dst_coords": None,
+            "stitched_support_corridor_signature": [],
+            "stitched_support_surface_side_signature": [],
             "single_traj_support_segments": [],
             "stitched_traj_support_segments": [],
             "single_traj_candidate_count": int(len(candidate_traj_rows)),
@@ -945,6 +1016,17 @@ def _support_type_for_arc(
             support_anchor_src_coords,
             support_anchor_dst_coords,
         )
+        support_surface_side_signature = _support_surface_side_signature(
+            support_anchor_src_coords=support_anchor_src_coords,
+            support_anchor_dst_coords=support_anchor_dst_coords,
+            src_xsec=src_xsec,
+            dst_xsec=dst_xsec,
+        )
+        support_full_xsec_crossing = bool(
+            str(traj_production_type) == "terminal_crossing_support"
+            and support_anchor_src_coords is not None
+            and support_anchor_dst_coords is not None
+        )
         best_line_distance_m = min(
             (
                 float(
@@ -995,7 +1077,10 @@ def _support_type_for_arc(
                     else "single_traj_candidate_without_support"
                 ),
                 "support_corridor_signature": support_corridor_signature,
-                "support_surface_side_signature": tuple(),
+                "support_surface_side_signature": support_surface_side_signature,
+                "support_full_xsec_crossing": bool(support_full_xsec_crossing),
+                "support_cluster_support_count": 0,
+                "support_cluster_is_dominant": False,
             }
         )
 
@@ -1010,12 +1095,73 @@ def _support_type_for_arc(
         for item in single_traj_support_segments
         if str(item.get("support_type", "")) == "partial_arc_support"
     ]
+    stitched_coverage_ratio = _coverage_ratio_from_spans(
+        all_partial_span_rows,
+        arc_length_m=float(arc_line.length),
+        max_proj_gap_m=float(max_proj_gap_m),
+    )
+    merged = _merge_support_spans(all_partial_span_rows, max_proj_gap_m=float(max_proj_gap_m))
+    endpoint_margin = float(arc_line.length) * float(endpoint_margin_ratio)
+    covers_start = bool(merged and float(merged[0][0]) <= endpoint_margin)
+    covers_end = bool(merged and float(merged[-1][1]) >= float(arc_line.length) - endpoint_margin)
+    stitched_has_src_xsec_anchor = any(bool(item.get("supports_src_xsec_anchor", False)) for item in all_partial_span_rows)
+    stitched_has_dst_xsec_anchor = any(bool(item.get("supports_dst_xsec_anchor", False)) for item in all_partial_span_rows)
+    stitched_ready = bool(
+        len(stitched_traj_support_segments) >= 2
+        and covers_start
+        and covers_end
+        and stitched_has_src_xsec_anchor
+        and stitched_has_dst_xsec_anchor
+        and stitched_coverage_ratio >= stitched_min_ratio
+    )
+    stitched_surface_consistent = bool(
+        stitched_ready
+        and stitched_traj_support_segments
+        and all(bool(item.get("surface_consistent", False)) for item in stitched_traj_support_segments)
+    )
+    stitched_support_anchor_src_coords: list[float] | None = None
+    stitched_support_anchor_dst_coords: list[float] | None = None
+    stitched_support_reference_coords: list[list[float]] = []
+    stitched_support_corridor_signature: list[Any] = []
+    stitched_support_surface_side_signature: list[float] = []
+    if stitched_surface_consistent:
+        stitched_support_anchor_src_coords, stitched_support_anchor_dst_coords = _support_anchors_from_segments(
+            stitched_traj_support_segments
+        )
+        stitched_support_reference_coords = _best_support_reference_coords(stitched_traj_support_segments)
+        stitched_support_corridor_signature = list(
+            _support_corridor_signature(
+                stitched_support_reference_coords,
+                stitched_support_anchor_src_coords,
+                stitched_support_anchor_dst_coords,
+            )
+        )
+        stitched_support_surface_side_signature = list(
+            _support_surface_side_signature(
+                support_anchor_src_coords=stitched_support_anchor_src_coords,
+                support_anchor_dst_coords=stitched_support_anchor_dst_coords,
+                src_xsec=src_xsec,
+                dst_xsec=dst_xsec,
+            )
+        )
+
+    stitched_summary = {
+        "stitched_support_available": bool(stitched_surface_consistent),
+        "stitched_support_ready": bool(stitched_ready),
+        "stitched_support_coverage_ratio": float(stitched_coverage_ratio),
+        "stitched_support_reference_coords": stitched_support_reference_coords,
+        "stitched_support_anchor_src_coords": stitched_support_anchor_src_coords,
+        "stitched_support_anchor_dst_coords": stitched_support_anchor_dst_coords,
+        "stitched_support_corridor_signature": stitched_support_corridor_signature,
+        "stitched_support_surface_side_signature": stitched_support_surface_side_signature,
+    }
     qualified_single_evals = [
         dict(item)
         for item in single_traj_evals
         if str(item.get("traj_support_type", "")) != "no_support"
         and int(item.get("surface_consistent_segment_count", 0)) >= 1
     ]
+    qualified_single_evals = _annotate_support_candidate_clusters(qualified_single_evals)
     ranked_single_candidates = sorted(qualified_single_evals, key=_support_selection_key)
     support_candidate_options = [
         {
@@ -1045,6 +1191,10 @@ def _support_type_for_arc(
             ),
             "support_corridor_signature": list(best_single.get("support_corridor_signature", [])),
             "support_surface_side_signature": list(best_single.get("support_surface_side_signature", [])),
+            "support_full_xsec_crossing": bool(best_single.get("support_full_xsec_crossing", False)),
+            "support_cluster_support_count": int(best_single.get("support_cluster_support_count", 0)),
+            "support_cluster_is_dominant": bool(best_single.get("support_cluster_is_dominant", False)),
+            **stitched_summary,
             "single_traj_support_segments": single_traj_support_segments,
             "stitched_traj_support_segments": stitched_traj_support_segments,
             "single_traj_candidate_count": int(len(candidate_traj_rows)),
@@ -1054,34 +1204,8 @@ def _support_type_for_arc(
             "prior_support_available": bool(prior_available),
         }
 
-    stitched_coverage_ratio = _coverage_ratio_from_spans(
-        all_partial_span_rows,
-        arc_length_m=float(arc_line.length),
-        max_proj_gap_m=float(max_proj_gap_m),
-    )
-    merged = _merge_support_spans(all_partial_span_rows, max_proj_gap_m=float(max_proj_gap_m))
-    endpoint_margin = float(arc_line.length) * float(endpoint_margin_ratio)
-    covers_start = bool(merged and float(merged[0][0]) <= endpoint_margin)
-    covers_end = bool(merged and float(merged[-1][1]) >= float(arc_line.length) - endpoint_margin)
-    stitched_has_src_xsec_anchor = any(bool(item.get("supports_src_xsec_anchor", False)) for item in all_partial_span_rows)
-    stitched_has_dst_xsec_anchor = any(bool(item.get("supports_dst_xsec_anchor", False)) for item in all_partial_span_rows)
-    stitched_ready = bool(
-        len(stitched_traj_support_segments) >= 2
-        and covers_start
-        and covers_end
-        and stitched_has_src_xsec_anchor
-        and stitched_has_dst_xsec_anchor
-        and stitched_coverage_ratio >= stitched_min_ratio
-    )
-    stitched_surface_consistent = bool(
-        stitched_ready
-        and stitched_traj_support_segments
-        and all(bool(item.get("surface_consistent", False)) for item in stitched_traj_support_segments)
-    )
     if stitched_surface_consistent:
         _mark_support_segments_selected(stitched_traj_support_segments)
-        support_anchor_src_coords, support_anchor_dst_coords = _support_anchors_from_segments(stitched_traj_support_segments)
-        support_reference_coords = _best_support_reference_coords(stitched_traj_support_segments)
         return {
             "traj_support_type": "stitched_arc_support",
             "traj_support_ids": sorted({str(item.get("traj_id", "")) for item in stitched_traj_support_segments if str(item.get("traj_id", ""))}),
@@ -1089,21 +1213,19 @@ def _support_type_for_arc(
             "traj_support_coverage_ratio": float(stitched_coverage_ratio),
             "traj_support_spans": [dict(item) for item in all_partial_span_rows],
             "traj_support_segments": stitched_traj_support_segments,
-            "support_reference_coords": support_reference_coords,
-            "support_anchor_src_coords": support_anchor_src_coords,
-            "support_anchor_dst_coords": support_anchor_dst_coords,
+            "support_reference_coords": stitched_support_reference_coords,
+            "support_anchor_src_coords": stitched_support_anchor_src_coords,
+            "support_anchor_dst_coords": stitched_support_anchor_dst_coords,
             "support_generation_mode": "stitched",
             "support_generation_reason": "zero_surface_consistent_single_traj_support",
             "selected_support_traj_id": "",
             "selected_support_segment_traj_id": "",
-            "support_corridor_signature": list(
-                _support_corridor_signature(
-                    support_reference_coords,
-                    support_anchor_src_coords,
-                    support_anchor_dst_coords,
-                )
-            ),
-            "support_surface_side_signature": [],
+            "support_corridor_signature": stitched_support_corridor_signature,
+            "support_surface_side_signature": stitched_support_surface_side_signature,
+            "support_full_xsec_crossing": bool(stitched_has_src_xsec_anchor and stitched_has_dst_xsec_anchor),
+            "support_cluster_support_count": int(len(stitched_traj_support_segments)),
+            "support_cluster_is_dominant": True,
+            **stitched_summary,
             "single_traj_support_segments": single_traj_support_segments,
             "stitched_traj_support_segments": stitched_traj_support_segments,
             "single_traj_candidate_count": int(len(candidate_traj_rows)),
@@ -1139,6 +1261,10 @@ def _support_type_for_arc(
         "selected_support_segment_traj_id": "",
         "support_corridor_signature": [],
         "support_surface_side_signature": [],
+        "support_full_xsec_crossing": False,
+        "support_cluster_support_count": 0,
+        "support_cluster_is_dominant": False,
+        **stitched_summary,
         "single_traj_support_segments": single_traj_support_segments,
         "stitched_traj_support_segments": stitched_traj_support_segments,
         "single_traj_candidate_count": int(len(candidate_traj_rows)),
@@ -1246,6 +1372,17 @@ def _apply_support_candidate_to_row(
                 "selected_support_segment_traj_id": "",
                 "support_corridor_signature": [],
                 "support_surface_side_signature": [],
+                "support_full_xsec_crossing": False,
+                "support_cluster_support_count": 0,
+                "support_cluster_is_dominant": False,
+                "stitched_support_available": bool(row.get("stitched_support_available", False)),
+                "stitched_support_ready": bool(row.get("stitched_support_ready", False)),
+                "stitched_support_coverage_ratio": float(row.get("stitched_support_coverage_ratio", 0.0) or 0.0),
+                "stitched_support_reference_coords": [list(item) for item in row.get("stitched_support_reference_coords", [])],
+                "stitched_support_anchor_src_coords": row.get("stitched_support_anchor_src_coords"),
+                "stitched_support_anchor_dst_coords": row.get("stitched_support_anchor_dst_coords"),
+                "stitched_support_corridor_signature": list(row.get("stitched_support_corridor_signature", [])),
+                "stitched_support_surface_side_signature": list(row.get("stitched_support_surface_side_signature", [])),
                 "same_pair_support_deconflict_reason": str(reason),
             }
         )
@@ -1312,6 +1449,9 @@ def _same_pair_support_deconflict(
                             "surface_consistent_segment_count": int(len(row.get("traj_support_segments", []))),
                             "support_corridor_signature": row.get("support_corridor_signature", []),
                             "support_surface_side_signature": row.get("support_surface_side_signature", []),
+                            "support_full_xsec_crossing": bool(row.get("support_full_xsec_crossing", False)),
+                            "support_cluster_support_count": int(row.get("support_cluster_support_count", 0)),
+                            "support_cluster_is_dominant": bool(row.get("support_cluster_is_dominant", False)),
                             "candidate_quality_rank": topk + 1,
                         },
                         xsec_by_nodeid=xsec_by_nodeid,
@@ -1564,6 +1704,7 @@ def build_arc_evidence_attach(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     pipeline = _pipeline()
+    xsec_map = pipeline._xsec_map(frame)
     selected_by_arc = {str(segment.topology_arc_id): segment for segment in selected_segments if str(segment.topology_arc_id)}
     patch_geometry_cache = build_patch_geometry_cache(inputs, params)
     divstrip_buffer = patch_geometry_cache.get("divstrip_buffer")
@@ -1637,6 +1778,8 @@ def build_arc_evidence_attach(
         support = _support_type_for_arc(
             row=current,
             arc_line=arc_line,
+            src_xsec=(None if xsec_map.get(int(current["src"])) is None else xsec_map[int(current["src"])].geometry_metric()),
+            dst_xsec=(None if xsec_map.get(int(current["dst"])) is None else xsec_map[int(current["dst"])].geometry_metric()),
             prior_roads=prior_roads,
             prior_index=prior_index,
             candidate_traj_rows=candidate_traj_rows,
@@ -1669,6 +1812,17 @@ def build_arc_evidence_attach(
                 ),
                 "support_corridor_signature": list(support.get("support_corridor_signature", [])),
                 "support_surface_side_signature": list(support.get("support_surface_side_signature", [])),
+                "support_full_xsec_crossing": bool(support.get("support_full_xsec_crossing", False)),
+                "support_cluster_support_count": int(support.get("support_cluster_support_count", 0)),
+                "support_cluster_is_dominant": bool(support.get("support_cluster_is_dominant", False)),
+                "stitched_support_available": bool(support.get("stitched_support_available", False)),
+                "stitched_support_ready": bool(support.get("stitched_support_ready", False)),
+                "stitched_support_coverage_ratio": float(support.get("stitched_support_coverage_ratio", 0.0) or 0.0),
+                "stitched_support_reference_coords": list(support.get("stitched_support_reference_coords", [])),
+                "stitched_support_anchor_src_coords": support.get("stitched_support_anchor_src_coords"),
+                "stitched_support_anchor_dst_coords": support.get("stitched_support_anchor_dst_coords"),
+                "stitched_support_corridor_signature": list(support.get("stitched_support_corridor_signature", [])),
+                "stitched_support_surface_side_signature": list(support.get("stitched_support_surface_side_signature", [])),
                 "single_traj_candidate_count": int(support.get("single_traj_candidate_count", 0)),
                 "single_traj_surface_consistent_count": int(support.get("single_traj_surface_consistent_count", 0)),
                 "support_candidate_options": list(support.get("support_candidate_options", [])),

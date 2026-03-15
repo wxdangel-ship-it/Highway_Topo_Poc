@@ -10,7 +10,7 @@ from shapely.geometry import LineString, Point
 from shapely.ops import nearest_points, substring
 
 from .io import write_json, write_lines_geojson
-from .models import BaseCrossSection, CorridorIdentity, CorridorWitness, FinalRoad, Segment, SlotInterval, line_to_coords
+from .models import BaseCrossSection, CorridorIdentity, CorridorInterval, CorridorWitness, FinalRoad, Segment, SlotInterval, line_to_coords
 from .step3_corridor_identity import (
     build_patch_geometry_cache,
     build_prior_reference_index,
@@ -370,6 +370,64 @@ def slot_reference_line(
     return segment.geometry_metric(), "segment_support"
 
 
+def _project_anchor_s_on_xsec(xsec_line: LineString, anchor_coords: list[float] | tuple[float, float] | None) -> float | None:
+    if anchor_coords is None or len(anchor_coords) < 2 or xsec_line.is_empty or float(xsec_line.length) <= 1e-6:
+        return None
+    try:
+        anchor = Point(float(anchor_coords[0]), float(anchor_coords[1]))
+    except Exception:
+        return None
+    return float(xsec_line.project(anchor))
+
+
+def _resolve_interval_from_anchor(
+    *,
+    intervals: list[CorridorInterval],
+    xsec_line: LineString,
+    anchor_coords: list[float] | tuple[float, float] | None,
+    tolerance_m: float,
+    label: str,
+) -> tuple[CorridorInterval | None, str, str]:
+    anchor_s = _project_anchor_s_on_xsec(xsec_line, anchor_coords)
+    if anchor_s is None or not intervals:
+        return None, "unresolved", "anchor_missing"
+    for interval in intervals:
+        if float(interval.start_s) - float(tolerance_m) <= float(anchor_s) <= float(interval.end_s) + float(tolerance_m):
+            return interval, f"{label}_contains", f"{label}_anchor_on_interval"
+    nearest = min(intervals, key=lambda item: abs(float(item.center_s) - float(anchor_s)))
+    if abs(float(nearest.center_s) - float(anchor_s)) <= float(tolerance_m):
+        return nearest, f"{label}_nearest", f"{label}_anchor_nearest_interval"
+    return None, "unresolved", "anchor_outside_legal_interval"
+
+
+def _slot_anchor_candidates(
+    *,
+    arc_row: dict[str, Any] | None,
+    endpoint_tag: str,
+) -> list[tuple[list[float] | tuple[float, float], str]]:
+    if not isinstance(arc_row, dict) or not arc_row:
+        return []
+    endpoint_key = "src" if str(endpoint_tag) == "src" else "dst"
+    stitched_anchor = arc_row.get(f"stitched_support_anchor_{endpoint_key}_coords")
+    support_anchor = arc_row.get(f"support_anchor_{endpoint_key}_coords")
+    prefer_stitched = bool(arc_row.get("stitched_support_available", False)) and (
+        not bool(arc_row.get("support_full_xsec_crossing", False))
+        or not bool(arc_row.get("support_cluster_is_dominant", False))
+    )
+    ordered = [
+        (stitched_anchor, "stitched_support"),
+        (support_anchor, "selected_support"),
+    ] if prefer_stitched else [
+        (support_anchor, "selected_support"),
+        (stitched_anchor, "stitched_support"),
+    ]
+    out: list[tuple[list[float] | tuple[float, float], str]] = []
+    for coords, label in ordered:
+        if isinstance(coords, (list, tuple)) and len(coords) >= 2:
+            out.append((coords, label))
+    return out
+
+
 def shape_ref_line(
     *,
     segment: Segment,
@@ -407,6 +465,7 @@ def build_slot(
     params: dict[str, Any],
     endpoint_tag: str,
     drivable_surface: Any | None = None,
+    arc_row: dict[str, Any] | None = None,
 ) -> SlotInterval:
     pipeline = _pipeline()
     surface = drivable_surface if drivable_surface is not None else pipeline._drivable_surface(inputs, params)
@@ -455,6 +514,18 @@ def build_slot(
             interval = min(intervals, key=lambda item: abs((float(item.center_s) / max(float(xsec_line.length), 1e-6)) - float(witness_fraction)))
             method = "fraction_match"
             reason = "witness_fraction_match"
+    anchor_tolerance_m = float(params.get("STEP5_SLOT_ANCHOR_TOL_M", 0.75))
+    if interval is None and len(intervals) > 1:
+        for anchor_coords, label in _slot_anchor_candidates(arc_row=arc_row, endpoint_tag=endpoint_tag):
+            interval, method, reason = _resolve_interval_from_anchor(
+                intervals=intervals,
+                xsec_line=xsec_line,
+                anchor_coords=anchor_coords,
+                tolerance_m=anchor_tolerance_m,
+                label=label,
+            )
+            if interval is not None:
+                break
     if interval is None:
         interval, method, reason = pipeline._choose_interval(intervals, reference_s=ref_s, desired_rank=desired_rank)
     return SlotInterval(
@@ -1376,12 +1447,27 @@ def run_slot_mapping_stage(
     witnesses = {str(item.segment_id): item for item in (CorridorWitness.from_dict(v) for v in witnesses_payload.get("witnesses", []))}
     identities = {str(item.segment_id): item for item in (CorridorIdentity.from_dict(v) for v in identities_payload.get("corridor_identities", []))}
     full_registry_rows = list(identities_payload.get("full_legal_arc_registry", []))
+    registry_by_working_segment = {
+        str(item.get("working_segment_id", "")): dict(item)
+        for item in full_registry_rows
+        if str(item.get("working_segment_id", ""))
+    }
+    registry_by_arc_id = {
+        str(item.get("topology_arc_id", "")): dict(item)
+        for item in full_registry_rows
+        if str(item.get("topology_arc_id", ""))
+    }
     legal_arc_funnel = dict(identities_payload.get("legal_arc_funnel", {}))
     slot_map: dict[str, dict[str, SlotInterval]] = {}
     debug_features: list[tuple[LineString, dict[str, Any]]] = []
     for segment in segments:
         witness = witnesses.get(str(segment.segment_id))
         identity = identities[str(segment.segment_id)]
+        arc_row = (
+            registry_by_working_segment.get(str(segment.segment_id))
+            or registry_by_arc_id.get(str(segment.topology_arc_id))
+            or {}
+        )
         line, line_mode = slot_reference_line(segment=segment, identity=identity, prior_roads=prior_roads, prior_index=prior_index)
         src_slot = build_slot(
             segment=segment,
@@ -1393,6 +1479,7 @@ def run_slot_mapping_stage(
             params=params,
             endpoint_tag="src",
             drivable_surface=patch_geometry_cache.get("drivable_surface"),
+            arc_row=arc_row,
         )
         dst_slot = build_slot(
             segment=segment,
@@ -1404,6 +1491,7 @@ def run_slot_mapping_stage(
             params=params,
             endpoint_tag="dst",
             drivable_surface=patch_geometry_cache.get("drivable_surface"),
+            arc_row=arc_row,
         )
         slot_map[str(segment.segment_id)] = {"src": src_slot, "dst": dst_slot}
         for slot in (src_slot, dst_slot):

@@ -65,6 +65,9 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_arc_evidence impo
     build_arc_evidence_attach,
     classify_topology_gap_rows,
 )
+from highway_topo_poc.modules.t05_topology_between_rc_v2.step5_conservative_road import (
+    build_slot,
+)
 from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_corridor_identity import (
     build_corridor_identities,
     build_patch_geometry_cache,
@@ -1200,6 +1203,25 @@ def test_t05v2_same_pair_support_deconflict_assigns_distinct_support_sides(tmp_p
     assert rows["arc_1_2_2"]["production_multi_arc_allowed"] is True
 
 
+def test_t05v2_same_pair_conflict_key_coalesces_nearly_identical_surface_sides() -> None:
+    from highway_topo_poc.modules.t05_topology_between_rc_v2 import step3_arc_evidence as evidence_module
+
+    candidate_a = {
+        "support_corridor_signature": [(10.0, 0.0), (0.0, 0.0), (100.0, 0.0)],
+        "support_surface_side_signature": [0.97, 0.03],
+        "support_anchor_src_coords": [0.0, 0.0],
+        "support_anchor_dst_coords": [100.0, 0.0],
+    }
+    candidate_b = {
+        "support_corridor_signature": [(10.0, 0.0), (0.0, 0.0), (100.0, 0.0)],
+        "support_surface_side_signature": [0.96, 0.04],
+        "support_anchor_src_coords": [0.0, 0.2],
+        "support_anchor_dst_coords": [100.0, 0.2],
+    }
+
+    assert evidence_module._same_pair_support_conflict_key(candidate_a) == evidence_module._same_pair_support_conflict_key(candidate_b)
+
+
 def test_t05v2_step2_writes_traj_crossing_and_support_audits(tmp_path: Path) -> None:
     patch_id = "traj_audit"
     data_root = tmp_path / "data"
@@ -1485,6 +1507,35 @@ def test_t05v2_arc_first_stitched_support_uses_same_arc_fragments(tmp_path: Path
     assert all(not bool(item["properties"]["accepted_for_production"]) for item in stitched_debug["features"])
 
 
+def test_t05v2_arc_first_prefers_dominant_terminal_crossing_cluster(tmp_path: Path) -> None:
+    patch_id = "arc_first_terminal_cluster"
+    data_root = tmp_path / "data"
+    road_fc = _fc([_line_feature([(0.0, 2.0), (100.0, 2.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=_simple_intersections(),
+        drivezone_fc=_fc([_poly_feature([(-5.0, -6.0), (105.0, -6.0), (105.0, 6.0), (-5.0, 6.0)])], "EPSG:3857"),
+        traj_tracks=[
+            [(0.0, 4.0), (50.0, 4.0), (100.0, 4.0)],
+            [(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)],
+            [(0.0, 0.2), (50.0, 0.2), (100.0, 0.2)],
+        ],
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_stage(stage="step1_input_frame", data_root=data_root, patch_id=patch_id, run_id="run_terminal_cluster", out_root=out_root)
+    run_stage(stage="step2_segment", data_root=data_root, patch_id=patch_id, run_id="run_terminal_cluster", out_root=out_root)
+    run_stage(stage="step3_witness", data_root=data_root, patch_id=patch_id, run_id="run_terminal_cluster", out_root=out_root)
+    step3_payload = _read_json(out_root / "run_terminal_cluster" / "patches" / patch_id / "step3" / "witnesses.json")
+    row = step3_payload["full_legal_arc_registry"][0]
+    assert row["traj_support_type"] == "terminal_crossing_support"
+    assert row["selected_support_traj_id"] in {"traj_01", "traj_02"}
+    assert bool(row["support_full_xsec_crossing"]) is True
+    assert bool(row["support_cluster_is_dominant"]) is True
+    assert int(row["support_cluster_support_count"]) == 2
+
+
 def test_t05v2_arc_first_prefilter_keeps_same_arc_support_and_skips_far_traj(tmp_path: Path) -> None:
     patch_id = "arc_first_prefilter"
     data_root = tmp_path / "data"
@@ -1724,6 +1775,84 @@ def test_t05v2_build_final_road_prefers_projected_witness_reference_before_segme
     assert result["candidate_attempts"][0]["mode"] == "witness_reference_projected_anchored"
     assert float(result["candidate_attempts"][0]["drivezone_ratio"]) >= float(DEFAULT_PARAMS["ROAD_MIN_DRIVEZONE_RATIO"])
     assert road.line_coords == ((0.0, 1.0), (50.0, 1.0), (100.0, 1.0))
+
+
+def test_t05v2_build_slot_prefers_support_anchor_interval_over_reference_interval() -> None:
+    segment = Segment(
+        segment_id="seg_slot_anchor",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((-10.0, -7.0), (10.0, -7.0)),
+        candidate_ids=("cand_1",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_1",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=True,
+        formation_reason="traj_supported_cluster",
+        length_m=20.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_slot_anchor",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+    )
+    identity = CorridorIdentity(
+        segment_id="seg_slot_anchor",
+        state="prior_based",
+        reason="prior_reference_available",
+        risk_flags=tuple(),
+        witness_interval_rank=None,
+        prior_supported=True,
+    )
+    xsec = BaseCrossSection(
+        nodeid=10,
+        geometry_coords=((0.0, -10.0), (0.0, 10.0)),
+        properties={},
+    )
+    surface = Polygon([(-1.0, -8.0), (1.0, -8.0), (1.0, -6.0), (-1.0, -6.0)]).union(
+        Polygon([(-1.0, 2.0), (1.0, 2.0), (1.0, 4.0), (-1.0, 4.0)])
+    )
+    inputs = PatchInputs(
+        patch_id="slot_anchor_patch",
+        patch_dir=Path("."),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=surface,
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+    slot = build_slot(
+        segment=segment,
+        witness=None,
+        identity=identity,
+        xsec=xsec,
+        line=LineString([(-10.0, -7.0), (10.0, -7.0)]),
+        inputs=inputs,
+        params=dict(DEFAULT_PARAMS),
+        endpoint_tag="src",
+        drivable_surface=surface,
+        arc_row={
+            "support_anchor_src_coords": [0.0, 3.0],
+            "support_full_xsec_crossing": True,
+            "support_cluster_is_dominant": True,
+            "stitched_support_available": False,
+        },
+    )
+
+    assert slot.resolved is True
+    assert slot.interval is not None
+    assert slot.method == "selected_support_contains"
+    assert slot.reason == "selected_support_anchor_on_interval"
+    assert float(slot.interval.center_s) > 0.0
 
 
 def test_t05v2_build_final_road_uses_support_reference_candidate_to_avoid_divstrip() -> None:
