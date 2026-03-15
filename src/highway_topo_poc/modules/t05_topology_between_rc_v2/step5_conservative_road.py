@@ -1091,6 +1091,18 @@ def build_final_road(
     selected_candidate: tuple[LineString, str, float, float, bool] | None = None
     best_candidate: tuple[LineString, str, float, float, bool] | None = None
     attempted_side_constrained = False
+    relaxed_small_gap_modes = {
+        "traj_support_trend_extended_safe_envelope",
+        "traj_support_trend_extended",
+        "traj_support_slot_anchored",
+        "traj_support_slot_anchored_safe_envelope",
+        "topology_arc_trend_extended_safe_envelope",
+        "topology_arc_trend_extended",
+        "topology_arc_projected_anchored",
+        "topology_arc_projected_anchored_safe_envelope",
+        "rcsdroad_trend_extended_safe_envelope",
+        "rcsdroad_trend_extended",
+    }
     for line, mode in candidate_lines:
         drivezone_ratio = pipeline._drivezone_ratio(line, inputs.drivezone_zone_metric)
         divstrip_overlap_ratio = _line_overlap_ratio(line, divstrip_buffer)
@@ -1117,7 +1129,17 @@ def build_final_road(
             float(best_candidate[2]),
         ):
             best_candidate = candidate
-        if drivezone_ratio >= float(params["ROAD_MIN_DRIVEZONE_RATIO"]) and not road_intersects_divstrip:
+        min_drivezone_ratio = float(params["ROAD_MIN_DRIVEZONE_RATIO"])
+        if (
+            str(getattr(segment, "topology_gap_reason", "")) == "gap_small_terminal_gap_candidate"
+            and str(getattr(segment, "topology_gap_decision", "")) == "gap_enter_mainflow"
+            and str(mode) in relaxed_small_gap_modes
+        ):
+            min_drivezone_ratio = min(
+                float(min_drivezone_ratio),
+                float(params.get("ROAD_SMALL_GAP_RELAXED_DRIVEZONE_RATIO", 0.65)),
+            )
+        if drivezone_ratio >= float(min_drivezone_ratio) and not road_intersects_divstrip:
             selected_candidate = candidate
             break
     chosen_line, chosen_mode, drivezone_ratio, divstrip_overlap_ratio, road_intersects_divstrip = selected_candidate or best_candidate or (

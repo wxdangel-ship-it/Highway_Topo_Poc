@@ -1607,6 +1607,30 @@ def test_t05v2_support_full_xsec_status_promotes_dual_anchor_partial_support() -
     assert bool(has_dst_anchor) is True
 
 
+def test_t05v2_support_interval_trust_rejects_candidate_that_prefers_competing_arc() -> None:
+    candidates = [
+        {
+            "traj_id": "competing_like",
+            "support_full_xsec_crossing": True,
+            "support_cluster_is_dominant": True,
+            "support_cluster_support_count": 6,
+            "support_surface_side_signature": [0.5, 0.5],
+            "support_anchor_src_coords": [0.0, 0.0],
+            "support_anchor_dst_coords": [100.0, 0.0],
+            "support_competing_arc_preferred": False,
+        }
+    ]
+
+    annotated = _step3_evidence._annotate_support_candidate_interval_reference_trust(
+        candidates,
+        stitched_summary={},
+        params=dict(DEFAULT_PARAMS),
+    )
+
+    assert bool(annotated[0]["support_interval_reference_trusted"]) is False
+    assert annotated[0]["support_interval_reference_reason"] == "single_prefers_competing_arc"
+
+
 def test_t05v2_near_full_partial_support_cluster_beats_isolated_terminal_outlier() -> None:
     params = dict(DEFAULT_PARAMS)
     candidates = [
@@ -2894,6 +2918,151 @@ def test_t05v2_build_final_road_prefers_topology_arc_trend_for_gap_case() -> Non
     assert road is not None
     assert result["reason"] == "built"
     assert str(result["shape_ref_mode"]).startswith("topology_arc_")
+
+
+def test_t05v2_build_final_road_relaxes_small_gap_drivezone_threshold_for_support_candidate() -> None:
+    segment = Segment(
+        segment_id="seg_gap_relaxed_threshold",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 6.0), (50.0, 6.0), (100.0, 6.0)),
+        candidate_ids=("cand_gap_relaxed",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_gap_relaxed",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="arc_first_partial_support",
+        length_m=100.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_gap_relaxed",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        topology_gap_decision="gap_enter_mainflow",
+        topology_gap_reason="gap_small_terminal_gap_candidate",
+        same_pair_rank=1,
+        kept_reason="",
+    )
+    witness = CorridorWitness(
+        segment_id="seg_gap_relaxed_threshold",
+        status="selected",
+        reason="witness_interval_selected",
+        line_coords=((0.0, 10.0), (100.0, 10.0)),
+        sample_s_norm=0.5,
+        intervals=tuple(),
+        selected_interval_rank=None,
+        selected_interval_start_s=None,
+        selected_interval_end_s=None,
+        exclusive_interval=True,
+        stability_score=1.0,
+        neighbor_match_count=1,
+        axis_vector=(0.0, 1.0),
+    )
+    identity = CorridorIdentity(
+        segment_id="seg_gap_relaxed_threshold",
+        state="witness_based",
+        reason="witness_selected",
+        risk_flags=tuple(),
+        witness_interval_rank=None,
+        prior_supported=False,
+    )
+    src_slot = SlotInterval(
+        segment_id="seg_gap_relaxed_threshold",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, 0.0), (0.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=0.0,
+            end_s=10.0,
+            center_s=5.0,
+            length_m=10.0,
+            rank=0,
+            geometry_coords=((0.0, 0.0), (0.0, 10.0)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    dst_slot = SlotInterval(
+        segment_id="seg_gap_relaxed_threshold",
+        endpoint_tag="dst",
+        xsec_nodeid=20,
+        xsec_coords=((100.0, 0.0), (100.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=0.0,
+            end_s=10.0,
+            center_s=5.0,
+            length_m=10.0,
+            rank=0,
+            geometry_coords=((100.0, 0.0), (100.0, 10.0)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    inputs = PatchInputs(
+        patch_id="gap_relaxed_threshold_case",
+        patch_dir=Path("gap_relaxed_threshold_case"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, -5.0), (105.0, -5.0), (105.0, 15.0), (-5.0, 15.0)]),
+        divstrip_zone_metric=Polygon(),
+        road_prior_path=None,
+        input_summary={},
+    )
+    params = dict(DEFAULT_PARAMS)
+    params["ROAD_MIN_DRIVEZONE_RATIO"] = 0.85
+    params["ROAD_SMALL_GAP_RELAXED_DRIVEZONE_RATIO"] = 0.65
+
+    def _fake_drivezone_ratio(line: LineString, _zone) -> float:
+        min_y = min(float(coord[1]) for coord in line.coords)
+        return 0.67 if min_y < 4.5 else 0.2
+
+    fake_pipeline = SimpleNamespace(
+        _BRIDGE_CHAIN_TOPOLOGY_SOURCE="bridge_chain_topology_arc",
+        _midpoint_of_interval=lambda interval: Point(
+            float((interval.geometry_coords[0][0] + interval.geometry_coords[-1][0]) / 2.0),
+            float((interval.geometry_coords[0][1] + interval.geometry_coords[-1][1]) / 2.0),
+        ),
+        _drivezone_ratio=_fake_drivezone_ratio,
+    )
+
+    with (
+        patch.object(_step5_road, "_pipeline", return_value=fake_pipeline),
+        patch.object(_step5_road, "_surface_envelope_candidate_line", return_value=None),
+        patch.object(_step5_road, "_append_side_constrained_candidates", return_value=None),
+    ):
+        road, result = _build_final_road(
+            patch_id="gap_relaxed_threshold_case",
+            segment=segment,
+            identity=identity,
+            witness=witness,
+            src_slot=src_slot,
+            dst_slot=dst_slot,
+            inputs=inputs,
+            prior_roads=[],
+            params=params,
+            arc_row={
+                "traj_support_type": "partial_arc_support",
+                "support_full_xsec_crossing": False,
+                "support_reference_coords": [[10.0, 4.0], [50.0, 4.0], [90.0, 4.0]],
+            },
+        )
+
+    assert road is not None
+    assert result["reason"] == "built"
+    assert str(result["shape_ref_mode"]).startswith("traj_support_")
+    assert float(result["drivezone_ratio"]) == pytest.approx(0.67)
 
 
 def test_t05v2_build_final_road_allows_same_pair_multi_arc_with_side_constrained_candidate() -> None:

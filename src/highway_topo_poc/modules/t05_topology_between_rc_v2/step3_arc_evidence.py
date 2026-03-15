@@ -594,6 +594,43 @@ def _hashable_support_signature(value: Any) -> Any:
     return value
 
 
+def _build_competing_arc_lines_by_arc_id(
+    rows: list[dict[str, Any]],
+) -> dict[str, list[LineString]]:
+    by_src: dict[int, list[tuple[str, LineString]]] = defaultdict(list)
+    for row in rows:
+        arc_id = str(row.get("topology_arc_id", ""))
+        arc_line = _arc_line(row)
+        if not arc_id or arc_line is None:
+            continue
+        by_src[int(row.get("src", 0))].append((arc_id, arc_line))
+    out: dict[str, list[LineString]] = {}
+    for items in by_src.values():
+        for arc_id, _line in items:
+            out[arc_id] = [other_line for other_id, other_line in items if other_id != arc_id]
+    return out
+
+
+def _segment_distance_to_arc_lines(
+    segments: list[dict[str, Any]],
+    arc_lines: list[LineString],
+) -> float:
+    if not arc_lines:
+        return float("inf")
+    distances: list[float] = []
+    for item in segments:
+        coords = tuple(
+            (float(coord[0]), float(coord[1]))
+            for coord in item.get("line_coords", [])
+            if isinstance(coord, (list, tuple)) and len(coord) >= 2
+        )
+        if len(coords) < 2:
+            continue
+        seg_line = coords_to_line(coords)
+        distances.append(min(float(seg_line.hausdorff_distance(arc_line)) for arc_line in arc_lines))
+    return min(distances, default=float("inf"))
+
+
 def _support_candidate_cluster_key(
     candidate: dict[str, Any],
     *,
@@ -605,12 +642,24 @@ def _support_candidate_cluster_key(
         resolution=side_resolution,
     )
     support_full_xsec_mode = str(candidate.get("support_full_xsec_mode", "") or "")
+    shared_xsec_alias = bool(candidate.get("src_alias_applied", False) or candidate.get("dst_alias_applied", False))
+    shared_xsec_alias = shared_xsec_alias or len(candidate.get("src_xsec_nodeids", []) or []) >= 2
+    shared_xsec_alias = shared_xsec_alias or len(candidate.get("dst_xsec_nodeids", []) or []) >= 2
     if (
         bool(candidate.get("support_full_xsec_crossing", False))
         and support_full_xsec_mode == "partial_dual_anchor"
     ):
         return (
             "near_full_crossing_anchor",
+            _bucket_point(candidate.get("support_anchor_src_coords"), resolution_m=anchor_resolution_m),
+            _bucket_point(candidate.get("support_anchor_dst_coords"), resolution_m=anchor_resolution_m),
+        )
+    if bool(candidate.get("support_full_xsec_crossing", False)) and shared_xsec_alias:
+        corridor_signature = _hashable_support_signature(candidate.get("support_corridor_signature", ()))
+        return (
+            "full_crossing_shared_xsec",
+            corridor_signature,
+            side_cluster_signature,
             _bucket_point(candidate.get("support_anchor_src_coords"), resolution_m=anchor_resolution_m),
             _bucket_point(candidate.get("support_anchor_dst_coords"), resolution_m=anchor_resolution_m),
         )
@@ -766,6 +815,8 @@ def _annotate_support_candidate_interval_reference_trust(
         reason = ""
         if not bool(item.get("support_full_xsec_crossing", False)):
             reason = "single_not_full_xsec_crossing"
+        elif not bool(item.get("support_competing_arc_preferred", True)):
+            reason = "single_prefers_competing_arc"
         elif not bool(item.get("support_cluster_is_dominant", False)):
             reason = "single_full_xsec_cluster_not_dominant"
         elif int(item.get("support_cluster_support_count", 0)) >= min_cluster_count:
@@ -802,10 +853,12 @@ def _annotate_support_candidate_interval_reference_trust(
 
 def _support_selection_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
     return (
+        0 if bool(candidate.get("support_competing_arc_preferred", True)) else 1,
         0 if bool(candidate.get("support_interval_reference_trusted", False)) else 1,
         0 if bool(candidate.get("support_full_xsec_crossing", False)) else 1,
         0 if bool(candidate.get("support_cluster_is_dominant", False)) else 1,
         -int(candidate.get("support_cluster_support_count", 0)),
+        -float(candidate.get("support_competing_arc_margin_m", float("-inf")) or float("-inf")),
         float(candidate.get("best_line_distance_m", float("inf"))),
         -float(candidate.get("traj_support_coverage_ratio", 0.0) or 0.0),
         -int(candidate.get("surface_consistent_segment_count", 0)),
@@ -838,6 +891,9 @@ def _support_candidate_public_fields(candidate: dict[str, Any]) -> dict[str, Any
         "support_has_dst_xsec_anchor": bool(candidate.get("support_has_dst_xsec_anchor", False)),
         "support_cluster_support_count": int(candidate.get("support_cluster_support_count", 0)),
         "support_cluster_is_dominant": bool(candidate.get("support_cluster_is_dominant", False)),
+        "support_competing_arc_preferred": bool(candidate.get("support_competing_arc_preferred", True)),
+        "support_competing_arc_distance_m": candidate.get("support_competing_arc_distance_m"),
+        "support_competing_arc_margin_m": candidate.get("support_competing_arc_margin_m"),
         "support_interval_reference_trusted": bool(candidate.get("support_interval_reference_trusted", False)),
         "selected_support_interval_reference_trusted": bool(candidate.get("support_interval_reference_trusted", False)),
         "support_interval_reference_source": (
@@ -1025,6 +1081,7 @@ def _support_type_for_arc(
     prior_roads: list[Any],
     prior_index: dict[tuple[int, int], list[Any]] | None,
     candidate_traj_rows: list[dict[str, Any]],
+    competing_arc_lines: list[LineString],
     drivezone: Any | None,
     drivable_surface: Any | None,
     divstrip_buffer: Any | None,
@@ -1038,6 +1095,7 @@ def _support_type_for_arc(
     stitched_min_ratio = float(params.get("ARC_STITCH_MIN_COVERAGE_RATIO", 0.72))
     endpoint_margin_ratio = float(params.get("ARC_STITCH_ENDPOINT_MARGIN_RATIO", 0.18))
     stitched_terminal_anchor_max_seq_gap = int(params.get("ARC_STITCH_TERMINAL_ANCHOR_MAX_SEQ_GAP", max_seq_gap))
+    competing_arc_margin_m = float(params.get("ARC_SUPPORT_COMPETING_ARC_MIN_MARGIN_M", 1.5))
 
     prior_support_type, prior_available = _prior_support_type(
         src_nodeid=int(row["src"]),
@@ -1259,6 +1317,16 @@ def _support_type_for_arc(
             ),
             default=float("inf"),
         )
+        best_competing_arc_distance_m = _segment_distance_to_arc_lines(
+            traj_production_segments,
+            competing_arc_lines,
+        )
+        support_competing_arc_margin_m = float(best_competing_arc_distance_m - best_line_distance_m)
+        support_competing_arc_preferred = bool(
+            not competing_arc_lines
+            or best_competing_arc_distance_m == float("inf")
+            or support_competing_arc_margin_m >= float(competing_arc_margin_m)
+        )
         single_traj_evals.append(
             {
                 "traj_id": str(traj_id),
@@ -1300,6 +1368,17 @@ def _support_type_for_arc(
                 "support_has_dst_xsec_anchor": bool(support_has_dst_xsec_anchor),
                 "support_cluster_support_count": 0,
                 "support_cluster_is_dominant": False,
+                "support_competing_arc_preferred": bool(support_competing_arc_preferred),
+                "support_competing_arc_distance_m": (
+                    None if best_competing_arc_distance_m == float("inf") else float(best_competing_arc_distance_m)
+                ),
+                "support_competing_arc_margin_m": (
+                    None if best_competing_arc_distance_m == float("inf") else float(support_competing_arc_margin_m)
+                ),
+                "src_alias_applied": bool(row.get("src_alias_applied", False)),
+                "dst_alias_applied": bool(row.get("dst_alias_applied", False)),
+                "src_xsec_nodeids": [int(v) for v in row.get("src_xsec_nodeids", []) if v is not None],
+                "dst_xsec_nodeids": [int(v) for v in row.get("dst_xsec_nodeids", []) if v is not None],
             }
         )
 
@@ -2041,6 +2120,7 @@ def build_arc_evidence_attach(
         params=params,
         divstrip_buffer=divstrip_buffer,
     )
+    competing_arc_lines_by_arc_id = _build_competing_arc_lines_by_arc_id(full_registry_rows)
     preprocessed_traj_rows: list[dict[str, Any]] = []
     for traj_row in traj_rows:
         traj_line = traj_row.get("line")
@@ -2109,6 +2189,7 @@ def build_arc_evidence_attach(
             prior_roads=prior_roads,
             prior_index=prior_index,
             candidate_traj_rows=candidate_traj_rows,
+            competing_arc_lines=competing_arc_lines_by_arc_id.get(str(current.get("topology_arc_id", "")), []),
             drivezone=inputs.drivezone_zone_metric,
             drivable_surface=patch_geometry_cache.get("drivable_surface"),
             divstrip_buffer=divstrip_buffer,
