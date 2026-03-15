@@ -3129,10 +3129,136 @@ def test_t05v2_build_final_road_uses_step3_production_working_segment_family() -
 
     assert road is not None
     assert result["reason"] == "built"
-    assert result["shape_ref_mode"] == "production_working_segment_slot_anchored"
+    assert result["shape_ref_mode"] == "production_working_segment_slot_anchored_transition_aware"
     assert result["shape_ref_source_family"] == "production_working_segment_family"
-    assert result["candidate_attempts"][0]["mode"] == "production_working_segment_slot_anchored"
-    assert road.line_coords == ((0.0, 2.6), (50.0, 2.6), (100.0, 2.6))
+    assert result["candidate_attempts"][0]["mode"] == "production_working_segment_slot_anchored_transition_aware"
+    assert result["entry_transition_method"] == "transition_aware_curve"
+
+
+def test_t05v2_build_final_road_prefers_transition_aware_candidate_for_production_shape_ref() -> None:
+    segment = Segment(
+        segment_id="prodseg::seg_step5_transition",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 2.6), (50.0, 2.6), (100.0, 2.6)),
+        candidate_ids=("cand_prod_transition",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_1",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=1,
+        prior_supported=False,
+        formation_reason="arc_first_support_driven",
+        length_m=100.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_step5_transition",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        geometry_role="step3_production_working_segment",
+        geometry_source_type="support_arc_fused",
+        support_provenance="selected_support:terminal_crossing_support",
+        anchor_provenance="src:selected_support_xsec_projection|dst:selected_support_xsec_projection",
+        production_consumable_default=True,
+    )
+    identity = CorridorIdentity(
+        segment_id="prodseg::seg_step5_transition",
+        state="witness_based",
+        reason="synthetic_witness_state",
+        risk_flags=tuple(),
+        witness_interval_rank=None,
+        prior_supported=False,
+    )
+    src_slot = SlotInterval(
+        segment_id="prodseg::seg_step5_transition",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, -10.0), (0.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=12.5,
+            end_s=13.5,
+            center_s=13.0,
+            length_m=1.0,
+            rank=0,
+            geometry_coords=((0.0, 2.5), (0.0, 3.5)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    dst_slot = SlotInterval(
+        segment_id="prodseg::seg_step5_transition",
+        endpoint_tag="dst",
+        xsec_nodeid=20,
+        xsec_coords=((100.0, -10.0), (100.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=12.5,
+            end_s=13.5,
+            center_s=13.0,
+            length_m=1.0,
+            rank=0,
+            geometry_coords=((100.0, 2.5), (100.0, 3.5)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    inputs = PatchInputs(
+        patch_id="step5_production_transition",
+        patch_dir=Path("step5_production_transition"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, 2.0), (105.0, 2.0), (105.0, 4.0), (-5.0, 4.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+    transition_line = LineString(((0.0, 2.6), (20.0, 2.9), (80.0, 2.9), (100.0, 2.6)))
+    transition_meta = {
+        "entry_transition_source": "authoritative_endpoint_anchor",
+        "entry_transition_method": "transition_aware_curve",
+        "core_segment_source": "shape_ref_core",
+        "exit_transition_source": "authoritative_endpoint_anchor",
+        "exit_transition_method": "transition_aware_curve",
+    }
+
+    with (
+        patch.object(_step5_road, "_transition_aware_candidate_line", return_value=(transition_line, transition_meta)),
+        patch.object(_step5_road, "_surface_envelope_candidate_line", return_value=None),
+        patch.object(_step5_road, "_append_side_constrained_candidates", return_value=None),
+    ):
+        road, result = _build_final_road(
+            patch_id="step5_production_transition",
+            segment=segment,
+            identity=identity,
+            witness=None,
+            src_slot=src_slot,
+            dst_slot=dst_slot,
+            inputs=inputs,
+            prior_roads=[],
+            params=dict(DEFAULT_PARAMS),
+            arc_row={
+                "support_reference_coords": [[0.0, 2.8], [50.0, 2.8], [100.0, 2.8]],
+                "selected_support_interval_reference_trusted": True,
+                "support_interval_reference_source": "selected_support",
+                "stitched_support_interval_reference_trusted": False,
+            },
+        )
+
+    assert road is not None
+    assert result["reason"] == "built"
+    assert result["shape_ref_mode"] == "production_working_segment_slot_anchored_transition_aware"
+    assert result["final_export_source"] == "production_working_segment_slot_anchored_transition_aware"
+    assert result["entry_transition_method"] == "transition_aware_curve"
+    assert result["candidate_attempts"][0]["mode"] == "production_working_segment_slot_anchored_transition_aware"
 
 
 def test_t05v2_step3_production_segment_uses_assigned_endpoint_intervals() -> None:

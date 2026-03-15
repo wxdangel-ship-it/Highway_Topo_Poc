@@ -308,13 +308,16 @@ def _append_candidate_line(
     mode: str,
     *,
     priority: bool = False,
+    prepend: bool = False,
 ) -> None:
     if line is None:
         return
     if any(line.equals(existing_line) for existing_line, _ in candidate_lines):
         return
     item = (line, str(mode))
-    if priority:
+    if prepend:
+        candidate_lines.insert(0, item)
+    elif priority:
         candidate_lines.insert(1 if candidate_lines else 0, item)
     else:
         candidate_lines.append(item)
@@ -2876,6 +2879,7 @@ def build_final_road(
             preferred_transition,
             transition_mode,
             priority=str(preferred_mode).startswith("production_working_segment"),
+            prepend=str(preferred_mode).startswith("production_working_segment"),
         )
     preferred_envelope = _surface_envelope_candidate_line(
         preferred_line,
@@ -3065,7 +3069,14 @@ def build_final_road(
             transition_candidate_meta[transition_mode] = dict(segment_anchor_transition_meta)
             transition_candidate_meta[transition_mode]["core_authoritative_source"] = "production_working_segment_slot_anchored"
             transition_candidate_meta[transition_mode]["core_segment_source"] = "production_working_segment_slot_anchored"
-            _append_candidate_line(candidate_lines, segment_anchor_transition, transition_mode, priority=True)
+            prefer_transition_over_preferred = str(preferred_mode).startswith("production_working_segment")
+            _append_candidate_line(
+                candidate_lines,
+                segment_anchor_transition,
+                transition_mode,
+                priority=prefer_transition_over_preferred,
+                prepend=prefer_transition_over_preferred,
+            )
         _append_candidate_line(candidate_lines, segment_anchor, "production_working_segment_slot_anchored")
         segment_anchor_envelope = _surface_envelope_candidate_line(
             segment_anchor,
