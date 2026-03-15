@@ -1635,6 +1635,7 @@ def test_t05v2_geometry_refine_anchor_prefers_traj_crossing_over_midpoint() -> N
         slot=slot,
         safe_surface=safe_surface,
         arc_row={},
+        authoritative_anchor_coords=None,
         source_line=source_line,
         source_family="traj_guided",
         endpoint_tag="src",
@@ -3883,6 +3884,135 @@ def test_t05v2_build_final_road_prefers_trusted_support_reference_before_witness
     assert result["shape_ref_mode"] == "selected_support_reference_projected_anchored"
     assert result["candidate_attempts"][0]["mode"] == "selected_support_reference_projected_anchored"
     assert road.line_coords == ((0.0, 3.0), (50.0, 3.0), (100.0, 3.0))
+    assert result["step5_used_anchor_source"] == {"src": "selected_candidate_endpoint", "dst": "selected_candidate_endpoint"}
+    assert result["step5_used_anchor_coords"] == {"src": [0.0, 3.0], "dst": [100.0, 3.0]}
+
+
+def test_t05v2_build_final_road_inherits_step3_authoritative_anchor_by_default() -> None:
+    segment = Segment(
+        segment_id="seg_step3_authoritative_anchor",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 1.0), (50.0, 1.0), (100.0, 1.0)),
+        candidate_ids=("cand_1",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_1",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="arc_first_terminal_support",
+        length_m=100.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_step3_authoritative_anchor",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        same_pair_rank=1,
+        kept_reason="",
+    )
+    witness = CorridorWitness(
+        segment_id="seg_step3_authoritative_anchor",
+        status="selected",
+        reason="witness_interval_selected",
+        line_coords=((50.0, -10.0), (50.0, 10.0)),
+        sample_s_norm=0.5,
+        intervals=tuple(),
+        selected_interval_rank=None,
+        selected_interval_start_s=None,
+        selected_interval_end_s=None,
+        exclusive_interval=True,
+        stability_score=1.0,
+        neighbor_match_count=1,
+        axis_vector=(0.0, 1.0),
+    )
+    identity = CorridorIdentity(
+        segment_id="seg_step3_authoritative_anchor",
+        state="witness_based",
+        reason="witness_selected",
+        risk_flags=tuple(),
+        witness_interval_rank=None,
+        prior_supported=False,
+    )
+    src_slot = SlotInterval(
+        segment_id="seg_step3_authoritative_anchor",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, -10.0), (0.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=12.5,
+            end_s=13.5,
+            center_s=13.0,
+            length_m=1.0,
+            rank=0,
+            geometry_coords=((0.0, 2.5), (0.0, 3.5)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    dst_slot = SlotInterval(
+        segment_id="seg_step3_authoritative_anchor",
+        endpoint_tag="dst",
+        xsec_nodeid=20,
+        xsec_coords=((100.0, -10.0), (100.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=12.5,
+            end_s=13.5,
+            center_s=13.0,
+            length_m=1.0,
+            rank=0,
+            geometry_coords=((100.0, 2.5), (100.0, 3.5)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    inputs = PatchInputs(
+        patch_id="step3_authoritative_anchor_case",
+        patch_dir=Path("step3_authoritative_anchor_case"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, 0.0), (105.0, 0.0), (105.0, 4.0), (-5.0, 4.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+
+    road, result = _build_final_road(
+        patch_id="step3_authoritative_anchor_case",
+        segment=segment,
+        identity=identity,
+        witness=witness,
+        src_slot=src_slot,
+        dst_slot=dst_slot,
+        inputs=inputs,
+        prior_roads=[],
+        params=dict(DEFAULT_PARAMS),
+        arc_row={
+            "production_endpoint_anchor_coords": {"src": [0.0, 3.0], "dst": [100.0, 3.0]},
+            "production_anchor_provenance": {"src": "xsec_interval_anchor", "dst": "xsec_interval_anchor"},
+            "support_reference_coords": [[0.0, 3.0], [50.0, 3.0], [100.0, 3.0]],
+            "selected_support_interval_reference_trusted": True,
+            "support_interval_reference_source": "selected_support",
+        },
+    )
+
+    assert road is not None
+    assert result["reason"] == "built"
+    assert result["step5_used_anchor_source"] == {"src": "step3_authoritative_anchor", "dst": "step3_authoritative_anchor"}
+    assert result["anchor_adjusted_bool"] is False
+    assert result["step5_used_anchor_coords"] == {"src": [0.0, 3.0], "dst": [100.0, 3.0]}
+    assert road.line_coords[0] == (0.0, 3.0)
+    assert road.line_coords[-1] == (100.0, 3.0)
 
 
 def test_t05v2_rcsdroad_trend_extended_candidate_line_uses_endpoint_trend() -> None:
@@ -4132,6 +4262,7 @@ def test_t05v2_build_final_road_interval_anchor_can_preempt_rcsdroad_fallback() 
     assert result["reason"] == "built"
     assert str(result["shape_ref_mode"]) in {
         "production_working_segment_slot_anchored",
+        "production_working_segment_slot_anchored_transition_aware",
         "rcsdroad_trend_extended",
         "rcsdroad_trend_extended_safe_envelope",
     }
@@ -4283,6 +4414,219 @@ def test_t05v2_build_final_road_uses_rcsdroad_fallback_when_regular_candidates_f
     assert str(result["shape_ref_mode"]).startswith("rcsdroad_trend_extended")
     assert result["shape_ref_source_family"] == "rcsdroad_family"
     assert all(not str(item["mode"]).startswith("traj_support_") for item in result["candidate_attempts"])
+
+
+def test_t05v2_write_road_outputs_emits_final_geometry_trace_and_transition_segments(tmp_path: Path) -> None:
+    segment = Segment(
+        segment_id="seg_write_trace",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 1.0), (50.0, 1.0), (100.0, 1.0)),
+        candidate_ids=("cand_trace",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_trace",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="arc_first_terminal_support",
+        length_m=100.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_write_trace",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        same_pair_rank=1,
+        kept_reason="",
+    )
+    witness = CorridorWitness(
+        segment_id="seg_write_trace",
+        status="selected",
+        reason="witness_interval_selected",
+        line_coords=((50.0, -10.0), (50.0, 10.0)),
+        sample_s_norm=0.5,
+        intervals=tuple(),
+        selected_interval_rank=None,
+        selected_interval_start_s=None,
+        selected_interval_end_s=None,
+        exclusive_interval=True,
+        stability_score=1.0,
+        neighbor_match_count=1,
+        axis_vector=(0.0, 1.0),
+    )
+    identity = CorridorIdentity(
+        segment_id="seg_write_trace",
+        state="witness_based",
+        reason="witness_selected",
+        risk_flags=tuple(),
+        witness_interval_rank=None,
+        prior_supported=False,
+    )
+    src_slot = SlotInterval(
+        segment_id="seg_write_trace",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, -10.0), (0.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=12.5,
+            end_s=13.5,
+            center_s=13.0,
+            length_m=1.0,
+            rank=0,
+            geometry_coords=((0.0, 2.5), (0.0, 3.5)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    dst_slot = SlotInterval(
+        segment_id="seg_write_trace",
+        endpoint_tag="dst",
+        xsec_nodeid=20,
+        xsec_coords=((100.0, -10.0), (100.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=12.5,
+            end_s=13.5,
+            center_s=13.0,
+            length_m=1.0,
+            rank=0,
+            geometry_coords=((100.0, 2.5), (100.0, 3.5)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    inputs = PatchInputs(
+        patch_id="write_trace_case",
+        patch_dir=Path("write_trace_case"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, 0.0), (105.0, 0.0), (105.0, 4.0), (-5.0, 4.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+    road, result = _build_final_road(
+        patch_id="write_trace_case",
+        segment=segment,
+        identity=identity,
+        witness=witness,
+        src_slot=src_slot,
+        dst_slot=dst_slot,
+        inputs=inputs,
+        prior_roads=[],
+        params=dict(DEFAULT_PARAMS),
+        arc_row={
+            "production_endpoint_anchor_coords": {"src": [0.0, 3.0], "dst": [100.0, 3.0]},
+            "production_anchor_provenance": {"src": "xsec_interval_anchor", "dst": "xsec_interval_anchor"},
+            "assigned_endpoint_intervals": {
+                "src": {
+                    "xsec_id": 10,
+                    "arc_id": "arc_write_trace",
+                    "endpoint_role": "src",
+                    "interval_start_s": 12.5,
+                    "interval_end_s": 13.5,
+                    "interval_center_s": 13.0,
+                    "width_m": 1.0,
+                    "geometry_coords": [[0.0, 2.5], [0.0, 3.5]],
+                    "evidence_mode": "clean_traj_crossing",
+                    "traj_cross_count": 1,
+                    "traj_ids": ["traj_trace"],
+                    "ownership_reason": "support_corridor",
+                    "deconflict_reason": "allocator_preserved_order",
+                    "fallback_reason": "",
+                    "relative_order_satisfied": True,
+                },
+                "dst": {
+                    "xsec_id": 20,
+                    "arc_id": "arc_write_trace",
+                    "endpoint_role": "dst",
+                    "interval_start_s": 12.5,
+                    "interval_end_s": 13.5,
+                    "interval_center_s": 13.0,
+                    "width_m": 1.0,
+                    "geometry_coords": [[100.0, 2.5], [100.0, 3.5]],
+                    "evidence_mode": "clean_traj_crossing",
+                    "traj_cross_count": 1,
+                    "traj_ids": ["traj_trace"],
+                    "ownership_reason": "support_corridor",
+                    "deconflict_reason": "allocator_preserved_order",
+                    "fallback_reason": "",
+                    "relative_order_satisfied": True,
+                },
+            },
+        },
+    )
+    assert road is not None
+
+    out_root = tmp_path / "out"
+    _step5_road.write_road_outputs(
+        out_root=out_root,
+        run_id="run1",
+        patch_id="write_trace_case",
+        segments=[segment],
+        identities={str(segment.segment_id): identity},
+        witnesses={str(segment.segment_id): witness},
+        slots={str(segment.segment_id): {"src": src_slot, "dst": dst_slot}},
+        roads=[road],
+        road_results=[result],
+        inputs=inputs,
+        full_registry_rows=[
+            {
+                "working_segment_id": str(segment.segment_id),
+                "topology_arc_id": str(segment.topology_arc_id),
+                "assigned_endpoint_intervals": {
+                    "src": {
+                        "xsec_id": 10,
+                        "arc_id": "arc_write_trace",
+                        "endpoint_role": "src",
+                        "interval_start_s": 12.5,
+                        "interval_end_s": 13.5,
+                        "interval_center_s": 13.0,
+                        "width_m": 1.0,
+                        "geometry": [[0.0, 2.5], [0.0, 3.5]],
+                    },
+                    "dst": {
+                        "xsec_id": 20,
+                        "arc_id": "arc_write_trace",
+                        "endpoint_role": "dst",
+                        "interval_start_s": 12.5,
+                        "interval_end_s": 13.5,
+                        "interval_center_s": 13.0,
+                        "width_m": 1.0,
+                        "geometry": [[100.0, 2.5], [100.0, 3.5]],
+                    },
+                },
+                "production_endpoint_anchor_coords": {"src": [0.0, 3.0], "dst": [100.0, 3.0]},
+                "production_anchor_provenance": {"src": "xsec_interval_anchor", "dst": "xsec_interval_anchor"},
+                "production_geometry_source_type": "support_arc_fused",
+                "working_segment_source": "step3_support_driven_production",
+            }
+        ],
+        params=dict(DEFAULT_PARAMS),
+        geometry_refine_review={"rows": [], "summary": {}},
+        geometry_refine_artifacts={},
+    )
+
+    patch_dir = out_root / "run1" / "patches" / "write_trace_case"
+    assert (patch_dir / "step5_final_geometry_trace.json").exists()
+    assert (patch_dir / "step5_endpoint_anchor_trace.geojson").exists()
+    assert (patch_dir / "step5_transition_segments.geojson").exists()
+    assert (patch_dir / "final_geometry_components.geojson").exists()
+
+    trace_payload = _read_json(patch_dir / "step5_final_geometry_trace.json")
+    assert trace_payload["rows"][0]["final_export_source"]
+    transition_payload = _read_json(patch_dir / "step5_transition_segments.geojson")
+    transition_roles = {str(item["properties"]["transition_role"]) for item in transition_payload["features"]}
+    assert {"entry_transition", "core_segment", "exit_transition"} <= transition_roles
 
 
 def test_t05v2_build_final_road_prefers_partial_support_trend_extension_for_gap_case() -> None:

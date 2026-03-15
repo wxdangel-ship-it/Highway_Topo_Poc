@@ -494,6 +494,153 @@ def _slot_surface_mid_anchor_point(
     return pipeline._midpoint_of_interval(slot.interval)
 
 
+def _point_to_coords(point: Point | None) -> list[float] | None:
+    if point is None or point.is_empty:
+        return None
+    return [float(point.x), float(point.y)]
+
+
+def _step3_endpoint_anchor_payload(
+    arc_row: dict[str, Any] | None,
+    endpoint_tag: str,
+) -> tuple[list[float] | tuple[float, float] | None, str]:
+    if not isinstance(arc_row, dict) or not arc_row:
+        return None, ""
+    coords_payload = dict(arc_row.get("production_endpoint_anchor_coords") or {})
+    provenance_payload = dict(arc_row.get("production_anchor_provenance") or {})
+    coords = coords_payload.get(str(endpoint_tag)) or coords_payload.get(endpoint_tag)
+    source = str(provenance_payload.get(str(endpoint_tag)) or provenance_payload.get(endpoint_tag) or "")
+    return coords, source
+
+
+def _assigned_interval_source(
+    arc_row: dict[str, Any] | None,
+    endpoint_tag: str,
+) -> str:
+    if not isinstance(arc_row, dict) or not arc_row:
+        return ""
+    assigned = dict(arc_row.get("assigned_endpoint_intervals") or {})
+    payload = assigned.get(str(endpoint_tag)) or assigned.get(endpoint_tag) or {}
+    if not isinstance(payload, dict) or not payload:
+        return ""
+    return str(
+        payload.get("deconflict_reason")
+        or payload.get("ownership_reason")
+        or payload.get("fallback_reason")
+        or payload.get("evidence_mode")
+        or "assigned_interval"
+    )
+
+
+def _resolve_step5_endpoint_anchor(
+    *,
+    slot: SlotInterval,
+    reference_line: LineString,
+    safe_surface: Any | None,
+    arc_row: dict[str, Any] | None,
+    endpoint_tag: str,
+    params: dict[str, Any],
+) -> tuple[Point, dict[str, Any]]:
+    default_anchor = _slot_surface_anchor_point(slot, reference_line, safe_surface)
+    trace = {
+        "endpoint_tag": str(endpoint_tag),
+        "endpoint_interval_source": str(_assigned_interval_source(arc_row, endpoint_tag)),
+        "step3_endpoint_anchor_source": "",
+        "step3_endpoint_anchor_coords": None,
+        "step5_used_anchor_source": "",
+        "step5_used_anchor_coords": None,
+        "step3_endpoint_anchor_available": False,
+        "anchor_adjusted_bool": False,
+        "anchor_adjust_reason": "",
+        "anchor_before_after": {},
+    }
+    authoritative_coords, authoritative_source = _step3_endpoint_anchor_payload(arc_row, endpoint_tag)
+    trace["step3_endpoint_anchor_source"] = str(authoritative_source)
+    trace["step3_endpoint_anchor_coords"] = authoritative_coords
+    authoritative_point = _safe_point_from_coords(authoritative_coords)
+    if authoritative_point is None:
+        return default_anchor, trace
+    trace["step3_endpoint_anchor_available"] = True
+    slot_geom = _slot_surface_geometry(slot, safe_surface)
+    if slot_geom is None:
+        trace["step5_used_anchor_source"] = "step3_authoritative_anchor"
+        trace["step5_used_anchor_coords"] = _point_to_coords(authoritative_point)
+        return authoritative_point, trace
+    if isinstance(slot_geom, Point):
+        snapped = slot_geom
+        distance = float(authoritative_point.distance(snapped))
+        tolerance_m = max(float(params.get("STEP5_SLOT_ANCHOR_TOL_M", 0.75)), 1.0)
+        if distance <= tolerance_m:
+            trace["step5_used_anchor_source"] = "step3_authoritative_anchor"
+            trace["step5_used_anchor_coords"] = _point_to_coords(snapped)
+            if distance > 1e-6:
+                trace["anchor_adjusted_bool"] = True
+                trace["anchor_adjust_reason"] = "anchor_snapped_to_slot_point"
+                trace["anchor_before_after"] = {
+                    "before": authoritative_coords,
+                    "after": _point_to_coords(snapped),
+                }
+            return snapped, trace
+        trace["anchor_adjusted_bool"] = True
+        trace["anchor_adjust_reason"] = "anchor_outside_legal_interval"
+        trace["anchor_before_after"] = {
+            "before": authoritative_coords,
+            "after": _point_to_coords(default_anchor),
+        }
+        return default_anchor, trace
+    nearest = _safe_nearest_points(slot_geom, authoritative_point)
+    if nearest is not None:
+        snapped = nearest[0]
+        max_snap_dist_m = max(
+            float(params.get("STEP5_SLOT_ANCHOR_TOL_M", 0.75)),
+            float(params.get("GEOMETRY_REFINE_ANCHOR_MAX_SNAP_DIST_M", 3.0)),
+        )
+        distance = float(authoritative_point.distance(snapped))
+        if distance <= max_snap_dist_m:
+            trace["step5_used_anchor_source"] = "step3_authoritative_anchor"
+            trace["step5_used_anchor_coords"] = _point_to_coords(snapped)
+            if distance > 1e-6:
+                trace["anchor_adjusted_bool"] = True
+                trace["anchor_adjust_reason"] = "anchor_snapped_to_slot_surface"
+                trace["anchor_before_after"] = {
+                    "before": authoritative_coords,
+                    "after": _point_to_coords(snapped),
+                }
+            return snapped, trace
+    trace["anchor_adjusted_bool"] = True
+    trace["anchor_adjust_reason"] = "anchor_outside_safe_surface"
+    trace["anchor_before_after"] = {
+        "before": authoritative_coords,
+        "after": _point_to_coords(default_anchor),
+    }
+    return default_anchor, trace
+
+
+def _candidate_anchor_pair(
+    base_line: LineString,
+    *,
+    src_slot: SlotInterval,
+    dst_slot: SlotInterval,
+    safe_surface: Any | None,
+    src_anchor_override: Point | None,
+    dst_anchor_override: Point | None,
+    prefer_trend: bool = False,
+) -> tuple[Point, Point]:
+    if _point_is_finite(src_anchor_override):
+        start_anchor = src_anchor_override
+    elif prefer_trend:
+        start_anchor = _slot_trend_anchor_point(src_slot, base_line, safe_surface, at_start=True)
+    else:
+        start_anchor = _slot_surface_anchor_point(src_slot, base_line, safe_surface)
+    if _point_is_finite(dst_anchor_override):
+        end_anchor = dst_anchor_override
+    elif prefer_trend:
+        end_anchor = _slot_trend_anchor_point(dst_slot, base_line, safe_surface, at_start=False)
+    else:
+        end_anchor = _slot_surface_anchor_point(dst_slot, base_line, safe_surface)
+    return start_anchor, end_anchor
+
+
 def _anchor_line_to_slot_intervals(
     base_line: LineString,
     src_slot: SlotInterval,
@@ -502,9 +649,14 @@ def _anchor_line_to_slot_intervals(
     safe_surface: Any | None = None,
     prefer_trend: bool = False,
     anchor_reference_line: LineString | None = None,
+    src_anchor_override: Point | None = None,
+    dst_anchor_override: Point | None = None,
 ) -> LineString:
     anchor_line = anchor_reference_line if anchor_reference_line is not None else base_line
-    if prefer_trend:
+    if _point_is_finite(src_anchor_override) and _point_is_finite(dst_anchor_override):
+        start_anchor = src_anchor_override
+        end_anchor = dst_anchor_override
+    elif prefer_trend:
         start_anchor = _slot_trend_anchor_point(src_slot, anchor_line, safe_surface, at_start=True)
         end_anchor = _slot_trend_anchor_point(dst_slot, anchor_line, safe_surface, at_start=False)
     else:
@@ -518,12 +670,23 @@ def _surface_envelope_candidate_line(
     src_slot: SlotInterval,
     dst_slot: SlotInterval,
     safe_surface: Any | None,
+    *,
+    src_anchor_override: Point | None = None,
+    dst_anchor_override: Point | None = None,
 ) -> LineString | None:
     core_line = _surface_envelope_core_line(base_line, safe_surface)
     if core_line is None:
         return None
-    start_anchor = _slot_surface_anchor_point(src_slot, core_line, safe_surface)
-    end_anchor = _slot_surface_anchor_point(dst_slot, core_line, safe_surface)
+    start_anchor = (
+        src_anchor_override
+        if _point_is_finite(src_anchor_override)
+        else _slot_surface_anchor_point(src_slot, core_line, safe_surface)
+    )
+    end_anchor = (
+        dst_anchor_override
+        if _point_is_finite(dst_anchor_override)
+        else _slot_surface_anchor_point(dst_slot, core_line, safe_surface)
+    )
     candidate = _anchor_along_base_line(core_line, start_anchor, end_anchor)
     if candidate.is_empty or float(candidate.length) <= 1e-6:
         return None
@@ -626,14 +789,24 @@ def _rcsdroad_trend_extended_candidate_line(
     *,
     safe_surface: Any | None = None,
     use_safe_core: bool = False,
+    src_anchor_override: Point | None = None,
+    dst_anchor_override: Point | None = None,
 ) -> LineString | None:
     if base_line.is_empty or float(base_line.length) <= 1e-6:
         return None
     core_line = _surface_envelope_core_line(base_line, safe_surface) if use_safe_core else base_line
     if core_line is None or core_line.is_empty or float(core_line.length) <= 1e-6:
         return None
-    start_anchor = _slot_trend_anchor_point(src_slot, core_line, safe_surface, at_start=True)
-    end_anchor = _slot_trend_anchor_point(dst_slot, core_line, safe_surface, at_start=False)
+    start_anchor = (
+        src_anchor_override
+        if _point_is_finite(src_anchor_override)
+        else _slot_trend_anchor_point(src_slot, core_line, safe_surface, at_start=True)
+    )
+    end_anchor = (
+        dst_anchor_override
+        if _point_is_finite(dst_anchor_override)
+        else _slot_trend_anchor_point(dst_slot, core_line, safe_surface, at_start=False)
+    )
     candidate = _anchor_along_base_line(core_line, start_anchor, end_anchor)
     if candidate.is_empty or float(candidate.length) <= 1e-6:
         return None
@@ -892,16 +1065,33 @@ def shape_ref_line(
     prior_roads: list[Any],
     arc_row: dict[str, Any] | None = None,
     prior_index: dict[tuple[int, int], list[Any]] | None = None,
+    safe_surface: Any | None = None,
+    src_anchor_override: Point | None = None,
+    dst_anchor_override: Point | None = None,
 ) -> tuple[LineString, str]:
     base_line, mode = slot_reference_line(segment=segment, identity=identity, prior_roads=prior_roads, prior_index=prior_index)
     if src_slot.interval is None or dst_slot.interval is None:
         return base_line, str(mode)
     if _segment_prefers_production_shape_ref(segment):
-        return _anchor_line_to_slot_intervals(base_line, src_slot, dst_slot), f"{mode}_slot_anchored"
+        return _anchor_line_to_slot_intervals(
+            base_line,
+            src_slot,
+            dst_slot,
+            safe_surface=safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
+        ), f"{mode}_slot_anchored"
     trusted_support_ref = _trusted_support_reference_line(arc_row=arc_row)
     if trusted_support_ref is not None:
         trusted_line, trusted_label = trusted_support_ref
-        return _anchor_line_to_slot_intervals(trusted_line, src_slot, dst_slot), f"{trusted_label}_reference_projected_anchored"
+        return _anchor_line_to_slot_intervals(
+            trusted_line,
+            src_slot,
+            dst_slot,
+            safe_surface=safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
+        ), f"{trusted_label}_reference_projected_anchored"
     if str(identity.state) == "witness_based":
         witness_reference = None if witness is None else witness.geometry_metric()
         if witness_reference is not None and not witness_reference.is_empty and float(witness_reference.length) > 1e-6:
@@ -909,14 +1099,24 @@ def shape_ref_line(
                 witness_reference,
                 src_slot,
                 dst_slot,
+                safe_surface=safe_surface,
                 anchor_reference_line=base_line,
+                src_anchor_override=src_anchor_override,
+                dst_anchor_override=dst_anchor_override,
             ), "witness_reference_projected_anchored"
-        start_pt = _slot_surface_anchor_point(src_slot, base_line, None)
-        end_pt = _slot_surface_anchor_point(dst_slot, base_line, None)
+        start_pt = src_anchor_override if _point_is_finite(src_anchor_override) else _slot_surface_anchor_point(src_slot, base_line, safe_surface)
+        end_pt = dst_anchor_override if _point_is_finite(dst_anchor_override) else _slot_surface_anchor_point(dst_slot, base_line, safe_surface)
         legacy_centerline = _legacy_witness_centerline(witness=witness, start_pt=start_pt, end_pt=end_pt)
         if legacy_centerline is not None:
             return legacy_centerline, "witness_centerline"
-    return _anchor_line_to_slot_intervals(base_line, src_slot, dst_slot), f"{mode}_slot_anchored"
+    return _anchor_line_to_slot_intervals(
+        base_line,
+        src_slot,
+        dst_slot,
+        safe_surface=safe_surface,
+        src_anchor_override=src_anchor_override,
+        dst_anchor_override=dst_anchor_override,
+    ), f"{mode}_slot_anchored"
 
 
 def _midpoint_between_points(point_a: Point, point_b: Point) -> Point:
@@ -1028,6 +1228,86 @@ def _curve_connector_line(
         )
         coords.append((float(x), float(y)))
     return _line_from_coords(coords)
+
+
+def _transition_aware_candidate_line(
+    base_line: LineString,
+    *,
+    start_pt: Point,
+    end_pt: Point,
+    params: dict[str, Any],
+) -> tuple[LineString | None, dict[str, Any]]:
+    core_line = _trim_line_middle(base_line, trim_frac=float(params.get("GEOMETRY_REFINE_CORE_TRIM_FRAC", 0.15)))
+    if core_line is None:
+        core_line = base_line
+    entry_line = _curve_connector_line(
+        start_pt,
+        Point(core_line.coords[0][:2]),
+        start_dir=_direction_unit(base_line, at_start=True),
+        end_dir=_direction_unit(core_line, at_start=True),
+        ctrl_frac=float(params.get("GEOMETRY_REFINE_ENTRY_EXIT_CTRL_FRAC", 0.35)),
+        ctrl_min_m=float(params.get("GEOMETRY_REFINE_ENTRY_EXIT_CTRL_MIN_M", 2.5)),
+        ctrl_max_m=float(params.get("GEOMETRY_REFINE_ENTRY_EXIT_CTRL_MAX_M", 14.0)),
+    )
+    exit_line = _curve_connector_line(
+        Point(core_line.coords[-1][:2]),
+        end_pt,
+        start_dir=_direction_unit(core_line, at_start=False),
+        end_dir=_direction_unit(base_line, at_start=False),
+        ctrl_frac=float(params.get("GEOMETRY_REFINE_ENTRY_EXIT_CTRL_FRAC", 0.35)),
+        ctrl_min_m=float(params.get("GEOMETRY_REFINE_ENTRY_EXIT_CTRL_MIN_M", 2.5)),
+        ctrl_max_m=float(params.get("GEOMETRY_REFINE_ENTRY_EXIT_CTRL_MAX_M", 14.0)),
+    )
+    entry_line = entry_line if isinstance(entry_line, LineString) and not entry_line.is_empty else _line_from_coords([(start_pt.x, start_pt.y), core_line.coords[0][:2]])
+    exit_line = exit_line if isinstance(exit_line, LineString) and not exit_line.is_empty else _line_from_coords([core_line.coords[-1][:2], (end_pt.x, end_pt.y)])
+    combined = _combine_line_parts(entry_line, core_line, exit_line)
+    return combined, {
+        "entry_line": entry_line,
+        "core_line": core_line,
+        "exit_line": exit_line,
+        "entry_transition_source": "authoritative_endpoint_anchor",
+        "entry_transition_method": "transition_aware_curve",
+        "core_segment_source": "shape_ref_core",
+        "exit_transition_source": "authoritative_endpoint_anchor",
+        "exit_transition_method": "transition_aware_curve",
+    }
+
+
+def _transition_component_payload(
+    line: LineString,
+    *,
+    start_pt: Point,
+    end_pt: Point,
+    params: dict[str, Any],
+    transition_trace: dict[str, Any] | None = None,
+) -> dict[str, list[list[float]]]:
+    trace = dict(transition_trace or {})
+    entry_line = trace.get("entry_line")
+    core_line = trace.get("core_line")
+    exit_line = trace.get("exit_line")
+    if not _line_is_usable(core_line):
+        core_line = _trim_line_middle(line, trim_frac=float(params.get("GEOMETRY_REFINE_CORE_TRIM_FRAC", 0.15))) or line
+    core_start = Point(core_line.coords[0][:2])
+    core_end = Point(core_line.coords[-1][:2])
+    if not _line_is_usable(entry_line) and float(start_pt.distance(core_start)) > 1e-6:
+        entry_line = _line_from_coords(
+            [
+                (float(start_pt.x), float(start_pt.y)),
+                (float(core_start.x), float(core_start.y)),
+            ]
+        )
+    if not _line_is_usable(exit_line) and float(core_end.distance(end_pt)) > 1e-6:
+        exit_line = _line_from_coords(
+            [
+                (float(core_end.x), float(core_end.y)),
+                (float(end_pt.x), float(end_pt.y)),
+            ]
+        )
+    return {
+        "entry_transition_coords": [[float(x), float(y)] for x, y in line_to_coords(entry_line)] if _line_is_usable(entry_line) else [],
+        "core_segment_coords": [[float(x), float(y)] for x, y in line_to_coords(core_line)] if _line_is_usable(core_line) else [],
+        "exit_transition_coords": [[float(x), float(y)] for x, y in line_to_coords(exit_line)] if _line_is_usable(exit_line) else [],
+    }
 
 
 def _sample_line_points(line: LineString, *, step_m: float) -> list[Point]:
@@ -1350,6 +1630,7 @@ def _select_refine_anchor_point(
     slot: SlotInterval,
     safe_surface: Any | None,
     arc_row: dict[str, Any] | None,
+    authoritative_anchor_coords: list[float] | tuple[float, float] | None = None,
     source_line: LineString | None,
     source_family: str,
     endpoint_tag: str,
@@ -1363,6 +1644,16 @@ def _select_refine_anchor_point(
             "anchor_midpoint_fallback_used": bool(midpoint_fallback_used),
         }
 
+    if authoritative_anchor_coords is not None:
+        point = _slot_anchor_point_from_coords(slot, authoritative_anchor_coords, safe_surface)
+        if point is not None:
+            point, midpoint_used = _stabilize_slot_anchor_point(slot=slot, point=point, safe_surface=safe_surface, params=params)
+            return _anchor_result(
+                point,
+                source="midpoint_fallback" if midpoint_used else "step5_authoritative_anchor",
+                confidence=0.35 if midpoint_used else 0.995,
+                midpoint_fallback_used=midpoint_used,
+            )
     if source_family == "traj_guided" and source_line is not None:
         point = _slot_surface_anchor_point(slot, source_line, safe_surface)
         point, midpoint_used = _stabilize_slot_anchor_point(slot=slot, point=point, safe_surface=safe_surface, params=params)
@@ -1586,6 +1877,13 @@ def _refine_built_road_geometry(
         "candidate_smoothness_score": 0.0,
         "candidate_drivezone_score": 0.0,
         "selected_candidate_mode": "original",
+        "entry_transition_source": str(build_result.get("entry_transition_source", "")),
+        "entry_transition_method": str(build_result.get("entry_transition_method", "")),
+        "core_segment_source": str(build_result.get("core_segment_source", "")),
+        "exit_transition_source": str(build_result.get("exit_transition_source", "")),
+        "exit_transition_method": str(build_result.get("exit_transition_method", "")),
+        "core_authoritative_source": str(build_result.get("core_authoritative_source", "")),
+        "refine_candidate_source": "",
     }
     if src_slot.interval is None or dst_slot.interval is None:
         review["skip_reason"] = "slot_unresolved"
@@ -1693,10 +1991,12 @@ def _refine_built_road_geometry(
         )
         return road, review, empty_artifacts
     source_family = _geometry_refine_source_family(source_label)
+    step5_anchor_coords = dict(build_result.get("step5_used_anchor_coords") or {})
     start_pt, start_anchor_info = _select_refine_anchor_point(
         slot=src_slot,
         safe_surface=safe_surface,
         arc_row=arc_row,
+        authoritative_anchor_coords=step5_anchor_coords.get("src"),
         source_line=source_line,
         source_family=source_family,
         endpoint_tag="src",
@@ -1707,6 +2007,7 @@ def _refine_built_road_geometry(
         slot=dst_slot,
         safe_surface=safe_surface,
         arc_row=arc_row,
+        authoritative_anchor_coords=step5_anchor_coords.get("dst"),
         source_line=source_line,
         source_family=source_family,
         endpoint_tag="dst",
@@ -1716,6 +2017,7 @@ def _refine_built_road_geometry(
     review["eligible"] = True
     review["core_skeleton_source"] = str(source_family)
     review["core_skeleton_source_detail"] = str(source_label)
+    review["refine_candidate_source"] = str(source_label)
     review["entry_anchor_source"] = str(start_anchor_info["anchor_source"])
     review["exit_anchor_source"] = str(end_anchor_info["anchor_source"])
     review["entry_anchor_confidence"] = float(start_anchor_info["anchor_confidence"])
@@ -2150,6 +2452,17 @@ def _apply_geometry_refine(
                 "geometry_refine_safe_envelope_applied": bool(review["safe_envelope_applied"]),
                 "geometry_refine_safe_envelope_source": str(review["safe_envelope_source"]),
                 "geometry_refine_original_road_used_as_weak_ref": bool(review["original_road_used_as_weak_ref"]),
+                "refine_candidate_source": str(review["refine_candidate_source"]),
+                "refine_applied_bool": bool(review["applied"]),
+                "refine_rejected_reason": str(review["skip_reason"]),
+                "entry_transition_source": str(review["entry_transition_source"]),
+                "entry_transition_method": str(review["entry_transition_method"]),
+                "core_segment_source": str(review["core_segment_source"] or review["core_skeleton_source_detail"]),
+                "exit_transition_source": str(review["exit_transition_source"]),
+                "exit_transition_method": str(review["exit_transition_method"]),
+                "core_authoritative_source": str(
+                    review["core_authoritative_source"] or review["core_skeleton_source_detail"]
+                ),
                 "geometry_refine_before_length": float(review["before_length"]),
                 "geometry_refine_after_length": float(review["after_length"]),
                 "geometry_refine_drivezone_ratio_before": float(review["before_drivezone_overlap_ratio"]),
@@ -2164,6 +2477,24 @@ def _apply_geometry_refine(
                 "geometry_refine_after_smoothness_score": float(review["after_smoothness_score"]),
                 "geometry_refine_candidate_total_score": float(review["candidate_total_score"]),
                 "geometry_refine_selected_candidate_mode": str(review["selected_candidate_mode"]),
+                "final_export_source": (
+                    f"geometry_refine::{review['selected_candidate_mode']}"
+                    if bool(review["applied"])
+                    else str(result_map[str(segment.segment_id)].get("final_export_source", ""))
+                ),
+                "final_override_reason": (
+                    f"geometry_refine_applied::{review['selected_candidate_mode']}"
+                    if bool(review["applied"])
+                    else str(
+                        result_map[str(segment.segment_id)].get("final_override_reason")
+                        or review["skip_reason"]
+                    )
+                ),
+                "final_clip_reason": (
+                    str(review["safe_envelope_source"])
+                    if bool(review["safe_envelope_applied"])
+                    else str(result_map[str(segment.segment_id)].get("final_clip_reason", ""))
+                ),
             }
         )
         refined_roads.append(refined_road)
@@ -2344,9 +2675,34 @@ def build_final_road(
     result = {
         "segment_id": str(segment.segment_id),
         "corridor_state": str(identity.state),
+        "endpoint_interval_source": {},
+        "step3_endpoint_anchor_source": {},
+        "step3_endpoint_anchor_coords": {},
+        "step5_used_anchor_source": {},
+        "step5_used_anchor_coords": {},
+        "anchor_adjusted_bool": False,
+        "anchor_adjust_reason": {},
+        "anchor_before_after": {},
         "shape_ref_mode": "",
         "shape_ref_source_family": "",
         "shape_ref_coords": [],
+        "shape_ref_base_mode": "",
+        "shape_ref_base_source_family": "",
+        "shape_ref_base_coords": [],
+        "step3_production_source": str(getattr(segment, "geometry_source_type", "")),
+        "step3_production_segment_id": str(segment.segment_id),
+        "entry_transition_source": "",
+        "entry_transition_method": "",
+        "entry_transition_coords": [],
+        "core_segment_source": "",
+        "core_segment_coords": [],
+        "exit_transition_source": "",
+        "exit_transition_method": "",
+        "exit_transition_coords": [],
+        "core_authoritative_source": "",
+        "final_export_source": "",
+        "final_override_reason": "",
+        "final_clip_reason": "",
         "candidate_attempts": [],
         "drivezone_ratio": 0.0,
         "divstrip_overlap_ratio": 0.0,
@@ -2427,6 +2783,56 @@ def build_final_road(
         result["reason"] = "bridge_slot_not_established" if bridge_retained else "slot_unresolved"
         return None, result
     safe_surface = _safe_surface(inputs, divstrip_buffer)
+    start_pt, start_anchor_trace = _resolve_step5_endpoint_anchor(
+        slot=src_slot,
+        reference_line=segment.geometry_metric(),
+        safe_surface=safe_surface,
+        arc_row=arc_row,
+        endpoint_tag="src",
+        params=params,
+    )
+    end_pt, end_anchor_trace = _resolve_step5_endpoint_anchor(
+        slot=dst_slot,
+        reference_line=segment.geometry_metric(),
+        safe_surface=safe_surface,
+        arc_row=arc_row,
+        endpoint_tag="dst",
+        params=params,
+    )
+    result["endpoint_interval_source"] = {
+        "src": str(start_anchor_trace.get("endpoint_interval_source", "")),
+        "dst": str(end_anchor_trace.get("endpoint_interval_source", "")),
+    }
+    result["step3_endpoint_anchor_source"] = {
+        "src": str(start_anchor_trace.get("step3_endpoint_anchor_source", "")),
+        "dst": str(end_anchor_trace.get("step3_endpoint_anchor_source", "")),
+    }
+    result["step3_endpoint_anchor_coords"] = {
+        "src": start_anchor_trace.get("step3_endpoint_anchor_coords"),
+        "dst": end_anchor_trace.get("step3_endpoint_anchor_coords"),
+    }
+    result["step5_used_anchor_source"] = {
+        "src": str(start_anchor_trace.get("step5_used_anchor_source", "")),
+        "dst": str(end_anchor_trace.get("step5_used_anchor_source", "")),
+    }
+    result["step5_used_anchor_coords"] = {
+        "src": start_anchor_trace.get("step5_used_anchor_coords"),
+        "dst": end_anchor_trace.get("step5_used_anchor_coords"),
+    }
+    result["anchor_adjusted_bool"] = bool(
+        start_anchor_trace.get("anchor_adjusted_bool", False)
+        or end_anchor_trace.get("anchor_adjusted_bool", False)
+    )
+    result["anchor_adjust_reason"] = {
+        "src": str(start_anchor_trace.get("anchor_adjust_reason", "")),
+        "dst": str(end_anchor_trace.get("anchor_adjust_reason", "")),
+    }
+    result["anchor_before_after"] = {
+        "src": dict(start_anchor_trace.get("anchor_before_after", {}) or {}),
+        "dst": dict(end_anchor_trace.get("anchor_before_after", {}) or {}),
+    }
+    src_anchor_override = start_pt if bool(start_anchor_trace.get("step3_endpoint_anchor_available", False)) else None
+    dst_anchor_override = end_pt if bool(end_anchor_trace.get("step3_endpoint_anchor_available", False)) else None
     preferred_line, preferred_mode = shape_ref_line(
         segment=segment,
         identity=identity,
@@ -2436,31 +2842,84 @@ def build_final_road(
         prior_roads=prior_roads,
         arc_row=arc_row,
         prior_index=prior_index,
+        safe_surface=safe_surface,
+        src_anchor_override=src_anchor_override,
+        dst_anchor_override=dst_anchor_override,
     )
-    start_pt = _slot_surface_anchor_point(src_slot, preferred_line, safe_surface)
-    end_pt = _slot_surface_anchor_point(dst_slot, preferred_line, safe_surface)
+    result["shape_ref_base_mode"] = str(preferred_mode)
+    result["shape_ref_base_source_family"] = str(_shape_ref_source_family(preferred_mode))
+    result["shape_ref_base_coords"] = [[float(x), float(y)] for x, y in line_to_coords(preferred_line)]
+    result["step5_shape_ref_source"] = str(preferred_mode)
     candidate_lines: list[tuple[LineString, str]] = [(preferred_line, str(preferred_mode))]
-    preferred_envelope = _surface_envelope_candidate_line(preferred_line, src_slot, dst_slot, safe_surface)
+    transition_candidate_meta: dict[str, dict[str, Any]] = {}
+    preferred_start_pt, preferred_end_pt = _candidate_anchor_pair(
+        preferred_line,
+        src_slot=src_slot,
+        dst_slot=dst_slot,
+        safe_surface=safe_surface,
+        src_anchor_override=src_anchor_override,
+        dst_anchor_override=dst_anchor_override,
+    )
+    preferred_transition, preferred_transition_meta = _transition_aware_candidate_line(
+        preferred_line,
+        start_pt=preferred_start_pt,
+        end_pt=preferred_end_pt,
+        params=params,
+    )
+    if preferred_transition is not None and not preferred_transition.equals(preferred_line):
+        transition_mode = f"{preferred_mode}_transition_aware"
+        transition_candidate_meta[transition_mode] = dict(preferred_transition_meta)
+        transition_candidate_meta[transition_mode]["core_authoritative_source"] = str(preferred_mode)
+        transition_candidate_meta[transition_mode]["core_segment_source"] = str(preferred_mode)
+        _append_candidate_line(candidate_lines, preferred_transition, transition_mode, priority=True)
+    preferred_envelope = _surface_envelope_candidate_line(
+        preferred_line,
+        src_slot,
+        dst_slot,
+        safe_surface,
+        src_anchor_override=src_anchor_override,
+        dst_anchor_override=dst_anchor_override,
+    )
     _append_candidate_line(candidate_lines, preferred_envelope, f"{preferred_mode}_safe_envelope", priority=True)
     _append_side_constrained_candidates(
         candidate_lines,
         preferred_line,
         str(preferred_mode),
-        start_pt=start_pt,
-        end_pt=end_pt,
+        start_pt=preferred_start_pt,
+        end_pt=preferred_end_pt,
         prefer_early=True,
     )
     if str(identity.state) == "witness_based":
-        legacy_centerline = _legacy_witness_centerline(witness=witness, start_pt=start_pt, end_pt=end_pt)
+        witness_anchor_line = witness.geometry_metric() if witness is not None else preferred_line
+        witness_start_pt, witness_end_pt = _candidate_anchor_pair(
+            witness_anchor_line,
+            src_slot=src_slot,
+            dst_slot=dst_slot,
+            safe_surface=safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
+        )
+        legacy_centerline = _legacy_witness_centerline(
+            witness=witness,
+            start_pt=witness_start_pt,
+            end_pt=witness_end_pt,
+        )
         _append_candidate_line(candidate_lines, legacy_centerline, "witness_centerline")
-        legacy_envelope = _surface_envelope_candidate_line(legacy_centerline, src_slot, dst_slot, safe_surface)
+        legacy_envelope = _surface_envelope_candidate_line(
+            legacy_centerline,
+            src_slot,
+            dst_slot,
+            safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
+        )
         _append_candidate_line(candidate_lines, legacy_envelope, "witness_centerline_safe_envelope")
         _append_side_constrained_candidates(
             candidate_lines,
             legacy_centerline,
             "witness_centerline",
-            start_pt=start_pt,
-            end_pt=end_pt,
+            start_pt=witness_start_pt,
+            end_pt=witness_end_pt,
         )
     support_reference_line = _line_from_coords(list((arc_row or {}).get("support_reference_coords", [])))
     if support_reference_line is not None and bool(_allow_support_reference_candidates(segment)):
@@ -2475,6 +2934,8 @@ def build_final_road(
             dst_slot,
             safe_surface=safe_surface,
             use_safe_core=True,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
         )
         _append_candidate_line(
             candidate_lines,
@@ -2488,6 +2949,8 @@ def build_final_road(
             dst_slot,
             safe_surface=safe_surface,
             use_safe_core=False,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
         )
         _append_candidate_line(
             candidate_lines,
@@ -2500,13 +2963,30 @@ def build_final_road(
             src_slot,
             dst_slot,
             safe_surface=safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
+        )
+        support_start_pt, support_end_pt = _candidate_anchor_pair(
+            support_anchor,
+            src_slot=src_slot,
+            dst_slot=dst_slot,
+            safe_surface=safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
         )
         _append_candidate_line(
             candidate_lines,
             support_anchor,
             "traj_support_slot_anchored",
         )
-        support_envelope = _surface_envelope_candidate_line(support_anchor, src_slot, dst_slot, safe_surface)
+        support_envelope = _surface_envelope_candidate_line(
+            support_anchor,
+            src_slot,
+            dst_slot,
+            safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
+        )
         _append_candidate_line(
             candidate_lines,
             support_envelope,
@@ -2516,34 +2996,80 @@ def build_final_road(
             candidate_lines,
             support_anchor,
             "traj_support_slot_anchored",
-            start_pt=start_pt,
-            end_pt=end_pt,
+            start_pt=support_start_pt,
+            end_pt=support_end_pt,
         )
     segment_projected = _anchor_line_to_slot_intervals(
         segment.geometry_metric(),
         src_slot,
         dst_slot,
         safe_surface=None,
+        src_anchor_override=src_anchor_override,
+        dst_anchor_override=dst_anchor_override,
+    )
+    segment_projected_start_pt, segment_projected_end_pt = _candidate_anchor_pair(
+        segment_projected,
+        src_slot=src_slot,
+        dst_slot=dst_slot,
+        safe_surface=safe_surface,
+        src_anchor_override=src_anchor_override,
+        dst_anchor_override=dst_anchor_override,
     )
     _append_candidate_line(candidate_lines, segment_projected, "production_working_segment_projected_anchored")
-    segment_envelope = _surface_envelope_candidate_line(segment_projected, src_slot, dst_slot, safe_surface)
+    segment_envelope = _surface_envelope_candidate_line(
+        segment_projected,
+        src_slot,
+        dst_slot,
+        safe_surface,
+        src_anchor_override=src_anchor_override,
+        dst_anchor_override=dst_anchor_override,
+    )
     _append_candidate_line(candidate_lines, segment_envelope, "production_working_segment_projected_anchored_safe_envelope")
     _append_side_constrained_candidates(
         candidate_lines,
         segment_projected,
         "production_working_segment_projected_anchored",
-        start_pt=start_pt,
-        end_pt=end_pt,
+        start_pt=segment_projected_start_pt,
+        end_pt=segment_projected_end_pt,
     )
     segment_anchor = _anchor_line_to_slot_intervals(
         segment.geometry_metric(),
         src_slot,
         dst_slot,
         safe_surface=safe_surface,
+        src_anchor_override=src_anchor_override,
+        dst_anchor_override=dst_anchor_override,
     )
     if not segment_anchor.equals(preferred_line):
+        segment_anchor_start_pt, segment_anchor_end_pt = _candidate_anchor_pair(
+            segment_anchor,
+            src_slot=src_slot,
+            dst_slot=dst_slot,
+            safe_surface=safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
+        )
         _append_candidate_line(candidate_lines, segment_anchor, "production_working_segment_slot_anchored")
-        segment_anchor_envelope = _surface_envelope_candidate_line(segment_anchor, src_slot, dst_slot, safe_surface)
+        segment_anchor_transition, segment_anchor_transition_meta = _transition_aware_candidate_line(
+            segment_anchor,
+            start_pt=segment_anchor_start_pt,
+            end_pt=segment_anchor_end_pt,
+            params=params,
+        )
+        if segment_anchor_transition is not None and not segment_anchor_transition.equals(segment_anchor):
+            transition_mode = "production_working_segment_slot_anchored_transition_aware"
+            transition_candidate_meta[transition_mode] = dict(segment_anchor_transition_meta)
+            transition_candidate_meta[transition_mode]["core_authoritative_source"] = "production_working_segment_slot_anchored"
+            transition_candidate_meta[transition_mode]["core_segment_source"] = "production_working_segment_slot_anchored"
+            _append_candidate_line(candidate_lines, segment_anchor_transition, transition_mode, priority=True)
+        segment_anchor_envelope = _surface_envelope_candidate_line(
+            segment_anchor,
+            src_slot,
+            dst_slot,
+            safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
+        )
         _append_candidate_line(candidate_lines, segment_anchor_envelope, "production_working_segment_slot_anchored_safe_envelope")
     prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
     if prior_line is not None:
@@ -2552,6 +3078,16 @@ def build_final_road(
             src_slot,
             dst_slot,
             safe_surface=None,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
+        )
+        prior_projected_start_pt, prior_projected_end_pt = _candidate_anchor_pair(
+            prior_projected,
+            src_slot=src_slot,
+            dst_slot=dst_slot,
+            safe_surface=safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
         )
         _append_candidate_line(
             candidate_lines,
@@ -2559,7 +3095,14 @@ def build_final_road(
             "prior_reference_projected_anchored",
             priority=str(identity.state) == "prior_based",
         )
-        prior_envelope = _surface_envelope_candidate_line(prior_projected, src_slot, dst_slot, safe_surface)
+        prior_envelope = _surface_envelope_candidate_line(
+            prior_projected,
+            src_slot,
+            dst_slot,
+            safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
+        )
         _append_candidate_line(
             candidate_lines,
             prior_envelope,
@@ -2570,8 +3113,8 @@ def build_final_road(
             candidate_lines,
             prior_projected,
             "prior_reference_projected_anchored",
-            start_pt=start_pt,
-            end_pt=end_pt,
+            start_pt=prior_projected_start_pt,
+            end_pt=prior_projected_end_pt,
             prefer_early=str(identity.state) == "prior_based",
         )
         prior_anchor = _anchor_line_to_slot_intervals(
@@ -2579,6 +3122,8 @@ def build_final_road(
             src_slot,
             dst_slot,
             safe_surface=safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
         )
         _append_candidate_line(
             candidate_lines,
@@ -2586,7 +3131,14 @@ def build_final_road(
             "prior_reference_slot_anchored",
             priority=str(identity.state) == "prior_based",
         )
-        prior_anchor_envelope = _surface_envelope_candidate_line(prior_anchor, src_slot, dst_slot, safe_surface)
+        prior_anchor_envelope = _surface_envelope_candidate_line(
+            prior_anchor,
+            src_slot,
+            dst_slot,
+            safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
+        )
         _append_candidate_line(
             candidate_lines,
             prior_anchor_envelope,
@@ -2606,6 +3158,8 @@ def build_final_road(
             dst_slot,
             safe_surface=safe_surface,
             use_safe_core=True,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
         )
         _append_candidate_line(
             candidate_lines,
@@ -2619,6 +3173,8 @@ def build_final_road(
             dst_slot,
             safe_surface=safe_surface,
             use_safe_core=False,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
         )
         _append_candidate_line(
             candidate_lines,
@@ -2631,6 +3187,8 @@ def build_final_road(
             src_slot,
             dst_slot,
             safe_surface=None,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
         )
         _append_candidate_line(
             candidate_lines,
@@ -2638,7 +3196,14 @@ def build_final_road(
             "topology_arc_projected_anchored",
             priority=bool(prefer_topology_arc_trend),
         )
-        topology_arc_envelope = _surface_envelope_candidate_line(topology_arc_projected, src_slot, dst_slot, safe_surface)
+        topology_arc_envelope = _surface_envelope_candidate_line(
+            topology_arc_projected,
+            src_slot,
+            dst_slot,
+            safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
+        )
         _append_candidate_line(
             candidate_lines,
             topology_arc_envelope,
@@ -2659,6 +3224,8 @@ def build_final_road(
             dst_slot,
             safe_surface=safe_surface,
             use_safe_core=False,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
         )
         _append_candidate_line(candidate_lines, rcsdroad_trend, "rcsdroad_trend_extended", priority=True)
         rcsdroad_trend_safe = _rcsdroad_trend_extended_candidate_line(
@@ -2667,6 +3234,8 @@ def build_final_road(
             dst_slot,
             safe_surface=safe_surface,
             use_safe_core=True,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
         )
         _append_candidate_line(
             candidate_lines,
@@ -2681,6 +3250,8 @@ def build_final_road(
             dst_slot,
             safe_surface=safe_surface,
             use_safe_core=True,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
         )
         _append_candidate_line(candidate_lines, rcsdroad_trend_safe, "rcsdroad_trend_extended_safe_envelope")
         rcsdroad_trend = _rcsdroad_trend_extended_candidate_line(
@@ -2689,6 +3260,8 @@ def build_final_road(
             dst_slot,
             safe_surface=safe_surface,
             use_safe_core=False,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
         )
         _append_candidate_line(candidate_lines, rcsdroad_trend, "rcsdroad_trend_extended")
     attempts: list[dict[str, Any]] = []
@@ -2779,9 +3352,71 @@ def build_final_road(
     result["shape_ref_mode"] = str(chosen_mode)
     result["shape_ref_source_family"] = str(_shape_ref_source_family(chosen_mode))
     result["shape_ref_coords"] = [[float(x), float(y)] for x, y in line_to_coords(chosen_line)]
+    transition_trace = dict(transition_candidate_meta.get(str(chosen_mode), {}) or {})
+    result["entry_transition_source"] = str(
+        transition_trace.get("entry_transition_source")
+        or ("authoritative_endpoint_anchor" if "transition_aware" in str(chosen_mode) else "slot_interval_anchor")
+    )
+    result["entry_transition_method"] = str(
+        transition_trace.get("entry_transition_method")
+        or ("transition_aware_curve" if "transition_aware" in str(chosen_mode) else "anchor_along_base_line")
+    )
+    result["core_segment_source"] = str(
+        transition_trace.get("core_segment_source")
+        or ("shape_ref_core" if "transition_aware" in str(chosen_mode) else str(chosen_mode))
+    )
+    result["exit_transition_source"] = str(
+        transition_trace.get("exit_transition_source")
+        or ("authoritative_endpoint_anchor" if "transition_aware" in str(chosen_mode) else "slot_interval_anchor")
+    )
+    result["exit_transition_method"] = str(
+        transition_trace.get("exit_transition_method")
+        or ("transition_aware_curve" if "transition_aware" in str(chosen_mode) else "anchor_along_base_line")
+    )
+    result["core_authoritative_source"] = str(
+        transition_trace.get("core_authoritative_source")
+        or str(preferred_mode)
+    )
     result["drivezone_ratio"] = float(drivezone_ratio)
     result["divstrip_overlap_ratio"] = float(divstrip_overlap_ratio)
     result["road_intersects_divstrip"] = bool(road_intersects_divstrip)
+    result["final_export_source"] = str(chosen_mode)
+    result["final_override_reason"] = (
+        ""
+        if str(chosen_mode) == str(preferred_mode)
+        else f"candidate_selected_over_{preferred_mode}"
+    )
+    result["final_clip_reason"] = "safe_envelope_candidate" if "safe_envelope" in str(chosen_mode) else ""
+    if not bool(start_anchor_trace.get("step3_endpoint_anchor_available", False)):
+        chosen_start_pt = Point(chosen_line.coords[0][:2])
+        result["step5_used_anchor_source"]["src"] = "selected_candidate_endpoint"
+        result["step5_used_anchor_coords"]["src"] = _point_to_coords(chosen_start_pt)
+        result["anchor_adjust_reason"]["src"] = ""
+        result["anchor_before_after"]["src"] = {}
+    else:
+        chosen_start_pt = _safe_point_from_coords(result["step5_used_anchor_coords"].get("src")) or Point(chosen_line.coords[0][:2])
+    if not bool(end_anchor_trace.get("step3_endpoint_anchor_available", False)):
+        chosen_end_pt = Point(chosen_line.coords[-1][:2])
+        result["step5_used_anchor_source"]["dst"] = "selected_candidate_endpoint"
+        result["step5_used_anchor_coords"]["dst"] = _point_to_coords(chosen_end_pt)
+        result["anchor_adjust_reason"]["dst"] = ""
+        result["anchor_before_after"]["dst"] = {}
+    else:
+        chosen_end_pt = _safe_point_from_coords(result["step5_used_anchor_coords"].get("dst")) or Point(chosen_line.coords[-1][:2])
+    result["anchor_adjusted_bool"] = bool(
+        str(result["anchor_adjust_reason"].get("src", ""))
+        or str(result["anchor_adjust_reason"].get("dst", ""))
+    )
+    transition_component_payload = _transition_component_payload(
+        chosen_line,
+        start_pt=chosen_start_pt,
+        end_pt=chosen_end_pt,
+        params=params,
+        transition_trace=transition_trace,
+    )
+    result["entry_transition_coords"] = list(transition_component_payload.get("entry_transition_coords") or [])
+    result["core_segment_coords"] = list(transition_component_payload.get("core_segment_coords") or [])
+    result["exit_transition_coords"] = list(transition_component_payload.get("exit_transition_coords") or [])
     if selected_candidate is None:
         if road_intersects_divstrip:
             result["reason"] = (
@@ -2818,6 +3453,7 @@ def build_final_road(
         risk_flags=tuple(str(v) for v in identity.risk_flags),
     )
     result["reason"] = "built"
+    result["step5_shape_ref_source"] = str(preferred_mode)
     if bridge_retained:
         result["bridge_decision_stage"] = "bridge_final_decision"
         result["bridge_decision_reason"] = "built"
@@ -2945,6 +3581,12 @@ def write_road_outputs(
     dbg_dir = pipeline.debug_dir(out_root, run_id, patch_id)
     geometry_refine_review = dict(geometry_refine_review or {"rows": [], "summary": {}})
     geometry_refine_artifacts = dict(geometry_refine_artifacts or {})
+    geometry_refine_rows = list(geometry_refine_review.get("rows", []))
+    geometry_refine_by_segment = {
+        str(item.get("segment_id", "")): dict(item)
+        for item in geometry_refine_rows
+        if str(item.get("segment_id", ""))
+    }
     geometry_refine_traj_guided_features = list(geometry_refine_artifacts.get("traj_guided_core_line") or [])
     geometry_refine_core_features = list(geometry_refine_artifacts.get("trusted_core_skeleton") or [])
     geometry_refine_anchor_features = list(geometry_refine_artifacts.get("xsec_anchor_points") or [])
@@ -2957,7 +3599,11 @@ def write_road_outputs(
     hard_breakpoints: list[dict[str, Any]] = []
     soft_breakpoints: list[dict[str, Any]] = []
     road_trace_entries: list[dict[str, Any]] = []
+    final_geometry_trace_entries: list[dict[str, Any]] = []
     bridge_trial_entries: list[dict[str, Any]] = []
+    endpoint_anchor_trace_features: list[tuple[Any, dict[str, Any]]] = []
+    transition_segment_features: list[tuple[Any, dict[str, Any]]] = []
+    final_component_features: list[tuple[Any, dict[str, Any]]] = []
     road_map = {str(road.segment_id): road for road in roads}
     result_map = {str(item["segment_id"]): item for item in road_results}
     registry_by_working_segment = {
@@ -2977,6 +3623,7 @@ def write_road_outputs(
         src_slot = slots[str(segment.segment_id)]["src"]
         dst_slot = slots[str(segment.segment_id)]["dst"]
         build_result = result_map.get(str(segment.segment_id), {})
+        refine_row = dict(geometry_refine_by_segment.get(str(segment.segment_id), {}))
         registry_row = (
             registry_by_working_segment.get(str(segment.segment_id))
             or registry_by_arc_id.get(str(segment.topology_arc_id))
@@ -3110,6 +3757,160 @@ def write_road_outputs(
                     },
                 )
             )
+        step3_anchor_coords = dict(build_result.get("step3_endpoint_anchor_coords") or registry_row.get("production_endpoint_anchor_coords") or {})
+        step5_anchor_coords = dict(build_result.get("step5_used_anchor_coords") or {})
+        for endpoint_tag in ("src", "dst"):
+            step3_point = _safe_point_from_coords(step3_anchor_coords.get(endpoint_tag))
+            if step3_point is not None:
+                endpoint_anchor_trace_features.append(
+                    (
+                        step3_point,
+                        {
+                            "segment_id": str(segment.segment_id),
+                            "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                            "endpoint_tag": str(endpoint_tag),
+                            "anchor_role": "step3_anchor",
+                            "anchor_source": str((build_result.get("step3_endpoint_anchor_source") or {}).get(endpoint_tag, "")),
+                            "anchor_adjusted": bool(build_result.get("anchor_adjusted_bool", False)),
+                        },
+                    )
+                )
+            step5_point = _safe_point_from_coords(step5_anchor_coords.get(endpoint_tag))
+            if step5_point is not None:
+                endpoint_anchor_trace_features.append(
+                    (
+                        step5_point,
+                        {
+                            "segment_id": str(segment.segment_id),
+                            "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                            "endpoint_tag": str(endpoint_tag),
+                            "anchor_role": "step5_anchor",
+                            "anchor_source": str((build_result.get("step5_used_anchor_source") or {}).get(endpoint_tag, "")),
+                            "anchor_adjusted": bool((build_result.get("anchor_adjust_reason") or {}).get(endpoint_tag)),
+                            "anchor_adjust_reason": str((build_result.get("anchor_adjust_reason") or {}).get(endpoint_tag, "")),
+                        },
+                    )
+                )
+            if step3_point is not None and step5_point is not None and float(step3_point.distance(step5_point)) > 1e-6:
+                adjust_line = _line_from_coords(
+                    [
+                        (float(step3_point.x), float(step3_point.y)),
+                        (float(step5_point.x), float(step5_point.y)),
+                    ]
+                )
+                if adjust_line is not None:
+                    endpoint_anchor_trace_features.append(
+                        (
+                            adjust_line,
+                            {
+                                "segment_id": str(segment.segment_id),
+                                "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                                "endpoint_tag": str(endpoint_tag),
+                                "anchor_role": "anchor_adjustment",
+                                "anchor_adjust_reason": str((build_result.get("anchor_adjust_reason") or {}).get(endpoint_tag, "")),
+                            },
+                        )
+                    )
+        assigned_payload = dict(registry_row.get("assigned_endpoint_intervals") or {})
+        for endpoint_tag in ("src", "dst"):
+            assigned_interval_payload = assigned_payload.get(endpoint_tag) or assigned_payload.get(str(endpoint_tag))
+            if isinstance(assigned_interval_payload, dict) and assigned_interval_payload:
+                try:
+                    assigned_interval = EndpointInterval.from_dict(dict(assigned_interval_payload))
+                except Exception:
+                    assigned_interval = None
+                if assigned_interval is not None:
+                    final_component_features.append(
+                        (
+                            assigned_interval.geometry_metric(),
+                            {
+                                "segment_id": str(segment.segment_id),
+                                "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                                "component_role": f"assigned_endpoint_interval_{endpoint_tag}",
+                            },
+                        )
+                    )
+        final_component_features.append(
+            (
+                segment.geometry_metric(),
+                {
+                    "segment_id": str(segment.segment_id),
+                    "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                    "component_role": "step3_production_line",
+                },
+            )
+        )
+        shape_ref_base_line = _line_from_coords(list(build_result.get("shape_ref_base_coords") or []))
+        if shape_ref_base_line is not None:
+            final_component_features.append(
+                (
+                    shape_ref_base_line,
+                    {
+                        "segment_id": str(segment.segment_id),
+                        "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                        "component_role": "step5_shape_ref",
+                        "shape_ref_mode": str(build_result.get("shape_ref_base_mode", "")),
+                    },
+                )
+            )
+        chosen_shape_ref_line = _line_from_coords(list(build_result.get("shape_ref_coords") or []))
+        if chosen_shape_ref_line is not None:
+            final_component_features.append(
+                (
+                    chosen_shape_ref_line,
+                    {
+                        "segment_id": str(segment.segment_id),
+                        "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                        "component_role": "step5_selected_candidate",
+                        "shape_ref_mode": str(build_result.get("shape_ref_mode", "")),
+                    },
+                )
+            )
+        for role, coords_key, source_key, method_key in (
+            ("entry_transition", "entry_transition_coords", "entry_transition_source", "entry_transition_method"),
+            ("core_segment", "core_segment_coords", "core_segment_source", None),
+            ("exit_transition", "exit_transition_coords", "exit_transition_source", "exit_transition_method"),
+        ):
+            component_line = _line_from_coords(list(build_result.get(coords_key) or []))
+            if component_line is None:
+                continue
+            transition_segment_features.append(
+                (
+                    component_line,
+                    {
+                        "segment_id": str(segment.segment_id),
+                        "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                        "transition_role": str(role),
+                        "transition_source": str(build_result.get(source_key, "")),
+                        "transition_method": "" if method_key is None else str(build_result.get(method_key, "")),
+                        "core_authoritative_source": str(build_result.get("core_authoritative_source", "")),
+                    },
+                )
+            )
+        if road is not None:
+            final_component_features.append(
+                (
+                    road.geometry_metric(),
+                    {
+                        "segment_id": str(segment.segment_id),
+                        "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                        "component_role": "final_road",
+                        "final_export_source": str(build_result.get("final_export_source", "")),
+                    },
+                )
+            )
+            if bool(build_result.get("geometry_refine_applied", False)):
+                final_component_features.append(
+                    (
+                        road.geometry_metric(),
+                        {
+                            "segment_id": str(segment.segment_id),
+                            "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                            "component_role": "refine_accepted_line",
+                            "selected_candidate_mode": str(build_result.get("geometry_refine_selected_candidate_mode", "")),
+                        },
+                    )
+                )
         unresolved_reason = ""
         if road is None:
             unresolved_reason = str(build_result.get("reason") or identity.reason)
@@ -3162,6 +3963,45 @@ def write_road_outputs(
                 "geometry_refine_entry_midpoint_fallback_used": bool(build_result.get("geometry_refine_entry_midpoint_fallback_used", False)),
                 "geometry_refine_exit_midpoint_fallback_used": bool(build_result.get("geometry_refine_exit_midpoint_fallback_used", False)),
                 "geometry_refine_safe_envelope_source": str(build_result.get("geometry_refine_safe_envelope_source", "")),
+                "failure_classification": str(failure_classification),
+            }
+        )
+        final_geometry_trace_entries.append(
+            {
+                "segment_id": str(segment.segment_id),
+                "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                "topology_arc_id": str(segment.topology_arc_id),
+                "assigned_endpoint_interval_source": dict(build_result.get("endpoint_interval_source", {})),
+                "step3_endpoint_anchor_source": dict(build_result.get("step3_endpoint_anchor_source", {})),
+                "step3_endpoint_anchor_coords": dict(build_result.get("step3_endpoint_anchor_coords", {})),
+                "step5_used_anchor_source": dict(build_result.get("step5_used_anchor_source", {})),
+                "step5_used_anchor_coords": dict(build_result.get("step5_used_anchor_coords", {})),
+                "anchor_adjusted_bool": bool(build_result.get("anchor_adjusted_bool", False)),
+                "anchor_adjust_reason": dict(build_result.get("anchor_adjust_reason", {})),
+                "anchor_before_after": dict(build_result.get("anchor_before_after", {})),
+                "step3_production_source": str(
+                    build_result.get("step3_production_source")
+                    or registry_row.get("production_geometry_source_type", "")
+                    or segment.geometry_source_type
+                ),
+                "step5_shape_ref_source": str(build_result.get("step5_shape_ref_source", "")),
+                "step5_selected_candidate_source": str(build_result.get("shape_ref_mode", "")),
+                "entry_transition_source": str(build_result.get("entry_transition_source", "")),
+                "entry_transition_method": str(build_result.get("entry_transition_method", "")),
+                "core_segment_source": str(build_result.get("core_segment_source", "")),
+                "exit_transition_source": str(build_result.get("exit_transition_source", "")),
+                "exit_transition_method": str(build_result.get("exit_transition_method", "")),
+                "core_authoritative_source": str(build_result.get("core_authoritative_source", "")),
+                "refine_candidate_source": str(build_result.get("refine_candidate_source", "")),
+                "refine_applied_bool": bool(build_result.get("refine_applied_bool", False) or build_result.get("geometry_refine_applied", False)),
+                "refine_rejected_reason": str(build_result.get("refine_rejected_reason") or build_result.get("geometry_refine_skip_reason", "")),
+                "refine_selected_candidate_mode": str(build_result.get("geometry_refine_selected_candidate_mode", "")),
+                "final_export_source": str(build_result.get("final_export_source", "")),
+                "final_override_reason": str(build_result.get("final_override_reason", "")),
+                "final_clip_reason": str(build_result.get("final_clip_reason", "")),
+                "shape_ref_source_family": str(build_result.get("shape_ref_source_family", "")),
+                "built_final_road": bool(road is not None),
+                "final_reason": str(build_result.get("reason", "")),
                 "failure_classification": str(failure_classification),
             }
         )
@@ -3261,12 +4101,32 @@ def write_road_outputs(
                 "step3_preliminary_geometry_source": str(registry_row.get("preliminary_geometry_source", "")),
                 "corridor_identity_state": str(identity.state),
                 "shape_ref_mode": str(build_result.get("shape_ref_mode", "")),
+                "step5_shape_ref_source": str(build_result.get("step5_shape_ref_source", "")),
                 "shape_ref_source_family": str(
                     build_result.get(
                         "shape_ref_source_family",
                         _shape_ref_source_family(build_result.get("shape_ref_mode", "")),
                     )
                 ),
+                "endpoint_interval_source": dict(build_result.get("endpoint_interval_source", {})),
+                "step3_endpoint_anchor_source": dict(build_result.get("step3_endpoint_anchor_source", {})),
+                "step3_endpoint_anchor_coords": dict(build_result.get("step3_endpoint_anchor_coords", {})),
+                "step5_used_anchor_source": dict(build_result.get("step5_used_anchor_source", {})),
+                "step5_used_anchor_coords": dict(build_result.get("step5_used_anchor_coords", {})),
+                "anchor_adjusted_bool": bool(build_result.get("anchor_adjusted_bool", False)),
+                "anchor_adjust_reason": dict(build_result.get("anchor_adjust_reason", {})),
+                "entry_transition_source": str(build_result.get("entry_transition_source", "")),
+                "entry_transition_method": str(build_result.get("entry_transition_method", "")),
+                "core_segment_source": str(build_result.get("core_segment_source", "")),
+                "exit_transition_source": str(build_result.get("exit_transition_source", "")),
+                "exit_transition_method": str(build_result.get("exit_transition_method", "")),
+                "core_authoritative_source": str(build_result.get("core_authoritative_source", "")),
+                "refine_candidate_source": str(build_result.get("refine_candidate_source", "")),
+                "refine_applied_bool": bool(build_result.get("refine_applied_bool", False) or build_result.get("geometry_refine_applied", False)),
+                "refine_rejected_reason": str(build_result.get("refine_rejected_reason") or build_result.get("geometry_refine_skip_reason", "")),
+                "final_export_source": str(build_result.get("final_export_source", "")),
+                "final_override_reason": str(build_result.get("final_override_reason", "")),
+                "final_clip_reason": str(build_result.get("final_clip_reason", "")),
                 "step5_endpoint_anchor_policy": str(build_result.get("endpoint_anchor_policy", "")),
                 "step5_support_candidate_policy": str(build_result.get("support_candidate_policy", "")),
                 "step5_rcsdroad_fallback_applied": bool(build_result.get("rcsdroad_fallback_applied", False)),
@@ -3519,6 +4379,27 @@ def write_road_outputs(
                 ]
             )
         )
+    for geometry, props in geometry_refine_core_features:
+        transition_segment_features.append(
+            (
+                geometry,
+                {
+                    **dict(props),
+                    "transition_role": "core_segment",
+                },
+            )
+        )
+    for geometry, props in geometry_refine_entry_exit_features:
+        role = str(dict(props).get("role", ""))
+        transition_segment_features.append(
+            (
+                geometry,
+                {
+                    **dict(props),
+                    "transition_role": "entry_transition" if role == "entry" else "exit_transition",
+                },
+            )
+        )
     write_lines_geojson(patch_dir / "Road.geojson", road_features)
     write_features_geojson(patch_dir / "traj_guided_core_line.geojson", geometry_refine_traj_guided_features)
     write_lines_geojson(patch_dir / "trusted_core_skeleton.geojson", geometry_refine_core_features)
@@ -3531,6 +4412,25 @@ def write_road_outputs(
     write_json(patch_dir / "metrics.json", metrics)
     write_json(patch_dir / "gate.json", gate)
     write_json(patch_dir / "geometry_refine_review.json", geometry_refine_review)
+    write_json(
+        patch_dir / "step5_final_geometry_trace.json",
+        {
+            "rows": final_geometry_trace_entries,
+            "summary": {
+                "row_count": int(len(final_geometry_trace_entries)),
+                "built_count": int(sum(1 for item in final_geometry_trace_entries if bool(item["built_final_road"]))),
+                "refine_applied_count": int(sum(1 for item in final_geometry_trace_entries if bool(item["refine_applied_bool"]))),
+                "anchor_adjusted_count": int(sum(1 for item in final_geometry_trace_entries if bool(item["anchor_adjusted_bool"]))),
+            },
+        },
+    )
+    write_json(
+        patch_dir / "step5_refine_apply_review.json",
+        {
+            "rows": geometry_refine_rows,
+            "summary": dict(geometry_refine_review.get("summary", {})),
+        },
+    )
     write_json(
         pipeline.stage_dir(out_root, run_id, patch_id, "step5_slot_mapping") / "step5_geometry_input_sources.json",
         {
@@ -3555,6 +4455,9 @@ def write_road_outputs(
             },
         },
     )
+    write_features_geojson(patch_dir / "step5_endpoint_anchor_trace.geojson", endpoint_anchor_trace_features)
+    write_features_geojson(patch_dir / "step5_transition_segments.geojson", transition_segment_features)
+    write_features_geojson(patch_dir / "final_geometry_components.geojson", final_component_features)
     (patch_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
     write_lines_geojson(dbg_dir / "shape_ref_line.geojson", shape_ref_features)
     write_lines_geojson(dbg_dir / "road_final.geojson", road_features)
@@ -3568,6 +4471,17 @@ def write_road_outputs(
     write_lines_geojson(dbg_dir / "geometry_refine_entry_exit.geojson", geometry_refine_entry_exit_features)
     write_json(dbg_dir / "geometry_refine_review.json", geometry_refine_review)
     write_json(dbg_dir / "step5_geometry_input_sources.json", {"rows": geometry_input_source_rows})
+    write_json(dbg_dir / "step5_final_geometry_trace.json", {"rows": final_geometry_trace_entries})
+    write_json(
+        dbg_dir / "step5_refine_apply_review.json",
+        {
+            "rows": geometry_refine_rows,
+            "summary": dict(geometry_refine_review.get("summary", {})),
+        },
+    )
+    write_features_geojson(dbg_dir / "step5_endpoint_anchor_trace.geojson", endpoint_anchor_trace_features)
+    write_features_geojson(dbg_dir / "step5_transition_segments.geojson", transition_segment_features)
+    write_features_geojson(dbg_dir / "final_geometry_components.geojson", final_component_features)
     write_json(
         dbg_dir / "reason_trace.json",
         {

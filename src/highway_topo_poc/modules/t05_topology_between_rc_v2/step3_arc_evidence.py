@@ -2228,6 +2228,12 @@ def _anchor_point_on_xsec_interval(
     return point, f"{interval_reason}|{point_reason}", review
 
 
+def _point_to_coords(point: Point | None) -> list[float] | None:
+    if point is None or point.is_empty:
+        return None
+    return [float(point.x), float(point.y)]
+
+
 def _anchor_point_on_xsec(
     *,
     xsec_line: LineString | None,
@@ -2812,6 +2818,10 @@ def build_production_working_segment(
         "production_anchor_provenance": {
             "src": str(start_anchor_provenance),
             "dst": str(end_anchor_provenance),
+        },
+        "production_endpoint_anchor_coords": {
+            "src": _point_to_coords(start_pt),
+            "dst": _point_to_coords(end_pt),
         },
         "production_anchor_interval_review": {
             "src": dict(start_anchor_review),
@@ -3513,6 +3523,9 @@ def build_arc_evidence_attach(
             current["production_anchor_provenance"] = dict(
                 production_review.get("production_anchor_provenance", {})
             )
+            current["production_endpoint_anchor_coords"] = dict(
+                production_review.get("production_endpoint_anchor_coords", {})
+            )
             current["production_anchor_interval_review"] = dict(
                 production_review.get("production_anchor_interval_review", {})
             )
@@ -3566,6 +3579,9 @@ def build_arc_evidence_attach(
                         current.get("production_support_geometry_mode", "")
                     ),
                     "production_anchor_provenance": dict(current.get("production_anchor_provenance", {})),
+                    "production_endpoint_anchor_coords": dict(
+                        current.get("production_endpoint_anchor_coords", {})
+                    ),
                     "production_anchor_interval_review": dict(
                         current.get("production_anchor_interval_review", {})
                     ),
