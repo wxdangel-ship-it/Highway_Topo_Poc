@@ -2871,7 +2871,12 @@ def build_final_road(
         transition_candidate_meta[transition_mode] = dict(preferred_transition_meta)
         transition_candidate_meta[transition_mode]["core_authoritative_source"] = str(preferred_mode)
         transition_candidate_meta[transition_mode]["core_segment_source"] = str(preferred_mode)
-        _append_candidate_line(candidate_lines, preferred_transition, transition_mode, priority=True)
+        _append_candidate_line(
+            candidate_lines,
+            preferred_transition,
+            transition_mode,
+            priority=str(preferred_mode).startswith("production_working_segment"),
+        )
     preferred_envelope = _surface_envelope_candidate_line(
         preferred_line,
         src_slot,
@@ -3049,7 +3054,6 @@ def build_final_road(
             src_anchor_override=src_anchor_override,
             dst_anchor_override=dst_anchor_override,
         )
-        _append_candidate_line(candidate_lines, segment_anchor, "production_working_segment_slot_anchored")
         segment_anchor_transition, segment_anchor_transition_meta = _transition_aware_candidate_line(
             segment_anchor,
             start_pt=segment_anchor_start_pt,
@@ -3062,6 +3066,7 @@ def build_final_road(
             transition_candidate_meta[transition_mode]["core_authoritative_source"] = "production_working_segment_slot_anchored"
             transition_candidate_meta[transition_mode]["core_segment_source"] = "production_working_segment_slot_anchored"
             _append_candidate_line(candidate_lines, segment_anchor_transition, transition_mode, priority=True)
+        _append_candidate_line(candidate_lines, segment_anchor, "production_working_segment_slot_anchored")
         segment_anchor_envelope = _surface_envelope_candidate_line(
             segment_anchor,
             src_slot,
