@@ -100,6 +100,19 @@ def _patch_rows(run_dir: Path, patch_id: str) -> list[dict[str, Any]]:
                     or registry.get("support_interval_reference_source")
                     or ""
                 ),
+                "step3_production_support_binding_ok": bool(
+                    prod.get("production_support_binding_ok", True)
+                ),
+                "step3_production_support_binding_reason": str(
+                    prod.get("production_support_binding_reason")
+                    or registry.get("production_support_binding_reason")
+                    or ""
+                ),
+                "step3_production_support_geometry_mode": str(
+                    prod.get("production_support_geometry_mode")
+                    or registry.get("production_support_geometry_mode")
+                    or ""
+                ),
                 "same_pair_explainability": {
                     "same_pair_support_deconflict_reason": str(
                         same_pair.get("same_pair_support_deconflict_reason")

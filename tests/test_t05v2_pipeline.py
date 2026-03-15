@@ -1882,6 +1882,14 @@ def test_t05v2_step3_production_segment_prefers_support_over_step2_preliminary()
         "is_unique": True,
         "traj_support_type": "terminal_crossing_support",
         "traj_support_ids": ["traj_support"],
+        "traj_support_segments": [
+            {
+                "line_coords": [[0.0, 3.0], [50.0, 3.0], [100.0, 3.0]],
+                "segment_order": 0,
+                "source_span_start_idx": 0,
+                "source_span_end_idx": 5,
+            }
+        ],
         "prior_support_type": "no_support",
         "prior_support_available": False,
         "support_reference_coords": [[0.0, 3.0], [50.0, 3.0], [100.0, 3.0]],
@@ -1889,6 +1897,9 @@ def test_t05v2_step3_production_segment_prefers_support_over_step2_preliminary()
         "support_anchor_dst_coords": [100.0, 3.0],
         "support_interval_reference_source": "selected_support",
         "support_generation_reason": "selected_support",
+        "support_has_src_xsec_anchor": True,
+        "support_has_dst_xsec_anchor": True,
+        "support_full_xsec_crossing": True,
         "same_pair_rank": 1,
         "kept_reason": "arc_first_main_flow",
     }
@@ -2007,6 +2018,216 @@ def test_t05v2_step3_production_segment_uses_topology_arc_before_preliminary_hin
     assert segment.preliminary_hint_used is False
     assert segment.geometry_coords == ((0.0, 2.0), (50.0, 2.0), (100.0, 2.0))
     assert review["production_geometry_fallback_reason"] == "no_support_reference_available"
+
+
+def test_t05v2_step3_production_segment_fuses_partial_support_with_arc_tail() -> None:
+    row = {
+        "pair": "10:20",
+        "src": 10,
+        "dst": 20,
+        "topology_arc_id": "arc_partial_tail",
+        "topology_arc_source_type": "direct_topology_arc",
+        "line_coords": [[0.0, 0.0], [40.0, 0.0], [70.0, 20.0], [100.0, 50.0]],
+        "edge_ids": ["edge_partial_tail"],
+        "node_path": [10, 20],
+        "is_direct_legal": True,
+        "is_unique": True,
+        "traj_support_type": "partial_arc_support",
+        "traj_support_ids": ["traj_partial_tail"],
+        "traj_support_segments": [
+            {
+                "line_coords": [[40.0, 0.0], [55.0, 0.0]],
+                "segment_order": 0,
+                "source_span_start_idx": 2,
+                "source_span_end_idx": 4,
+            }
+        ],
+        "prior_support_type": "no_support",
+        "prior_support_available": False,
+        "support_reference_coords": [[40.0, 0.0], [55.0, 0.0]],
+        "support_anchor_src_coords": [40.0, 0.0],
+        "support_anchor_dst_coords": [55.0, 0.0],
+        "support_interval_reference_source": "none",
+        "support_generation_reason": "partial_support_selected",
+        "support_competing_arc_preferred": True,
+        "support_full_xsec_crossing": False,
+        "support_has_src_xsec_anchor": False,
+        "support_has_dst_xsec_anchor": False,
+        "same_pair_rank": 1,
+        "kept_reason": "arc_first_main_flow",
+    }
+    xsec_map = {
+        10: BaseCrossSection(nodeid=10, geometry_coords=((0.0, -10.0), (0.0, 10.0))),
+        20: BaseCrossSection(nodeid=20, geometry_coords=((100.0, 40.0), (100.0, 60.0))),
+    }
+    inputs = PatchInputs(
+        patch_id="builder_partial_tail",
+        patch_dir=Path("builder_partial_tail"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, -5.0), (105.0, -5.0), (105.0, 55.0), (-5.0, 55.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+
+    segment, review = _step3_evidence.build_production_working_segment(
+        row=row,
+        selected_segment=None,
+        xsec_map=xsec_map,
+        inputs=inputs,
+        params=dict(DEFAULT_PARAMS),
+        drivable_surface=inputs.drivezone_zone_metric,
+        divstrip_buffer=None,
+    )
+
+    coords = list(segment.geometry_coords)
+    assert segment.geometry_source_type == "support_arc_fused"
+    assert review["production_support_geometry_mode"] == "support_segment_arc_endcaps"
+    assert coords[0] == (0.0, 0.0)
+    assert coords[-1] == (100.0, 50.0)
+    assert any(float(y) > 0.0 for _x, y in coords[2:-1])
+
+
+def test_t05v2_step3_production_segment_rejects_competing_shared_xsec_support() -> None:
+    row = {
+        "pair": "10:20",
+        "src": 10,
+        "dst": 20,
+        "topology_arc_id": "arc_shared_conflict",
+        "topology_arc_source_type": "direct_topology_arc",
+        "line_coords": [[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]],
+        "edge_ids": ["edge_shared_conflict"],
+        "node_path": [10, 20],
+        "is_direct_legal": True,
+        "is_unique": True,
+        "traj_support_type": "terminal_crossing_support",
+        "traj_support_ids": ["traj_shared_conflict"],
+        "traj_support_segments": [
+            {
+                "line_coords": [[0.0, 3.0], [50.0, 3.0], [100.0, 3.0]],
+                "segment_order": 0,
+                "source_span_start_idx": 0,
+                "source_span_end_idx": 5,
+            }
+        ],
+        "prior_support_type": "no_support",
+        "prior_support_available": False,
+        "support_reference_coords": [[0.0, 3.0], [50.0, 3.0], [100.0, 3.0]],
+        "support_anchor_src_coords": [0.0, 3.0],
+        "support_anchor_dst_coords": [100.0, 3.0],
+        "support_interval_reference_source": "none",
+        "support_generation_reason": "selected_support",
+        "support_competing_arc_preferred": False,
+        "support_full_xsec_crossing": True,
+        "support_has_src_xsec_anchor": True,
+        "support_has_dst_xsec_anchor": True,
+        "support_cluster_is_dominant": False,
+        "src_xsec_nodeids": [10, 11],
+        "dst_xsec_nodeids": [20, 21],
+        "same_pair_rank": 1,
+        "kept_reason": "arc_first_main_flow",
+    }
+    xsec_map = {
+        10: BaseCrossSection(nodeid=10, geometry_coords=((0.0, -10.0), (0.0, 10.0))),
+        20: BaseCrossSection(nodeid=20, geometry_coords=((100.0, -10.0), (100.0, 10.0))),
+    }
+    inputs = PatchInputs(
+        patch_id="builder_shared_conflict",
+        patch_dir=Path("builder_shared_conflict"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, -5.0), (105.0, -5.0), (105.0, 5.0), (-5.0, 5.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+
+    segment, review = _step3_evidence.build_production_working_segment(
+        row=row,
+        selected_segment=None,
+        xsec_map=xsec_map,
+        inputs=inputs,
+        params=dict(DEFAULT_PARAMS),
+        drivable_surface=inputs.drivezone_zone_metric,
+        divstrip_buffer=None,
+    )
+
+    assert segment.geometry_source_type == "topology_arc_anchored"
+    assert review["production_support_binding_ok"] is False
+    assert review["production_support_binding_reason"] == "support_prefers_competing_arc"
+    assert review["production_geometry_fallback_reason"] == "support_prefers_competing_arc_arc_fallback"
+
+
+def test_t05v2_step3_production_segment_avoids_soft_failed_weak_partial_support() -> None:
+    row = {
+        "pair": "10:20",
+        "src": 10,
+        "dst": 20,
+        "topology_arc_id": "arc_soft_partial",
+        "topology_arc_source_type": "direct_topology_arc",
+        "line_coords": [[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]],
+        "edge_ids": ["edge_soft_partial"],
+        "node_path": [10, 20],
+        "is_direct_legal": True,
+        "is_unique": True,
+        "traj_support_type": "partial_arc_support",
+        "traj_support_ids": ["traj_soft_partial"],
+        "traj_support_segments": [
+            {
+                "line_coords": [[0.0, 8.0], [50.0, 8.0]],
+                "segment_order": 0,
+                "source_span_start_idx": 0,
+                "source_span_end_idx": 3,
+            }
+        ],
+        "prior_support_type": "no_support",
+        "prior_support_available": False,
+        "support_reference_coords": [[0.0, 8.0], [50.0, 8.0]],
+        "support_anchor_src_coords": [0.0, 8.0],
+        "support_anchor_dst_coords": [50.0, 8.0],
+        "support_interval_reference_source": "none",
+        "support_generation_reason": "partial_support_selected",
+        "support_competing_arc_preferred": True,
+        "support_full_xsec_crossing": False,
+        "support_has_src_xsec_anchor": False,
+        "support_has_dst_xsec_anchor": False,
+        "same_pair_rank": 1,
+        "kept_reason": "arc_first_main_flow",
+    }
+    xsec_map = {
+        10: BaseCrossSection(nodeid=10, geometry_coords=((0.0, -10.0), (0.0, 10.0))),
+        20: BaseCrossSection(nodeid=20, geometry_coords=((100.0, -10.0), (100.0, 10.0))),
+    }
+    inputs = PatchInputs(
+        patch_id="builder_soft_partial",
+        patch_dir=Path("builder_soft_partial"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, 20.0), (105.0, 20.0), (105.0, 30.0), (-5.0, 30.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+
+    segment, review = _step3_evidence.build_production_working_segment(
+        row=row,
+        selected_segment=None,
+        xsec_map=xsec_map,
+        inputs=inputs,
+        params=dict(DEFAULT_PARAMS),
+        drivable_surface=inputs.drivezone_zone_metric,
+        divstrip_buffer=None,
+    )
+
+    assert segment.geometry_source_type == "topology_arc_anchored"
+    assert review["production_geometry_fallback_reason"] == "weak_partial_support_surface_inconsistent_arc_fallback"
 
 
 def test_t05v2_arc_first_partial_support_recovers_same_arc_without_terminal_crossing(tmp_path: Path) -> None:

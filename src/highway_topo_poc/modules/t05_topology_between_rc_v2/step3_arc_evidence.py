@@ -7,7 +7,7 @@ from time import perf_counter
 from typing import Any
 
 from shapely.geometry import LineString, Point
-from shapely.ops import nearest_points
+from shapely.ops import nearest_points, substring
 
 from .arc_selection_rules import (
     STRUCTURE_MERGE_MULTI_UPSTREAM,
@@ -1828,6 +1828,169 @@ def _replace_line_endpoints(line: LineString, start_pt: Point, end_pt: Point) ->
     return LineString(deduped)
 
 
+def _line_is_usable(line: LineString | None) -> bool:
+    return bool(
+        isinstance(line, LineString)
+        and not line.is_empty
+        and math.isfinite(float(line.length))
+        and float(line.length) > 1e-6
+    )
+
+
+def _safe_line_project(line: LineString | None, point: Point | None) -> float | None:
+    if not _line_is_usable(line) or point is None or point.is_empty:
+        return None
+    try:
+        value = float(line.project(point))
+    except Exception:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _append_unique_coords(
+    coords: list[tuple[float, float]],
+    values: list[tuple[float, float]],
+) -> None:
+    for xy in values:
+        if not coords or xy != coords[-1]:
+            coords.append(xy)
+
+
+def _line_with_anchor_endcaps(base_line: LineString, start_pt: Point, end_pt: Point) -> LineString:
+    if not _line_is_usable(base_line):
+        return LineString([(float(start_pt.x), float(start_pt.y)), (float(end_pt.x), float(end_pt.y))])
+    start_s = _safe_line_project(base_line, start_pt)
+    end_s = _safe_line_project(base_line, end_pt)
+    if start_s is None or end_s is None:
+        return _replace_line_endpoints(base_line, start_pt, end_pt)
+    try:
+        middle = substring(base_line, start_s, end_s)
+    except Exception:
+        return _replace_line_endpoints(base_line, start_pt, end_pt)
+    coords: list[tuple[float, float]] = [(float(start_pt.x), float(start_pt.y))]
+    if isinstance(middle, Point) and not middle.is_empty:
+        _append_unique_coords(coords, [(float(middle.x), float(middle.y))])
+    elif isinstance(middle, LineString) and not middle.is_empty:
+        _append_unique_coords(coords, [(float(x), float(y)) for x, y, *_ in middle.coords])
+    _append_unique_coords(coords, [(float(end_pt.x), float(end_pt.y))])
+    if len(coords) < 2:
+        coords = [(float(start_pt.x), float(start_pt.y)), (float(end_pt.x), float(end_pt.y))]
+    return LineString(coords)
+
+
+def _support_segment_lines_along_arc(
+    row: dict[str, Any],
+    arc_line: LineString | None,
+) -> list[dict[str, Any]]:
+    if not _line_is_usable(arc_line):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in row.get("traj_support_segments", []):
+        if not isinstance(item, dict):
+            continue
+        line = _line_from_coords_payload(item.get("line_coords", []))
+        if not _line_is_usable(line):
+            continue
+        start_pt = _endpoint_from_line(line, endpoint_tag="src")
+        end_pt = _endpoint_from_line(line, endpoint_tag="dst")
+        start_s = _safe_line_project(arc_line, start_pt)
+        end_s = _safe_line_project(arc_line, end_pt)
+        if start_s is None or end_s is None:
+            continue
+        if float(end_s) < float(start_s):
+            coords = [(float(x), float(y)) for x, y, *_ in reversed(list(line.coords))]
+            line = LineString(coords)
+            start_s, end_s = end_s, start_s
+        out.append(
+            {
+                "line": line,
+                "start_s": float(start_s),
+                "end_s": float(end_s),
+                "segment_order": int(item.get("segment_order", 0)),
+                "source_span_start_idx": int(item.get("source_span_start_idx", 0)),
+                "source_span_end_idx": int(item.get("source_span_end_idx", 0)),
+            }
+        )
+    return sorted(
+        out,
+        key=lambda item: (
+            float(item.get("start_s", 0.0)),
+            int(item.get("segment_order", 0)),
+            int(item.get("source_span_start_idx", 0)),
+            int(item.get("source_span_end_idx", 0)),
+        ),
+    )
+
+
+def _build_support_fused_line(
+    *,
+    row: dict[str, Any],
+    arc_line: LineString | None,
+    support_line: LineString | None,
+    start_pt: Point,
+    end_pt: Point,
+) -> tuple[LineString | None, str]:
+    if not _line_is_usable(support_line):
+        return None, "support_missing"
+    if not _line_is_usable(arc_line):
+        return _line_with_anchor_endcaps(support_line, start_pt, end_pt), "support_reference_endcaps"
+    ordered_segments = _support_segment_lines_along_arc(row=row, arc_line=arc_line)
+    if not ordered_segments:
+        return _line_with_anchor_endcaps(support_line, start_pt, end_pt), "support_reference_endcaps"
+    start_s = _safe_line_project(arc_line, start_pt)
+    end_s = _safe_line_project(arc_line, end_pt)
+    if start_s is None or end_s is None:
+        return _line_with_anchor_endcaps(support_line, start_pt, end_pt), "support_reference_endcaps"
+    cursor_s = float(start_s)
+    end_s = float(end_s)
+    coords: list[tuple[float, float]] = [(float(start_pt.x), float(start_pt.y))]
+    used_arc_gap = False
+    used_multiple_segments = False
+    for idx, item in enumerate(ordered_segments):
+        seg_start = max(float(item.get("start_s", 0.0)), float(start_s))
+        seg_end = min(float(item.get("end_s", 0.0)), float(end_s))
+        if seg_end <= seg_start + 1e-6:
+            continue
+        if seg_start > cursor_s + 1e-6:
+            try:
+                arc_piece = substring(arc_line, cursor_s, seg_start)
+            except Exception:
+                arc_piece = None
+            if isinstance(arc_piece, Point) and not arc_piece.is_empty:
+                _append_unique_coords(coords, [(float(arc_piece.x), float(arc_piece.y))])
+                used_arc_gap = True
+            elif isinstance(arc_piece, LineString) and not arc_piece.is_empty:
+                _append_unique_coords(coords, [(float(x), float(y)) for x, y, *_ in arc_piece.coords])
+                used_arc_gap = True
+        segment_line = item.get("line")
+        if _line_is_usable(segment_line):
+            _append_unique_coords(coords, [(float(x), float(y)) for x, y, *_ in segment_line.coords])
+            used_multiple_segments = used_multiple_segments or idx >= 1
+        cursor_s = max(cursor_s, seg_end)
+    if cursor_s < end_s - 1e-6:
+        try:
+            arc_piece = substring(arc_line, cursor_s, end_s)
+        except Exception:
+            arc_piece = None
+        if isinstance(arc_piece, Point) and not arc_piece.is_empty:
+            _append_unique_coords(coords, [(float(arc_piece.x), float(arc_piece.y))])
+            used_arc_gap = True
+        elif isinstance(arc_piece, LineString) and not arc_piece.is_empty:
+            _append_unique_coords(coords, [(float(x), float(y)) for x, y, *_ in arc_piece.coords])
+            used_arc_gap = True
+    _append_unique_coords(coords, [(float(end_pt.x), float(end_pt.y))])
+    if len(coords) < 2:
+        return _line_with_anchor_endcaps(support_line, start_pt, end_pt), "support_reference_endcaps"
+    fused = LineString(coords)
+    if not _line_is_usable(fused):
+        return _line_with_anchor_endcaps(support_line, start_pt, end_pt), "support_reference_endcaps"
+    if used_multiple_segments:
+        return fused, "support_segments_arc_fused"
+    if used_arc_gap:
+        return fused, "support_segment_arc_endcaps"
+    return fused, "support_reference_endcaps"
+
+
 def _nearest_point_on_xsec(xsec_line: LineString | None, geometry: Any) -> Point | None:
     if xsec_line is None or xsec_line.is_empty or xsec_line.length <= 1e-6:
         return None
@@ -1948,6 +2111,44 @@ def _preferred_support_geometry(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _shared_xsec_alias_context(row: dict[str, Any]) -> bool:
+    return bool(
+        row.get("src_alias_applied", False)
+        or row.get("dst_alias_applied", False)
+        or len(row.get("src_xsec_nodeids", []) or []) >= 2
+        or len(row.get("dst_xsec_nodeids", []) or []) >= 2
+    )
+
+
+def _support_binding_state(
+    *,
+    row: dict[str, Any],
+    support_source_type: str,
+) -> tuple[bool, str]:
+    if str(support_source_type) == "none" or str(row.get("traj_support_type", "no_support")) == "no_support":
+        return False, "support_missing"
+    if not bool(row.get("support_competing_arc_preferred", True)):
+        return False, "support_prefers_competing_arc"
+    interval_source = str(row.get("support_interval_reference_source", ""))
+    has_terminal_anchors = bool(row.get("support_has_src_xsec_anchor", False)) and bool(
+        row.get("support_has_dst_xsec_anchor", False)
+    )
+    strong_full_crossing = bool(row.get("support_full_xsec_crossing", False)) and has_terminal_anchors
+    if _shared_xsec_alias_context(row):
+        if interval_source == str(support_source_type) and has_terminal_anchors:
+            return True, "shared_xsec_trusted_terminal_support"
+        if strong_full_crossing and bool(row.get("support_cluster_is_dominant", False)):
+            return True, "shared_xsec_dominant_full_crossing_support"
+        return False, "shared_xsec_support_binding_weak"
+    if interval_source == str(support_source_type):
+        return True, "trusted_support_interval_reference"
+    if strong_full_crossing:
+        return True, "full_crossing_support"
+    if str(row.get("traj_support_type", "")) == "stitched_arc_support":
+        return True, "stitched_support_available"
+    return True, "support_available"
+
+
 def _production_surface_ok(metrics: dict[str, Any], params: dict[str, Any]) -> bool:
     return bool(
         float(metrics.get("on_drivable_surface_ratio", 0.0) or 0.0)
@@ -1975,29 +2176,60 @@ def build_production_working_segment(
     support_geometry = _preferred_support_geometry(row)
     support_line = support_geometry["line"]
     support_source_type = str(support_geometry["source_type"])
-    preferred_base_line = support_line or arc_line or preliminary_line
+    support_binding_ok, support_binding_reason = _support_binding_state(
+        row=row,
+        support_source_type=support_source_type,
+    )
+    support_has_src_anchor = bool(row.get("support_has_src_xsec_anchor", False))
+    support_has_dst_anchor = bool(row.get("support_has_dst_xsec_anchor", False))
     src_xsec = xsec_map.get(int(row.get("src", 0)))
     dst_xsec = xsec_map.get(int(row.get("dst", 0)))
     src_xsec_line = None if src_xsec is None else src_xsec.geometry_metric()
     dst_xsec_line = None if dst_xsec is None else dst_xsec.geometry_metric()
     start_pt, start_anchor_provenance = _anchor_point_on_xsec(
         xsec_line=src_xsec_line,
-        preferred_anchor_coords=support_geometry.get("src_anchor_coords"),
+        preferred_anchor_coords=(
+            support_geometry.get("src_anchor_coords")
+            if support_has_src_anchor
+            else None
+        ),
         preferred_label=support_source_type if support_source_type != "none" else "support",
-        base_line=preferred_base_line,
+        base_line=(
+            support_line
+            if support_has_src_anchor and support_line is not None
+            else (arc_line or support_line or preliminary_line)
+        ),
         base_label="support_or_arc",
         preliminary_line=preliminary_line,
         endpoint_tag="src",
     )
     end_pt, end_anchor_provenance = _anchor_point_on_xsec(
         xsec_line=dst_xsec_line,
-        preferred_anchor_coords=support_geometry.get("dst_anchor_coords"),
+        preferred_anchor_coords=(
+            support_geometry.get("dst_anchor_coords")
+            if support_has_dst_anchor
+            else None
+        ),
         preferred_label=support_source_type if support_source_type != "none" else "support",
-        base_line=preferred_base_line,
+        base_line=(
+            support_line
+            if support_has_dst_anchor and support_line is not None
+            else (arc_line or support_line or preliminary_line)
+        ),
         base_label="support_or_arc",
         preliminary_line=preliminary_line,
         endpoint_tag="dst",
     )
+    support_candidate_line = None
+    support_geometry_mode = "support_missing"
+    if support_line is not None and str(row.get("traj_support_type", "no_support")) != "no_support":
+        support_candidate_line, support_geometry_mode = _build_support_fused_line(
+            row=row,
+            arc_line=arc_line,
+            support_line=support_line,
+            start_pt=start_pt,
+            end_pt=end_pt,
+        )
 
     candidate_rows: list[dict[str, Any]] = []
 
@@ -2007,10 +2239,17 @@ def build_production_working_segment(
         source_type: str,
         support_driven: bool,
         preliminary_hint_used: bool,
+        shape_mode: str,
+        binding_ok: bool = True,
+        binding_reason: str = "",
     ) -> None:
         if line is None or line.is_empty or line.length <= 1e-6:
             return
-        anchored = _replace_line_endpoints(line, start_pt, end_pt)
+        anchored = (
+            line
+            if bool(support_driven)
+            else _line_with_anchor_endcaps(line, start_pt, end_pt)
+        )
         metrics = _line_surface_metrics(
             anchored,
             drivezone=inputs.drivezone_zone_metric,
@@ -2023,6 +2262,9 @@ def build_production_working_segment(
                 "source_type": str(source_type),
                 "support_driven": bool(support_driven),
                 "preliminary_hint_used": bool(preliminary_hint_used),
+                "shape_mode": str(shape_mode),
+                "binding_ok": bool(binding_ok),
+                "binding_reason": str(binding_reason),
                 "surface_ok": bool(_production_surface_ok(metrics, params)),
                 "metrics": {
                     **dict(metrics),
@@ -2041,9 +2283,9 @@ def build_production_working_segment(
             }
         )
 
-    if support_line is not None and str(row.get("traj_support_type", "no_support")) != "no_support":
+    if support_candidate_line is not None and str(row.get("traj_support_type", "no_support")) != "no_support":
         _candidate_record(
-            support_line,
+            support_candidate_line,
             source_type=(
                 "support_arc_fused"
                 if arc_line is not None
@@ -2051,6 +2293,9 @@ def build_production_working_segment(
             ),
             support_driven=True,
             preliminary_hint_used=False,
+            shape_mode=support_geometry_mode,
+            binding_ok=bool(support_binding_ok),
+            binding_reason=str(support_binding_reason),
         )
     if arc_line is not None:
         _candidate_record(
@@ -2058,6 +2303,7 @@ def build_production_working_segment(
             source_type="topology_arc_anchored",
             support_driven=False,
             preliminary_hint_used=False,
+            shape_mode="topology_arc_endcaps",
         )
     if preliminary_line is not None:
         _candidate_record(
@@ -2065,6 +2311,7 @@ def build_production_working_segment(
             source_type="preliminary_hint_anchored",
             support_driven=False,
             preliminary_hint_used=True,
+            shape_mode="preliminary_hint_endcaps",
         )
     if not candidate_rows:
         raise ValueError(f"production_geometry_missing:{row.get('topology_arc_id', '')}")
@@ -2072,11 +2319,32 @@ def build_production_working_segment(
     support_candidate = next((item for item in candidate_rows if bool(item["support_driven"])), None)
     arc_candidate = next((item for item in candidate_rows if str(item["source_type"]) == "topology_arc_anchored"), None)
     preliminary_candidate = next((item for item in candidate_rows if bool(item["preliminary_hint_used"])), None)
+    weak_partial_support = bool(
+        support_candidate is not None
+        and str(row.get("traj_support_type", "")) == "partial_arc_support"
+        and not bool(row.get("support_full_xsec_crossing", False))
+    )
+    support_rejected_reason = ""
 
     chosen = None
     fallback_reason = ""
-    if support_candidate is not None and bool(support_candidate["surface_ok"]):
+    if support_candidate is not None and not bool(support_candidate.get("binding_ok", True)):
+        support_rejected_reason = str(support_candidate.get("binding_reason", "support_binding_rejected"))
+        if arc_candidate is not None:
+            chosen = arc_candidate
+            fallback_reason = f"{support_rejected_reason}_arc_fallback"
+        elif preliminary_candidate is not None:
+            chosen = preliminary_candidate
+            fallback_reason = f"{support_rejected_reason}_preliminary_hint_fallback"
+    elif support_candidate is not None and bool(support_candidate["surface_ok"]):
         chosen = support_candidate
+    elif weak_partial_support and arc_candidate is not None:
+        chosen = arc_candidate
+        fallback_reason = (
+            "weak_partial_support_surface_inconsistent_arc_fallback"
+            if support_candidate is not None
+            else "weak_partial_support_arc_fallback"
+        )
     elif arc_candidate is not None and bool(arc_candidate["surface_ok"]):
         chosen = arc_candidate
         fallback_reason = (
@@ -2092,22 +2360,31 @@ def build_production_working_segment(
             else "support_and_arc_surface_inconsistent_preliminary_hint_fallback"
         )
     else:
-        chosen = sorted(
+        ranked_candidates = sorted(
             candidate_rows,
             key=lambda item: (
                 int(bool(item["surface_ok"])),
+                int(bool(item.get("binding_ok", True))),
                 float(item["metrics"].get("drivezone_overlap_ratio", 0.0) or 0.0),
                 -float(item["metrics"].get("divstrip_overlap_ratio", 0.0) or 0.0),
                 float(item["metrics"].get("on_drivable_surface_ratio", 0.0) or 0.0),
             ),
             reverse=True,
-        )[0]
+        )
+        chosen = ranked_candidates[0]
+        if weak_partial_support and bool(chosen.get("support_driven", False)) and arc_candidate is not None:
+            chosen = arc_candidate
+            fallback_reason = "weak_partial_support_soft_failed_arc_fallback"
+        elif not bool(chosen.get("binding_ok", True)) and arc_candidate is not None and bool(chosen.get("support_driven", False)):
+            support_rejected_reason = str(chosen.get("binding_reason", "support_binding_rejected"))
+            chosen = arc_candidate
+            fallback_reason = f"{support_rejected_reason}_arc_soft_fallback"
         if bool(chosen["preliminary_hint_used"]):
-            fallback_reason = "no_surface_consistent_support_or_arc_preliminary_hint_used"
+            fallback_reason = fallback_reason or "no_surface_consistent_support_or_arc_preliminary_hint_used"
         elif bool(chosen["support_driven"]):
-            fallback_reason = "support_surface_soft_failed_but_best_available"
+            fallback_reason = fallback_reason or "support_surface_soft_failed_but_best_available"
         else:
-            fallback_reason = "support_surface_soft_failed_arc_fallback"
+            fallback_reason = fallback_reason or "support_surface_soft_failed_arc_fallback"
 
     support_ids = tuple(
         sorted(
@@ -2282,7 +2559,9 @@ def build_production_working_segment(
         support_provenance=(
             "none"
             if support_source_type == "none"
-            else f"{support_source_type}:{str(row.get('support_generation_reason', ''))}"
+            else (
+                f"{support_source_type}:{str(row.get('support_generation_reason', ''))}:{str(chosen.get('shape_mode', ''))}"
+            )
         ),
         anchor_provenance=f"src:{start_anchor_provenance}|dst:{end_anchor_provenance}",
         preliminary_hint_used=bool(chosen["preliminary_hint_used"]),
@@ -2297,6 +2576,13 @@ def build_production_working_segment(
         "production_support_driven": bool(chosen["support_driven"]),
         "production_preliminary_hint_used": bool(chosen["preliminary_hint_used"]),
         "production_geometry_fallback_reason": str(fallback_reason),
+        "production_support_binding_ok": bool(
+            True if support_candidate is None else support_candidate.get("binding_ok", True)
+        ),
+        "production_support_binding_reason": str(
+            "" if support_candidate is None else support_candidate.get("binding_reason", "")
+        ),
+        "production_support_geometry_mode": str(chosen.get("shape_mode", "")),
         "production_anchor_provenance": {
             "src": str(start_anchor_provenance),
             "dst": str(end_anchor_provenance),
@@ -2309,6 +2595,9 @@ def build_production_working_segment(
                     "source_type": str(item["source_type"]),
                     "support_driven": bool(item["support_driven"]),
                     "preliminary_hint_used": bool(item["preliminary_hint_used"]),
+                    "shape_mode": str(item.get("shape_mode", "")),
+                    "binding_ok": bool(item.get("binding_ok", True)),
+                    "binding_reason": str(item.get("binding_reason", "")),
                     "surface_ok": bool(item["surface_ok"]),
                     "metrics": dict(item["metrics"]),
                 }
@@ -2943,6 +3232,15 @@ def build_arc_evidence_attach(
             current["production_geometry_fallback_reason"] = str(
                 production_review.get("production_geometry_fallback_reason", "")
             )
+            current["production_support_binding_ok"] = bool(
+                production_review.get("production_support_binding_ok", True)
+            )
+            current["production_support_binding_reason"] = str(
+                production_review.get("production_support_binding_reason", "")
+            )
+            current["production_support_geometry_mode"] = str(
+                production_review.get("production_support_geometry_mode", "")
+            )
             current["production_anchor_provenance"] = dict(
                 production_review.get("production_anchor_provenance", {})
             )
@@ -2985,6 +3283,15 @@ def build_arc_evidence_attach(
                     ),
                     "production_geometry_fallback_reason": str(
                         current.get("production_geometry_fallback_reason", "")
+                    ),
+                    "production_support_binding_ok": bool(
+                        current.get("production_support_binding_ok", True)
+                    ),
+                    "production_support_binding_reason": str(
+                        current.get("production_support_binding_reason", "")
+                    ),
+                    "production_support_geometry_mode": str(
+                        current.get("production_support_geometry_mode", "")
                     ),
                     "production_anchor_provenance": dict(current.get("production_anchor_provenance", {})),
                     "production_support_provenance": str(current.get("production_support_provenance", "")),
@@ -3079,6 +3386,15 @@ def build_arc_evidence_attach(
                 ),
                 "production_geometry_fallback_reason": str(
                     current.get("production_geometry_fallback_reason", "")
+                ),
+                "production_support_binding_ok": bool(
+                    current.get("production_support_binding_ok", True)
+                ),
+                "production_support_binding_reason": str(
+                    current.get("production_support_binding_reason", "")
+                ),
+                "production_support_geometry_mode": str(
+                    current.get("production_support_geometry_mode", "")
                 ),
             }
         )
