@@ -1365,6 +1365,46 @@ def test_t05v2_unique_witness_based_full_pipeline(tmp_path: Path) -> None:
     assert "road_summary: built=1 failed=0" in summary
 
 
+def test_t05v2_geometry_refine_outputs_for_built_lane_boundary_case(tmp_path: Path) -> None:
+    patch_id = "geometry_refine_lane"
+    data_root = tmp_path / "data"
+    road_fc = _fc([_line_feature([(0.0, 0.0), (100.0, 0.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
+    lane_fc = _fc(
+        [
+            _line_feature([(0.0, -2.5), (100.0, -2.5)]),
+            _line_feature([(0.0, 2.5), (100.0, 2.5)]),
+        ],
+        "EPSG:3857",
+    )
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=_simple_intersections(),
+        drivezone_fc=_fc([_poly_feature([(-5.0, -4.0), (105.0, -4.0), (105.0, 4.0), (-5.0, 4.0)])], "EPSG:3857"),
+        traj_tracks=[[(0.0, 0.0), (20.0, 0.5), (50.0, 0.0), (80.0, -0.5), (100.0, 0.0)]],
+        lane_fc=lane_fc,
+        road_fc=road_fc,
+    )
+    out_root = tmp_path / "out"
+    run_full_pipeline(data_root=data_root, patch_id=patch_id, run_id="run_geom_refine", out_root=out_root)
+    patch_dir = out_root / "run_geom_refine" / "patches" / patch_id
+    review = _read_json(patch_dir / "geometry_refine_review.json")
+    core = _read_json(patch_dir / "geometry_refine_core_skeleton.geojson")
+    entry_exit = _read_json(patch_dir / "geometry_refine_entry_exit.geojson")
+    roads = _read_json(patch_dir / "Road.geojson")
+    step6 = _read_json(patch_dir / "step6" / "final_roads.json")
+
+    assert int(review["summary"]["road_count"]) == 1
+    assert int(review["summary"]["reviewed_count"]) == 1
+    assert bool(review["rows"][0]["lane_boundary_used"]) is True
+    assert review["rows"][0]["core_skeleton_source"] == "lane_boundary_centerline"
+    assert len(core["features"]) == 1
+    assert len(entry_exit["features"]) == 2
+    assert bool(roads["features"][0]["properties"]["geometry_refine_lane_boundary_used"]) is True
+    assert "geometry_refine_review" in step6
+    assert int(step6["geometry_refine_review"]["summary"]["reviewed_count"]) == 1
+
+
 def test_t05v2_prior_based_for_short_prior_segment(tmp_path: Path) -> None:
     patch_id = "prior_short"
     data_root = tmp_path / "data"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 from math import hypot
 from pathlib import Path
 from time import perf_counter
@@ -651,6 +652,485 @@ def shape_ref_line(
         if legacy_centerline is not None:
             return legacy_centerline, "witness_centerline"
     return _replace_endpoints(base_line, start_pt, end_pt), f"{mode}_slot_anchored"
+
+
+def _midpoint_between_points(point_a: Point, point_b: Point) -> Point:
+    return Point(
+        (float(point_a.x) + float(point_b.x)) / 2.0,
+        (float(point_a.y) + float(point_b.y)) / 2.0,
+    )
+
+
+def _sample_line_points(line: LineString, *, step_m: float) -> list[Point]:
+    if line.is_empty or float(line.length) <= 1e-6:
+        return []
+    sample_step = max(float(step_m), 2.0)
+    sample_count = max(5, int(float(line.length) / sample_step) + 1)
+    if sample_count <= 2:
+        sample_count = 3
+    return [line.interpolate(float(idx) / float(sample_count - 1), normalized=True) for idx in range(sample_count)]
+
+
+def _combine_line_parts(*parts: LineString | None) -> LineString | None:
+    coords: list[tuple[float, float]] = []
+    for line in parts:
+        if line is None or line.is_empty:
+            continue
+        for x, y, *_ in line.coords:
+            xy = (float(x), float(y))
+            if not coords or xy != coords[-1]:
+                coords.append(xy)
+    if len(coords) < 2:
+        return None
+    combined = LineString(coords)
+    if combined.is_empty or float(combined.length) <= 1e-6:
+        return None
+    return combined
+
+
+def _trim_line_middle(line: LineString, *, trim_frac: float) -> LineString | None:
+    if line.is_empty or float(line.length) <= 1e-6:
+        return None
+    frac = max(0.0, min(0.35, float(trim_frac)))
+    start_s = float(line.length) * frac
+    end_s = float(line.length) * (1.0 - frac)
+    if end_s - start_s <= 1e-6:
+        return line
+    middle = substring(line, start_s, end_s)
+    if isinstance(middle, Point):
+        return None
+    if not isinstance(middle, LineString) or middle.is_empty or float(middle.length) <= 1e-6:
+        return None
+    return middle
+
+
+def _smoothed_line(line: LineString, *, step_m: float) -> LineString | None:
+    points = _sample_line_points(line, step_m=step_m)
+    if len(points) < 5:
+        return None
+    coords = [(float(point.x), float(point.y)) for point in points]
+    smoothed: list[tuple[float, float]] = [coords[0]]
+    for idx in range(1, len(coords) - 1):
+        prev_x, prev_y = coords[idx - 1]
+        cur_x, cur_y = coords[idx]
+        next_x, next_y = coords[idx + 1]
+        smoothed.append(
+            (
+                float(prev_x * 0.25 + cur_x * 0.5 + next_x * 0.25),
+                float(prev_y * 0.25 + cur_y * 0.5 + next_y * 0.25),
+            )
+        )
+    smoothed.append(coords[-1])
+    line_smoothed = _line_from_coords(smoothed)
+    if line_smoothed is None:
+        return None
+    return line_smoothed
+
+
+def _lane_boundary_centerline_for_road(
+    *,
+    road_line: LineString,
+    lane_boundaries: tuple[LineString, ...],
+    safe_surface: Any | None,
+    params: dict[str, Any],
+) -> LineString | None:
+    if road_line.is_empty or float(road_line.length) <= 1e-6 or len(lane_boundaries) < 2:
+        return None
+    midpoint = road_line.interpolate(0.5, normalized=True)
+    search_m = float(params.get("GEOMETRY_REFINE_LANE_BOUNDARY_SEARCH_M", 12.0))
+    min_sep_m = float(params.get("GEOMETRY_REFINE_LANE_BOUNDARY_PAIR_MIN_SEP_M", 1.5))
+    max_sep_m = float(params.get("GEOMETRY_REFINE_LANE_BOUNDARY_PAIR_MAX_SEP_M", 18.0))
+    candidates: list[tuple[float, LineString]] = []
+    for boundary in lane_boundaries:
+        if boundary.is_empty or float(boundary.length) <= 1e-6:
+            continue
+        try:
+            boundary_point = nearest_points(boundary, midpoint)[0]
+        except Exception:
+            continue
+        distance = float(boundary_point.distance(midpoint))
+        if distance <= search_m:
+            candidates.append((distance, boundary))
+    if len(candidates) < 2:
+        return None
+    candidates.sort(key=lambda item: float(item[0]))
+    sample_points = _sample_line_points(road_line, step_m=float(params.get("GEOMETRY_REFINE_SMOOTH_SAMPLE_STEP_M", 8.0)))
+    best_line: LineString | None = None
+    best_score: tuple[float, float, float] | None = None
+    for idx in range(len(candidates)):
+        for jdx in range(idx + 1, len(candidates)):
+            boundary_a = candidates[idx][1]
+            boundary_b = candidates[jdx][1]
+            center_points: list[tuple[float, float]] = []
+            center_offsets: list[float] = []
+            separations: list[float] = []
+            valid_pair = True
+            for sample_point in sample_points:
+                try:
+                    point_a = nearest_points(boundary_a, sample_point)[0]
+                    point_b = nearest_points(boundary_b, sample_point)[0]
+                except Exception:
+                    valid_pair = False
+                    break
+                separation = float(point_a.distance(point_b))
+                if separation < min_sep_m or separation > max_sep_m:
+                    valid_pair = False
+                    break
+                center_point = _midpoint_between_points(point_a, point_b)
+                center_points.append((float(center_point.x), float(center_point.y)))
+                center_offsets.append(float(center_point.distance(sample_point)))
+                separations.append(separation)
+            if not valid_pair or len(center_points) < 3:
+                continue
+            center_line = _line_from_coords(center_points)
+            if center_line is None:
+                continue
+            if safe_surface is not None and not getattr(safe_surface, "is_empty", True):
+                if _line_overlap_ratio(center_line, safe_surface) < 0.75:
+                    continue
+            score = (
+                float(sum(center_offsets) / max(len(center_offsets), 1)),
+                float(sum(separations) / max(len(separations), 1)),
+                float(-center_line.length),
+            )
+            if best_score is None or score < best_score:
+                best_score = score
+                best_line = center_line
+    return best_line
+
+
+def _geometry_refine_candidate_ok(
+    *,
+    line: LineString,
+    inputs: Any,
+    divstrip_buffer: Any | None,
+    original_drivezone_ratio: float,
+    params: dict[str, Any],
+) -> tuple[bool, float, float, bool]:
+    pipeline = _pipeline()
+    drivezone_ratio = float(pipeline._drivezone_ratio(line, inputs.drivezone_zone_metric))
+    divstrip_overlap_ratio = float(_line_overlap_ratio(line, divstrip_buffer))
+    road_intersects_divstrip = bool(
+        divstrip_buffer is not None and (not divstrip_buffer.is_empty) and line.intersects(divstrip_buffer)
+    )
+    min_drivezone_ratio = max(
+        float(params.get("ROAD_MIN_DRIVEZONE_RATIO", 0.85)),
+        float(original_drivezone_ratio) - float(params.get("GEOMETRY_REFINE_MAX_DRIVEZONE_DROP", 0.03)),
+    )
+    return (
+        (not road_intersects_divstrip) and drivezone_ratio >= min_drivezone_ratio,
+        drivezone_ratio,
+        divstrip_overlap_ratio,
+        road_intersects_divstrip,
+    )
+
+
+def _refine_built_road_geometry(
+    *,
+    road: FinalRoad,
+    segment: Segment,
+    identity: CorridorIdentity,
+    witness: CorridorWitness | None,
+    src_slot: SlotInterval,
+    dst_slot: SlotInterval,
+    build_result: dict[str, Any],
+    inputs: Any,
+    prior_roads: list[Any],
+    params: dict[str, Any],
+    arc_row: dict[str, Any] | None = None,
+    prior_index: dict[tuple[int, int], list[Any]] | None = None,
+    divstrip_buffer: Any | None = None,
+) -> tuple[FinalRoad, dict[str, Any], tuple[LineString, dict[str, Any]] | None, list[tuple[LineString, dict[str, Any]]]]:
+    pipeline = _pipeline()
+    pair = pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid))
+    original_line = road.geometry_metric()
+    original_drivezone_ratio = float(pipeline._drivezone_ratio(original_line, inputs.drivezone_zone_metric))
+    safe_surface = _safe_surface(inputs, divstrip_buffer)
+    review = {
+        "pair": str(pair),
+        "segment_id": str(segment.segment_id),
+        "built_final_road": True,
+        "eligible": False,
+        "applied": False,
+        "skip_reason": "",
+        "core_skeleton_source": "",
+        "entry_anchor_source": f"slot_surface_anchor_{str(src_slot.method or 'unknown')}",
+        "exit_anchor_source": f"slot_surface_anchor_{str(dst_slot.method or 'unknown')}",
+        "smoothed": False,
+        "lane_boundary_used": False,
+        "support_trend_used": False,
+        "shape_ref_mode_before": str(build_result.get("shape_ref_mode", "")),
+        "road_drivezone_overlap_ratio_before": float(original_drivezone_ratio),
+        "road_drivezone_overlap_ratio_after": float(original_drivezone_ratio),
+        "road_divstrip_overlap_ratio_after": float(_line_overlap_ratio(original_line, divstrip_buffer)),
+    }
+    if src_slot.interval is None or dst_slot.interval is None:
+        review["skip_reason"] = "slot_unresolved"
+        return road, review, None, []
+    start_pt = _slot_surface_anchor_point(src_slot, original_line, safe_surface)
+    end_pt = _slot_surface_anchor_point(dst_slot, original_line, safe_surface)
+    lane_boundary_line = _lane_boundary_centerline_for_road(
+        road_line=original_line,
+        lane_boundaries=tuple(inputs.lane_boundaries_metric),
+        safe_surface=safe_surface,
+        params=params,
+    )
+    source_line: LineString | None = None
+    source_label = ""
+    if lane_boundary_line is not None:
+        source_line = _anchor_along_base_line(lane_boundary_line, start_pt, end_pt)
+        source_label = "lane_boundary_centerline"
+        review["lane_boundary_used"] = True
+    else:
+        trusted_support_ref = _trusted_support_shape_ref_line(
+            arc_row=arc_row,
+            start_pt=start_pt,
+            end_pt=end_pt,
+        )
+        if trusted_support_ref is not None:
+            source_line, source_label = trusted_support_ref
+            review["support_trend_used"] = True
+        elif str(identity.state) == "witness_based":
+            source_line = _witness_reference_projected_line(witness=witness, start_pt=start_pt, end_pt=end_pt)
+            source_label = "witness_reference_projected_anchored"
+            if source_line is None:
+                source_line = _legacy_witness_centerline(witness=witness, start_pt=start_pt, end_pt=end_pt)
+                source_label = "witness_centerline" if source_line is not None else ""
+        elif str(identity.state) == "prior_based":
+            prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
+            if prior_line is not None:
+                source_line = _anchor_along_base_line(prior_line, start_pt, end_pt)
+                source_label = "prior_reference_projected_anchored"
+        if source_line is None:
+            shape_ref_line = _line_from_coords(list(build_result.get("shape_ref_coords", [])))
+            if shape_ref_line is not None and not str(build_result.get("shape_ref_mode", "")).startswith("traj_support"):
+                source_line = _anchor_along_base_line(shape_ref_line, start_pt, end_pt)
+                source_label = "selected_shape_ref"
+    if source_line is None or source_line.is_empty or float(source_line.length) <= 1e-6:
+        review["skip_reason"] = "no_trusted_ref_source"
+        return road, review, None, []
+    support_dirty = str(build_result.get("shape_ref_mode", "")).startswith("traj_support") and not (
+        bool((arc_row or {}).get("selected_support_interval_reference_trusted", False))
+        or bool((arc_row or {}).get("stitched_support_interval_reference_trusted", False))
+    )
+    if support_dirty and not review["lane_boundary_used"]:
+        review["skip_reason"] = "support_reference_untrusted"
+        return road, review, None, []
+    review["eligible"] = True
+    review["core_skeleton_source"] = str(source_label)
+    source_line = _anchor_along_base_line(source_line, start_pt, end_pt)
+    core_line = _surface_envelope_core_line(source_line, safe_surface) or source_line
+    trimmed_core = _trim_line_middle(core_line, trim_frac=float(params.get("GEOMETRY_REFINE_CORE_TRIM_FRAC", 0.15)))
+    if trimmed_core is not None:
+        core_line = trimmed_core
+    core_start_s = float(source_line.project(Point(core_line.coords[0][:2]))) if not core_line.is_empty else 0.0
+    core_end_s = float(source_line.project(Point(core_line.coords[-1][:2]))) if not core_line.is_empty else float(source_line.length)
+    entry_line = substring(source_line, 0.0, core_start_s) if core_start_s > 1e-6 else _line_from_coords([(start_pt.x, start_pt.y), core_line.coords[0][:2]])
+    exit_line = (
+        substring(source_line, core_end_s, float(source_line.length))
+        if float(source_line.length) - core_end_s > 1e-6
+        else _line_from_coords([core_line.coords[-1][:2], (end_pt.x, end_pt.y)])
+    )
+    entry_line = entry_line if isinstance(entry_line, LineString) and not entry_line.is_empty else _line_from_coords([(start_pt.x, start_pt.y), core_line.coords[0][:2]])
+    exit_line = exit_line if isinstance(exit_line, LineString) and not exit_line.is_empty else _line_from_coords([core_line.coords[-1][:2], (end_pt.x, end_pt.y)])
+    refined_candidate = _combine_line_parts(entry_line, core_line, exit_line)
+    if refined_candidate is None:
+        review["skip_reason"] = "refine_candidate_missing"
+        return road, review, None, []
+    smoothed_candidate = _smoothed_line(
+        refined_candidate,
+        step_m=float(params.get("GEOMETRY_REFINE_SMOOTH_SAMPLE_STEP_M", 8.0)),
+    )
+    smoothed_candidate = _replace_endpoints(smoothed_candidate, start_pt, end_pt) if smoothed_candidate is not None else None
+    candidates: list[tuple[LineString, bool]] = []
+    if smoothed_candidate is not None:
+        candidates.append((smoothed_candidate, True))
+    candidates.append((refined_candidate, False))
+    selected_line = original_line
+    for candidate_line, smoothed in candidates:
+        ok, drivezone_ratio, divstrip_overlap_ratio, road_intersects_divstrip = _geometry_refine_candidate_ok(
+            line=candidate_line,
+            inputs=inputs,
+            divstrip_buffer=divstrip_buffer,
+            original_drivezone_ratio=original_drivezone_ratio,
+            params=params,
+        )
+        if not ok:
+            continue
+        selected_line = candidate_line
+        review["applied"] = not candidate_line.equals(original_line)
+        review["smoothed"] = bool(smoothed and review["applied"])
+        review["road_drivezone_overlap_ratio_after"] = float(drivezone_ratio)
+        review["road_divstrip_overlap_ratio_after"] = float(divstrip_overlap_ratio)
+        review["road_intersects_divstrip_after"] = bool(road_intersects_divstrip)
+        break
+    if not review["applied"]:
+        review["skip_reason"] = review["skip_reason"] or "kept_original_geometry"
+        review["road_drivezone_overlap_ratio_after"] = float(original_drivezone_ratio)
+        review["road_divstrip_overlap_ratio_after"] = float(_line_overlap_ratio(original_line, divstrip_buffer))
+        return road, review, (
+            core_line,
+            {
+                "pair": str(pair),
+                "segment_id": str(segment.segment_id),
+                "core_skeleton_source": str(source_label),
+                "lane_boundary_used": bool(review["lane_boundary_used"]),
+                "support_trend_used": bool(review["support_trend_used"]),
+                "smoothed": False,
+                "applied": False,
+            },
+        ), [
+            (
+                entry_line,
+                {
+                    "pair": str(pair),
+                    "segment_id": str(segment.segment_id),
+                    "role": "entry",
+                    "anchor_source": str(review["entry_anchor_source"]),
+                    "applied": False,
+                },
+            ),
+            (
+                exit_line,
+                {
+                    "pair": str(pair),
+                    "segment_id": str(segment.segment_id),
+                    "role": "exit",
+                    "anchor_source": str(review["exit_anchor_source"]),
+                    "applied": False,
+                },
+            ),
+        ]
+    refined_road = replace(
+        road,
+        line_coords=line_to_coords(selected_line),
+        length_m=float(selected_line.length),
+    )
+    core_feature = (
+        core_line,
+        {
+            "pair": str(pair),
+            "segment_id": str(segment.segment_id),
+            "core_skeleton_source": str(source_label),
+            "lane_boundary_used": bool(review["lane_boundary_used"]),
+            "support_trend_used": bool(review["support_trend_used"]),
+            "smoothed": bool(review["smoothed"]),
+            "applied": True,
+        },
+    )
+    entry_exit_features = [
+        (
+            entry_line,
+            {
+                "pair": str(pair),
+                "segment_id": str(segment.segment_id),
+                "role": "entry",
+                "anchor_source": str(review["entry_anchor_source"]),
+                "applied": True,
+            },
+        ),
+        (
+            exit_line,
+            {
+                "pair": str(pair),
+                "segment_id": str(segment.segment_id),
+                "role": "exit",
+                "anchor_source": str(review["exit_anchor_source"]),
+                "applied": True,
+            },
+        ),
+    ]
+    return refined_road, review, core_feature, entry_exit_features
+
+
+def _apply_geometry_refine(
+    *,
+    segments: list[Segment],
+    identities: dict[str, CorridorIdentity],
+    witnesses: dict[str, CorridorWitness],
+    slots: dict[str, dict[str, SlotInterval]],
+    roads: list[FinalRoad],
+    road_results: list[dict[str, Any]],
+    inputs: Any,
+    prior_roads: list[Any],
+    params: dict[str, Any],
+    full_registry_rows: list[dict[str, Any]] | None = None,
+    prior_index: dict[tuple[int, int], list[Any]] | None = None,
+    divstrip_buffer: Any | None = None,
+) -> tuple[list[FinalRoad], list[dict[str, Any]], list[tuple[LineString, dict[str, Any]]], list[tuple[LineString, dict[str, Any]]], dict[str, Any]]:
+    if not bool(params.get("GEOMETRY_REFINE_ENABLE", 1)):
+        return roads, road_results, [], [], {"rows": [], "summary": {"enable": False, "road_count": int(len(roads))}}
+    road_map = {str(road.segment_id): road for road in roads}
+    result_map = {str(item.get("segment_id", "")): dict(item) for item in road_results if str(item.get("segment_id", ""))}
+    registry_by_working_segment = {
+        str(item.get("working_segment_id", "")): dict(item)
+        for item in list(full_registry_rows or [])
+        if str(item.get("working_segment_id", ""))
+    }
+    registry_by_arc_id = {
+        str(item.get("topology_arc_id", "")): dict(item)
+        for item in list(full_registry_rows or [])
+        if str(item.get("topology_arc_id", ""))
+    }
+    refined_roads: list[FinalRoad] = []
+    core_features: list[tuple[LineString, dict[str, Any]]] = []
+    entry_exit_features: list[tuple[LineString, dict[str, Any]]] = []
+    review_rows: list[dict[str, Any]] = []
+    for segment in segments:
+        road = road_map.get(str(segment.segment_id))
+        if road is None:
+            continue
+        refined_road, review, core_feature, local_entry_exit = _refine_built_road_geometry(
+            road=road,
+            segment=segment,
+            identity=identities[str(segment.segment_id)],
+            witness=witnesses.get(str(segment.segment_id)),
+            src_slot=slots[str(segment.segment_id)]["src"],
+            dst_slot=slots[str(segment.segment_id)]["dst"],
+            build_result=result_map.get(str(segment.segment_id), {}),
+            inputs=inputs,
+            prior_roads=prior_roads,
+            params=params,
+            arc_row=registry_by_working_segment.get(str(segment.segment_id))
+            or registry_by_arc_id.get(str(segment.topology_arc_id))
+            or {},
+            prior_index=prior_index,
+            divstrip_buffer=divstrip_buffer,
+        )
+        result_map.setdefault(str(segment.segment_id), {})
+        result_map[str(segment.segment_id)].update(
+            {
+                "geometry_refine_eligible": bool(review["eligible"]),
+                "geometry_refine_applied": bool(review["applied"]),
+                "geometry_refine_skip_reason": str(review["skip_reason"]),
+                "geometry_refine_core_skeleton_source": str(review["core_skeleton_source"]),
+                "geometry_refine_entry_anchor_source": str(review["entry_anchor_source"]),
+                "geometry_refine_exit_anchor_source": str(review["exit_anchor_source"]),
+                "geometry_refine_smoothed": bool(review["smoothed"]),
+                "geometry_refine_lane_boundary_used": bool(review["lane_boundary_used"]),
+                "geometry_refine_support_trend_used": bool(review["support_trend_used"]),
+                "geometry_refine_drivezone_ratio_after": float(review["road_drivezone_overlap_ratio_after"]),
+                "geometry_refine_divstrip_overlap_ratio_after": float(review["road_divstrip_overlap_ratio_after"]),
+            }
+        )
+        refined_roads.append(refined_road)
+        review_rows.append(review)
+        if core_feature is not None:
+            core_features.append(core_feature)
+        entry_exit_features.extend(local_entry_exit)
+    summary = {
+        "enable": True,
+        "road_count": int(len(roads)),
+        "reviewed_count": int(len(review_rows)),
+        "eligible_count": int(sum(1 for row in review_rows if bool(row.get("eligible", False)))),
+        "applied_count": int(sum(1 for row in review_rows if bool(row.get("applied", False)))),
+        "smoothed_count": int(sum(1 for row in review_rows if bool(row.get("smoothed", False)))),
+        "lane_boundary_used_count": int(sum(1 for row in review_rows if bool(row.get("lane_boundary_used", False)))),
+        "support_trend_used_count": int(sum(1 for row in review_rows if bool(row.get("support_trend_used", False)))),
+        "skip_reason_hist": dict(Counter(str(row.get("skip_reason", "") or "-") for row in review_rows if str(row.get("skip_reason", "") or "-") != "-")),
+    }
+    ordered_results = [result_map[str(item.get("segment_id", ""))] for item in road_results if str(item.get("segment_id", "")) in result_map]
+    return refined_roads, ordered_results, core_features, entry_exit_features, {"rows": review_rows, "summary": summary}
 
 
 def build_slot(
@@ -1308,12 +1788,18 @@ def write_road_outputs(
     legal_arc_funnel_seed: dict[str, Any] | None = None,
     arc_evidence_attach_audit: list[dict[str, Any]] | None = None,
     params: dict[str, Any] | None = None,
+    geometry_refine_review: dict[str, Any] | None = None,
+    geometry_refine_core_features: list[tuple[LineString, dict[str, Any]]] | None = None,
+    geometry_refine_entry_exit_features: list[tuple[LineString, dict[str, Any]]] | None = None,
 ) -> None:
     pipeline = _pipeline()
     patch_geometry_cache = build_patch_geometry_cache(inputs, params or pipeline.DEFAULT_PARAMS)
     divstrip_buffer = patch_geometry_cache.get("divstrip_buffer")
     patch_dir = pipeline.patch_root(out_root, run_id, patch_id)
     dbg_dir = pipeline.debug_dir(out_root, run_id, patch_id)
+    geometry_refine_review = dict(geometry_refine_review or {"rows": [], "summary": {}})
+    geometry_refine_core_features = list(geometry_refine_core_features or [])
+    geometry_refine_entry_exit_features = list(geometry_refine_entry_exit_features or [])
     road_features: list[tuple[LineString, dict[str, Any]]] = []
     shape_ref_features: list[tuple[LineString, dict[str, Any]]] = []
     metrics_segments: list[dict[str, Any]] = []
@@ -1427,6 +1913,11 @@ def write_road_outputs(
                         "bridge_diagnostic_reason": str(segment.bridge_diagnostic_reason),
                         "bridge_decision_stage": str(build_result.get("bridge_decision_stage", segment.bridge_decision_stage)),
                         "bridge_decision_reason": str(build_result.get("bridge_decision_reason", segment.bridge_decision_reason)),
+                        "geometry_refine_applied": bool(build_result.get("geometry_refine_applied", False)),
+                        "geometry_refine_smoothed": bool(build_result.get("geometry_refine_smoothed", False)),
+                        "geometry_refine_core_skeleton_source": str(build_result.get("geometry_refine_core_skeleton_source", "")),
+                        "geometry_refine_lane_boundary_used": bool(build_result.get("geometry_refine_lane_boundary_used", False)),
+                        "geometry_refine_support_trend_used": bool(build_result.get("geometry_refine_support_trend_used", False)),
                         "failure_classification": "built",
                     },
                 )
@@ -1467,6 +1958,9 @@ def write_road_outputs(
                 "bridge_diagnostic_reason": str(segment.bridge_diagnostic_reason),
                 "bridge_decision_stage": str(build_result.get("bridge_decision_stage", segment.bridge_decision_stage)),
                 "bridge_decision_reason": str(build_result.get("bridge_decision_reason", segment.bridge_decision_reason)),
+                "geometry_refine_applied": bool(build_result.get("geometry_refine_applied", False)),
+                "geometry_refine_smoothed": bool(build_result.get("geometry_refine_smoothed", False)),
+                "geometry_refine_core_skeleton_source": str(build_result.get("geometry_refine_core_skeleton_source", "")),
                 "failure_classification": str(failure_classification),
             }
         )
@@ -1524,6 +2018,11 @@ def write_road_outputs(
             "bridge_decision_stage": str(build_result.get("bridge_decision_stage", segment.bridge_decision_stage)),
             "bridge_decision_reason": str(build_result.get("bridge_decision_reason", segment.bridge_decision_reason)),
             "reject_stage": str(build_result.get("reject_stage", "")),
+            "geometry_refine_applied": bool(build_result.get("geometry_refine_applied", False)),
+            "geometry_refine_smoothed": bool(build_result.get("geometry_refine_smoothed", False)),
+            "geometry_refine_core_skeleton_source": str(build_result.get("geometry_refine_core_skeleton_source", "")),
+            "geometry_refine_lane_boundary_used": bool(build_result.get("geometry_refine_lane_boundary_used", False)),
+            "geometry_refine_support_trend_used": bool(build_result.get("geometry_refine_support_trend_used", False)),
             "failure_classification": str(failure_classification),
         }
         metrics_segments.append(metrics_entry)
@@ -1768,11 +2267,17 @@ def write_road_outputs(
             )
         )
     write_lines_geojson(patch_dir / "Road.geojson", road_features)
+    write_lines_geojson(patch_dir / "geometry_refine_core_skeleton.geojson", geometry_refine_core_features)
+    write_lines_geojson(patch_dir / "geometry_refine_entry_exit.geojson", geometry_refine_entry_exit_features)
     write_json(patch_dir / "metrics.json", metrics)
     write_json(patch_dir / "gate.json", gate)
+    write_json(patch_dir / "geometry_refine_review.json", geometry_refine_review)
     (patch_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
     write_lines_geojson(dbg_dir / "shape_ref_line.geojson", shape_ref_features)
     write_lines_geojson(dbg_dir / "road_final.geojson", road_features)
+    write_lines_geojson(dbg_dir / "geometry_refine_core_skeleton.geojson", geometry_refine_core_features)
+    write_lines_geojson(dbg_dir / "geometry_refine_entry_exit.geojson", geometry_refine_entry_exit_features)
+    write_json(dbg_dir / "geometry_refine_review.json", geometry_refine_review)
     write_json(
         dbg_dir / "reason_trace.json",
         {
@@ -1989,9 +2494,24 @@ def run_build_road_stage(
         road_results.append(dict(build_meta))
         if road is not None:
             roads.append(road)
+    roads, road_results, geometry_refine_core_features, geometry_refine_entry_exit_features, geometry_refine_review = _apply_geometry_refine(
+        segments=segments,
+        identities=identities,
+        witnesses=witnesses,
+        slots=slot_map,
+        roads=roads,
+        road_results=road_results,
+        inputs=inputs,
+        prior_roads=prior_roads,
+        params=params,
+        full_registry_rows=full_registry_rows,
+        prior_index=prior_index,
+        divstrip_buffer=patch_geometry_cache.get("divstrip_buffer"),
+    )
     artifact = {
         "roads": [road.to_dict() for road in roads],
         "road_results": road_results,
+        "geometry_refine_review": geometry_refine_review,
         "runtime": {"stage_runtime_ms": float((perf_counter() - stage_started) * 1000.0)},
     }
     write_json(pipeline._artifact_path(out_root, run_id, patch_id, "step6_build_road"), artifact)
@@ -2011,6 +2531,9 @@ def run_build_road_stage(
         legal_arc_funnel_seed=legal_arc_funnel_seed,
         arc_evidence_attach_audit=arc_evidence_attach_audit,
         params=params,
+        geometry_refine_review=geometry_refine_review,
+        geometry_refine_core_features=geometry_refine_core_features,
+        geometry_refine_entry_exit_features=geometry_refine_entry_exit_features,
     )
     return {
         "artifact": artifact,
