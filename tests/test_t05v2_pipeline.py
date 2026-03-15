@@ -2433,6 +2433,130 @@ def test_t05v2_build_final_road_uses_rcsdroad_trend_extension_as_last_fallback()
     assert float(result["drivezone_ratio"]) >= 0.98
 
 
+def test_t05v2_build_final_road_prefers_partial_support_trend_extension_for_gap_case() -> None:
+    segment = Segment(
+        segment_id="seg_gap_support_trend",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 6.0), (50.0, 6.0), (100.0, 6.0)),
+        candidate_ids=("cand_gap",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_gap",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=True,
+        formation_reason="arc_first_partial_support",
+        length_m=100.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_gap_support",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        topology_gap_decision="gap_enter_mainflow",
+        topology_gap_reason="gap_should_enter_mainflow",
+        same_pair_rank=1,
+        kept_reason="",
+    )
+    witness = CorridorWitness(
+        segment_id="seg_gap_support_trend",
+        status="selected",
+        reason="witness_interval_selected",
+        line_coords=((0.0, 10.0), (100.0, 10.0)),
+        sample_s_norm=0.5,
+        intervals=tuple(),
+        selected_interval_rank=None,
+        selected_interval_start_s=None,
+        selected_interval_end_s=None,
+        exclusive_interval=True,
+        stability_score=1.0,
+        neighbor_match_count=1,
+        axis_vector=(0.0, 1.0),
+    )
+    identity = CorridorIdentity(
+        segment_id="seg_gap_support_trend",
+        state="witness_based",
+        reason="witness_selected",
+        risk_flags=tuple(),
+        witness_interval_rank=None,
+        prior_supported=False,
+    )
+    src_slot = SlotInterval(
+        segment_id="seg_gap_support_trend",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, 0.0), (0.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=0.0,
+            end_s=10.0,
+            center_s=5.0,
+            length_m=10.0,
+            rank=0,
+            geometry_coords=((0.0, 0.0), (0.0, 10.0)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    dst_slot = SlotInterval(
+        segment_id="seg_gap_support_trend",
+        endpoint_tag="dst",
+        xsec_nodeid=20,
+        xsec_coords=((100.0, 0.0), (100.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=0.0,
+            end_s=10.0,
+            center_s=5.0,
+            length_m=10.0,
+            rank=0,
+            geometry_coords=((100.0, 0.0), (100.0, 10.0)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    support_reference = [[10.0, 4.8], [50.0, 5.0], [90.0, 5.2]]
+    safe_surface = Polygon([(-5.0, 4.4), (105.0, 4.4), (105.0, 5.6), (-5.0, 5.6)])
+    inputs = PatchInputs(
+        patch_id="gap_support_trend_case",
+        patch_dir=Path("gap_support_trend_case"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=safe_surface,
+        divstrip_zone_metric=Polygon(),
+        road_prior_path=None,
+        input_summary={},
+    )
+    road, result = _build_final_road(
+        patch_id="gap_support_trend_case",
+        segment=segment,
+        identity=identity,
+        witness=witness,
+        src_slot=src_slot,
+        dst_slot=dst_slot,
+        inputs=inputs,
+        prior_roads=[],
+        params=dict(DEFAULT_PARAMS),
+        arc_row={
+            "traj_support_type": "partial_arc_support",
+            "support_full_xsec_crossing": False,
+            "support_reference_coords": support_reference,
+        },
+    )
+
+    assert road is not None
+    assert result["reason"] == "built"
+    assert str(result["shape_ref_mode"]).startswith("traj_support_trend_extended")
+
+
 def test_t05v2_build_final_road_allows_same_pair_multi_arc_with_side_constrained_candidate() -> None:
     segment = Segment(
         segment_id="seg_multi_arc",

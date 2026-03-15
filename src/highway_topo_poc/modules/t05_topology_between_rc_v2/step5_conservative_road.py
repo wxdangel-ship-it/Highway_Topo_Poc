@@ -843,10 +843,49 @@ def build_final_road(
         )
     support_reference_line = _line_from_coords(list((arc_row or {}).get("support_reference_coords", [])))
     if support_reference_line is not None:
+        prefer_support_trend_extension = (
+            str(getattr(segment, "topology_gap_decision", "")) == "gap_enter_mainflow"
+            and str((arc_row or {}).get("traj_support_type", "")) == "partial_arc_support"
+            and not bool((arc_row or {}).get("support_full_xsec_crossing", False))
+        )
+        support_trend_safe = _rcsdroad_trend_extended_candidate_line(
+            support_reference_line,
+            src_slot,
+            dst_slot,
+            safe_surface=safe_surface,
+            use_safe_core=True,
+        )
+        _append_candidate_line(
+            candidate_lines,
+            support_trend_safe,
+            "traj_support_trend_extended_safe_envelope",
+            priority=bool(prefer_support_trend_extension),
+        )
+        support_trend = _rcsdroad_trend_extended_candidate_line(
+            support_reference_line,
+            src_slot,
+            dst_slot,
+            safe_surface=safe_surface,
+            use_safe_core=False,
+        )
+        _append_candidate_line(
+            candidate_lines,
+            support_trend,
+            "traj_support_trend_extended",
+            priority=bool(prefer_support_trend_extension),
+        )
         support_anchor = _anchor_along_base_line(support_reference_line, start_pt, end_pt)
-        _append_candidate_line(candidate_lines, support_anchor, "traj_support_slot_anchored")
+        _append_candidate_line(
+            candidate_lines,
+            support_anchor,
+            "traj_support_slot_anchored",
+        )
         support_envelope = _surface_envelope_candidate_line(support_anchor, src_slot, dst_slot, safe_surface)
-        _append_candidate_line(candidate_lines, support_envelope, "traj_support_slot_anchored_safe_envelope")
+        _append_candidate_line(
+            candidate_lines,
+            support_envelope,
+            "traj_support_slot_anchored_safe_envelope",
+        )
         _append_side_constrained_candidates(
             candidate_lines,
             support_anchor,
