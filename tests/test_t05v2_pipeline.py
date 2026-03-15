@@ -1528,20 +1528,41 @@ def test_t05v2_geometry_refine_outputs_for_built_lane_boundary_case(tmp_path: Pa
     run_full_pipeline(data_root=data_root, patch_id=patch_id, run_id="run_geom_refine", out_root=out_root)
     patch_dir = out_root / "run_geom_refine" / "patches" / patch_id
     review = _read_json(patch_dir / "geometry_refine_review.json")
-    core = _read_json(patch_dir / "geometry_refine_core_skeleton.geojson")
-    entry_exit = _read_json(patch_dir / "geometry_refine_entry_exit.geojson")
+    traj_core = _read_json(patch_dir / "traj_guided_core_line.geojson")
+    core = _read_json(patch_dir / "trusted_core_skeleton.geojson")
+    anchor_points = _read_json(patch_dir / "xsec_anchor_points.geojson")
+    entry_exit = _read_json(patch_dir / "entry_exit_segments.geojson")
+    safe_envelope = _read_json(patch_dir / "safe_envelope_polygon.geojson")
+    refined = _read_json(patch_dir / "refined_final_road.geojson")
     roads = _read_json(patch_dir / "Road.geojson")
     step6 = _read_json(patch_dir / "step6" / "final_roads.json")
 
     assert int(review["summary"]["road_count"]) == 1
     assert int(review["summary"]["reviewed_count"]) == 1
-    assert bool(review["rows"][0]["lane_boundary_used"]) is True
-    assert review["rows"][0]["core_skeleton_source"] == "lane_boundary_centerline"
+    assert "built_source_road_id" in review["rows"][0]
+    assert "before_length" in review["rows"][0]
+    assert "after_length" in review["rows"][0]
+    assert "before_drivezone_overlap_ratio" in review["rows"][0]
+    assert "after_drivezone_overlap_ratio" in review["rows"][0]
+    assert bool(review["rows"][0]["safe_envelope_applied"]) is True
+    assert review["rows"][0]["core_skeleton_source"] in {
+        "traj_guided",
+        "lane_boundary_guided",
+        "witness_guided",
+        "prior_guided",
+        "reference_guided",
+    }
+    assert review["rows"][0]["entry_anchor_source"] != ""
+    assert review["rows"][0]["exit_anchor_source"] != ""
+    assert "features" in traj_core
     assert len(core["features"]) == 1
+    assert len(anchor_points["features"]) == 2
     assert len(entry_exit["features"]) == 2
-    assert review["rows"][0]["entry_anchor_source"].startswith("slot_surface_midpoint_")
-    assert review["rows"][0]["exit_anchor_source"].startswith("slot_surface_midpoint_")
+    assert len(safe_envelope["features"]) == 1
+    assert len(refined["features"]) == 1
     assert bool(roads["features"][0]["properties"]["geometry_refine_lane_boundary_used"]) is True
+    assert "geometry_refine_traj_guided_used" in roads["features"][0]["properties"]
+    assert "geometry_refine_safe_envelope_applied" in roads["features"][0]["properties"]
     assert "geometry_refine_review" in step6
     assert int(step6["geometry_refine_review"]["summary"]["reviewed_count"]) == 1
 
@@ -1587,6 +1608,12 @@ def test_t05v2_geometry_refine_connector_curve_bends_smoothly() -> None:
     coords = list(connector.coords)
     assert len(coords) >= 6
     assert max(float(y) for _, y in coords[1:-1]) > 0.5
+
+
+def test_t05v2_geometry_refine_source_family_prefers_traj_guided() -> None:
+    assert _step5_road._geometry_refine_source_family("selected_support_reference_projected_anchored") == "traj_guided"
+    assert _step5_road._geometry_refine_source_family("stitched_support_reference_projected_anchored") == "traj_guided"
+    assert _step5_road._geometry_refine_source_family("lane_boundary_centerline") == "lane_boundary_guided"
 
 
 def test_t05v2_prior_based_for_short_prior_segment(tmp_path: Path) -> None:
