@@ -162,6 +162,8 @@ def _patch_rows(run_dir: Path, patch_id: str) -> list[dict[str, Any]]:
                 "final_road_source_family": str(step5.get("shape_ref_source_family", "")),
                 "shape_ref_mode": str(step5.get("shape_ref_mode", "")),
                 "step5_endpoint_anchor_policy": str(step5.get("step5_endpoint_anchor_policy", "")),
+                "step5_support_candidate_policy": str(step5.get("step5_support_candidate_policy", "")),
+                "step5_rcsdroad_fallback_applied": bool(step5.get("step5_rcsdroad_fallback_applied", False)),
                 "production_geometry_fallback_reason": str(
                     prod.get("production_geometry_fallback_reason")
                     or registry.get("production_geometry_fallback_reason")

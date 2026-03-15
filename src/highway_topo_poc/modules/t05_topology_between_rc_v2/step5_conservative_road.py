@@ -695,6 +695,29 @@ def _segment_prefers_production_shape_ref(segment: Segment) -> bool:
     ) == "step3_production_working_segment"
 
 
+def _support_candidate_policy(segment: Segment) -> str:
+    if not _segment_prefers_production_shape_ref(segment):
+        return "allowed"
+    fallback_reason = str(getattr(segment, "geometry_fallback_reason", "") or "")
+    if not fallback_reason:
+        return "allowed"
+    if (
+        str(getattr(segment, "geometry_source_type", "")) != "support_arc_fused"
+        and (
+            "arc_fallback" in fallback_reason
+            or "support_" in fallback_reason
+            or "shared_xsec" in fallback_reason
+            or "weak_partial_support" in fallback_reason
+        )
+    ):
+        return "suppressed_after_step3_arc_fallback"
+    return "allowed"
+
+
+def _allow_support_reference_candidates(segment: Segment) -> bool:
+    return str(_support_candidate_policy(segment)) == "allowed"
+
+
 def _project_anchor_s_on_xsec(xsec_line: LineString, anchor_coords: list[float] | tuple[float, float] | None) -> float | None:
     if anchor_coords is None or len(anchor_coords) < 2 or xsec_line.is_empty or float(xsec_line.length) <= 1e-6:
         return None
@@ -2303,6 +2326,8 @@ def build_final_road(
         "topology_gap_reason": str(segment.topology_gap_reason),
         "reject_stage": "",
         "endpoint_anchor_policy": "slot_interval_surface",
+        "support_candidate_policy": str(_support_candidate_policy(segment)),
+        "rcsdroad_fallback_applied": False,
     }
     final_gate_reason = ""
     has_topology_assignment = bool(
@@ -2391,7 +2416,7 @@ def build_final_road(
             end_pt=end_pt,
         )
     support_reference_line = _line_from_coords(list((arc_row or {}).get("support_reference_coords", [])))
-    if support_reference_line is not None:
+    if support_reference_line is not None and bool(_allow_support_reference_candidates(segment)):
         prefer_support_trend_extension = (
             str(getattr(segment, "topology_gap_decision", "")) == "gap_enter_mainflow"
             and str((arc_row or {}).get("traj_support_type", "")) == "partial_arc_support"
@@ -2622,6 +2647,7 @@ def build_final_road(
     attempts: list[dict[str, Any]] = []
     selected_candidate: tuple[LineString, str, float, float, bool] | None = None
     best_candidate: tuple[LineString, str, float, float, bool] | None = None
+    rcsdroad_fallback_candidate: tuple[LineString, str, float, float, bool] | None = None
     attempted_side_constrained = False
     relaxed_small_gap_modes = {
         "traj_support_trend_extended_safe_envelope",
@@ -2661,6 +2687,24 @@ def build_final_road(
             float(best_candidate[2]),
         ):
             best_candidate = candidate
+        if (
+            str(mode).startswith("rcsdroad_trend_extended")
+            and not road_intersects_divstrip
+            and float(drivezone_ratio) >= float(
+                params.get(
+                    "ROAD_RCSDROAD_FALLBACK_MIN_DRIVEZONE_RATIO",
+                    params.get("ROAD_SMALL_GAP_RELAXED_DRIVEZONE_RATIO", 0.65),
+                )
+            )
+        ):
+            if rcsdroad_fallback_candidate is None or (
+                float(drivezone_ratio),
+                float(-divstrip_overlap_ratio),
+            ) > (
+                float(rcsdroad_fallback_candidate[2]),
+                float(-rcsdroad_fallback_candidate[3]),
+            ):
+                rcsdroad_fallback_candidate = candidate
         min_drivezone_ratio = float(params["ROAD_MIN_DRIVEZONE_RATIO"])
         if (
             str(getattr(segment, "topology_gap_reason", "")) == "gap_small_terminal_gap_candidate"
@@ -2674,6 +2718,9 @@ def build_final_road(
         if drivezone_ratio >= float(min_drivezone_ratio) and not road_intersects_divstrip:
             selected_candidate = candidate
             break
+    if selected_candidate is None and rcsdroad_fallback_candidate is not None:
+        selected_candidate = rcsdroad_fallback_candidate
+        result["rcsdroad_fallback_applied"] = True
     chosen_line, chosen_mode, drivezone_ratio, divstrip_overlap_ratio, road_intersects_divstrip = selected_candidate or best_candidate or (
         preferred_line,
         str(preferred_mode),
@@ -3174,6 +3221,8 @@ def write_road_outputs(
                     )
                 ),
                 "step5_endpoint_anchor_policy": str(build_result.get("endpoint_anchor_policy", "")),
+                "step5_support_candidate_policy": str(build_result.get("support_candidate_policy", "")),
+                "step5_rcsdroad_fallback_applied": bool(build_result.get("rcsdroad_fallback_applied", False)),
                 "built_final_road": bool(road is not None),
                 "final_reason": str(build_result.get("reason", "")),
                 "same_pair_arc_finalize_allowed": bool(
