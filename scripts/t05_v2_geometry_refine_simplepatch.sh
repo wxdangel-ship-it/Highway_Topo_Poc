@@ -29,7 +29,7 @@ if [ -z "$DATA_ROOT" ] || [ -z "$RUN_ID" ]; then
 fi
 
 if [ -z "$BUNDLE_OUT" ]; then
-  BUNDLE_OUT="$REPO_ROOT/outputs/_work/t05_v2_geometry_refine_simplepatch_$(date +%Y%m%d_%H%M%S)"
+  BUNDLE_OUT="$REPO_ROOT/outputs/_work/t05_v2_geometry_refine_v2_simplepatch_$(date +%Y%m%d_%H%M%S)"
 fi
 
 export PYTHONPATH="$REPO_ROOT/src"

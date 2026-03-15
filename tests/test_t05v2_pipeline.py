@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import warnings
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
@@ -1545,6 +1546,11 @@ def test_t05v2_geometry_refine_outputs_for_built_lane_boundary_case(tmp_path: Pa
     assert "before_drivezone_overlap_ratio" in review["rows"][0]
     assert "after_drivezone_overlap_ratio" in review["rows"][0]
     assert bool(review["rows"][0]["safe_envelope_applied"]) is True
+    assert "entry_midpoint_fallback_used" in review["rows"][0]
+    assert "exit_midpoint_fallback_used" in review["rows"][0]
+    assert "lane_boundary_quality_score" in review["rows"][0]
+    assert "safe_envelope_source" in review["rows"][0]
+    assert "candidate_total_score" in review["rows"][0]
     assert review["rows"][0]["core_skeleton_source"] in {
         "traj_guided",
         "lane_boundary_guided",
@@ -1593,6 +1599,44 @@ def test_t05v2_geometry_refine_mid_anchor_uses_interval_midpoint() -> None:
     assert anchor.distance(Point(0.0, 0.0)) <= 1e-6
 
 
+def test_t05v2_geometry_refine_anchor_prefers_traj_crossing_over_midpoint() -> None:
+    slot = SlotInterval(
+        segment_id="seg_crossing_anchor",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, -8.0), (0.0, 8.0)),
+        interval=CorridorInterval(
+            start_s=0.0,
+            end_s=8.0,
+            center_s=4.0,
+            length_m=8.0,
+            rank=0,
+            geometry_coords=((0.0, -4.0), (0.0, 4.0)),
+        ),
+        resolved=True,
+        method="rank",
+        reason="synthetic",
+        interval_count=1,
+    )
+    safe_surface = Polygon([(-1.0, -5.0), (1.0, -5.0), (1.0, 5.0), (-1.0, 5.0)])
+    source_line = LineString([(-6.0, -3.6), (10.0, -3.5)])
+
+    anchor, info = _step5_road._select_refine_anchor_point(
+        slot=slot,
+        safe_surface=safe_surface,
+        arc_row={},
+        source_line=source_line,
+        source_family="traj_guided",
+        endpoint_tag="src",
+        witness=None,
+        params=dict(DEFAULT_PARAMS),
+    )
+
+    assert float(anchor.y) < -3.0
+    assert info["anchor_source"] == "traj_crossing"
+    assert bool(info["anchor_midpoint_fallback_used"]) is False
+
+
 def test_t05v2_geometry_refine_connector_curve_bends_smoothly() -> None:
     connector = _step5_road._curve_connector_line(
         Point(0.0, 0.0),
@@ -1608,6 +1652,58 @@ def test_t05v2_geometry_refine_connector_curve_bends_smoothly() -> None:
     coords = list(connector.coords)
     assert len(coords) >= 6
     assert max(float(y) for _, y in coords[1:-1]) > 0.5
+
+
+def test_t05v2_geometry_refine_candidate_metrics_allow_small_drivezone_drop_for_better_geometry() -> None:
+    params = dict(DEFAULT_PARAMS)
+    inputs = SimpleNamespace(
+        drivezone_zone_metric=Polygon([(0.0, -2.0), (12.0, -2.0), (12.0, 2.0), (0.0, 2.0)]),
+    )
+    source_line = LineString([(0.0, 0.0), (12.0, 0.0)])
+    lane_boundary_line = LineString([(0.0, 0.2), (12.0, 0.2)])
+    original_line = LineString([(0.0, -1.7), (6.0, -1.6), (12.0, -1.7)])
+    refined_line = LineString([(0.0, 0.0), (4.0, 0.1), (8.0, 0.05), (12.0, 0.0)])
+    start_pt = Point(0.0, 0.0)
+    end_pt = Point(12.0, 0.0)
+
+    original = _step5_road._geometry_refine_candidate_metrics(
+        line=original_line,
+        start_anchor=start_pt,
+        end_anchor=end_pt,
+        entry_anchor_confidence=0.95,
+        exit_anchor_confidence=0.95,
+        source_line=source_line,
+        lane_boundary_line=lane_boundary_line,
+        inputs=inputs,
+        divstrip_buffer=None,
+        params=params,
+    )
+    refined = _step5_road._geometry_refine_candidate_metrics(
+        line=refined_line,
+        start_anchor=start_pt,
+        end_anchor=end_pt,
+        entry_anchor_confidence=0.95,
+        exit_anchor_confidence=0.95,
+        source_line=source_line,
+        lane_boundary_line=lane_boundary_line,
+        inputs=inputs,
+        divstrip_buffer=None,
+        params=params,
+    )
+
+    assert bool(refined["ok"]) is True
+    assert float(refined["candidate_drivezone_score"]) > 0.9
+    assert float(refined["candidate_total_score"]) > float(original["candidate_total_score"])
+    assert float(refined["candidate_centering_score"]) > float(original["candidate_centering_score"])
+
+
+def test_t05v2_geometry_refine_finite_guard_avoids_runtime_warning() -> None:
+    xsec_line = LineString([(0.0, -4.0), (0.0, 4.0)])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("error", RuntimeWarning)
+        value = _step5_road._project_anchor_s_on_xsec(xsec_line, (float("nan"), 0.0))
+    assert value is None
+    assert caught == []
 
 
 def test_t05v2_geometry_refine_source_family_prefers_traj_guided() -> None:

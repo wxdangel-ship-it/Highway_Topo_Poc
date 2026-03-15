@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import replace
-from math import hypot
+from math import atan2, hypot, isfinite
 from pathlib import Path
 from time import perf_counter
 from typing import Any
+import warnings
 
 from shapely.geometry import LineString, Point
 from shapely.ops import nearest_points, substring, unary_union
@@ -47,7 +48,10 @@ def _line_from_coords(coords: list[list[float]] | tuple[tuple[float, float], ...
     pts = tuple(
         (float(item[0]), float(item[1]))
         for item in coords
-        if isinstance(item, (list, tuple)) and len(item) >= 2
+        if isinstance(item, (list, tuple))
+        and len(item) >= 2
+        and isfinite(float(item[0]))
+        and isfinite(float(item[1]))
     )
     if len(pts) < 2:
         return None
@@ -57,11 +61,150 @@ def _line_from_coords(coords: list[list[float]] | tuple[tuple[float, float], ...
     return line
 
 
+def _point_is_finite(point: Any) -> bool:
+    return (
+        isinstance(point, Point)
+        and not point.is_empty
+        and isfinite(float(point.x))
+        and isfinite(float(point.y))
+    )
+
+
+def _line_is_usable(line: Any) -> bool:
+    return isinstance(line, LineString) and not line.is_empty and isfinite(float(line.length)) and float(line.length) > 1e-6
+
+
+def _safe_line_project(line: LineString, point: Point) -> float | None:
+    if not _line_is_usable(line) or not _point_is_finite(point):
+        return None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        try:
+            value = float(line.project(point))
+        except Exception:
+            return None
+    return value if isfinite(value) else None
+
+
+def _safe_line_interpolate(line: LineString, distance: float, *, normalized: bool = False) -> Point | None:
+    if not _line_is_usable(line) or not isfinite(float(distance)):
+        return None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        try:
+            point = line.interpolate(float(distance), normalized=bool(normalized))
+        except Exception:
+            return None
+    return point if _point_is_finite(point) else None
+
+
+def _safe_nearest_points(geometry_a: Any, geometry_b: Any) -> tuple[Point, Point] | None:
+    if geometry_a is None or geometry_b is None:
+        return None
+    if getattr(geometry_a, "is_empty", True) or getattr(geometry_b, "is_empty", True):
+        return None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        try:
+            point_a, point_b = nearest_points(geometry_a, geometry_b)
+        except Exception:
+            return None
+    if not _point_is_finite(point_a) or not _point_is_finite(point_b):
+        return None
+    return point_a, point_b
+
+
+def _safe_point_from_coords(anchor_coords: list[float] | tuple[float, float] | None) -> Point | None:
+    if anchor_coords is None or len(anchor_coords) < 2:
+        return None
+    try:
+        point = Point(float(anchor_coords[0]), float(anchor_coords[1]))
+    except Exception:
+        return None
+    return point if _point_is_finite(point) else None
+
+
+def _mean_endpoint_distance(line: LineString, start_pt: Point, end_pt: Point) -> float:
+    if not _line_is_usable(line) or not _point_is_finite(start_pt) or not _point_is_finite(end_pt):
+        return 999.0
+    coords = list(line.coords)
+    if len(coords) < 2:
+        return 999.0
+    line_start = Point(float(coords[0][0]), float(coords[0][1]))
+    line_end = Point(float(coords[-1][0]), float(coords[-1][1]))
+    return float(line_start.distance(start_pt) + line_end.distance(end_pt)) / 2.0
+
+
+def _mean_line_offset(line: LineString, reference_line: LineString | None, *, step_m: float) -> float:
+    if not _line_is_usable(line) or reference_line is None or not _line_is_usable(reference_line):
+        return 999.0
+    points = _sample_line_points(line, step_m=step_m)
+    if not points:
+        return 999.0
+    distances: list[float] = []
+    for point in points:
+        nearest = _safe_nearest_points(reference_line, point)
+        if nearest is None:
+            continue
+        distances.append(float(nearest[0].distance(point)))
+    if not distances:
+        return 999.0
+    return float(sum(distances) / max(len(distances), 1))
+
+
+def _mean_turn_angle_deg(line: LineString, *, step_m: float) -> float:
+    points = _sample_line_points(line, step_m=step_m)
+    if len(points) < 3:
+        return 0.0
+    angles: list[float] = []
+    coords = [(float(point.x), float(point.y)) for point in points]
+    for idx in range(1, len(coords) - 1):
+        px, py = coords[idx - 1]
+        cx, cy = coords[idx]
+        nx, ny = coords[idx + 1]
+        heading_in = atan2(float(cy - py), float(cx - px))
+        heading_out = atan2(float(ny - cy), float(nx - cx))
+        delta = abs(float(heading_out - heading_in))
+        while delta > 3.141592653589793:
+            delta -= 2.0 * 3.141592653589793
+        angles.append(abs(delta) * 180.0 / 3.141592653589793)
+    if not angles:
+        return 0.0
+    return float(sum(angles) / max(len(angles), 1))
+
+
+def _distance_to_score(distance_m: float, *, scale_m: float) -> float:
+    if not isfinite(float(distance_m)):
+        return 0.0
+    scale = max(float(scale_m), 0.5)
+    return float(1.0 / (1.0 + max(0.0, float(distance_m)) / scale))
+
+
+def _slot_surface_geometry(slot: SlotInterval, safe_surface: Any | None) -> Any | None:
+    slot_line = _slot_interval_line(slot)
+    if slot_line is None:
+        return None
+    slot_geom: Any = slot_line
+    if safe_surface is not None and not getattr(safe_surface, "is_empty", True):
+        try:
+            clipped = slot_line.intersection(safe_surface)
+        except Exception:
+            clipped = slot_line
+        line_components = _iter_line_components(clipped)
+        if line_components:
+            slot_geom = max(line_components, key=lambda item: float(item.length))
+        elif isinstance(clipped, Point) and _point_is_finite(clipped):
+            return clipped
+    return slot_geom
+
+
 def _anchor_along_base_line(base_line: LineString, start_pt: Point, end_pt: Point) -> LineString:
     if base_line.is_empty or base_line.length <= 1e-6:
         return _replace_endpoints(base_line, start_pt, end_pt)
-    start_s = float(base_line.project(start_pt))
-    end_s = float(base_line.project(end_pt))
+    start_s = _safe_line_project(base_line, start_pt)
+    end_s = _safe_line_project(base_line, end_pt)
+    if start_s is None or end_s is None:
+        return _replace_endpoints(base_line, start_pt, end_pt)
     middle = substring(base_line, start_s, end_s)
     coords: list[tuple[float, float]] = [(float(start_pt.x), float(start_pt.y))]
     if isinstance(middle, Point):
@@ -95,10 +238,13 @@ def _slot_side_shift_vector(
 ) -> tuple[float, float] | None:
     if base_line.is_empty or base_line.length <= 1e-6:
         return None
-    try:
-        start_proj = base_line.interpolate(float(base_line.project(start_pt)))
-        end_proj = base_line.interpolate(float(base_line.project(end_pt)))
-    except Exception:
+    start_s = _safe_line_project(base_line, start_pt)
+    end_s = _safe_line_project(base_line, end_pt)
+    if start_s is None or end_s is None:
+        return None
+    start_proj = _safe_line_interpolate(base_line, start_s)
+    end_proj = _safe_line_interpolate(base_line, end_s)
+    if start_proj is None or end_proj is None:
         return None
     shift_dx = ((float(start_pt.x) - float(start_proj.x)) + (float(end_pt.x) - float(end_proj.x))) / 2.0
     shift_dy = ((float(start_pt.y) - float(start_proj.y)) + (float(end_pt.y) - float(end_proj.y))) / 2.0
@@ -315,52 +461,36 @@ def _slot_surface_anchor_point(
     reference_line: LineString,
     safe_surface: Any | None,
 ) -> Point:
-    slot_line = _slot_interval_line(slot)
-    if slot_line is None:
+    slot_geom = _slot_surface_geometry(slot, safe_surface)
+    if slot_geom is None:
         pipeline = _pipeline()
         return pipeline._midpoint_of_interval(slot.interval)
-    slot_geom = slot_line
-    if safe_surface is not None and not getattr(safe_surface, "is_empty", True):
-        try:
-            clipped = slot_line.intersection(safe_surface)
-        except Exception:
-            clipped = slot_line
-        line_components = _iter_line_components(clipped)
-        if line_components:
-            slot_geom = max(line_components, key=lambda item: float(item.length))
-        elif isinstance(clipped, Point):
-            return clipped
+    if isinstance(slot_geom, Point):
+        return slot_geom
     if str(getattr(slot, "method", "")) == "fraction_match":
-        if isinstance(slot_geom, LineString) and float(slot_geom.length) > 1e-6:
-            return slot_geom.interpolate(0.5, normalized=True)
-    try:
-        return nearest_points(slot_geom, reference_line)[0]
-    except Exception:
-        pipeline = _pipeline()
-        return pipeline._midpoint_of_interval(slot.interval)
+        midpoint = _safe_line_interpolate(slot_geom, 0.5, normalized=True) if isinstance(slot_geom, LineString) else None
+        if midpoint is not None:
+            return midpoint
+    nearest = _safe_nearest_points(slot_geom, reference_line)
+    if nearest is not None:
+        return nearest[0]
+    pipeline = _pipeline()
+    return pipeline._midpoint_of_interval(slot.interval)
 
 
 def _slot_surface_mid_anchor_point(
     slot: SlotInterval,
     safe_surface: Any | None,
 ) -> Point:
-    slot_line = _slot_interval_line(slot)
     pipeline = _pipeline()
-    if slot_line is None:
+    slot_geom = _slot_surface_geometry(slot, safe_surface)
+    if slot_geom is None:
         return pipeline._midpoint_of_interval(slot.interval)
-    slot_geom = slot_line
-    if safe_surface is not None and not getattr(safe_surface, "is_empty", True):
-        try:
-            clipped = slot_line.intersection(safe_surface)
-        except Exception:
-            clipped = slot_line
-        line_components = _iter_line_components(clipped)
-        if line_components:
-            slot_geom = max(line_components, key=lambda item: float(item.length))
-        elif isinstance(clipped, Point):
-            return clipped
-    if isinstance(slot_geom, LineString) and float(slot_geom.length) > 1e-6:
-        return slot_geom.interpolate(0.5, normalized=True)
+    if isinstance(slot_geom, Point):
+        return slot_geom
+    midpoint = _safe_line_interpolate(slot_geom, 0.5, normalized=True) if isinstance(slot_geom, LineString) else None
+    if midpoint is not None:
+        return midpoint
     return pipeline._midpoint_of_interval(slot.interval)
 
 
@@ -428,12 +558,10 @@ def _closest_point_on_geometry(geometry: Any, reference_point: Point) -> Point |
     if geometry is None or getattr(geometry, "is_empty", True):
         return None
     if isinstance(geometry, Point):
-        return geometry
+        return geometry if _point_is_finite(geometry) else None
     if isinstance(geometry, LineString):
-        try:
-            return nearest_points(geometry, reference_point)[0]
-        except Exception:
-            return None
+        nearest = _safe_nearest_points(geometry, reference_point)
+        return nearest[0] if nearest is not None else None
     candidates: list[Point] = []
     for geom in getattr(geometry, "geoms", []) or []:
         point = _closest_point_on_geometry(geom, reference_point)
@@ -451,21 +579,12 @@ def _slot_trend_anchor_point(
     *,
     at_start: bool,
 ) -> Point:
-    slot_line = _slot_interval_line(slot)
-    if slot_line is None:
+    slot_geom = _slot_surface_geometry(slot, safe_surface)
+    if slot_geom is None:
         pipeline = _pipeline()
         return pipeline._midpoint_of_interval(slot.interval)
-    slot_geom = slot_line
-    if safe_surface is not None and not getattr(safe_surface, "is_empty", True):
-        try:
-            clipped = slot_line.intersection(safe_surface)
-        except Exception:
-            clipped = slot_line
-        line_components = _iter_line_components(clipped)
-        if line_components:
-            slot_geom = max(line_components, key=lambda item: float(item.length))
-        elif isinstance(clipped, Point):
-            return clipped
+    if isinstance(slot_geom, Point):
+        return slot_geom
     trend_ray = _endpoint_trend_ray(reference_line, at_start=bool(at_start))
     if trend_ray is None:
         return _slot_surface_anchor_point(slot, reference_line, safe_surface)
@@ -477,10 +596,8 @@ def _slot_trend_anchor_point(
     trend_point = _closest_point_on_geometry(intersection, endpoint_pt)
     if trend_point is not None:
         return trend_point
-    try:
-        return nearest_points(slot_geom, ray_line)[0]
-    except Exception:
-        return _slot_surface_anchor_point(slot, reference_line, safe_surface)
+    nearest = _safe_nearest_points(slot_geom, ray_line)
+    return nearest[0] if nearest is not None else _slot_surface_anchor_point(slot, reference_line, safe_surface)
 
 
 def _rcsdroad_trend_extended_candidate_line(
@@ -535,11 +652,10 @@ def slot_reference_line(
 def _project_anchor_s_on_xsec(xsec_line: LineString, anchor_coords: list[float] | tuple[float, float] | None) -> float | None:
     if anchor_coords is None or len(anchor_coords) < 2 or xsec_line.is_empty or float(xsec_line.length) <= 1e-6:
         return None
-    try:
-        anchor = Point(float(anchor_coords[0]), float(anchor_coords[1]))
-    except Exception:
+    anchor = _safe_point_from_coords(anchor_coords)
+    if anchor is None:
         return None
-    return float(xsec_line.project(anchor))
+    return _safe_line_project(xsec_line, anchor)
 
 
 def _resolve_interval_from_anchor(
@@ -796,7 +912,12 @@ def _sample_line_points(line: LineString, *, step_m: float) -> list[Point]:
     sample_count = max(5, int(float(line.length) / sample_step) + 1)
     if sample_count <= 2:
         sample_count = 3
-    return [line.interpolate(float(idx) / float(sample_count - 1), normalized=True) for idx in range(sample_count)]
+    points: list[Point] = []
+    for idx in range(sample_count):
+        point = _safe_line_interpolate(line, float(idx) / float(sample_count - 1), normalized=True)
+        if point is not None:
+            points.append(point)
+    return points
 
 
 def _combine_line_parts(*parts: LineString | None) -> LineString | None:
@@ -861,10 +982,17 @@ def _lane_boundary_centerline_for_road(
     lane_boundaries: tuple[LineString, ...],
     safe_surface: Any | None,
     params: dict[str, Any],
-) -> LineString | None:
+) -> tuple[LineString | None, dict[str, Any]]:
+    info = {
+        "quality_score": 0.0,
+        "center_offset": None,
+        "use_reason": "lane_boundary_missing_or_low_quality",
+    }
     if road_line.is_empty or float(road_line.length) <= 1e-6 or len(lane_boundaries) < 2:
-        return None
-    midpoint = road_line.interpolate(0.5, normalized=True)
+        return None, info
+    midpoint = _safe_line_interpolate(road_line, 0.5, normalized=True)
+    if midpoint is None:
+        return None, info
     search_m = float(params.get("GEOMETRY_REFINE_LANE_BOUNDARY_SEARCH_M", 12.0))
     min_sep_m = float(params.get("GEOMETRY_REFINE_LANE_BOUNDARY_PAIR_MIN_SEP_M", 1.5))
     max_sep_m = float(params.get("GEOMETRY_REFINE_LANE_BOUNDARY_PAIR_MAX_SEP_M", 18.0))
@@ -872,19 +1000,20 @@ def _lane_boundary_centerline_for_road(
     for boundary in lane_boundaries:
         if boundary.is_empty or float(boundary.length) <= 1e-6:
             continue
-        try:
-            boundary_point = nearest_points(boundary, midpoint)[0]
-        except Exception:
+        nearest = _safe_nearest_points(boundary, midpoint)
+        if nearest is None:
             continue
+        boundary_point = nearest[0]
         distance = float(boundary_point.distance(midpoint))
         if distance <= search_m:
             candidates.append((distance, boundary))
     if len(candidates) < 2:
-        return None
+        return None, info
     candidates.sort(key=lambda item: float(item[0]))
     sample_points = _sample_line_points(road_line, step_m=float(params.get("GEOMETRY_REFINE_SMOOTH_SAMPLE_STEP_M", 8.0)))
     best_line: LineString | None = None
-    best_score: tuple[float, float, float] | None = None
+    best_rank: tuple[float, float, float] | None = None
+    best_meta: dict[str, Any] = {}
     for idx in range(len(candidates)):
         for jdx in range(idx + 1, len(candidates)):
             boundary_a = candidates[idx][1]
@@ -894,12 +1023,13 @@ def _lane_boundary_centerline_for_road(
             separations: list[float] = []
             valid_pair = True
             for sample_point in sample_points:
-                try:
-                    point_a = nearest_points(boundary_a, sample_point)[0]
-                    point_b = nearest_points(boundary_b, sample_point)[0]
-                except Exception:
+                nearest_a = _safe_nearest_points(boundary_a, sample_point)
+                nearest_b = _safe_nearest_points(boundary_b, sample_point)
+                if nearest_a is None or nearest_b is None:
                     valid_pair = False
                     break
+                point_a = nearest_a[0]
+                point_b = nearest_b[0]
                 separation = float(point_a.distance(point_b))
                 if separation < min_sep_m or separation > max_sep_m:
                     valid_pair = False
@@ -916,15 +1046,35 @@ def _lane_boundary_centerline_for_road(
             if safe_surface is not None and not getattr(safe_surface, "is_empty", True):
                 if _line_overlap_ratio(center_line, safe_surface) < 0.75:
                     continue
-            score = (
-                float(sum(center_offsets) / max(len(center_offsets), 1)),
-                float(sum(separations) / max(len(separations), 1)),
+            avg_offset = float(sum(center_offsets) / max(len(center_offsets), 1))
+            avg_sep = float(sum(separations) / max(len(separations), 1))
+            sep_spread = float(max(separations) - min(separations)) if separations else 0.0
+            quality = max(
+                0.0,
+                min(
+                    1.0,
+                    1.0
+                    - (avg_offset / max(search_m, 1.0))
+                    - min(0.45, sep_spread / max(max_sep_m, 1.0))
+                    - min(0.25, abs(avg_sep - float(params.get("GEOMETRY_REFINE_LANE_BOUNDARY_TARGET_WIDTH_M", 6.0))) / max(max_sep_m, 1.0)),
+                ),
+            )
+            rank = (
+                -float(quality),
+                float(avg_offset),
                 float(-center_line.length),
             )
-            if best_score is None or score < best_score:
-                best_score = score
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
                 best_line = center_line
-    return best_line
+                best_meta = {
+                    "quality_score": float(quality),
+                    "center_offset": float(avg_offset),
+                    "use_reason": "paired_lane_boundary_centerline",
+                }
+    if best_line is None:
+        return None, info
+    return best_line, best_meta
 
 
 def _geometry_refine_source_family(source_label: str) -> str:
@@ -951,14 +1101,16 @@ def _blend_centerlines(
         return None
     if primary_line.is_empty or float(primary_line.length) <= 1e-6:
         return None
-    weight = max(0.55, min(0.9, float(primary_weight)))
+    weight = max(0.5, min(0.92, float(primary_weight)))
     sample_step = max(float(step_m), 4.0)
     sample_count = max(7, int(max(float(primary_line.length), float(center_hint_line.length)) / sample_step) + 1)
     coords: list[tuple[float, float]] = []
     for idx in range(sample_count):
         t = float(idx) / float(sample_count - 1)
-        primary_pt = primary_line.interpolate(t, normalized=True)
-        center_pt = center_hint_line.interpolate(t, normalized=True)
+        primary_pt = _safe_line_interpolate(primary_line, t, normalized=True)
+        center_pt = _safe_line_interpolate(center_hint_line, t, normalized=True)
+        if primary_pt is None or center_pt is None:
+            continue
         coords.append(
             (
                 float(primary_pt.x) * weight + float(center_pt.x) * (1.0 - weight),
@@ -971,32 +1123,56 @@ def _blend_centerlines(
 def _local_safe_envelope(
     *,
     safe_surface: Any | None,
-    road_line: LineString,
     source_line: LineString | None,
+    source_family: str,
     lane_boundary_line: LineString | None,
+    original_line: LineString,
     params: dict[str, Any],
-) -> Any | None:
+) -> tuple[Any | None, str, bool]:
     if safe_surface is None or getattr(safe_surface, "is_empty", True):
-        return None
+        return None, "", False
     corridor_buffer_m = float(params.get("GEOMETRY_REFINE_LOCAL_CORRIDOR_BUFFER_M", 12.0))
+    lane_buffer_m = float(params.get("GEOMETRY_REFINE_LANE_BOUNDARY_BUFFER_M", max(4.0, corridor_buffer_m * 0.8)))
+    weak_buffer_m = float(params.get("GEOMETRY_REFINE_ORIGINAL_WEAK_BUFFER_M", max(3.0, corridor_buffer_m * 0.45)))
     corridor_parts = []
-    for line in (road_line, source_line, lane_boundary_line):
-        if line is None or line.is_empty or float(line.length) <= 1e-6:
-            continue
+    if source_line is not None and _line_is_usable(source_line):
         try:
-            corridor_parts.append(line.buffer(corridor_buffer_m, cap_style=2, join_style=2))
+            corridor_parts.append(source_line.buffer(corridor_buffer_m, cap_style=2, join_style=2))
         except Exception:
-            continue
+            pass
+    lane_boundary_used = bool(lane_boundary_line is not None and _line_is_usable(lane_boundary_line))
+    if lane_boundary_used:
+        try:
+            corridor_parts.append(lane_boundary_line.buffer(lane_buffer_m, cap_style=2, join_style=2))
+        except Exception:
+            lane_boundary_used = False
+    original_used_as_weak_ref = False
+    if _line_is_usable(original_line) and source_family != "traj_guided":
+        try:
+            corridor_parts.append(original_line.buffer(weak_buffer_m, cap_style=2, join_style=2))
+            original_used_as_weak_ref = True
+        except Exception:
+            original_used_as_weak_ref = False
     if not corridor_parts:
-        return safe_surface
+        return safe_surface, "mixed", bool(original_used_as_weak_ref)
     try:
         corridor = unary_union(corridor_parts)
         envelope = safe_surface.intersection(corridor)
     except Exception:
-        return safe_surface
+        return safe_surface, "mixed", bool(original_used_as_weak_ref)
     if envelope is None or getattr(envelope, "is_empty", True):
-        return safe_surface
-    return envelope
+        return safe_surface, "mixed", bool(original_used_as_weak_ref)
+    if source_family == "lane_boundary_guided" and lane_boundary_used:
+        envelope_source = "lane_boundary"
+    elif source_family == "traj_guided" and lane_boundary_used:
+        envelope_source = "mixed"
+    elif source_family == "traj_guided":
+        envelope_source = "traj_guided"
+    elif lane_boundary_used:
+        envelope_source = "mixed"
+    else:
+        envelope_source = "mixed"
+    return envelope, envelope_source, bool(original_used_as_weak_ref)
 
 
 def _slot_anchor_point_from_coords(
@@ -1004,27 +1180,17 @@ def _slot_anchor_point_from_coords(
     anchor_coords: list[float] | tuple[float, float],
     safe_surface: Any | None,
 ) -> Point | None:
-    if not isinstance(anchor_coords, (list, tuple)) or len(anchor_coords) < 2:
+    point = _safe_point_from_coords(anchor_coords)
+    if point is None:
         return None
-    slot_line = _slot_interval_line(slot)
-    if slot_line is None:
+    slot_geom = _slot_surface_geometry(slot, safe_surface)
+    if slot_geom is None:
         pipeline = _pipeline()
         return pipeline._midpoint_of_interval(slot.interval)
-    slot_geom = slot_line
-    if safe_surface is not None and not getattr(safe_surface, "is_empty", True):
-        try:
-            clipped = slot_line.intersection(safe_surface)
-        except Exception:
-            clipped = slot_line
-        line_components = _iter_line_components(clipped)
-        if line_components:
-            slot_geom = max(line_components, key=lambda item: float(item.length))
-        elif isinstance(clipped, Point):
-            return clipped
-    try:
-        return nearest_points(slot_geom, Point(float(anchor_coords[0]), float(anchor_coords[1])))[0]
-    except Exception:
-        return None
+    if isinstance(slot_geom, Point):
+        return slot_geom
+    nearest = _safe_nearest_points(slot_geom, point)
+    return nearest[0] if nearest is not None else None
 
 
 def _stabilize_slot_anchor_point(
@@ -1033,29 +1199,23 @@ def _stabilize_slot_anchor_point(
     point: Point,
     safe_surface: Any | None,
     params: dict[str, Any],
-) -> Point:
-    slot_line = _slot_interval_line(slot)
-    if slot_line is None or slot_line.is_empty or float(slot_line.length) <= 1e-6:
-        return point
-    slot_geom = slot_line
-    if safe_surface is not None and not getattr(safe_surface, "is_empty", True):
-        try:
-            clipped = slot_line.intersection(safe_surface)
-        except Exception:
-            clipped = slot_line
-        line_components = _iter_line_components(clipped)
-        if line_components:
-            slot_geom = max(line_components, key=lambda item: float(item.length))
-        elif isinstance(clipped, Point):
-            return clipped
-    if slot_geom.is_empty or float(slot_geom.length) <= 1e-6:
-        return point
-    anchor_s = float(slot_geom.project(point))
-    anchor_frac = anchor_s / max(float(slot_geom.length), 1e-6)
-    edge_frac = float(params.get("GEOMETRY_REFINE_XSEC_ANCHOR_EDGE_FRAC", 0.12))
-    if edge_frac < anchor_frac < 1.0 - edge_frac:
-        return point
-    return slot_geom.interpolate(0.5, normalized=True)
+) -> tuple[Point, bool]:
+    midpoint = _slot_surface_mid_anchor_point(slot, safe_surface)
+    slot_geom = _slot_surface_geometry(slot, safe_surface)
+    if slot_geom is None:
+        return midpoint, True
+    if isinstance(slot_geom, Point):
+        return slot_geom, False
+    if not _point_is_finite(point):
+        return midpoint, True
+    nearest = _safe_nearest_points(slot_geom, point)
+    if nearest is None:
+        return midpoint, True
+    snapped = nearest[0]
+    max_snap_dist_m = float(params.get("GEOMETRY_REFINE_ANCHOR_MAX_SNAP_DIST_M", 3.0))
+    if float(point.distance(snapped)) > max_snap_dist_m:
+        return midpoint, True
+    return snapped, False
 
 
 def _select_refine_anchor_point(
@@ -1068,46 +1228,155 @@ def _select_refine_anchor_point(
     endpoint_tag: str,
     witness: CorridorWitness | None,
     params: dict[str, Any],
-) -> tuple[Point, str]:
+) -> tuple[Point, dict[str, Any]]:
+    def _anchor_result(point: Point, *, source: str, confidence: float, midpoint_fallback_used: bool) -> tuple[Point, dict[str, Any]]:
+        return point, {
+            "anchor_source": str(source),
+            "anchor_confidence": float(max(0.0, min(1.0, confidence))),
+            "anchor_midpoint_fallback_used": bool(midpoint_fallback_used),
+        }
+
     if source_family == "traj_guided" and source_line is not None:
         point = _slot_surface_anchor_point(slot, source_line, safe_surface)
-        return _stabilize_slot_anchor_point(slot=slot, point=point, safe_surface=safe_surface, params=params), "traj_guided_xsec_anchor"
+        point, midpoint_used = _stabilize_slot_anchor_point(slot=slot, point=point, safe_surface=safe_surface, params=params)
+        return _anchor_result(
+            point,
+            source="midpoint_fallback" if midpoint_used else "traj_crossing",
+            confidence=0.35 if midpoint_used else 0.98,
+            midpoint_fallback_used=midpoint_used,
+        )
     for coords, label in _slot_anchor_candidates(arc_row=arc_row, endpoint_tag=endpoint_tag, trusted_only=False):
         point = _slot_anchor_point_from_coords(slot, coords, safe_surface)
         if point is not None:
-            return _stabilize_slot_anchor_point(slot=slot, point=point, safe_surface=safe_surface, params=params), f"{label}_anchor"
+            point, midpoint_used = _stabilize_slot_anchor_point(slot=slot, point=point, safe_surface=safe_surface, params=params)
+            return _anchor_result(
+                point,
+                source="midpoint_fallback" if midpoint_used else "support_crossing",
+                confidence=0.32 if midpoint_used else (0.9 if label == "selected_support" else 0.84),
+                midpoint_fallback_used=midpoint_used,
+            )
     if witness is not None:
         witness_line = witness.geometry_metric()
         if not witness_line.is_empty and float(witness_line.length) > 1e-6:
             point = _slot_surface_anchor_point(slot, witness_line, safe_surface)
-            return _stabilize_slot_anchor_point(slot=slot, point=point, safe_surface=safe_surface, params=params), "witness_anchor"
-    return _slot_surface_mid_anchor_point(slot, safe_surface), f"slot_surface_midpoint_{str(slot.method or 'unknown')}"
+            point, midpoint_used = _stabilize_slot_anchor_point(slot=slot, point=point, safe_surface=safe_surface, params=params)
+            return _anchor_result(
+                point,
+                source="midpoint_fallback" if midpoint_used else "witness",
+                confidence=0.3 if midpoint_used else 0.72,
+                midpoint_fallback_used=midpoint_used,
+            )
+    return _anchor_result(
+        _slot_surface_mid_anchor_point(slot, safe_surface),
+        source="midpoint_fallback",
+        confidence=0.25,
+        midpoint_fallback_used=True,
+    )
 
 
-def _geometry_refine_candidate_ok(
+def _geometry_refine_candidate_metrics(
     *,
     line: LineString,
+    start_anchor: Point,
+    end_anchor: Point,
+    entry_anchor_confidence: float,
+    exit_anchor_confidence: float,
+    source_line: LineString | None,
+    lane_boundary_line: LineString | None,
     inputs: Any,
     divstrip_buffer: Any | None,
-    original_drivezone_ratio: float,
     params: dict[str, Any],
-) -> tuple[bool, float, float, bool]:
+) -> dict[str, Any]:
     pipeline = _pipeline()
     drivezone_ratio = float(pipeline._drivezone_ratio(line, inputs.drivezone_zone_metric))
     divstrip_overlap_ratio = float(_line_overlap_ratio(line, divstrip_buffer))
     road_intersects_divstrip = bool(
         divstrip_buffer is not None and (not divstrip_buffer.is_empty) and line.intersects(divstrip_buffer)
     )
-    min_drivezone_ratio = max(
+    hard_min_drivezone_ratio = max(
         float(params.get("ROAD_MIN_DRIVEZONE_RATIO", 0.85)),
-        float(original_drivezone_ratio) - float(params.get("GEOMETRY_REFINE_MAX_DRIVEZONE_DROP", 0.03)),
+        float(params.get("GEOMETRY_REFINE_HARD_MIN_DRIVEZONE_RATIO", 0.93)),
     )
-    return (
-        (not road_intersects_divstrip) and drivezone_ratio >= min_drivezone_ratio,
-        drivezone_ratio,
-        divstrip_overlap_ratio,
-        road_intersects_divstrip,
+    endpoint_fit_distance = _mean_endpoint_distance(line, start_anchor, end_anchor)
+    geometry_offset = _mean_line_offset(
+        line,
+        source_line,
+        step_m=float(params.get("GEOMETRY_REFINE_SMOOTH_SAMPLE_STEP_M", 8.0)),
     )
+    center_offset = _mean_line_offset(
+        line,
+        lane_boundary_line,
+        step_m=float(params.get("GEOMETRY_REFINE_SMOOTH_SAMPLE_STEP_M", 8.0)),
+    )
+    smoothness_angle_deg = _mean_turn_angle_deg(
+        line,
+        step_m=float(params.get("GEOMETRY_REFINE_SMOOTH_SAMPLE_STEP_M", 8.0)),
+    )
+    endpoint_fit_score = _distance_to_score(
+        endpoint_fit_distance,
+        scale_m=float(params.get("GEOMETRY_REFINE_ENDPOINT_FIT_SCORE_SCALE_M", 3.0)),
+    )
+    geometry_score = _distance_to_score(
+        geometry_offset,
+        scale_m=float(params.get("GEOMETRY_REFINE_GEOMETRY_SCORE_SCALE_M", 6.0)),
+    )
+    centering_score = (
+        _distance_to_score(
+            center_offset,
+            scale_m=float(params.get("GEOMETRY_REFINE_CENTERING_SCORE_SCALE_M", 4.0)),
+        )
+        if lane_boundary_line is not None
+        else geometry_score
+    )
+    smoothness_score = max(
+        0.0,
+        min(
+            1.0,
+            1.0 - float(smoothness_angle_deg) / max(float(params.get("GEOMETRY_REFINE_SMOOTHNESS_CAP_DEG", 55.0)), 1.0),
+        ),
+    )
+    drivezone_score = max(
+        0.0,
+        min(
+            1.0,
+            (float(drivezone_ratio) - float(hard_min_drivezone_ratio)) / max(1e-6, 1.0 - float(hard_min_drivezone_ratio)),
+        ),
+    )
+    anchor_score = max(
+        0.0,
+        min(1.0, 0.55 * endpoint_fit_score + 0.45 * ((float(entry_anchor_confidence) + float(exit_anchor_confidence)) / 2.0)),
+    )
+    geometry_quality_score = max(
+        0.0,
+        min(1.0, 0.6 * geometry_score + 0.4 * centering_score),
+    )
+    total_score = (
+        0.30 * geometry_quality_score
+        + 0.22 * anchor_score
+        + 0.18 * centering_score
+        + 0.16 * smoothness_score
+        + 0.14 * drivezone_score
+    )
+    return {
+        "ok": (not road_intersects_divstrip) and drivezone_ratio >= hard_min_drivezone_ratio,
+        "drivezone_ratio": float(drivezone_ratio),
+        "divstrip_overlap_ratio": float(divstrip_overlap_ratio),
+        "road_intersects_divstrip": bool(road_intersects_divstrip),
+        "hard_min_drivezone_ratio": float(hard_min_drivezone_ratio),
+        "candidate_total_score": float(total_score),
+        "candidate_geometry_score": float(geometry_quality_score),
+        "candidate_anchor_score": float(anchor_score),
+        "candidate_centering_score": float(centering_score),
+        "candidate_smoothness_score": float(smoothness_score),
+        "candidate_drivezone_score": float(drivezone_score),
+        "center_offset_score": float(centering_score),
+        "endpoint_fit_score": float(endpoint_fit_score),
+        "smoothness_score": float(smoothness_score),
+        "center_offset_m": float(center_offset),
+        "geometry_offset_m": float(geometry_offset),
+        "endpoint_fit_distance_m": float(endpoint_fit_distance),
+        "smoothness_angle_deg": float(smoothness_angle_deg),
+    }
 
 
 def _refine_built_road_geometry(
@@ -1152,11 +1421,21 @@ def _refine_built_road_geometry(
         "core_skeleton_source_detail": "",
         "entry_anchor_source": "",
         "exit_anchor_source": "",
+        "entry_anchor_confidence": 0.0,
+        "exit_anchor_confidence": 0.0,
+        "anchor_confidence": 0.0,
+        "entry_midpoint_fallback_used": False,
+        "exit_midpoint_fallback_used": False,
         "smoothed": False,
         "lane_boundary_used": False,
+        "lane_boundary_quality_score": 0.0,
+        "lane_boundary_center_offset": None,
+        "lane_boundary_use_reason": "",
         "traj_guided_used": False,
         "support_trend_used": False,
         "safe_envelope_applied": False,
+        "safe_envelope_source": "",
+        "original_road_used_as_weak_ref": False,
         "shape_ref_mode_before": str(build_result.get("shape_ref_mode", "")),
         "before_length": float(original_line.length),
         "after_length": float(original_line.length),
@@ -1167,6 +1446,19 @@ def _refine_built_road_geometry(
         "after_drivezone_overlap_ratio": float(original_drivezone_ratio),
         "road_divstrip_overlap_ratio_after": float(original_divstrip_overlap_ratio),
         "after_divstrip_overlap_ratio": float(original_divstrip_overlap_ratio),
+        "before_center_offset_score": 0.0,
+        "after_center_offset_score": 0.0,
+        "before_endpoint_fit_score": 0.0,
+        "after_endpoint_fit_score": 0.0,
+        "before_smoothness_score": 0.0,
+        "after_smoothness_score": 0.0,
+        "candidate_total_score": 0.0,
+        "candidate_geometry_score": 0.0,
+        "candidate_anchor_score": 0.0,
+        "candidate_centering_score": 0.0,
+        "candidate_smoothness_score": 0.0,
+        "candidate_drivezone_score": 0.0,
+        "selected_candidate_mode": "original",
     }
     if src_slot.interval is None or dst_slot.interval is None:
         review["skip_reason"] = "slot_unresolved"
@@ -1185,12 +1477,16 @@ def _refine_built_road_geometry(
         return road, review, empty_artifacts
     mid_start_pt = _slot_surface_mid_anchor_point(src_slot, safe_surface)
     mid_end_pt = _slot_surface_mid_anchor_point(dst_slot, safe_surface)
-    lane_boundary_line = _lane_boundary_centerline_for_road(
+    lane_boundary_line, lane_boundary_meta = _lane_boundary_centerline_for_road(
         road_line=original_line,
         lane_boundaries=tuple(inputs.lane_boundaries_metric),
         safe_surface=safe_surface,
         params=params,
     )
+    lane_boundary_quality_score = float(lane_boundary_meta.get("quality_score", 0.0) or 0.0)
+    review["lane_boundary_quality_score"] = lane_boundary_quality_score
+    review["lane_boundary_center_offset"] = lane_boundary_meta.get("center_offset")
+    review["lane_boundary_use_reason"] = str(lane_boundary_meta.get("use_reason", "") or "")
     trusted_support_ref = _trusted_support_shape_ref_line(
         arc_row=arc_row,
         start_pt=mid_start_pt,
@@ -1204,7 +1500,7 @@ def _refine_built_road_geometry(
         source_line = traj_guided_line
         review["support_trend_used"] = True
         review["traj_guided_used"] = True
-    elif lane_boundary_line is not None:
+    elif lane_boundary_line is not None and lane_boundary_quality_score >= float(params.get("GEOMETRY_REFINE_LANE_BOUNDARY_MIN_QUALITY_SCORE", 0.45)):
         source_line = _anchor_along_base_line(lane_boundary_line, mid_start_pt, mid_end_pt)
         source_label = "lane_boundary_centerline"
         review["lane_boundary_used"] = True
@@ -1259,7 +1555,7 @@ def _refine_built_road_geometry(
         )
         return road, review, empty_artifacts
     source_family = _geometry_refine_source_family(source_label)
-    start_pt, start_anchor_source = _select_refine_anchor_point(
+    start_pt, start_anchor_info = _select_refine_anchor_point(
         slot=src_slot,
         safe_surface=safe_surface,
         arc_row=arc_row,
@@ -1269,7 +1565,7 @@ def _refine_built_road_geometry(
         witness=witness,
         params=params,
     )
-    end_pt, end_anchor_source = _select_refine_anchor_point(
+    end_pt, end_anchor_info = _select_refine_anchor_point(
         slot=dst_slot,
         safe_surface=safe_surface,
         arc_row=arc_row,
@@ -1282,27 +1578,45 @@ def _refine_built_road_geometry(
     review["eligible"] = True
     review["core_skeleton_source"] = str(source_family)
     review["core_skeleton_source_detail"] = str(source_label)
-    review["entry_anchor_source"] = str(start_anchor_source)
-    review["exit_anchor_source"] = str(end_anchor_source)
+    review["entry_anchor_source"] = str(start_anchor_info["anchor_source"])
+    review["exit_anchor_source"] = str(end_anchor_info["anchor_source"])
+    review["entry_anchor_confidence"] = float(start_anchor_info["anchor_confidence"])
+    review["exit_anchor_confidence"] = float(end_anchor_info["anchor_confidence"])
+    review["anchor_confidence"] = float(
+        (float(start_anchor_info["anchor_confidence"]) + float(end_anchor_info["anchor_confidence"])) / 2.0
+    )
+    review["entry_midpoint_fallback_used"] = bool(start_anchor_info["anchor_midpoint_fallback_used"])
+    review["exit_midpoint_fallback_used"] = bool(end_anchor_info["anchor_midpoint_fallback_used"])
     if traj_guided_line is not None:
         traj_guided_line = _anchor_along_base_line(traj_guided_line, start_pt, end_pt)
     if lane_boundary_line is not None:
         lane_boundary_line = _anchor_along_base_line(lane_boundary_line, start_pt, end_pt)
     source_line = _anchor_along_base_line(source_line, start_pt, end_pt)
-    local_safe_envelope = _local_safe_envelope(
+    local_safe_envelope, safe_envelope_source, original_used_as_weak_ref = _local_safe_envelope(
         safe_surface=safe_surface,
-        road_line=original_line,
         source_line=source_line,
+        source_family=source_family,
         lane_boundary_line=lane_boundary_line,
+        original_line=original_line,
         params=params,
     )
     review["safe_envelope_applied"] = bool(local_safe_envelope is not None and not getattr(local_safe_envelope, "is_empty", True))
+    review["safe_envelope_source"] = str(safe_envelope_source)
+    review["original_road_used_as_weak_ref"] = bool(original_used_as_weak_ref)
     core_input_line = source_line
-    if review["traj_guided_used"] and lane_boundary_line is not None:
+    if (
+        review["traj_guided_used"]
+        and lane_boundary_line is not None
+        and lane_boundary_quality_score >= float(params.get("GEOMETRY_REFINE_LANE_BOUNDARY_MIN_QUALITY_SCORE", 0.45))
+    ):
+        lane_weight = max(
+            0.08,
+            min(0.34, float(lane_boundary_quality_score) * float(params.get("GEOMETRY_REFINE_LANE_BOUNDARY_BLEND_MAX_WEIGHT", 0.32))),
+        )
         blended_core = _blend_centerlines(
             source_line,
             lane_boundary_line,
-            primary_weight=float(params.get("GEOMETRY_REFINE_TRAJ_PRIMARY_WEIGHT", 0.72)),
+            primary_weight=float(1.0 - lane_weight),
             step_m=float(params.get("GEOMETRY_REFINE_SMOOTH_SAMPLE_STEP_M", 8.0)),
         )
         if blended_core is not None:
@@ -1384,31 +1698,73 @@ def _refine_built_road_geometry(
         step_m=float(params.get("GEOMETRY_REFINE_SMOOTH_SAMPLE_STEP_M", 8.0)),
     )
     smoothed_candidate = _replace_endpoints(smoothed_candidate, start_pt, end_pt) if smoothed_candidate is not None else None
-    candidates: list[tuple[LineString, bool]] = []
+    baseline_metrics = _geometry_refine_candidate_metrics(
+        line=original_line,
+        start_anchor=start_pt,
+        end_anchor=end_pt,
+        entry_anchor_confidence=float(review["entry_anchor_confidence"]),
+        exit_anchor_confidence=float(review["exit_anchor_confidence"]),
+        source_line=source_line,
+        lane_boundary_line=lane_boundary_line,
+        inputs=inputs,
+        divstrip_buffer=divstrip_buffer,
+        params=params,
+    )
+    review["before_center_offset_score"] = float(baseline_metrics["center_offset_score"])
+    review["before_endpoint_fit_score"] = float(baseline_metrics["endpoint_fit_score"])
+    review["before_smoothness_score"] = float(baseline_metrics["smoothness_score"])
+    review["candidate_total_score"] = float(baseline_metrics["candidate_total_score"])
+    review["candidate_geometry_score"] = float(baseline_metrics["candidate_geometry_score"])
+    review["candidate_anchor_score"] = float(baseline_metrics["candidate_anchor_score"])
+    review["candidate_centering_score"] = float(baseline_metrics["candidate_centering_score"])
+    review["candidate_smoothness_score"] = float(baseline_metrics["candidate_smoothness_score"])
+    review["candidate_drivezone_score"] = float(baseline_metrics["candidate_drivezone_score"])
+    candidates: list[tuple[LineString, bool, str]] = []
     if smoothed_candidate is not None:
-        candidates.append((smoothed_candidate, True))
-    candidates.append((refined_candidate, False))
+        candidates.append((smoothed_candidate, True, "smoothed_candidate"))
+    candidates.append((refined_candidate, False, "refined_candidate"))
     selected_line = original_line
-    for candidate_line, smoothed in candidates:
-        ok, drivezone_ratio, divstrip_overlap_ratio, road_intersects_divstrip = _geometry_refine_candidate_ok(
+    selected_metrics = dict(baseline_metrics)
+    selected_mode = "original"
+    min_score_gain = float(params.get("GEOMETRY_REFINE_MIN_SCORE_GAIN", 0.03))
+    for candidate_line, smoothed, candidate_mode in candidates:
+        metrics = _geometry_refine_candidate_metrics(
             line=candidate_line,
+            start_anchor=start_pt,
+            end_anchor=end_pt,
+            entry_anchor_confidence=float(review["entry_anchor_confidence"]),
+            exit_anchor_confidence=float(review["exit_anchor_confidence"]),
+            source_line=source_line,
+            lane_boundary_line=lane_boundary_line,
             inputs=inputs,
             divstrip_buffer=divstrip_buffer,
-            original_drivezone_ratio=original_drivezone_ratio,
             params=params,
         )
-        if not ok:
+        if not bool(metrics["ok"]):
+            continue
+        if float(metrics["candidate_total_score"]) <= float(selected_metrics["candidate_total_score"]) + float(min_score_gain):
             continue
         selected_line = candidate_line
+        selected_metrics = dict(metrics)
+        selected_mode = str(candidate_mode)
         review["applied"] = not candidate_line.equals(original_line)
         review["smoothed"] = bool(smoothed and review["applied"])
-        review["after_length"] = float(candidate_line.length)
-        review["road_drivezone_overlap_ratio_after"] = float(drivezone_ratio)
-        review["after_drivezone_overlap_ratio"] = float(drivezone_ratio)
-        review["road_divstrip_overlap_ratio_after"] = float(divstrip_overlap_ratio)
-        review["after_divstrip_overlap_ratio"] = float(divstrip_overlap_ratio)
-        review["road_intersects_divstrip_after"] = bool(road_intersects_divstrip)
-        break
+    review["selected_candidate_mode"] = str(selected_mode)
+    review["after_length"] = float(selected_line.length)
+    review["road_drivezone_overlap_ratio_after"] = float(selected_metrics["drivezone_ratio"])
+    review["after_drivezone_overlap_ratio"] = float(selected_metrics["drivezone_ratio"])
+    review["road_divstrip_overlap_ratio_after"] = float(selected_metrics["divstrip_overlap_ratio"])
+    review["after_divstrip_overlap_ratio"] = float(selected_metrics["divstrip_overlap_ratio"])
+    review["road_intersects_divstrip_after"] = bool(selected_metrics["road_intersects_divstrip"])
+    review["after_center_offset_score"] = float(selected_metrics["center_offset_score"])
+    review["after_endpoint_fit_score"] = float(selected_metrics["endpoint_fit_score"])
+    review["after_smoothness_score"] = float(selected_metrics["smoothness_score"])
+    review["candidate_total_score"] = float(selected_metrics["candidate_total_score"])
+    review["candidate_geometry_score"] = float(selected_metrics["candidate_geometry_score"])
+    review["candidate_anchor_score"] = float(selected_metrics["candidate_anchor_score"])
+    review["candidate_centering_score"] = float(selected_metrics["candidate_centering_score"])
+    review["candidate_smoothness_score"] = float(selected_metrics["candidate_smoothness_score"])
+    review["candidate_drivezone_score"] = float(selected_metrics["candidate_drivezone_score"])
     artifacts: dict[str, list[tuple[Any, dict[str, Any]]]] = {
         "traj_guided_core_line": [],
         "trusted_core_skeleton": [],
@@ -1421,6 +1777,8 @@ def _refine_built_road_geometry(
                     "built_source_road_id": str(road.road_id),
                     "endpoint_tag": "src",
                     "anchor_source": str(review["entry_anchor_source"]),
+                    "anchor_confidence": float(review["entry_anchor_confidence"]),
+                    "anchor_midpoint_fallback_used": bool(review["entry_midpoint_fallback_used"]),
                     "applied": bool(review["applied"]),
                 },
             ),
@@ -1432,6 +1790,8 @@ def _refine_built_road_geometry(
                     "built_source_road_id": str(road.road_id),
                     "endpoint_tag": "dst",
                     "anchor_source": str(review["exit_anchor_source"]),
+                    "anchor_confidence": float(review["exit_anchor_confidence"]),
+                    "anchor_midpoint_fallback_used": bool(review["exit_midpoint_fallback_used"]),
                     "applied": bool(review["applied"]),
                 },
             ),
@@ -1450,6 +1810,7 @@ def _refine_built_road_geometry(
                     "built_source_road_id": str(road.road_id),
                     "core_skeleton_source": "traj_guided",
                     "source_detail": str(source_label),
+                    "lane_boundary_quality_score": float(review["lane_boundary_quality_score"]),
                     "applied": bool(review["applied"]),
                 },
             )
@@ -1466,6 +1827,7 @@ def _refine_built_road_geometry(
                 "lane_boundary_used": bool(review["lane_boundary_used"]),
                 "traj_guided_used": bool(review["traj_guided_used"]),
                 "support_trend_used": bool(review["support_trend_used"]),
+                "lane_boundary_quality_score": float(review["lane_boundary_quality_score"]),
                 "applied": bool(review["applied"]),
             },
         )
@@ -1480,6 +1842,8 @@ def _refine_built_road_geometry(
                     "built_source_road_id": str(road.road_id),
                     "role": "entry",
                     "anchor_source": str(review["entry_anchor_source"]),
+                    "anchor_confidence": float(review["entry_anchor_confidence"]),
+                    "anchor_midpoint_fallback_used": bool(review["entry_midpoint_fallback_used"]),
                     "applied": bool(review["applied"]),
                 },
             ),
@@ -1491,6 +1855,8 @@ def _refine_built_road_geometry(
                     "built_source_road_id": str(road.road_id),
                     "role": "exit",
                     "anchor_source": str(review["exit_anchor_source"]),
+                    "anchor_confidence": float(review["exit_anchor_confidence"]),
+                    "anchor_midpoint_fallback_used": bool(review["exit_midpoint_fallback_used"]),
                     "applied": bool(review["applied"]),
                 },
             ),
@@ -1505,6 +1871,8 @@ def _refine_built_road_geometry(
                     "segment_id": str(segment.segment_id),
                     "built_source_road_id": str(road.road_id),
                     "safe_envelope_applied": bool(review["safe_envelope_applied"]),
+                    "safe_envelope_source": str(review["safe_envelope_source"]),
+                    "original_road_used_as_weak_ref": bool(review["original_road_used_as_weak_ref"]),
                     "lane_boundary_used": bool(review["lane_boundary_used"]),
                     "traj_guided_used": bool(review["traj_guided_used"]),
                 },
@@ -1542,15 +1910,22 @@ def _refine_built_road_geometry(
                 "pair": str(pair),
                 "segment_id": str(segment.segment_id),
                 "built_source_road_id": str(road.road_id),
-                "applied": True,
-                "smoothed": bool(review["smoothed"]),
-                "before_length": float(review["before_length"]),
-                "after_length": float(review["after_length"]),
-                "before_drivezone_overlap_ratio": float(review["before_drivezone_overlap_ratio"]),
-                "after_drivezone_overlap_ratio": float(review["after_drivezone_overlap_ratio"]),
-            },
+                    "applied": True,
+                    "smoothed": bool(review["smoothed"]),
+                    "selected_candidate_mode": str(review["selected_candidate_mode"]),
+                    "before_length": float(review["before_length"]),
+                    "after_length": float(review["after_length"]),
+                    "before_drivezone_overlap_ratio": float(review["before_drivezone_overlap_ratio"]),
+                    "after_drivezone_overlap_ratio": float(review["after_drivezone_overlap_ratio"]),
+                    "before_endpoint_fit_score": float(review["before_endpoint_fit_score"]),
+                    "after_endpoint_fit_score": float(review["after_endpoint_fit_score"]),
+                    "before_center_offset_score": float(review["before_center_offset_score"]),
+                    "after_center_offset_score": float(review["after_center_offset_score"]),
+                    "before_smoothness_score": float(review["before_smoothness_score"]),
+                    "after_smoothness_score": float(review["after_smoothness_score"]),
+                },
+            )
         )
-    )
     return refined_road, review, artifacts
 
 
@@ -1624,17 +1999,33 @@ def _apply_geometry_refine(
                 "geometry_refine_core_skeleton_source_detail": str(review["core_skeleton_source_detail"]),
                 "geometry_refine_entry_anchor_source": str(review["entry_anchor_source"]),
                 "geometry_refine_exit_anchor_source": str(review["exit_anchor_source"]),
+                "geometry_refine_entry_anchor_confidence": float(review["entry_anchor_confidence"]),
+                "geometry_refine_exit_anchor_confidence": float(review["exit_anchor_confidence"]),
+                "geometry_refine_entry_midpoint_fallback_used": bool(review["entry_midpoint_fallback_used"]),
+                "geometry_refine_exit_midpoint_fallback_used": bool(review["exit_midpoint_fallback_used"]),
                 "geometry_refine_smoothed": bool(review["smoothed"]),
                 "geometry_refine_lane_boundary_used": bool(review["lane_boundary_used"]),
+                "geometry_refine_lane_boundary_quality_score": float(review["lane_boundary_quality_score"]),
+                "geometry_refine_lane_boundary_use_reason": str(review["lane_boundary_use_reason"]),
                 "geometry_refine_traj_guided_used": bool(review["traj_guided_used"]),
                 "geometry_refine_support_trend_used": bool(review["support_trend_used"]),
                 "geometry_refine_safe_envelope_applied": bool(review["safe_envelope_applied"]),
+                "geometry_refine_safe_envelope_source": str(review["safe_envelope_source"]),
+                "geometry_refine_original_road_used_as_weak_ref": bool(review["original_road_used_as_weak_ref"]),
                 "geometry_refine_before_length": float(review["before_length"]),
                 "geometry_refine_after_length": float(review["after_length"]),
                 "geometry_refine_drivezone_ratio_before": float(review["before_drivezone_overlap_ratio"]),
                 "geometry_refine_drivezone_ratio_after": float(review["road_drivezone_overlap_ratio_after"]),
                 "geometry_refine_divstrip_overlap_ratio_before": float(review["before_divstrip_overlap_ratio"]),
                 "geometry_refine_divstrip_overlap_ratio_after": float(review["road_divstrip_overlap_ratio_after"]),
+                "geometry_refine_before_center_offset_score": float(review["before_center_offset_score"]),
+                "geometry_refine_after_center_offset_score": float(review["after_center_offset_score"]),
+                "geometry_refine_before_endpoint_fit_score": float(review["before_endpoint_fit_score"]),
+                "geometry_refine_after_endpoint_fit_score": float(review["after_endpoint_fit_score"]),
+                "geometry_refine_before_smoothness_score": float(review["before_smoothness_score"]),
+                "geometry_refine_after_smoothness_score": float(review["after_smoothness_score"]),
+                "geometry_refine_candidate_total_score": float(review["candidate_total_score"]),
+                "geometry_refine_selected_candidate_mode": str(review["selected_candidate_mode"]),
             }
         )
         refined_roads.append(refined_road)
@@ -1652,6 +2043,8 @@ def _apply_geometry_refine(
         "traj_guided_used_count": int(sum(1 for row in review_rows if bool(row.get("traj_guided_used", False)))),
         "support_trend_used_count": int(sum(1 for row in review_rows if bool(row.get("support_trend_used", False)))),
         "safe_envelope_applied_count": int(sum(1 for row in review_rows if bool(row.get("safe_envelope_applied", False)))),
+        "entry_midpoint_fallback_count": int(sum(1 for row in review_rows if bool(row.get("entry_midpoint_fallback_used", False)))),
+        "exit_midpoint_fallback_count": int(sum(1 for row in review_rows if bool(row.get("exit_midpoint_fallback_used", False)))),
         "skip_reason_hist": dict(Counter(str(row.get("skip_reason", "") or "-") for row in review_rows if str(row.get("skip_reason", "") or "-") != "-")),
     }
     ordered_results = [result_map[str(item.get("segment_id", ""))] for item in road_results if str(item.get("segment_id", "")) in result_map]
@@ -1693,8 +2086,11 @@ def build_slot(
             reason="corridor_identity_unresolved",
             interval_count=int(len(intervals)),
         )
-    ref_point = nearest_points(xsec_line, line)[0]
-    ref_s = float(xsec_line.project(ref_point))
+    nearest = _safe_nearest_points(xsec_line, line)
+    ref_point = nearest[0] if nearest is not None else pipeline._midpoint_of_interval(intervals[0]) if intervals else Point()
+    ref_s = _safe_line_project(xsec_line, ref_point)
+    if ref_s is None:
+        ref_s = float(intervals[0].center_s) if intervals else 0.0
     desired_rank = identity.witness_interval_rank if str(identity.state) == "witness_based" else None
     interval = None
     method = "unresolved"
@@ -2456,10 +2852,16 @@ def write_road_outputs(
                         "geometry_refine_core_skeleton_source_detail": str(build_result.get("geometry_refine_core_skeleton_source_detail", "")),
                         "geometry_refine_entry_anchor_source": str(build_result.get("geometry_refine_entry_anchor_source", "")),
                         "geometry_refine_exit_anchor_source": str(build_result.get("geometry_refine_exit_anchor_source", "")),
+                        "geometry_refine_entry_midpoint_fallback_used": bool(build_result.get("geometry_refine_entry_midpoint_fallback_used", False)),
+                        "geometry_refine_exit_midpoint_fallback_used": bool(build_result.get("geometry_refine_exit_midpoint_fallback_used", False)),
+                        "geometry_refine_entry_anchor_confidence": float(build_result.get("geometry_refine_entry_anchor_confidence", 0.0)),
+                        "geometry_refine_exit_anchor_confidence": float(build_result.get("geometry_refine_exit_anchor_confidence", 0.0)),
                         "geometry_refine_lane_boundary_used": bool(build_result.get("geometry_refine_lane_boundary_used", False)),
+                        "geometry_refine_lane_boundary_quality_score": float(build_result.get("geometry_refine_lane_boundary_quality_score", 0.0)),
                         "geometry_refine_traj_guided_used": bool(build_result.get("geometry_refine_traj_guided_used", False)),
                         "geometry_refine_support_trend_used": bool(build_result.get("geometry_refine_support_trend_used", False)),
                         "geometry_refine_safe_envelope_applied": bool(build_result.get("geometry_refine_safe_envelope_applied", False)),
+                        "geometry_refine_safe_envelope_source": str(build_result.get("geometry_refine_safe_envelope_source", "")),
                         "failure_classification": "built",
                     },
                 )
@@ -2505,6 +2907,11 @@ def write_road_outputs(
                 "geometry_refine_smoothed": bool(build_result.get("geometry_refine_smoothed", False)),
                 "geometry_refine_core_skeleton_source": str(build_result.get("geometry_refine_core_skeleton_source", "")),
                 "geometry_refine_core_skeleton_source_detail": str(build_result.get("geometry_refine_core_skeleton_source_detail", "")),
+                "geometry_refine_entry_anchor_source": str(build_result.get("geometry_refine_entry_anchor_source", "")),
+                "geometry_refine_exit_anchor_source": str(build_result.get("geometry_refine_exit_anchor_source", "")),
+                "geometry_refine_entry_midpoint_fallback_used": bool(build_result.get("geometry_refine_entry_midpoint_fallback_used", False)),
+                "geometry_refine_exit_midpoint_fallback_used": bool(build_result.get("geometry_refine_exit_midpoint_fallback_used", False)),
+                "geometry_refine_safe_envelope_source": str(build_result.get("geometry_refine_safe_envelope_source", "")),
                 "failure_classification": str(failure_classification),
             }
         )
@@ -2569,10 +2976,14 @@ def write_road_outputs(
             "geometry_refine_core_skeleton_source_detail": str(build_result.get("geometry_refine_core_skeleton_source_detail", "")),
             "geometry_refine_entry_anchor_source": str(build_result.get("geometry_refine_entry_anchor_source", "")),
             "geometry_refine_exit_anchor_source": str(build_result.get("geometry_refine_exit_anchor_source", "")),
+            "geometry_refine_entry_midpoint_fallback_used": bool(build_result.get("geometry_refine_entry_midpoint_fallback_used", False)),
+            "geometry_refine_exit_midpoint_fallback_used": bool(build_result.get("geometry_refine_exit_midpoint_fallback_used", False)),
             "geometry_refine_lane_boundary_used": bool(build_result.get("geometry_refine_lane_boundary_used", False)),
+            "geometry_refine_lane_boundary_quality_score": float(build_result.get("geometry_refine_lane_boundary_quality_score", 0.0)),
             "geometry_refine_traj_guided_used": bool(build_result.get("geometry_refine_traj_guided_used", False)),
             "geometry_refine_support_trend_used": bool(build_result.get("geometry_refine_support_trend_used", False)),
             "geometry_refine_safe_envelope_applied": bool(build_result.get("geometry_refine_safe_envelope_applied", False)),
+            "geometry_refine_safe_envelope_source": str(build_result.get("geometry_refine_safe_envelope_source", "")),
             "failure_classification": str(failure_classification),
         }
         metrics_segments.append(metrics_entry)

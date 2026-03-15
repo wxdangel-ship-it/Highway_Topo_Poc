@@ -112,6 +112,8 @@ def _render_summary(
         f"- traj_guided_used_count: `{int(geom.get('traj_guided_used_count', 0))}`",
         f"- lane_boundary_used_count: `{int(geom.get('lane_boundary_used_count', 0))}`",
         f"- safe_envelope_applied_count: `{int(geom.get('safe_envelope_applied_count', 0))}`",
+        f"- entry_midpoint_fallback_count: `{int(geom.get('entry_midpoint_fallback_count', 0))}`",
+        f"- exit_midpoint_fallback_count: `{int(geom.get('exit_midpoint_fallback_count', 0))}`",
         f"- bad_built_arc_count: `{int(audit.get('bad_built_arc_count', 0))}`",
         f"- built_all_direct_unique: `{str(bool(audit.get('built_all_direct_unique', False))).lower()}`",
         f"- audit_summary_inconsistent: `{str(bool(audit.get('audit_summary_inconsistent', False))).lower()}`",
@@ -193,22 +195,29 @@ def main(argv: list[str] | None = None) -> int:
         f"smoothed={geom_summary.get('smoothed_count')} "
         f"traj_guided_used={geom_summary.get('traj_guided_used_count')} "
         f"lane_boundary_used={geom_summary.get('lane_boundary_used_count')} "
-        f"safe_envelope_applied={geom_summary.get('safe_envelope_applied_count')}"
+        f"safe_envelope_applied={geom_summary.get('safe_envelope_applied_count')} "
+        f"entry_midpoint_fallback={geom_summary.get('entry_midpoint_fallback_count')} "
+        f"exit_midpoint_fallback={geom_summary.get('exit_midpoint_fallback_count')}"
     )
     for row in geometry_refine_review.get("rows", []):
         print(
             f"GEOM_PAIR patch={row.get('patch_id')} "
             f"pair={row.get('pair')} "
-            f"applied={str(bool(row.get('applied', False))).lower()} "
-            f"smoothed={str(bool(row.get('smoothed', False))).lower()} "
-            f"core={row.get('core_skeleton_source')} "
-            f"entry={row.get('entry_anchor_source')} "
-            f"exit={row.get('exit_anchor_source')} "
-            f"traj_guided={str(bool(row.get('traj_guided_used', False))).lower()} "
-            f"lane_boundary={str(bool(row.get('lane_boundary_used', False))).lower()} "
-            f"before_len={row.get('before_length')} "
-            f"after_len={row.get('after_length')} "
-            f"before_drivezone={row.get('before_drivezone_overlap_ratio')} "
+        f"applied={str(bool(row.get('applied', False))).lower()} "
+        f"smoothed={str(bool(row.get('smoothed', False))).lower()} "
+        f"core={row.get('core_skeleton_source')} "
+        f"entry={row.get('entry_anchor_source')} "
+        f"exit={row.get('exit_anchor_source')} "
+        f"entry_midpoint={str(bool(row.get('entry_midpoint_fallback_used', False))).lower()} "
+        f"exit_midpoint={str(bool(row.get('exit_midpoint_fallback_used', False))).lower()} "
+        f"traj_guided={str(bool(row.get('traj_guided_used', False))).lower()} "
+        f"lane_boundary={str(bool(row.get('lane_boundary_used', False))).lower()} "
+        f"lane_quality={row.get('lane_boundary_quality_score')} "
+        f"env={row.get('safe_envelope_source')} "
+        f"score={row.get('candidate_total_score')} "
+        f"before_len={row.get('before_length')} "
+        f"after_len={row.get('after_length')} "
+        f"before_drivezone={row.get('before_drivezone_overlap_ratio')} "
             f"after_drivezone={row.get('after_drivezone_overlap_ratio')}"
         )
     print(
