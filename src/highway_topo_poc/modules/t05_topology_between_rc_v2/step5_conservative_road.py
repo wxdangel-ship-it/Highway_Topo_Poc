@@ -1416,6 +1416,7 @@ def build_final_road(
         "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
         "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
         "production_multi_arc_allowed": bool(segment.production_multi_arc_allowed),
+        "same_pair_arc_finalize_allowed": bool(getattr(segment, "same_pair_arc_finalize_allowed", False)),
         "multi_arc_evidence_mode": str(segment.multi_arc_evidence_mode),
         "multi_arc_structure_type": str(segment.multi_arc_structure_type),
         "multi_arc_rule_reason": str(segment.multi_arc_rule_reason),
@@ -1436,7 +1437,12 @@ def build_final_road(
         final_gate_reason = "final_gate_synthetic_arc_not_allowed"
     elif has_topology_assignment and not bool(segment.topology_arc_is_direct_legal):
         final_gate_reason = "final_gate_not_direct_legal"
-    elif has_topology_assignment and not bool(segment.topology_arc_is_unique) and not bool(segment.production_multi_arc_allowed):
+    elif (
+        has_topology_assignment
+        and not bool(segment.topology_arc_is_unique)
+        and not bool(segment.production_multi_arc_allowed)
+        and not bool(getattr(segment, "same_pair_arc_finalize_allowed", False))
+    ):
         final_gate_reason = "final_gate_non_unique_arc"
     elif has_topology_assignment and not str(segment.topology_arc_id):
         final_gate_reason = "final_gate_arc_unique_connectivity_violation"
@@ -1978,6 +1984,7 @@ def write_road_outputs(
                     "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
                     "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
                     "production_multi_arc_allowed": bool(segment.production_multi_arc_allowed),
+                    "same_pair_arc_finalize_allowed": bool(getattr(segment, "same_pair_arc_finalize_allowed", False)),
                     "multi_arc_evidence_mode": str(segment.multi_arc_evidence_mode),
                     "multi_arc_structure_type": str(segment.multi_arc_structure_type),
                     "multi_arc_rule_reason": str(segment.multi_arc_rule_reason),
@@ -2035,6 +2042,7 @@ def write_road_outputs(
                         "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
                         "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
                         "production_multi_arc_allowed": bool(segment.production_multi_arc_allowed),
+                        "same_pair_arc_finalize_allowed": bool(getattr(segment, "same_pair_arc_finalize_allowed", False)),
                         "multi_arc_evidence_mode": str(segment.multi_arc_evidence_mode),
                         "multi_arc_structure_type": str(segment.multi_arc_structure_type),
                         "multi_arc_rule_reason": str(segment.multi_arc_rule_reason),
@@ -2080,6 +2088,7 @@ def write_road_outputs(
                 "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
                 "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
                 "production_multi_arc_allowed": bool(segment.production_multi_arc_allowed),
+                "same_pair_arc_finalize_allowed": bool(getattr(segment, "same_pair_arc_finalize_allowed", False)),
                 "multi_arc_evidence_mode": str(segment.multi_arc_evidence_mode),
                 "multi_arc_structure_type": str(segment.multi_arc_structure_type),
                 "multi_arc_rule_reason": str(segment.multi_arc_rule_reason),
@@ -2139,6 +2148,7 @@ def write_road_outputs(
             "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
             "topology_arc_is_unique": bool(segment.topology_arc_is_unique),
             "production_multi_arc_allowed": bool(segment.production_multi_arc_allowed),
+            "same_pair_arc_finalize_allowed": bool(getattr(segment, "same_pair_arc_finalize_allowed", False)),
             "multi_arc_evidence_mode": str(segment.multi_arc_evidence_mode),
             "multi_arc_structure_type": str(segment.multi_arc_structure_type),
             "multi_arc_rule_reason": str(segment.multi_arc_rule_reason),
@@ -2229,6 +2239,7 @@ def write_road_outputs(
                 or (
                     (not bool(entry["topology_arc_is_unique"]))
                     and not bool(entry.get("production_multi_arc_allowed", False))
+                    and not bool(entry.get("same_pair_arc_finalize_allowed", False))
                 )
             )
         )

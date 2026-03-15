@@ -161,6 +161,7 @@ class Segment:
     topology_arc_assignment_geometry_fit_m: float | None = None
     topology_arc_assignment_score_gap_m: float | None = None
     production_multi_arc_allowed: bool = False
+    same_pair_arc_finalize_allowed: bool = False
     multi_arc_evidence_mode: str = ""
     multi_arc_structure_type: str = ""
     multi_arc_rule_reason: str = ""
@@ -230,6 +231,7 @@ class Segment:
                 else float(self.topology_arc_assignment_score_gap_m)
             ),
             "production_multi_arc_allowed": bool(self.production_multi_arc_allowed),
+            "same_pair_arc_finalize_allowed": bool(self.same_pair_arc_finalize_allowed),
             "multi_arc_evidence_mode": str(self.multi_arc_evidence_mode),
             "multi_arc_structure_type": str(self.multi_arc_structure_type),
             "multi_arc_rule_reason": str(self.multi_arc_rule_reason),
@@ -325,6 +327,7 @@ class Segment:
                 else float(payload.get("topology_arc_assignment_score_gap_m"))
             ),
             production_multi_arc_allowed=bool(payload.get("production_multi_arc_allowed", False)),
+            same_pair_arc_finalize_allowed=bool(payload.get("same_pair_arc_finalize_allowed", False)),
             multi_arc_evidence_mode=str(payload.get("multi_arc_evidence_mode", "")),
             multi_arc_structure_type=str(payload.get("multi_arc_structure_type", "")),
             multi_arc_rule_reason=str(payload.get("multi_arc_rule_reason", "")),

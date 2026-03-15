@@ -323,6 +323,7 @@ def _identity_record_from_row(
         "topology_arc_assignment_geometry_fit_m": payload.get("topology_arc_assignment_geometry_fit_m"),
         "topology_arc_assignment_score_gap_m": payload.get("topology_arc_assignment_score_gap_m"),
         "production_multi_arc_allowed": bool(payload.get("production_multi_arc_allowed", False)),
+        "same_pair_arc_finalize_allowed": bool(payload.get("same_pair_arc_finalize_allowed", False)),
         "multi_arc_evidence_mode": str(payload.get("multi_arc_evidence_mode", "")),
         "multi_arc_structure_type": str(
             payload.get("multi_arc_structure_type", payload.get("arc_structure_type", ""))
@@ -517,6 +518,7 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
                 or bool(str(row.get("hard_block_reason", "")))
                 or str(row.get("arc_structure_type", "")) == STRUCTURE_SAME_PAIR_MULTI_ARC
                 or bool(row.get("production_multi_arc_allowed", False))
+                or bool(row.get("same_pair_arc_finalize_allowed", False))
                 or bool(str(row.get("multi_arc_evidence_mode", "")))
             )
         )
@@ -581,6 +583,7 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
                 "topology_arc_assignment_geometry_fit_m": resolved.get("topology_arc_assignment_geometry_fit_m"),
                 "topology_arc_assignment_score_gap_m": resolved.get("topology_arc_assignment_score_gap_m"),
                 "production_multi_arc_allowed": bool(resolved.get("production_multi_arc_allowed", False)),
+                "same_pair_arc_finalize_allowed": bool(resolved.get("same_pair_arc_finalize_allowed", False)),
                 "multi_arc_evidence_mode": str(resolved.get("multi_arc_evidence_mode", "")),
                 "multi_arc_structure_type": str(resolved.get("multi_arc_structure_type", "")),
                 "multi_arc_rule_reason": str(resolved.get("multi_arc_rule_reason", "")),
@@ -1057,7 +1060,11 @@ def _production_arc_pass(row: dict[str, Any]) -> bool:
     return bool(
         str(row.get("topology_arc_source_type", "")) == _DIRECT_TOPOLOGY_ARC_SOURCE
         and bool(row.get("topology_arc_is_direct_legal", False))
-        and (bool(row.get("topology_arc_is_unique", False)) or bool(row.get("production_multi_arc_allowed", False)))
+        and (
+            bool(row.get("topology_arc_is_unique", False))
+            or bool(row.get("production_multi_arc_allowed", False))
+            or bool(row.get("same_pair_arc_finalize_allowed", False))
+        )
         and bool(str(row.get("topology_arc_id", "")))
     )
 
@@ -1080,6 +1087,7 @@ def _registry_row_to_arc_record(row: dict[str, Any]) -> dict[str, Any]:
         "topology_arc_is_direct_legal": bool(identity.get("topology_arc_is_direct_legal", False)),
         "topology_arc_is_unique": bool(identity.get("topology_arc_is_unique", False)),
         "production_multi_arc_allowed": bool(identity.get("production_multi_arc_allowed", False)),
+        "same_pair_arc_finalize_allowed": bool(identity.get("same_pair_arc_finalize_allowed", False)),
         "multi_arc_evidence_mode": str(identity.get("multi_arc_evidence_mode", "")),
         "multi_arc_structure_type": str(identity.get("multi_arc_structure_type", "")),
         "multi_arc_rule_reason": str(identity.get("multi_arc_rule_reason", "")),
@@ -2243,6 +2251,7 @@ def build_same_pair_provisional_allow_review(
             or bool(row.get("same_pair_multi_arc_candidate", False))
             or int(row.get("selected_segment_count", 0)) > 0
             or bool(row.get("production_multi_arc_allowed", False))
+            or bool(row.get("same_pair_arc_finalize_allowed", False))
         )
     ]
     rows: list[dict[str, Any]] = []
@@ -2287,6 +2296,9 @@ def build_same_pair_provisional_allow_review(
                 "stitched_support_corridor_signature": list(row.get("stitched_support_corridor_signature", [])),
                 "stitched_support_surface_side_signature": list(row.get("stitched_support_surface_side_signature", [])),
                 "same_pair_support_deconflict_reason": str(row.get("same_pair_support_deconflict_reason", "")),
+                "same_pair_arc_finalize_allowed": bool(
+                    row.get("same_pair_arc_finalize_allowed", pair_decision.get("same_pair_arc_finalize_allowed", False))
+                ),
                 "multi_arc_evidence_mode": str(
                     row.get("multi_arc_evidence_mode", pair_decision.get("multi_arc_evidence_mode", ""))
                 ),
@@ -2304,6 +2316,7 @@ def build_same_pair_provisional_allow_review(
         "row_count": int(len(rows)),
         "provisional_allow_count": int(sum(1 for row in rows if bool(row.get("same_pair_provisional_allowed", False)))),
         "finalized_allow_count": int(sum(1 for row in rows if bool(row.get("production_multi_arc_allowed", False)))),
+        "arc_level_finalize_count": int(sum(1 for row in rows if bool(row.get("same_pair_arc_finalize_allowed", False)))),
         "rows": rows,
     }
 
@@ -2323,6 +2336,7 @@ def build_multi_arc_review(
         if (
             str(row.get("arc_structure_type", "")) == STRUCTURE_SAME_PAIR_MULTI_ARC
             or bool(row.get("production_multi_arc_allowed", False))
+            or bool(row.get("same_pair_arc_finalize_allowed", False))
             or str(row.get("multi_arc_evidence_mode", "")) in {"witness_based", "fallback_based"}
         )
     ]
@@ -2333,7 +2347,11 @@ def build_multi_arc_review(
     }
     explicit_rule_rows: list[dict[str, Any]] = []
     for row in same_pair_registry_rows:
-        if bool(row.get("production_multi_arc_allowed", False)) or bool(str(row.get("multi_arc_evidence_mode", ""))):
+        if (
+            bool(row.get("production_multi_arc_allowed", False))
+            or bool(row.get("same_pair_arc_finalize_allowed", False))
+            or bool(str(row.get("multi_arc_evidence_mode", "")))
+        ):
             explicit_rule_rows.append(dict(row))
     multi_arc_rule = apply_multi_arc_rule(explicit_rule_rows or same_pair_registry_rows)
     observation_by_pair = {
@@ -2415,6 +2433,11 @@ def build_multi_arc_review(
                 },
                 "support_cluster_is_dominant": {
                     str(row.get("topology_arc_id", "")): bool(row.get("support_cluster_is_dominant", False))
+                    for row in pair_registry_rows
+                    if str(row.get("topology_arc_id", ""))
+                },
+                "same_pair_arc_finalize_allowed": {
+                    str(row.get("topology_arc_id", "")): bool(row.get("same_pair_arc_finalize_allowed", False))
                     for row in pair_registry_rows
                     if str(row.get("topology_arc_id", ""))
                 },

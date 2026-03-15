@@ -950,6 +950,15 @@ def _support_candidate_public_fields(candidate: dict[str, Any]) -> dict[str, Any
 
 
 def _same_pair_support_conflict_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
+    corridor_cluster_signature = _support_corridor_cluster_signature(
+        list(candidate.get("support_reference_coords", []) or []),
+        candidate.get("support_anchor_src_coords"),
+        candidate.get("support_anchor_dst_coords"),
+        midpoint_resolution_m=3.0,
+        anchor_resolution_m=6.0,
+    )
+    if bool(candidate.get("support_full_xsec_crossing", False)) and corridor_cluster_signature:
+        return ("same_pair_corridor_family", corridor_cluster_signature)
     existing = candidate.get("support_cluster_key")
     if isinstance(existing, (list, tuple)) and existing:
         return _hashable_support_signature(existing)
@@ -2069,6 +2078,12 @@ def _materialize_working_segment(
                     getattr(selected_segment, "production_multi_arc_allowed", False),
                 )
             ),
+            same_pair_arc_finalize_allowed=bool(
+                row.get(
+                    "same_pair_arc_finalize_allowed",
+                    getattr(selected_segment, "same_pair_arc_finalize_allowed", False),
+                )
+            ),
             multi_arc_evidence_mode=str(
                 row.get(
                     "multi_arc_evidence_mode",
@@ -2158,6 +2173,7 @@ def _materialize_working_segment(
         topology_arc_assignment_geometry_fit_m=row.get("topology_arc_assignment_geometry_fit_m"),
         topology_arc_assignment_score_gap_m=row.get("topology_arc_assignment_score_gap_m"),
         production_multi_arc_allowed=bool(row.get("production_multi_arc_allowed", False)),
+        same_pair_arc_finalize_allowed=bool(row.get("same_pair_arc_finalize_allowed", False)),
         multi_arc_evidence_mode=str(row.get("multi_arc_evidence_mode", "")),
         multi_arc_structure_type=str(row.get("multi_arc_structure_type", "")),
         multi_arc_rule_reason=str(row.get("multi_arc_rule_reason", "")),
@@ -2418,18 +2434,25 @@ def build_arc_evidence_attach(
         current["multi_arc_rule_reason"] = str(rule_row.get("rule_reason", ""))
         current["multi_arc_evidence_mode"] = str(evidence_modes.get(topology_arc_id, "insufficient"))
         current["multi_arc_allow_multi_output"] = bool(rule_row.get("allow_multi_output", False))
+        current["same_pair_arc_finalize_allowed"] = bool(
+            str(current.get("multi_arc_evidence_mode", "")) in {"witness_based", "fallback_based"}
+        )
         current["production_multi_arc_allowed"] = bool(
             current.get("multi_arc_allow_multi_output", False)
-            and str(current.get("multi_arc_evidence_mode", "")) in {"witness_based", "fallback_based"}
+            and bool(current.get("same_pair_arc_finalize_allowed", False))
         )
-        if bool(current.get("production_multi_arc_allowed", False)):
+        if bool(current.get("same_pair_arc_finalize_allowed", False)):
             current["entered_main_flow"] = True
             current["blocked_diagnostic_only"] = False
             current["blocked_diagnostic_reason"] = ""
             current["hard_block_reason"] = ""
             current["unbuilt_stage"] = ""
             current["unbuilt_reason"] = ""
-            current["working_segment_source"] = "arc_first_multi_arc_segment"
+            current["working_segment_source"] = (
+                "arc_first_multi_arc_segment"
+                if bool(current.get("production_multi_arc_allowed", False))
+                else "arc_first_same_pair_finalize_segment"
+            )
             same_pair_groups[canonical_pair].append(current)
         elif not bool(current.get("entered_main_flow", False)):
             current["unbuilt_stage"] = str(current.get("unbuilt_stage", "") or "step3_multi_arc_rule_blocked")
@@ -2450,7 +2473,11 @@ def build_arc_evidence_attach(
         )
         for rank, current in enumerate(ranked_rows, start=1):
             current["same_pair_rank"] = int(rank)
-            current["kept_reason"] = "same_pair_multi_arc_allowed"
+            current["kept_reason"] = (
+                "same_pair_multi_arc_allowed"
+                if bool(current.get("production_multi_arc_allowed", False))
+                else "same_pair_arc_finalize_allowed"
+            )
 
     for current in rows:
         selected_segment = selected_by_arc.get(str(current.get("topology_arc_id", "")))
@@ -2505,6 +2532,7 @@ def build_arc_evidence_attach(
                 "controlled_entry_allowed": bool(current.get("controlled_entry_allowed", False)),
                 "multi_arc_evidence_mode": str(current.get("multi_arc_evidence_mode", "")),
                 "production_multi_arc_allowed": bool(current.get("production_multi_arc_allowed", False)),
+                "same_pair_arc_finalize_allowed": bool(current.get("same_pair_arc_finalize_allowed", False)),
                 "working_segment_id": str(current.get("working_segment_id", "")),
                 "working_segment_source": str(current.get("working_segment_source", "")),
             }
