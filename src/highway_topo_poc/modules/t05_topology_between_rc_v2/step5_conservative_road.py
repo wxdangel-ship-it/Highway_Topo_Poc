@@ -479,6 +479,16 @@ def _rcsdroad_trend_extended_candidate_line(
     return candidate
 
 
+def _rcsdroad_fallback_base_line(
+    *,
+    segment: Segment,
+    prior_roads: list[Any],
+    prior_index: dict[tuple[int, int], list[Any]] | None = None,
+) -> LineString:
+    prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
+    return prior_line if prior_line is not None else segment.geometry_metric()
+
+
 def slot_reference_line(
     *,
     segment: Segment,
@@ -898,22 +908,51 @@ def build_final_road(
             "prior_reference_slot_anchored_safe_envelope",
             priority=str(identity.state) == "prior_based",
         )
-    rcsdroad_trend_safe = _rcsdroad_trend_extended_candidate_line(
-        segment.geometry_metric(),
-        src_slot,
-        dst_slot,
-        safe_surface=safe_surface,
-        use_safe_core=True,
+    rcsdroad_priority = str(segment.topology_gap_reason) == "gap_small_terminal_gap_candidate"
+    rcsdroad_base_line = _rcsdroad_fallback_base_line(
+        segment=segment,
+        prior_roads=prior_roads,
+        prior_index=prior_index,
     )
-    _append_candidate_line(candidate_lines, rcsdroad_trend_safe, "rcsdroad_trend_extended_safe_envelope")
-    rcsdroad_trend = _rcsdroad_trend_extended_candidate_line(
-        segment.geometry_metric(),
-        src_slot,
-        dst_slot,
-        safe_surface=safe_surface,
-        use_safe_core=False,
-    )
-    _append_candidate_line(candidate_lines, rcsdroad_trend, "rcsdroad_trend_extended")
+    if rcsdroad_priority:
+        rcsdroad_trend = _rcsdroad_trend_extended_candidate_line(
+            rcsdroad_base_line,
+            src_slot,
+            dst_slot,
+            safe_surface=safe_surface,
+            use_safe_core=False,
+        )
+        _append_candidate_line(candidate_lines, rcsdroad_trend, "rcsdroad_trend_extended", priority=True)
+        rcsdroad_trend_safe = _rcsdroad_trend_extended_candidate_line(
+            rcsdroad_base_line,
+            src_slot,
+            dst_slot,
+            safe_surface=safe_surface,
+            use_safe_core=True,
+        )
+        _append_candidate_line(
+            candidate_lines,
+            rcsdroad_trend_safe,
+            "rcsdroad_trend_extended_safe_envelope",
+            priority=True,
+        )
+    else:
+        rcsdroad_trend_safe = _rcsdroad_trend_extended_candidate_line(
+            rcsdroad_base_line,
+            src_slot,
+            dst_slot,
+            safe_surface=safe_surface,
+            use_safe_core=True,
+        )
+        _append_candidate_line(candidate_lines, rcsdroad_trend_safe, "rcsdroad_trend_extended_safe_envelope")
+        rcsdroad_trend = _rcsdroad_trend_extended_candidate_line(
+            rcsdroad_base_line,
+            src_slot,
+            dst_slot,
+            safe_surface=safe_surface,
+            use_safe_core=False,
+        )
+        _append_candidate_line(candidate_lines, rcsdroad_trend, "rcsdroad_trend_extended")
     attempts: list[dict[str, Any]] = []
     selected_candidate: tuple[LineString, str, float, float, bool] | None = None
     best_candidate: tuple[LineString, str, float, float, bool] | None = None

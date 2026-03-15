@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 from shapely.geometry import LineString, Point, Polygon
 
+from highway_topo_poc.modules.t05_topology_between_rc_v2 import step3_arc_evidence as _step3_evidence
 from highway_topo_poc.modules.t05_topology_between_rc_v2 import step5_conservative_road as _step5_road
 from highway_topo_poc.modules.t05_topology_between_rc_v2.io import InputFrame, PatchInputs
 from highway_topo_poc.modules.t05_topology_between_rc_v2.audit_acceptance import (
@@ -68,6 +69,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_arc_evidence impo
     classify_topology_gap_rows,
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.step5_conservative_road import (
+    _rcsdroad_fallback_base_line,
     _rcsdroad_trend_extended_candidate_line,
     build_slot,
 )
@@ -1544,6 +1546,117 @@ def test_t05v2_arc_first_prefers_dominant_terminal_crossing_cluster(tmp_path: Pa
     assert row["support_interval_reference_source"] == "selected_support"
 
 
+def test_t05v2_support_full_xsec_status_promotes_dual_anchor_partial_support() -> None:
+    promoted, mode, has_src_anchor, has_dst_anchor = _step3_evidence._support_full_xsec_status(
+        traj_production_type="partial_arc_support",
+        traj_production_segments=[
+            {
+                "supports_src_xsec_anchor": True,
+                "supports_dst_xsec_anchor": True,
+            }
+        ],
+        traj_support_span_count=1,
+        coverage_ratio=0.88,
+        support_anchor_src_coords=[0.0, 0.5],
+        support_anchor_dst_coords=[100.0, 0.2],
+        params=dict(DEFAULT_PARAMS),
+    )
+
+    assert bool(promoted) is True
+    assert mode == "partial_dual_anchor"
+    assert bool(has_src_anchor) is True
+    assert bool(has_dst_anchor) is True
+
+
+def test_t05v2_near_full_partial_support_cluster_beats_isolated_terminal_outlier() -> None:
+    params = dict(DEFAULT_PARAMS)
+    candidates = [
+        {
+            "traj_id": "wrong_terminal",
+            "selected_support_traj_id": "wrong_terminal",
+            "traj_support_type": "terminal_crossing_support",
+            "traj_support_ids": ["wrong_terminal"],
+            "traj_support_span_count": 1,
+            "traj_support_coverage_ratio": 1.0,
+            "traj_support_segments": [],
+            "support_reference_coords": [[0.0, 4.0], [50.0, 4.0], [100.0, 4.0]],
+            "support_anchor_src_coords": [0.0, 4.0],
+            "support_anchor_dst_coords": [100.0, 4.0],
+            "support_corridor_signature": [[0.0, 4.0], [50.0, 4.0], [100.0, 4.0]],
+            "support_surface_side_signature": [0.9, 0.9],
+            "support_full_xsec_crossing": True,
+            "support_full_xsec_mode": "strict_terminal",
+            "support_has_src_xsec_anchor": True,
+            "support_has_dst_xsec_anchor": True,
+            "surface_consistent_segment_count": 1,
+            "best_line_distance_m": 12.0,
+        },
+        {
+            "traj_id": "near_full_a",
+            "selected_support_traj_id": "near_full_a",
+            "traj_support_type": "partial_arc_support",
+            "traj_support_ids": ["near_full_a"],
+            "traj_support_span_count": 1,
+            "traj_support_coverage_ratio": 0.93,
+            "traj_support_segments": [],
+            "support_reference_coords": [[0.0, 0.5], [50.0, 0.3], [100.0, 0.1]],
+            "support_anchor_src_coords": [1.0, 0.6],
+            "support_anchor_dst_coords": [101.0, 0.2],
+            "support_corridor_signature": [[0.0, 0.5], [50.0, 0.3], [100.0, 0.1]],
+            "support_surface_side_signature": [0.18, 0.22],
+            "support_full_xsec_crossing": True,
+            "support_full_xsec_mode": "partial_dual_anchor",
+            "support_has_src_xsec_anchor": True,
+            "support_has_dst_xsec_anchor": True,
+            "surface_consistent_segment_count": 1,
+            "best_line_distance_m": 1.2,
+        },
+        {
+            "traj_id": "near_full_b",
+            "selected_support_traj_id": "near_full_b",
+            "traj_support_type": "partial_arc_support",
+            "traj_support_ids": ["near_full_b"],
+            "traj_support_span_count": 1,
+            "traj_support_coverage_ratio": 0.91,
+            "traj_support_segments": [],
+            "support_reference_coords": [[0.0, 0.4], [50.0, 0.2], [100.0, 0.0]],
+            "support_anchor_src_coords": [2.0, 0.5],
+            "support_anchor_dst_coords": [102.0, 0.1],
+            "support_corridor_signature": [[0.0, 0.4], [50.0, 0.2], [100.0, 0.0]],
+            "support_surface_side_signature": [0.21, 0.19],
+            "support_full_xsec_crossing": True,
+            "support_full_xsec_mode": "partial_dual_anchor",
+            "support_has_src_xsec_anchor": True,
+            "support_has_dst_xsec_anchor": True,
+            "surface_consistent_segment_count": 1,
+            "best_line_distance_m": 1.1,
+        },
+    ]
+    stitched_summary = {
+        "stitched_support_available": False,
+        "stitched_support_ready": False,
+        "stitched_support_anchor_src_coords": None,
+        "stitched_support_anchor_dst_coords": None,
+        "stitched_support_surface_side_signature": [],
+    }
+
+    annotated = _step3_evidence._annotate_support_candidate_clusters(list(candidates), params=params)
+    annotated = _step3_evidence._annotate_support_candidate_interval_reference_trust(
+        annotated,
+        stitched_summary=stitched_summary,
+        params=params,
+    )
+    ranked = sorted(annotated, key=_step3_evidence._support_selection_key)
+
+    assert ranked[0]["traj_id"] in {"near_full_a", "near_full_b"}
+    assert bool(ranked[0]["support_cluster_is_dominant"]) is True
+    assert int(ranked[0]["support_cluster_support_count"]) == 2
+    assert bool(ranked[0]["support_interval_reference_trusted"]) is True
+    outlier = next(item for item in annotated if item["traj_id"] == "wrong_terminal")
+    assert int(outlier["support_cluster_support_count"]) == 1
+    assert bool(outlier["support_interval_reference_trusted"]) is False
+
+
 def test_t05v2_arc_first_prefilter_keeps_same_arc_support_and_skips_far_traj(tmp_path: Path) -> None:
     patch_id = "arc_first_prefilter"
     data_root = tmp_path / "data"
@@ -2156,6 +2269,42 @@ def test_t05v2_rcsdroad_trend_extended_candidate_line_uses_endpoint_trend() -> N
     assert float(coords[0][1]) == pytest.approx(-0.5, abs=1e-6)
     assert float(coords[-1][0]) == pytest.approx(100.0)
     assert float(coords[-1][1]) == pytest.approx(4.5, abs=1e-6)
+
+
+def test_t05v2_rcsdroad_fallback_base_line_prefers_prior_reference() -> None:
+    segment = Segment(
+        segment_id="seg_rcsd_prior",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((10.0, 0.0), (50.0, 8.0), (90.0, 16.0)),
+        candidate_ids=("cand_prior",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_prior",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=True,
+        formation_reason="traj_supported_cluster",
+        length_m=82.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_rcsd_prior",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        same_pair_rank=1,
+        kept_reason="",
+    )
+    prior_line = LineString([(10.0, 5.0), (50.0, 5.0), (90.0, 5.0)])
+    base_line = _rcsdroad_fallback_base_line(
+        segment=segment,
+        prior_roads=[SimpleNamespace(line=prior_line, snodeid=10, enodeid=20)],
+    )
+
+    assert base_line.equals(prior_line)
 
 
 def test_t05v2_build_final_road_uses_rcsdroad_trend_extension_as_last_fallback() -> None:
@@ -3845,7 +3994,7 @@ def test_t05v2_write_witness_vis_step5_recovery_review_outputs_visual_layers(tmp
     assert recovery["rows"][0]["issue_classification"] in {"witness_layer_issue", "step5_issue_confirmed"}
     assert "corridor_witness_review" in summary
     gap_review = _read_json(output_root / "topology_gap_decision_review.json")
-    assert int(gap_review["row_count"]) == 3
+    assert int(gap_review["row_count"]) == 4
     gap_by_pair = {str(item["pair"]): item for item in gap_review["rows"]}
     assert gap_by_pair["760239:6963539359479390368"]["gap_classification"] == "gap_enter_mainflow"
     assert gap_by_pair["760239:6963539359479390368"]["gap_reason"] == "gap_should_enter_mainflow"
@@ -4030,6 +4179,32 @@ def test_t05v2_classify_topology_gap_rows_returns_reasoned_decisions() -> None:
     assert decisions["791871:37687913"]["decision"] == "gap_enter_mainflow"
     assert decisions["791871:37687913"]["reason"] == "gap_should_enter_mainflow"
     assert decisions["791871:37687913"]["arc_selection_allow_multi_output"] is True
+
+
+def test_t05v2_classify_topology_gap_rows_allows_small_terminal_gap_candidate() -> None:
+    rows = [
+        {
+            "pair": "5389884430552920:2703260460721685999",
+            "src": 5389884430552920,
+            "dst": 2703260460721685999,
+            "is_direct_legal": True,
+            "is_unique": True,
+            "blocked_diagnostic_reason": "topology_gap_unresolved",
+            "traj_support_type": "partial_arc_support",
+            "traj_support_ids": ["traj_gap_partial"],
+            "traj_support_coverage_ratio": 0.86,
+            "prior_support_type": "prior_fallback_support",
+            "support_anchor_src_coords": [0.0, 2.0],
+            "support_anchor_dst_coords": None,
+            "selected_support_interval_reference_trusted": True,
+            "support_interval_reference_source": "selected_support",
+        }
+    ]
+
+    decisions = classify_topology_gap_rows(rows, params=dict(DEFAULT_PARAMS))
+
+    assert decisions["5389884430552920:2703260460721685999"]["decision"] == "gap_enter_mainflow"
+    assert decisions["5389884430552920:2703260460721685999"]["reason"] == "gap_small_terminal_gap_candidate"
 
 
 def test_t05v2_competing_arc_closure_finalizes_obligation_statuses() -> None:

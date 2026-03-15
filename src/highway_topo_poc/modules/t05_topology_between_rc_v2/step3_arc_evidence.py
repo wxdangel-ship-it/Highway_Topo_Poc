@@ -23,6 +23,7 @@ _DEFAULT_TOPOLOGY_GAP_PAIR_IDS = (
     "55353246:37687913",
     "760239:6963539359479390368",
     "791871:37687913",
+    "5389884430552920:2703260460721685999",
 )
 
 _TOPOLOGY_GAP_DECISIONS = {
@@ -65,9 +66,15 @@ def classify_topology_gap_rows(
         dict(row)
         for row in rows
         if str(row.get("pair", "")) in target_pair_ids
-        and str(row.get("blocked_diagnostic_reason", row.get("unbuilt_reason", ""))) == "topology_gap_unresolved"
         and bool(row.get("is_direct_legal", False))
         and bool(row.get("is_unique", False))
+        and (
+            str(row.get("blocked_diagnostic_reason", row.get("unbuilt_reason", ""))) == "topology_gap_unresolved"
+            or (
+                str(row.get("traj_support_type", "no_support")) != "no_support"
+                and float(row.get("traj_support_coverage_ratio", 0.0) or 0.0) > 0.0
+            )
+        )
     ]
     if target_rows:
         target_rows = list(apply_arc_selection_rules(target_rows).get("rows", []))
@@ -85,14 +92,29 @@ def classify_topology_gap_rows(
         support_count = int(len(row.get("traj_support_ids", [])))
         has_src_anchor = row.get("support_anchor_src_coords") is not None
         has_dst_anchor = row.get("support_anchor_dst_coords") is not None
+        has_exactly_one_terminal_anchor = bool(has_src_anchor) ^ bool(has_dst_anchor)
         dst_nodeid = int(row.get("dst", 0))
         merge_rule = dict(merge_rule_by_pair.get(pair_id) or {})
+        small_gap_threshold = float(
+            params.get(
+                "STEP3_TOPOLOGY_GAP_SMALL_TERMINAL_GAP_MIN_SUPPORT_COVERAGE_RATIO",
+                max(float(coverage_threshold), 0.72),
+            )
+        )
 
         decision = "gap_remain_blocked"
         reason = "gap_support_insufficient"
         if traj_support_type == "no_support" and prior_support_type == "no_support":
             decision = "gap_remain_blocked"
             reason = "gap_support_insufficient"
+        elif (
+            traj_support_type == "partial_arc_support"
+            and has_exactly_one_terminal_anchor
+            and support_count >= 1
+            and coverage_ratio >= float(small_gap_threshold)
+        ):
+            decision = "gap_enter_mainflow"
+            reason = "gap_small_terminal_gap_candidate"
         elif not has_src_anchor or not has_dst_anchor:
             decision = "gap_ambiguous_need_more_constraints"
             reason = "gap_anchor_unreliable"
@@ -582,6 +604,16 @@ def _support_candidate_cluster_key(
         candidate.get("support_surface_side_signature", ()),
         resolution=side_resolution,
     )
+    support_full_xsec_mode = str(candidate.get("support_full_xsec_mode", "") or "")
+    if (
+        bool(candidate.get("support_full_xsec_crossing", False))
+        and support_full_xsec_mode == "partial_dual_anchor"
+    ):
+        return (
+            "near_full_crossing_anchor",
+            _bucket_point(candidate.get("support_anchor_src_coords"), resolution_m=anchor_resolution_m),
+            _bucket_point(candidate.get("support_anchor_dst_coords"), resolution_m=anchor_resolution_m),
+        )
     if bool(candidate.get("support_full_xsec_crossing", False)) and side_cluster_signature:
         return ("full_crossing_side", side_cluster_signature)
     corridor_signature = _hashable_support_signature(candidate.get("support_corridor_signature", ()))
@@ -661,6 +693,53 @@ def _support_anchor_distance_m(
     except Exception:
         return float("inf")
     return float(point_a.distance(point_b))
+
+
+def _support_segment_has_terminal_anchor(
+    segments: list[dict[str, Any]],
+    *,
+    endpoint_tag: str,
+) -> bool:
+    support_key = "supports_src_xsec_anchor" if str(endpoint_tag) == "src" else "supports_dst_xsec_anchor"
+    return any(bool(item.get(support_key, False)) for item in segments if isinstance(item, dict))
+
+
+def _support_full_xsec_status(
+    *,
+    traj_production_type: str,
+    traj_production_segments: list[dict[str, Any]],
+    traj_support_span_count: int,
+    coverage_ratio: float,
+    support_anchor_src_coords: list[float] | None,
+    support_anchor_dst_coords: list[float] | None,
+    params: dict[str, Any],
+) -> tuple[bool, str, bool, bool]:
+    has_src_xsec_anchor = bool(
+        support_anchor_src_coords is not None
+        and _support_segment_has_terminal_anchor(traj_production_segments, endpoint_tag="src")
+    )
+    has_dst_xsec_anchor = bool(
+        support_anchor_dst_coords is not None
+        and _support_segment_has_terminal_anchor(traj_production_segments, endpoint_tag="dst")
+    )
+    if (
+        str(traj_production_type) == "terminal_crossing_support"
+        and support_anchor_src_coords is not None
+        and support_anchor_dst_coords is not None
+    ):
+        return True, "strict_terminal", True, True
+    near_full_min_coverage_ratio = float(params.get("ARC_SUPPORT_NEAR_FULL_XSEC_MIN_COVERAGE_RATIO", 0.72))
+    near_full_max_span_count = int(params.get("ARC_SUPPORT_NEAR_FULL_XSEC_MAX_SPAN_COUNT", 2))
+    if (
+        str(traj_production_type) == "partial_arc_support"
+        and has_src_xsec_anchor
+        and has_dst_xsec_anchor
+        and int(traj_support_span_count) >= 1
+        and int(traj_support_span_count) <= max(1, int(near_full_max_span_count))
+        and float(coverage_ratio) >= float(near_full_min_coverage_ratio)
+    ):
+        return True, "partial_dual_anchor", True, True
+    return False, "none", has_src_xsec_anchor, has_dst_xsec_anchor
 
 
 def _stitched_interval_reference_trusted(stitched_summary: dict[str, Any]) -> bool:
@@ -754,6 +833,9 @@ def _support_candidate_public_fields(candidate: dict[str, Any]) -> dict[str, Any
         "support_corridor_signature": list(candidate.get("support_corridor_signature", [])),
         "support_surface_side_signature": list(candidate.get("support_surface_side_signature", [])),
         "support_full_xsec_crossing": bool(candidate.get("support_full_xsec_crossing", False)),
+        "support_full_xsec_mode": str(candidate.get("support_full_xsec_mode", "")),
+        "support_has_src_xsec_anchor": bool(candidate.get("support_has_src_xsec_anchor", False)),
+        "support_has_dst_xsec_anchor": bool(candidate.get("support_has_dst_xsec_anchor", False)),
         "support_cluster_support_count": int(candidate.get("support_cluster_support_count", 0)),
         "support_cluster_is_dominant": bool(candidate.get("support_cluster_is_dominant", False)),
         "support_interval_reference_trusted": bool(candidate.get("support_interval_reference_trusted", False)),
@@ -981,6 +1063,9 @@ def _support_type_for_arc(
             "support_corridor_signature": [],
             "support_surface_side_signature": [],
             "support_full_xsec_crossing": False,
+            "support_full_xsec_mode": "none",
+            "support_has_src_xsec_anchor": False,
+            "support_has_dst_xsec_anchor": False,
             "support_cluster_support_count": 0,
             "support_cluster_is_dominant": False,
             "selected_support_interval_reference_trusted": False,
@@ -1149,10 +1234,14 @@ def _support_type_for_arc(
             src_xsec=src_xsec,
             dst_xsec=dst_xsec,
         )
-        support_full_xsec_crossing = bool(
-            str(traj_production_type) == "terminal_crossing_support"
-            and support_anchor_src_coords is not None
-            and support_anchor_dst_coords is not None
+        support_full_xsec_crossing, support_full_xsec_mode, support_has_src_xsec_anchor, support_has_dst_xsec_anchor = _support_full_xsec_status(
+            traj_production_type=str(traj_production_type),
+            traj_production_segments=traj_production_segments,
+            traj_support_span_count=int(max(1, len(traj_production_segments))) if str(traj_production_type) != "no_support" else 0,
+            coverage_ratio=float(coverage_ratio),
+            support_anchor_src_coords=support_anchor_src_coords,
+            support_anchor_dst_coords=support_anchor_dst_coords,
+            params=params,
         )
         best_line_distance_m = min(
             (
@@ -1206,6 +1295,9 @@ def _support_type_for_arc(
                 "support_corridor_signature": support_corridor_signature,
                 "support_surface_side_signature": support_surface_side_signature,
                 "support_full_xsec_crossing": bool(support_full_xsec_crossing),
+                "support_full_xsec_mode": str(support_full_xsec_mode),
+                "support_has_src_xsec_anchor": bool(support_has_src_xsec_anchor),
+                "support_has_dst_xsec_anchor": bool(support_has_dst_xsec_anchor),
                 "support_cluster_support_count": 0,
                 "support_cluster_is_dominant": False,
             }
@@ -1335,6 +1427,9 @@ def _support_type_for_arc(
             "support_corridor_signature": list(best_single.get("support_corridor_signature", [])),
             "support_surface_side_signature": list(best_single.get("support_surface_side_signature", [])),
             "support_full_xsec_crossing": bool(best_single.get("support_full_xsec_crossing", False)),
+            "support_full_xsec_mode": str(best_single.get("support_full_xsec_mode", "")),
+            "support_has_src_xsec_anchor": bool(best_single.get("support_has_src_xsec_anchor", False)),
+            "support_has_dst_xsec_anchor": bool(best_single.get("support_has_dst_xsec_anchor", False)),
             "support_cluster_support_count": int(best_single.get("support_cluster_support_count", 0)),
             "support_cluster_is_dominant": bool(best_single.get("support_cluster_is_dominant", False)),
             "selected_support_interval_reference_trusted": bool(best_single.get("support_interval_reference_trusted", False)),
@@ -1374,6 +1469,11 @@ def _support_type_for_arc(
             "support_corridor_signature": stitched_support_corridor_signature,
             "support_surface_side_signature": stitched_support_surface_side_signature,
             "support_full_xsec_crossing": bool(stitched_has_src_xsec_anchor and stitched_has_dst_xsec_anchor),
+            "support_full_xsec_mode": (
+                "stitched_dual_anchor" if bool(stitched_has_src_xsec_anchor and stitched_has_dst_xsec_anchor) else "none"
+            ),
+            "support_has_src_xsec_anchor": bool(stitched_has_src_xsec_anchor),
+            "support_has_dst_xsec_anchor": bool(stitched_has_dst_xsec_anchor),
             "support_cluster_support_count": int(len(stitched_traj_support_segments)),
             "support_cluster_is_dominant": True,
             "selected_support_interval_reference_trusted": False,
@@ -1420,6 +1520,9 @@ def _support_type_for_arc(
             "support_corridor_signature": list(best_single.get("support_corridor_signature", [])),
             "support_surface_side_signature": list(best_single.get("support_surface_side_signature", [])),
             "support_full_xsec_crossing": bool(best_single.get("support_full_xsec_crossing", False)),
+            "support_full_xsec_mode": str(best_single.get("support_full_xsec_mode", "")),
+            "support_has_src_xsec_anchor": bool(best_single.get("support_has_src_xsec_anchor", False)),
+            "support_has_dst_xsec_anchor": bool(best_single.get("support_has_dst_xsec_anchor", False)),
             "support_cluster_support_count": int(best_single.get("support_cluster_support_count", 0)),
             "support_cluster_is_dominant": bool(best_single.get("support_cluster_is_dominant", False)),
             "selected_support_interval_reference_trusted": bool(best_single.get("support_interval_reference_trusted", False)),
@@ -1463,6 +1566,9 @@ def _support_type_for_arc(
         "support_corridor_signature": [],
         "support_surface_side_signature": [],
         "support_full_xsec_crossing": False,
+        "support_full_xsec_mode": "none",
+        "support_has_src_xsec_anchor": False,
+        "support_has_dst_xsec_anchor": False,
         "support_cluster_support_count": 0,
         "support_cluster_is_dominant": False,
         "selected_support_interval_reference_trusted": False,
@@ -1578,6 +1684,9 @@ def _apply_support_candidate_to_row(
                 "support_corridor_signature": [],
                 "support_surface_side_signature": [],
                 "support_full_xsec_crossing": False,
+                "support_full_xsec_mode": "none",
+                "support_has_src_xsec_anchor": False,
+                "support_has_dst_xsec_anchor": False,
                 "support_cluster_support_count": 0,
                 "support_cluster_is_dominant": False,
                 "selected_support_interval_reference_trusted": False,
