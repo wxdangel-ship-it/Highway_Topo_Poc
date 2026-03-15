@@ -2433,10 +2433,47 @@ def test_t05v2_rcsdroad_fallback_base_line_prefers_prior_reference() -> None:
     prior_line = LineString([(10.0, 5.0), (50.0, 5.0), (90.0, 5.0)])
     base_line = _rcsdroad_fallback_base_line(
         segment=segment,
+        arc_row=None,
         prior_roads=[SimpleNamespace(line=prior_line, snodeid=10, enodeid=20)],
     )
 
     assert base_line.equals(prior_line)
+
+
+def test_t05v2_rcsdroad_fallback_base_line_prefers_topology_arc_line() -> None:
+    segment = Segment(
+        segment_id="seg_rcsd_arc",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((10.0, 0.0), (50.0, 8.0), (90.0, 16.0)),
+        candidate_ids=("cand_arc",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_arc",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="traj_supported_cluster",
+        length_m=82.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_rcsd_arc",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        same_pair_rank=1,
+        kept_reason="",
+    )
+    base_line = _rcsdroad_fallback_base_line(
+        segment=segment,
+        arc_row={"line_coords": [[0.0, 4.0], [50.0, 4.0], [100.0, 4.0]]},
+        prior_roads=[],
+    )
+
+    assert list(base_line.coords) == [(0.0, 4.0), (50.0, 4.0), (100.0, 4.0)]
 
 
 def test_t05v2_build_final_road_uses_rcsdroad_trend_extension_as_last_fallback() -> None:
@@ -2687,6 +2724,137 @@ def test_t05v2_build_final_road_prefers_partial_support_trend_extension_for_gap_
     assert road is not None
     assert result["reason"] == "built"
     assert str(result["shape_ref_mode"]).startswith("traj_support_trend_extended")
+
+
+def test_t05v2_build_final_road_prefers_topology_arc_trend_for_gap_case() -> None:
+    segment = Segment(
+        segment_id="seg_gap_topology_arc",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 6.0), (50.0, 6.0), (100.0, 6.0)),
+        candidate_ids=("cand_gap_arc",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_gap_arc",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="arc_first_partial_support",
+        length_m=100.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_gap_topology_arc",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        topology_gap_decision="gap_enter_mainflow",
+        topology_gap_reason="gap_should_enter_mainflow",
+        same_pair_rank=1,
+        kept_reason="",
+    )
+    witness = CorridorWitness(
+        segment_id="seg_gap_topology_arc",
+        status="selected",
+        reason="witness_interval_selected",
+        line_coords=((0.0, 10.0), (100.0, 10.0)),
+        sample_s_norm=0.5,
+        intervals=tuple(),
+        selected_interval_rank=None,
+        selected_interval_start_s=None,
+        selected_interval_end_s=None,
+        exclusive_interval=True,
+        stability_score=1.0,
+        neighbor_match_count=1,
+        axis_vector=(0.0, 1.0),
+    )
+    identity = CorridorIdentity(
+        segment_id="seg_gap_topology_arc",
+        state="witness_based",
+        reason="witness_selected",
+        risk_flags=tuple(),
+        witness_interval_rank=None,
+        prior_supported=False,
+    )
+    src_slot = SlotInterval(
+        segment_id="seg_gap_topology_arc",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, 0.0), (0.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=0.0,
+            end_s=10.0,
+            center_s=5.0,
+            length_m=10.0,
+            rank=0,
+            geometry_coords=((0.0, 0.0), (0.0, 10.0)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    dst_slot = SlotInterval(
+        segment_id="seg_gap_topology_arc",
+        endpoint_tag="dst",
+        xsec_nodeid=20,
+        xsec_coords=((100.0, 0.0), (100.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=0.0,
+            end_s=10.0,
+            center_s=5.0,
+            length_m=10.0,
+            rank=0,
+            geometry_coords=((100.0, 0.0), (100.0, 10.0)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    topology_arc_line = LineString([(0.0, 5.0), (50.0, 5.0), (100.0, 5.0)])
+    inputs = PatchInputs(
+        patch_id="gap_topology_arc_case",
+        patch_dir=Path("gap_topology_arc_case"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=topology_arc_line.buffer(0.4, cap_style=2, join_style=2),
+        divstrip_zone_metric=Polygon(),
+        road_prior_path=None,
+        input_summary={},
+    )
+    params = dict(DEFAULT_PARAMS)
+    params["ROAD_MIN_DRIVEZONE_RATIO"] = 0.98
+
+    with (
+        patch.object(_step5_road, "_surface_envelope_candidate_line", return_value=None),
+        patch.object(_step5_road, "_append_side_constrained_candidates", return_value=None),
+    ):
+        road, result = _build_final_road(
+            patch_id="gap_topology_arc_case",
+            segment=segment,
+            identity=identity,
+            witness=witness,
+            src_slot=src_slot,
+            dst_slot=dst_slot,
+            inputs=inputs,
+            prior_roads=[],
+            params=params,
+            arc_row={
+                "traj_support_type": "partial_arc_support",
+                "support_full_xsec_crossing": False,
+                "support_reference_coords": [[0.0, 6.0], [50.0, 6.0], [100.0, 6.0]],
+                "line_coords": [[0.0, 5.0], [50.0, 5.0], [100.0, 5.0]],
+            },
+        )
+
+    assert road is not None
+    assert result["reason"] == "built"
+    assert str(result["shape_ref_mode"]).startswith("topology_arc_")
 
 
 def test_t05v2_build_final_road_allows_same_pair_multi_arc_with_side_constrained_candidate() -> None:

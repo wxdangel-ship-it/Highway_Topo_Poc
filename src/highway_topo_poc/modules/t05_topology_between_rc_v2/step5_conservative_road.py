@@ -482,9 +482,13 @@ def _rcsdroad_trend_extended_candidate_line(
 def _rcsdroad_fallback_base_line(
     *,
     segment: Segment,
+    arc_row: dict[str, Any] | None = None,
     prior_roads: list[Any],
     prior_index: dict[tuple[int, int], list[Any]] | None = None,
 ) -> LineString:
+    arc_line = _line_from_coords(list((arc_row or {}).get("line_coords", [])))
+    if arc_line is not None:
+        return arc_line
     prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
     return prior_line if prior_line is not None else segment.geometry_metric()
 
@@ -990,9 +994,57 @@ def build_final_road(
             "prior_reference_slot_anchored_safe_envelope",
             priority=str(identity.state) == "prior_based",
         )
+    topology_arc_line = _line_from_coords(list((arc_row or {}).get("line_coords", [])))
+    if topology_arc_line is not None:
+        prefer_topology_arc_trend = (
+            str(getattr(segment, "topology_gap_decision", "")) == "gap_enter_mainflow"
+            and str((arc_row or {}).get("traj_support_type", "")) == "partial_arc_support"
+            and not bool((arc_row or {}).get("support_full_xsec_crossing", False))
+        )
+        topology_arc_trend_safe = _rcsdroad_trend_extended_candidate_line(
+            topology_arc_line,
+            src_slot,
+            dst_slot,
+            safe_surface=safe_surface,
+            use_safe_core=True,
+        )
+        _append_candidate_line(
+            candidate_lines,
+            topology_arc_trend_safe,
+            "topology_arc_trend_extended_safe_envelope",
+            priority=bool(prefer_topology_arc_trend),
+        )
+        topology_arc_trend = _rcsdroad_trend_extended_candidate_line(
+            topology_arc_line,
+            src_slot,
+            dst_slot,
+            safe_surface=safe_surface,
+            use_safe_core=False,
+        )
+        _append_candidate_line(
+            candidate_lines,
+            topology_arc_trend,
+            "topology_arc_trend_extended",
+            priority=bool(prefer_topology_arc_trend),
+        )
+        topology_arc_projected = _anchor_along_base_line(topology_arc_line, start_pt, end_pt)
+        _append_candidate_line(
+            candidate_lines,
+            topology_arc_projected,
+            "topology_arc_projected_anchored",
+            priority=bool(prefer_topology_arc_trend),
+        )
+        topology_arc_envelope = _surface_envelope_candidate_line(topology_arc_projected, src_slot, dst_slot, safe_surface)
+        _append_candidate_line(
+            candidate_lines,
+            topology_arc_envelope,
+            "topology_arc_projected_anchored_safe_envelope",
+            priority=bool(prefer_topology_arc_trend),
+        )
     rcsdroad_priority = str(segment.topology_gap_reason) == "gap_small_terminal_gap_candidate"
     rcsdroad_base_line = _rcsdroad_fallback_base_line(
         segment=segment,
+        arc_row=arc_row,
         prior_roads=prior_roads,
         prior_index=prior_index,
     )
