@@ -2278,6 +2278,14 @@ def run_witness_stage(
                 ),
                 "support_corridor_signature": list(target_support_review.get("support_corridor_signature", [])),
                 "support_surface_side_signature": list(target_support_review.get("support_surface_side_signature", [])),
+                "support_full_xsec_crossing": bool(target_support_review.get("support_full_xsec_crossing", False)),
+                "support_cluster_support_count": int(target_support_review.get("support_cluster_support_count", 0)),
+                "support_cluster_is_dominant": bool(target_support_review.get("support_cluster_is_dominant", False)),
+                "stitched_support_available": bool(target_support_review.get("stitched_support_available", False)),
+                "stitched_support_ready": bool(target_support_review.get("stitched_support_ready", False)),
+                "stitched_support_coverage_ratio": float(target_support_review.get("stitched_support_coverage_ratio", 0.0) or 0.0),
+                "stitched_support_corridor_signature": list(target_support_review.get("stitched_support_corridor_signature", [])),
+                "stitched_support_surface_side_signature": list(target_support_review.get("stitched_support_surface_side_signature", [])),
                 "same_pair_support_deconflict_reason": str(
                     target_support_review.get("same_pair_support_deconflict_reason", "")
                 ),

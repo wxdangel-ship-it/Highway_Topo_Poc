@@ -607,6 +607,20 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
                 "topology_paths": list((topology_row or {}).get("topology_paths", [])),
                 "entered_main_flow": bool(resolved.get("entered_main_flow", False)),
                 "traj_support_type": str(resolved.get("traj_support_type", "")),
+                "selected_support_traj_id": str(resolved.get("selected_support_traj_id", "")),
+                "selected_support_segment_traj_id": str(
+                    resolved.get("selected_support_segment_traj_id", resolved.get("selected_support_traj_id", ""))
+                ),
+                "support_corridor_signature": list(resolved.get("support_corridor_signature", [])),
+                "support_surface_side_signature": list(resolved.get("support_surface_side_signature", [])),
+                "support_full_xsec_crossing": bool(resolved.get("support_full_xsec_crossing", False)),
+                "support_cluster_support_count": int(resolved.get("support_cluster_support_count", 0)),
+                "support_cluster_is_dominant": bool(resolved.get("support_cluster_is_dominant", False)),
+                "stitched_support_available": bool(resolved.get("stitched_support_available", False)),
+                "stitched_support_ready": bool(resolved.get("stitched_support_ready", False)),
+                "stitched_support_coverage_ratio": float(resolved.get("stitched_support_coverage_ratio", 0.0) or 0.0),
+                "stitched_support_corridor_signature": list(resolved.get("stitched_support_corridor_signature", [])),
+                "stitched_support_surface_side_signature": list(resolved.get("stitched_support_surface_side_signature", [])),
                 "prior_support_type": str(resolved.get("prior_support_type", "")),
                 "corridor_identity": str(resolved.get("corridor_identity", "")),
                 "slot_status": str(resolved.get("slot_status", "")),
@@ -2248,6 +2262,14 @@ def build_same_pair_provisional_allow_review(
                 ),
                 "support_corridor_signature": list(row.get("support_corridor_signature", [])),
                 "support_surface_side_signature": list(row.get("support_surface_side_signature", [])),
+                "support_full_xsec_crossing": bool(row.get("support_full_xsec_crossing", False)),
+                "support_cluster_support_count": int(row.get("support_cluster_support_count", 0)),
+                "support_cluster_is_dominant": bool(row.get("support_cluster_is_dominant", False)),
+                "stitched_support_available": bool(row.get("stitched_support_available", False)),
+                "stitched_support_ready": bool(row.get("stitched_support_ready", False)),
+                "stitched_support_coverage_ratio": float(row.get("stitched_support_coverage_ratio", 0.0) or 0.0),
+                "stitched_support_corridor_signature": list(row.get("stitched_support_corridor_signature", [])),
+                "stitched_support_surface_side_signature": list(row.get("stitched_support_surface_side_signature", [])),
                 "same_pair_support_deconflict_reason": str(row.get("same_pair_support_deconflict_reason", "")),
                 "multi_arc_evidence_mode": str(
                     row.get("multi_arc_evidence_mode", pair_decision.get("multi_arc_evidence_mode", ""))
@@ -2362,6 +2384,36 @@ def build_multi_arc_review(
                 },
                 "support_surface_side_signatures": {
                     str(row.get("topology_arc_id", "")): list(row.get("support_surface_side_signature", []))
+                    for row in pair_registry_rows
+                    if str(row.get("topology_arc_id", ""))
+                },
+                "support_full_xsec_crossing": {
+                    str(row.get("topology_arc_id", "")): bool(row.get("support_full_xsec_crossing", False))
+                    for row in pair_registry_rows
+                    if str(row.get("topology_arc_id", ""))
+                },
+                "support_cluster_support_counts": {
+                    str(row.get("topology_arc_id", "")): int(row.get("support_cluster_support_count", 0))
+                    for row in pair_registry_rows
+                    if str(row.get("topology_arc_id", ""))
+                },
+                "support_cluster_is_dominant": {
+                    str(row.get("topology_arc_id", "")): bool(row.get("support_cluster_is_dominant", False))
+                    for row in pair_registry_rows
+                    if str(row.get("topology_arc_id", ""))
+                },
+                "stitched_support_available": {
+                    str(row.get("topology_arc_id", "")): bool(row.get("stitched_support_available", False))
+                    for row in pair_registry_rows
+                    if str(row.get("topology_arc_id", ""))
+                },
+                "stitched_support_ready": {
+                    str(row.get("topology_arc_id", "")): bool(row.get("stitched_support_ready", False))
+                    for row in pair_registry_rows
+                    if str(row.get("topology_arc_id", ""))
+                },
+                "stitched_support_coverage_ratio": {
+                    str(row.get("topology_arc_id", "")): float(row.get("stitched_support_coverage_ratio", 0.0) or 0.0)
                     for row in pair_registry_rows
                     if str(row.get("topology_arc_id", ""))
                 },
