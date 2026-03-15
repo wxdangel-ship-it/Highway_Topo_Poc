@@ -3835,6 +3835,61 @@ def test_t05v2_arc_selection_structure_and_multi_arc_review_autofill_structure_a
     assert row["rule_reason"] == "same_pair_multi_arc_dual_output_ready"
 
 
+def test_t05v2_arc_selection_structure_accepts_json_nested_support_signatures(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    patch_id = "patch_nested_support_signature"
+    patch_dir = run_root / "patches" / patch_id
+    _write_json(
+        patch_dir / "metrics.json",
+        {
+            "patch_id": patch_id,
+            "full_legal_arc_registry": [
+                {
+                    "pair": "791873:791871",
+                    "src": 791873,
+                    "dst": 791871,
+                    "topology_arc_id": "arc_same_pair_1",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": False,
+                    "support_anchor_src_coords": [0.0, 0.0],
+                    "support_anchor_dst_coords": [100.0, 0.0],
+                    "support_corridor_signature": [[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]],
+                    "support_surface_side_signature": ["lane_a", [1.0, 0.0]],
+                    "multi_arc_evidence_mode": "fallback_based",
+                },
+                {
+                    "pair": "791873:791871",
+                    "src": 791873,
+                    "dst": 791871,
+                    "topology_arc_id": "arc_same_pair_2",
+                    "topology_arc_source_type": "direct_topology_arc",
+                    "is_direct_legal": True,
+                    "is_unique": False,
+                    "support_anchor_src_coords": [0.0, 4.0],
+                    "support_anchor_dst_coords": [100.0, 4.0],
+                    "support_corridor_signature": [[0.0, 4.0], [50.0, 4.0], [100.0, 4.0]],
+                    "support_surface_side_signature": ["lane_b", [1.0, 4.0]],
+                    "multi_arc_evidence_mode": "fallback_based",
+                },
+            ],
+        },
+    )
+
+    annotated = apply_arc_selection_rules(
+        json.loads((patch_dir / "metrics.json").read_text(encoding="utf-8"))["full_legal_arc_registry"]
+    )["rows"]
+    annotated_by_arc = {str(item["topology_arc_id"]): item for item in annotated}
+    assert annotated_by_arc["arc_same_pair_1"]["arc_structure_type"] == "SAME_PAIR_MULTI_ARC"
+    assert "distinct_support_corridor_signal" in annotated_by_arc["arc_same_pair_1"]["arc_selection_same_pair_distinct_path_signal"]
+    assert "distinct_support_side_signal" in annotated_by_arc["arc_same_pair_1"]["arc_selection_same_pair_distinct_path_signal"]
+
+    arc_selection = build_arc_selection_structure(run_root, complex_patch_id=patch_id)
+    assert int(arc_selection["same_pair_multi_arc_pair_count"]) == 1
+    by_arc = {str(item["topology_arc_id"]): item for item in arc_selection["rows"]}
+    assert by_arc["arc_same_pair_1"]["structure_type"] == "SAME_PAIR_MULTI_ARC"
+
+
 def test_t05v2_multi_arc_review_prefers_step3_evidence_mode_fields(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     patch_id = "patch_multi_arc_step3"
