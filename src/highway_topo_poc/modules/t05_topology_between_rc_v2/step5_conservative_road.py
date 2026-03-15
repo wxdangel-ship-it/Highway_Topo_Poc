@@ -13,6 +13,7 @@ from shapely.ops import nearest_points, substring, unary_union
 
 from .io import write_features_geojson, write_json, write_lines_geojson
 from .models import BaseCrossSection, CorridorIdentity, CorridorInterval, CorridorWitness, EndpointInterval, FinalRoad, Segment, SlotInterval, line_to_coords
+from .step5_global_geometry_fit import build_global_geometry_fit
 from .step3_corridor_identity import (
     build_patch_geometry_cache,
     build_prior_reference_index,
@@ -850,6 +851,8 @@ def slot_reference_line(
 
 def _shape_ref_source_family(mode: str) -> str:
     text = str(mode or "")
+    if text.startswith("trajectory_centered_global_fit"):
+        return "global_fit_family"
     if text.startswith(("selected_support_", "stitched_support_", "traj_support_")):
         return "support_reference_family"
     if text.startswith("witness"):
@@ -1888,6 +1891,7 @@ def _refine_built_road_geometry(
         "core_authoritative_source": str(build_result.get("core_authoritative_source", "")),
         "refine_candidate_source": "",
     }
+    global_fit_authoritative = bool(build_result.get("global_fit_used_bool", False))
     if src_slot.interval is None or dst_slot.interval is None:
         review["skip_reason"] = "slot_unresolved"
         empty_artifacts["refined_final_road"].append(
@@ -2192,6 +2196,13 @@ def _refine_built_road_geometry(
         selected_mode = str(candidate_mode)
         review["applied"] = not candidate_line.equals(original_line)
         review["smoothed"] = bool(smoothed and review["applied"])
+    if global_fit_authoritative:
+        selected_line = original_line
+        selected_metrics = dict(baseline_metrics)
+        selected_mode = "original"
+        review["applied"] = False
+        review["smoothed"] = False
+        review["skip_reason"] = "global_fit_authoritative"
     review["selected_candidate_mode"] = str(selected_mode)
     review["after_length"] = float(selected_line.length)
     review["road_drivezone_overlap_ratio_after"] = float(selected_metrics["drivezone_ratio"])
@@ -2734,6 +2745,24 @@ def build_final_road(
         "endpoint_anchor_policy": "slot_interval_surface",
         "support_candidate_policy": str(_support_candidate_policy(segment)),
         "rcsdroad_fallback_applied": False,
+        "global_fit_enabled_bool": bool(params.get("GLOBAL_FIT_ENABLE", 1)),
+        "global_fit_used_bool": False,
+        "global_fit_success_bool": False,
+        "global_fit_fallback_reason": "",
+        "global_fit_quality_gate_reason": "",
+        "global_fit_mode": "",
+        "global_fit_guide_source": "",
+        "trajectory_selection_rows": [],
+        "trajectory_spine_source": "",
+        "trajectory_spine_coords": [],
+        "trajectory_spine_quality": 0.0,
+        "trajectory_spine_support_count": 0,
+        "trajectory_spine_weak_bool": False,
+        "trajectory_spine_fallback_bool": False,
+        "lane_boundary_hint_rows": [],
+        "lane_boundary_hint_usage": {},
+        "global_fit_station_rows": [],
+        "global_fit_fitted_line_coords": [],
     }
     final_gate_reason = ""
     has_topology_assignment = bool(
@@ -2853,7 +2882,76 @@ def build_final_road(
     result["shape_ref_base_source_family"] = str(_shape_ref_source_family(preferred_mode))
     result["shape_ref_base_coords"] = [[float(x), float(y)] for x, y in line_to_coords(preferred_line)]
     result["step5_shape_ref_source"] = str(preferred_mode)
-    candidate_lines: list[tuple[LineString, str]] = [(preferred_line, str(preferred_mode))]
+    global_fit_trace: dict[str, Any] = {
+        "fitting_success_bool": False,
+        "fallback_reason": "global_fit_disabled",
+        "quality_gate_reason": "",
+        "fitting_mode": "trajectory_centered_global_fit",
+        "guide_source": "",
+        "trajectory_selection_rows": [],
+        "trajectory_spine_source": "",
+        "trajectory_spine_coords": [],
+        "trajectory_spine_quality": 0.0,
+        "trajectory_spine_support_count": 0,
+        "trajectory_spine_weak_bool": False,
+        "trajectory_spine_fallback_bool": False,
+        "lane_boundary_hint_rows": [],
+        "lane_boundary_hint_usage": {},
+        "station_rows": [],
+        "fitted_line_coords": [],
+    }
+    if bool(params.get("GLOBAL_FIT_ENABLE", 1)):
+        global_fit_trace = build_global_geometry_fit(
+            segment=segment,
+            arc_row=arc_row,
+            witness_line=None if witness is None else witness.geometry_metric(),
+            lane_boundaries=tuple(inputs.lane_boundaries_metric),
+            safe_surface=safe_surface,
+            start_anchor=start_pt,
+            end_anchor=end_pt,
+            params=params,
+            fallback_line=preferred_line,
+        )
+    result["global_fit_success_bool"] = bool(global_fit_trace.get("fitting_success_bool", False))
+    result["global_fit_fallback_reason"] = str(global_fit_trace.get("fallback_reason", ""))
+    result["global_fit_quality_gate_reason"] = str(global_fit_trace.get("quality_gate_reason", ""))
+    result["global_fit_mode"] = str(global_fit_trace.get("fitting_mode", ""))
+    result["global_fit_guide_source"] = str(global_fit_trace.get("guide_source", ""))
+    result["trajectory_selection_rows"] = list(global_fit_trace.get("trajectory_selection_rows") or [])
+    result["trajectory_spine_source"] = str(global_fit_trace.get("trajectory_spine_source", ""))
+    result["trajectory_spine_coords"] = list(global_fit_trace.get("trajectory_spine_coords") or [])
+    result["trajectory_spine_quality"] = float(global_fit_trace.get("trajectory_spine_quality", 0.0) or 0.0)
+    result["trajectory_spine_support_count"] = int(global_fit_trace.get("trajectory_spine_support_count", 0) or 0)
+    result["trajectory_spine_weak_bool"] = bool(global_fit_trace.get("trajectory_spine_weak_bool", False))
+    result["trajectory_spine_fallback_bool"] = bool(global_fit_trace.get("trajectory_spine_fallback_bool", False))
+    result["lane_boundary_hint_rows"] = list(global_fit_trace.get("lane_boundary_hint_rows") or [])
+    result["lane_boundary_hint_usage"] = dict(global_fit_trace.get("lane_boundary_hint_usage") or {})
+    result["global_fit_station_rows"] = list(global_fit_trace.get("station_rows") or [])
+    result["global_fit_fitted_line_coords"] = list(global_fit_trace.get("fitted_line_coords") or [])
+    global_fit_line = _line_from_coords(list(global_fit_trace.get("fitted_line_coords") or []))
+    candidate_lines: list[tuple[LineString, str]] = []
+    if bool(global_fit_trace.get("fitting_success_bool", False)) and global_fit_line is not None:
+        _append_candidate_line(
+            candidate_lines,
+            global_fit_line,
+            "trajectory_centered_global_fit",
+            prepend=True,
+        )
+        global_fit_envelope = _surface_envelope_candidate_line(
+            global_fit_line,
+            src_slot,
+            dst_slot,
+            safe_surface,
+            src_anchor_override=src_anchor_override,
+            dst_anchor_override=dst_anchor_override,
+        )
+        _append_candidate_line(
+            candidate_lines,
+            global_fit_envelope,
+            "trajectory_centered_global_fit_safe_envelope",
+            priority=True,
+        )
+    _append_candidate_line(candidate_lines, preferred_line, str(preferred_mode))
     transition_candidate_meta: dict[str, dict[str, Any]] = {}
     preferred_start_pt, preferred_end_pt = _candidate_anchor_pair(
         preferred_line,
@@ -2874,12 +2972,15 @@ def build_final_road(
         transition_candidate_meta[transition_mode] = dict(preferred_transition_meta)
         transition_candidate_meta[transition_mode]["core_authoritative_source"] = str(preferred_mode)
         transition_candidate_meta[transition_mode]["core_segment_source"] = str(preferred_mode)
+        production_prepend_allowed = str(preferred_mode).startswith("production_working_segment") and not bool(
+            global_fit_trace.get("fitting_success_bool", False)
+        )
         _append_candidate_line(
             candidate_lines,
             preferred_transition,
             transition_mode,
-            priority=str(preferred_mode).startswith("production_working_segment"),
-            prepend=str(preferred_mode).startswith("production_working_segment"),
+            priority=production_prepend_allowed,
+            prepend=production_prepend_allowed,
         )
     preferred_envelope = _surface_envelope_candidate_line(
         preferred_line,
@@ -3069,7 +3170,9 @@ def build_final_road(
             transition_candidate_meta[transition_mode] = dict(segment_anchor_transition_meta)
             transition_candidate_meta[transition_mode]["core_authoritative_source"] = "production_working_segment_slot_anchored"
             transition_candidate_meta[transition_mode]["core_segment_source"] = "production_working_segment_slot_anchored"
-            prefer_transition_over_preferred = str(preferred_mode).startswith("production_working_segment")
+            prefer_transition_over_preferred = str(preferred_mode).startswith("production_working_segment") and not bool(
+                global_fit_trace.get("fitting_success_bool", False)
+            )
             _append_candidate_line(
                 candidate_lines,
                 segment_anchor_transition,
@@ -3369,28 +3472,35 @@ def build_final_road(
     result["shape_ref_source_family"] = str(_shape_ref_source_family(chosen_mode))
     result["shape_ref_coords"] = [[float(x), float(y)] for x, y in line_to_coords(chosen_line)]
     transition_trace = dict(transition_candidate_meta.get(str(chosen_mode), {}) or {})
+    global_fit_selected = str(chosen_mode).startswith("trajectory_centered_global_fit")
     result["entry_transition_source"] = str(
         transition_trace.get("entry_transition_source")
+        or ("global_fitted_line" if global_fit_selected else "")
         or ("authoritative_endpoint_anchor" if "transition_aware" in str(chosen_mode) else "slot_interval_anchor")
     )
     result["entry_transition_method"] = str(
         transition_trace.get("entry_transition_method")
+        or ("unified_curve_station_slice" if global_fit_selected else "")
         or ("transition_aware_curve" if "transition_aware" in str(chosen_mode) else "anchor_along_base_line")
     )
     result["core_segment_source"] = str(
         transition_trace.get("core_segment_source")
+        or ("trajectory_trend_spine" if global_fit_selected else "")
         or ("shape_ref_core" if "transition_aware" in str(chosen_mode) else str(chosen_mode))
     )
     result["exit_transition_source"] = str(
         transition_trace.get("exit_transition_source")
+        or ("global_fitted_line" if global_fit_selected else "")
         or ("authoritative_endpoint_anchor" if "transition_aware" in str(chosen_mode) else "slot_interval_anchor")
     )
     result["exit_transition_method"] = str(
         transition_trace.get("exit_transition_method")
+        or ("unified_curve_station_slice" if global_fit_selected else "")
         or ("transition_aware_curve" if "transition_aware" in str(chosen_mode) else "anchor_along_base_line")
     )
     result["core_authoritative_source"] = str(
         transition_trace.get("core_authoritative_source")
+        or ("trajectory_centered_global_fit" if global_fit_selected else "")
         or str(preferred_mode)
     )
     result["drivezone_ratio"] = float(drivezone_ratio)
@@ -3403,6 +3513,9 @@ def build_final_road(
         else f"candidate_selected_over_{preferred_mode}"
     )
     result["final_clip_reason"] = "safe_envelope_candidate" if "safe_envelope" in str(chosen_mode) else ""
+    result["global_fit_used_bool"] = bool(global_fit_selected)
+    if bool(global_fit_trace.get("fitting_success_bool", False)) and not bool(global_fit_selected):
+        result["global_fit_fallback_reason"] = str(result.get("global_fit_fallback_reason") or "global_fit_candidate_rejected")
     if not bool(start_anchor_trace.get("step3_endpoint_anchor_available", False)):
         chosen_start_pt = Point(chosen_line.coords[0][:2])
         result["step5_used_anchor_source"]["src"] = "selected_candidate_endpoint"
@@ -3620,6 +3733,11 @@ def write_road_outputs(
     endpoint_anchor_trace_features: list[tuple[Any, dict[str, Any]]] = []
     transition_segment_features: list[tuple[Any, dict[str, Any]]] = []
     final_component_features: list[tuple[Any, dict[str, Any]]] = []
+    trajectory_spine_features: list[tuple[Any, dict[str, Any]]] = []
+    lane_boundary_hint_features: list[tuple[Any, dict[str, Any]]] = []
+    global_fit_sample_features: list[tuple[Any, dict[str, Any]]] = []
+    global_fit_component_features: list[tuple[Any, dict[str, Any]]] = []
+    global_fit_trace_entries: list[dict[str, Any]] = []
     road_map = {str(road.segment_id): road for road in roads}
     result_map = {str(item["segment_id"]): item for item in road_results}
     registry_by_working_segment = {
@@ -3791,6 +3909,17 @@ def write_road_outputs(
                         },
                     )
                 )
+                global_fit_component_features.append(
+                    (
+                        step3_point,
+                        {
+                            "segment_id": str(segment.segment_id),
+                            "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                            "component_role": f"authoritative_anchor_{endpoint_tag}",
+                            "anchor_stage": "step3",
+                        },
+                    )
+                )
             step5_point = _safe_point_from_coords(step5_anchor_coords.get(endpoint_tag))
             if step5_point is not None:
                 endpoint_anchor_trace_features.append(
@@ -3804,6 +3933,17 @@ def write_road_outputs(
                             "anchor_source": str((build_result.get("step5_used_anchor_source") or {}).get(endpoint_tag, "")),
                             "anchor_adjusted": bool((build_result.get("anchor_adjust_reason") or {}).get(endpoint_tag)),
                             "anchor_adjust_reason": str((build_result.get("anchor_adjust_reason") or {}).get(endpoint_tag, "")),
+                        },
+                    )
+                )
+                global_fit_component_features.append(
+                    (
+                        step5_point,
+                        {
+                            "segment_id": str(segment.segment_id),
+                            "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                            "component_role": f"applied_anchor_{endpoint_tag}",
+                            "anchor_stage": "step5",
                         },
                     )
                 )
@@ -3837,6 +3977,16 @@ def write_road_outputs(
                     assigned_interval = None
                 if assigned_interval is not None:
                     final_component_features.append(
+                        (
+                            assigned_interval.geometry_metric(),
+                            {
+                                "segment_id": str(segment.segment_id),
+                                "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                                "component_role": f"assigned_endpoint_interval_{endpoint_tag}",
+                            },
+                        )
+                    )
+                    global_fit_component_features.append(
                         (
                             assigned_interval.geometry_metric(),
                             {
@@ -3882,6 +4032,100 @@ def write_road_outputs(
                     },
                 )
             )
+        trajectory_spine_line = _line_from_coords(list(build_result.get("trajectory_spine_coords") or []))
+        if trajectory_spine_line is not None:
+            trajectory_spine_features.append(
+                (
+                    trajectory_spine_line,
+                    {
+                        "segment_id": str(segment.segment_id),
+                        "arc_id": str(segment.topology_arc_id),
+                        "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                        "support_trajectory_count": int(build_result.get("trajectory_spine_support_count", 0) or 0),
+                        "spine_quality": float(build_result.get("trajectory_spine_quality", 0.0) or 0.0),
+                        "weak_spine": bool(build_result.get("trajectory_spine_weak_bool", False)),
+                        "fallback_spine": bool(build_result.get("trajectory_spine_fallback_bool", False)),
+                        "spine_source": str(build_result.get("trajectory_spine_source", "")),
+                    },
+                )
+            )
+            global_fit_component_features.append(
+                (
+                    trajectory_spine_line,
+                    {
+                        "segment_id": str(segment.segment_id),
+                        "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                        "component_role": "trajectory_spine",
+                    },
+                )
+            )
+        for hint_row in list(build_result.get("lane_boundary_hint_rows") or []):
+            hint_point = _safe_point_from_coords(hint_row.get("coords"))
+            if hint_point is None:
+                continue
+            props = {
+                "segment_id": str(segment.segment_id),
+                "arc_id": str(segment.topology_arc_id),
+                "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                "station_index": int(hint_row.get("station_index", 0) or 0),
+                "station_norm": float(hint_row.get("station_norm", 0.0) or 0.0),
+                "quality_score": float(hint_row.get("quality_score", 0.0) or 0.0),
+                "weight": float(hint_row.get("weight", 0.0) or 0.0),
+                "width_m": float(hint_row.get("width_m", 0.0) or 0.0),
+                "source_lane_boundary_ids": list(hint_row.get("source_lane_boundary_ids") or []),
+            }
+            lane_boundary_hint_features.append((hint_point, props))
+            global_fit_component_features.append(
+                (
+                    hint_point,
+                    {
+                        **dict(props),
+                        "component_role": "lane_boundary_hint",
+                    },
+                )
+            )
+        for station_row in list(build_result.get("global_fit_station_rows") or []):
+            sample_common = {
+                "segment_id": str(segment.segment_id),
+                "arc_id": str(segment.topology_arc_id),
+                "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                "station_index": int(station_row.get("station_index", 0) or 0),
+                "station_norm": float(station_row.get("station_norm", 0.0) or 0.0),
+                "sample_count": int(station_row.get("sample_count", 0) or 0),
+                "trajectory_confidence": float(station_row.get("trajectory_confidence", 0.0) or 0.0),
+                "trajectory_dispersion_m": float(station_row.get("trajectory_dispersion_m", 0.0) or 0.0),
+            }
+            for kind, coords_key in (
+                ("guide_station", "guide_coords"),
+                ("trajectory_robust_center", "trajectory_robust_center_coords"),
+                ("lane_boundary_center_hint", "lane_boundary_center_hint_coords"),
+                ("fitted_station", "fitted_coords"),
+            ):
+                sample_point = _safe_point_from_coords(station_row.get(coords_key))
+                if sample_point is None:
+                    continue
+                global_fit_sample_features.append(
+                    (
+                        sample_point,
+                        {
+                            **dict(sample_common),
+                            "station_kind": str(kind),
+                        },
+                    )
+                )
+        global_fit_fitted_line = _line_from_coords(list(build_result.get("global_fit_fitted_line_coords") or []))
+        if global_fit_fitted_line is not None:
+            global_fit_component_features.append(
+                (
+                    global_fit_fitted_line,
+                    {
+                        "segment_id": str(segment.segment_id),
+                        "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                        "component_role": "global_fitted_line",
+                        "global_fit_success_bool": bool(build_result.get("global_fit_success_bool", False)),
+                    },
+                )
+            )
         for role, coords_key, source_key, method_key in (
             ("entry_transition", "entry_transition_coords", "entry_transition_source", "entry_transition_method"),
             ("core_segment", "core_segment_coords", "core_segment_source", None),
@@ -3911,6 +4155,17 @@ def write_road_outputs(
                         "segment_id": str(segment.segment_id),
                         "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
                         "component_role": "final_road",
+                        "final_export_source": str(build_result.get("final_export_source", "")),
+                    },
+                )
+            )
+            global_fit_component_features.append(
+                (
+                    road.geometry_metric(),
+                    {
+                        "segment_id": str(segment.segment_id),
+                        "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                        "component_role": "final_exported_road",
                         "final_export_source": str(build_result.get("final_export_source", "")),
                     },
                 )
@@ -3982,6 +4237,28 @@ def write_road_outputs(
                 "failure_classification": str(failure_classification),
             }
         )
+        global_fit_trace_entries.append(
+            {
+                "segment_id": str(segment.segment_id),
+                "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                "arc_id": str(segment.topology_arc_id),
+                "src_anchor": (build_result.get("step5_used_anchor_coords") or {}).get("src"),
+                "dst_anchor": (build_result.get("step5_used_anchor_coords") or {}).get("dst"),
+                "trajectory_spine_source": str(build_result.get("trajectory_spine_source", "")),
+                "trajectory_spine_quality": float(build_result.get("trajectory_spine_quality", 0.0) or 0.0),
+                "trajectory_spine_support_count": int(build_result.get("trajectory_spine_support_count", 0) or 0),
+                "trajectory_spine_weak_bool": bool(build_result.get("trajectory_spine_weak_bool", False)),
+                "trajectory_spine_fallback_bool": bool(build_result.get("trajectory_spine_fallback_bool", False)),
+                "lane_boundary_hint_usage": dict(build_result.get("lane_boundary_hint_usage") or {}),
+                "fitting_mode": str(build_result.get("global_fit_mode", "")),
+                "fitting_success_bool": bool(build_result.get("global_fit_success_bool", False)),
+                "quality_gate_reason": str(build_result.get("global_fit_quality_gate_reason", "")),
+                "fallback_reason": str(build_result.get("global_fit_fallback_reason", "")),
+                "global_fit_used_bool": bool(build_result.get("global_fit_used_bool", False)),
+                "final_export_source": str(build_result.get("final_export_source", "")),
+                "built_final_road": bool(road is not None),
+            }
+        )
         final_geometry_trace_entries.append(
             {
                 "segment_id": str(segment.segment_id),
@@ -4012,6 +4289,18 @@ def write_road_outputs(
                 "refine_applied_bool": bool(build_result.get("refine_applied_bool", False) or build_result.get("geometry_refine_applied", False)),
                 "refine_rejected_reason": str(build_result.get("refine_rejected_reason") or build_result.get("geometry_refine_skip_reason", "")),
                 "refine_selected_candidate_mode": str(build_result.get("geometry_refine_selected_candidate_mode", "")),
+                "global_fit_enabled_bool": bool(build_result.get("global_fit_enabled_bool", False)),
+                "global_fit_used_bool": bool(build_result.get("global_fit_used_bool", False)),
+                "global_fit_success_bool": bool(build_result.get("global_fit_success_bool", False)),
+                "global_fit_mode": str(build_result.get("global_fit_mode", "")),
+                "global_fit_guide_source": str(build_result.get("global_fit_guide_source", "")),
+                "global_fit_fallback_reason": str(build_result.get("global_fit_fallback_reason", "")),
+                "global_fit_quality_gate_reason": str(build_result.get("global_fit_quality_gate_reason", "")),
+                "trajectory_spine_source": str(build_result.get("trajectory_spine_source", "")),
+                "trajectory_spine_quality": float(build_result.get("trajectory_spine_quality", 0.0) or 0.0),
+                "trajectory_spine_support_count": int(build_result.get("trajectory_spine_support_count", 0) or 0),
+                "trajectory_spine_weak_bool": bool(build_result.get("trajectory_spine_weak_bool", False)),
+                "trajectory_spine_fallback_bool": bool(build_result.get("trajectory_spine_fallback_bool", False)),
                 "final_export_source": str(build_result.get("final_export_source", "")),
                 "final_override_reason": str(build_result.get("final_override_reason", "")),
                 "final_clip_reason": str(build_result.get("final_clip_reason", "")),
@@ -4437,6 +4726,31 @@ def write_road_outputs(
                 "built_count": int(sum(1 for item in final_geometry_trace_entries if bool(item["built_final_road"]))),
                 "refine_applied_count": int(sum(1 for item in final_geometry_trace_entries if bool(item["refine_applied_bool"]))),
                 "anchor_adjusted_count": int(sum(1 for item in final_geometry_trace_entries if bool(item["anchor_adjusted_bool"]))),
+                "global_fit_used_count": int(sum(1 for item in final_geometry_trace_entries if bool(item.get("global_fit_used_bool", False)))),
+                "global_fit_fallback_count": int(
+                    sum(
+                        1
+                        for item in final_geometry_trace_entries
+                        if bool(item.get("global_fit_enabled_bool", False))
+                        and (not bool(item.get("global_fit_used_bool", False)))
+                        and str(item.get("global_fit_fallback_reason", ""))
+                    )
+                ),
+            },
+        },
+    )
+    write_lines_geojson(patch_dir / "step5_trajectory_spine.geojson", trajectory_spine_features)
+    write_features_geojson(patch_dir / "step5_lane_boundary_center_hints.geojson", lane_boundary_hint_features)
+    write_features_geojson(patch_dir / "step5_global_fit_samples.geojson", global_fit_sample_features)
+    write_json(
+        patch_dir / "step5_global_fit_trace.json",
+        {
+            "rows": global_fit_trace_entries,
+            "summary": {
+                "row_count": int(len(global_fit_trace_entries)),
+                "success_count": int(sum(1 for item in global_fit_trace_entries if bool(item.get("fitting_success_bool", False)))),
+                "used_count": int(sum(1 for item in global_fit_trace_entries if bool(item.get("global_fit_used_bool", False)))),
+                "built_count": int(sum(1 for item in global_fit_trace_entries if bool(item.get("built_final_road", False)))),
             },
         },
     )
@@ -4474,6 +4788,7 @@ def write_road_outputs(
     write_features_geojson(patch_dir / "step5_endpoint_anchor_trace.geojson", endpoint_anchor_trace_features)
     write_features_geojson(patch_dir / "step5_transition_segments.geojson", transition_segment_features)
     write_features_geojson(patch_dir / "final_geometry_components.geojson", final_component_features)
+    write_features_geojson(patch_dir / "debug" / "final_geometry_global_fit_components.geojson", global_fit_component_features)
     (patch_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
     write_lines_geojson(dbg_dir / "shape_ref_line.geojson", shape_ref_features)
     write_lines_geojson(dbg_dir / "road_final.geojson", road_features)
@@ -4488,6 +4803,10 @@ def write_road_outputs(
     write_json(dbg_dir / "geometry_refine_review.json", geometry_refine_review)
     write_json(dbg_dir / "step5_geometry_input_sources.json", {"rows": geometry_input_source_rows})
     write_json(dbg_dir / "step5_final_geometry_trace.json", {"rows": final_geometry_trace_entries})
+    write_lines_geojson(dbg_dir / "step5_trajectory_spine.geojson", trajectory_spine_features)
+    write_features_geojson(dbg_dir / "step5_lane_boundary_center_hints.geojson", lane_boundary_hint_features)
+    write_features_geojson(dbg_dir / "step5_global_fit_samples.geojson", global_fit_sample_features)
+    write_json(dbg_dir / "step5_global_fit_trace.json", {"rows": global_fit_trace_entries})
     write_json(
         dbg_dir / "step5_refine_apply_review.json",
         {
@@ -4498,6 +4817,7 @@ def write_road_outputs(
     write_features_geojson(dbg_dir / "step5_endpoint_anchor_trace.geojson", endpoint_anchor_trace_features)
     write_features_geojson(dbg_dir / "step5_transition_segments.geojson", transition_segment_features)
     write_features_geojson(dbg_dir / "final_geometry_components.geojson", final_component_features)
+    write_features_geojson(dbg_dir / "final_geometry_global_fit_components.geojson", global_fit_component_features)
     write_json(
         dbg_dir / "reason_trace.json",
         {
