@@ -1400,9 +1400,54 @@ def test_t05v2_geometry_refine_outputs_for_built_lane_boundary_case(tmp_path: Pa
     assert review["rows"][0]["core_skeleton_source"] == "lane_boundary_centerline"
     assert len(core["features"]) == 1
     assert len(entry_exit["features"]) == 2
+    assert review["rows"][0]["entry_anchor_source"].startswith("slot_surface_midpoint_")
+    assert review["rows"][0]["exit_anchor_source"].startswith("slot_surface_midpoint_")
     assert bool(roads["features"][0]["properties"]["geometry_refine_lane_boundary_used"]) is True
     assert "geometry_refine_review" in step6
     assert int(step6["geometry_refine_review"]["summary"]["reviewed_count"]) == 1
+
+
+def test_t05v2_geometry_refine_mid_anchor_uses_interval_midpoint() -> None:
+    slot = SlotInterval(
+        segment_id="seg_mid_anchor",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, -8.0), (0.0, 8.0)),
+        interval=CorridorInterval(
+            start_s=4.0,
+            end_s=12.0,
+            center_s=8.0,
+            length_m=8.0,
+            rank=0,
+            geometry_coords=((0.0, -4.0), (0.0, 4.0)),
+        ),
+        resolved=True,
+        method="rank",
+        reason="synthetic",
+        interval_count=1,
+    )
+    safe_surface = Polygon([(-1.0, -5.0), (1.0, -5.0), (1.0, 5.0), (-1.0, 5.0)])
+
+    anchor = _step5_road._slot_surface_mid_anchor_point(slot, safe_surface)
+
+    assert anchor.distance(Point(0.0, 0.0)) <= 1e-6
+
+
+def test_t05v2_geometry_refine_connector_curve_bends_smoothly() -> None:
+    connector = _step5_road._curve_connector_line(
+        Point(0.0, 0.0),
+        Point(10.0, 0.0),
+        start_dir=(0.0, 1.0),
+        end_dir=(1.0, 0.0),
+        ctrl_frac=0.4,
+        ctrl_min_m=2.0,
+        ctrl_max_m=6.0,
+    )
+
+    assert connector is not None
+    coords = list(connector.coords)
+    assert len(coords) >= 6
+    assert max(float(y) for _, y in coords[1:-1]) > 0.5
 
 
 def test_t05v2_prior_based_for_short_prior_segment(tmp_path: Path) -> None:

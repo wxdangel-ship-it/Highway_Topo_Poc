@@ -340,6 +340,30 @@ def _slot_surface_anchor_point(
         return pipeline._midpoint_of_interval(slot.interval)
 
 
+def _slot_surface_mid_anchor_point(
+    slot: SlotInterval,
+    safe_surface: Any | None,
+) -> Point:
+    slot_line = _slot_interval_line(slot)
+    pipeline = _pipeline()
+    if slot_line is None:
+        return pipeline._midpoint_of_interval(slot.interval)
+    slot_geom = slot_line
+    if safe_surface is not None and not getattr(safe_surface, "is_empty", True):
+        try:
+            clipped = slot_line.intersection(safe_surface)
+        except Exception:
+            clipped = slot_line
+        line_components = _iter_line_components(clipped)
+        if line_components:
+            slot_geom = max(line_components, key=lambda item: float(item.length))
+        elif isinstance(clipped, Point):
+            return clipped
+    if isinstance(slot_geom, LineString) and float(slot_geom.length) > 1e-6:
+        return slot_geom.interpolate(0.5, normalized=True)
+    return pipeline._midpoint_of_interval(slot.interval)
+
+
 def _surface_envelope_candidate_line(
     base_line: LineString,
     src_slot: SlotInterval,
@@ -661,6 +685,110 @@ def _midpoint_between_points(point_a: Point, point_b: Point) -> Point:
     )
 
 
+def _direction_unit(line: LineString, *, at_start: bool) -> tuple[float, float] | None:
+    if line.is_empty or float(line.length) <= 1e-6:
+        return None
+    coords = list(line.coords)
+    if len(coords) < 2:
+        return None
+    if at_start:
+        endpoint = coords[0]
+        neighbor = next(
+            (coord for coord in coords[1:] if (float(coord[0]), float(coord[1])) != (float(endpoint[0]), float(endpoint[1]))),
+            None,
+        )
+        if neighbor is None:
+            return None
+        dx = float(neighbor[0]) - float(endpoint[0])
+        dy = float(neighbor[1]) - float(endpoint[1])
+    else:
+        endpoint = coords[-1]
+        neighbor = next(
+            (coord for coord in reversed(coords[:-1]) if (float(coord[0]), float(coord[1])) != (float(endpoint[0]), float(endpoint[1]))),
+            None,
+        )
+        if neighbor is None:
+            return None
+        dx = float(endpoint[0]) - float(neighbor[0])
+        dy = float(endpoint[1]) - float(neighbor[1])
+    norm = hypot(float(dx), float(dy))
+    if norm <= 1e-6:
+        return None
+    return float(dx / norm), float(dy / norm)
+
+
+def _curve_connector_line(
+    start_pt: Point,
+    end_pt: Point,
+    *,
+    start_dir: tuple[float, float] | None,
+    end_dir: tuple[float, float] | None,
+    ctrl_frac: float,
+    ctrl_min_m: float,
+    ctrl_max_m: float,
+    samples: int = 12,
+) -> LineString | None:
+    span = float(start_pt.distance(end_pt))
+    if span <= 1e-6:
+        return None
+    if span <= 2.0:
+        return _line_from_coords(
+            [
+                (float(start_pt.x), float(start_pt.y)),
+                (float(end_pt.x), float(end_pt.y)),
+            ]
+        )
+    ctrl_len = max(float(ctrl_min_m), min(float(ctrl_max_m), float(span) * float(ctrl_frac)))
+    if start_dir is None:
+        start_dir = (
+            float(end_pt.x) - float(start_pt.x),
+            float(end_pt.y) - float(start_pt.y),
+        )
+        start_norm = hypot(float(start_dir[0]), float(start_dir[1]))
+        start_dir = None if start_norm <= 1e-6 else (float(start_dir[0] / start_norm), float(start_dir[1] / start_norm))
+    if end_dir is None:
+        end_dir = (
+            float(end_pt.x) - float(start_pt.x),
+            float(end_pt.y) - float(start_pt.y),
+        )
+        end_norm = hypot(float(end_dir[0]), float(end_dir[1]))
+        end_dir = None if end_norm <= 1e-6 else (float(end_dir[0] / end_norm), float(end_dir[1] / end_norm))
+    if start_dir is None or end_dir is None:
+        return _line_from_coords(
+            [
+                (float(start_pt.x), float(start_pt.y)),
+                (float(end_pt.x), float(end_pt.y)),
+            ]
+        )
+    ctrl_1 = (
+        float(start_pt.x) + float(start_dir[0]) * float(ctrl_len),
+        float(start_pt.y) + float(start_dir[1]) * float(ctrl_len),
+    )
+    ctrl_2 = (
+        float(end_pt.x) - float(end_dir[0]) * float(ctrl_len),
+        float(end_pt.y) - float(end_dir[1]) * float(ctrl_len),
+    )
+    sample_count = max(6, int(samples))
+    coords: list[tuple[float, float]] = []
+    for idx in range(sample_count):
+        t = float(idx) / float(sample_count - 1)
+        mt = 1.0 - t
+        x = (
+            float(mt**3) * float(start_pt.x)
+            + 3.0 * float(mt**2) * float(t) * float(ctrl_1[0])
+            + 3.0 * float(mt) * float(t**2) * float(ctrl_2[0])
+            + float(t**3) * float(end_pt.x)
+        )
+        y = (
+            float(mt**3) * float(start_pt.y)
+            + 3.0 * float(mt**2) * float(t) * float(ctrl_1[1])
+            + 3.0 * float(mt) * float(t**2) * float(ctrl_2[1])
+            + float(t**3) * float(end_pt.y)
+        )
+        coords.append((float(x), float(y)))
+    return _line_from_coords(coords)
+
+
 def _sample_line_points(line: LineString, *, step_m: float) -> list[Point]:
     if line.is_empty or float(line.length) <= 1e-6:
         return []
@@ -854,8 +982,8 @@ def _refine_built_road_geometry(
         "applied": False,
         "skip_reason": "",
         "core_skeleton_source": "",
-        "entry_anchor_source": f"slot_surface_anchor_{str(src_slot.method or 'unknown')}",
-        "exit_anchor_source": f"slot_surface_anchor_{str(dst_slot.method or 'unknown')}",
+        "entry_anchor_source": f"slot_surface_midpoint_{str(src_slot.method or 'unknown')}",
+        "exit_anchor_source": f"slot_surface_midpoint_{str(dst_slot.method or 'unknown')}",
         "smoothed": False,
         "lane_boundary_used": False,
         "support_trend_used": False,
@@ -867,8 +995,8 @@ def _refine_built_road_geometry(
     if src_slot.interval is None or dst_slot.interval is None:
         review["skip_reason"] = "slot_unresolved"
         return road, review, None, []
-    start_pt = _slot_surface_anchor_point(src_slot, original_line, safe_surface)
-    end_pt = _slot_surface_anchor_point(dst_slot, original_line, safe_surface)
+    start_pt = _slot_surface_mid_anchor_point(src_slot, safe_surface)
+    end_pt = _slot_surface_mid_anchor_point(dst_slot, safe_surface)
     lane_boundary_line = _lane_boundary_centerline_for_road(
         road_line=original_line,
         lane_boundaries=tuple(inputs.lane_boundaries_metric),
@@ -923,13 +1051,23 @@ def _refine_built_road_geometry(
     trimmed_core = _trim_line_middle(core_line, trim_frac=float(params.get("GEOMETRY_REFINE_CORE_TRIM_FRAC", 0.15)))
     if trimmed_core is not None:
         core_line = trimmed_core
-    core_start_s = float(source_line.project(Point(core_line.coords[0][:2]))) if not core_line.is_empty else 0.0
-    core_end_s = float(source_line.project(Point(core_line.coords[-1][:2]))) if not core_line.is_empty else float(source_line.length)
-    entry_line = substring(source_line, 0.0, core_start_s) if core_start_s > 1e-6 else _line_from_coords([(start_pt.x, start_pt.y), core_line.coords[0][:2]])
-    exit_line = (
-        substring(source_line, core_end_s, float(source_line.length))
-        if float(source_line.length) - core_end_s > 1e-6
-        else _line_from_coords([core_line.coords[-1][:2], (end_pt.x, end_pt.y)])
+    entry_line = _curve_connector_line(
+        start_pt,
+        Point(core_line.coords[0][:2]),
+        start_dir=_direction_unit(source_line, at_start=True),
+        end_dir=_direction_unit(core_line, at_start=True),
+        ctrl_frac=float(params.get("GEOMETRY_REFINE_ENTRY_EXIT_CTRL_FRAC", 0.35)),
+        ctrl_min_m=float(params.get("GEOMETRY_REFINE_ENTRY_EXIT_CTRL_MIN_M", 2.5)),
+        ctrl_max_m=float(params.get("GEOMETRY_REFINE_ENTRY_EXIT_CTRL_MAX_M", 14.0)),
+    )
+    exit_line = _curve_connector_line(
+        Point(core_line.coords[-1][:2]),
+        end_pt,
+        start_dir=_direction_unit(core_line, at_start=False),
+        end_dir=_direction_unit(source_line, at_start=False),
+        ctrl_frac=float(params.get("GEOMETRY_REFINE_ENTRY_EXIT_CTRL_FRAC", 0.35)),
+        ctrl_min_m=float(params.get("GEOMETRY_REFINE_ENTRY_EXIT_CTRL_MIN_M", 2.5)),
+        ctrl_max_m=float(params.get("GEOMETRY_REFINE_ENTRY_EXIT_CTRL_MAX_M", 14.0)),
     )
     entry_line = entry_line if isinstance(entry_line, LineString) and not entry_line.is_empty else _line_from_coords([(start_pt.x, start_pt.y), core_line.coords[0][:2]])
     exit_line = exit_line if isinstance(exit_line, LineString) and not exit_line.is_empty else _line_from_coords([core_line.coords[-1][:2], (end_pt.x, end_pt.y)])
