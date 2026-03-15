@@ -248,6 +248,29 @@ def _row_candidate_order(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _endpoint_xsec_id(
+    row: dict[str, Any],
+    endpoint_role: str,
+    xsec_map: dict[int, BaseCrossSection],
+) -> int | None:
+    keys = (
+        ("canonical_src_xsec_id", "src", "raw_src_nodeid")
+        if str(endpoint_role) == "src"
+        else ("canonical_dst_xsec_id", "dst", "raw_dst_nodeid")
+    )
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            nodeid = int(value)
+        except Exception:
+            continue
+        if nodeid in xsec_map:
+            return int(nodeid)
+    return None
+
+
 def _ownership_for_crossing(
     *,
     group_rows: list[dict[str, Any]],
@@ -315,17 +338,20 @@ def collect_xsec_crossings(
     endpoint_xsec_ids = {
         int(nodeid)
         for row in rows
-        for nodeid in (row.get("src"), row.get("dst"))
-        if nodeid is not None and int(nodeid) in xsec_map
+        for nodeid in (
+            _endpoint_xsec_id(row, "src", xsec_map),
+            _endpoint_xsec_id(row, "dst", xsec_map),
+        )
+        if nodeid is not None
     }
     endpoint_xsec_map = {int(nodeid): xsec_map[int(nodeid)] for nodeid in endpoint_xsec_ids}
     crossings_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for endpoint_role in ("src", "dst"):
         group_rows_by_xsec: dict[int, list[dict[str, Any]]] = defaultdict(list)
         for row in rows:
-            xsec_id = int(row.get("src" if endpoint_role == "src" else "dst", 0) or 0)
-            if xsec_id in xsec_map:
-                group_rows_by_xsec[xsec_id].append(row)
+            xsec_id = _endpoint_xsec_id(row, endpoint_role, xsec_map)
+            if xsec_id is not None:
+                group_rows_by_xsec[int(xsec_id)].append(row)
         for xsec_id, group_rows in group_rows_by_xsec.items():
             xsec_line = xsec_map[int(xsec_id)].geometry_metric()
             for traj_row in traj_rows:
@@ -569,9 +595,9 @@ def _build_role_intervals(
     production_segments_by_arc = dict(production_segments_by_arc or {})
     groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        xsec_id = int(row.get("src" if endpoint_role == "src" else "dst", 0) or 0)
-        if xsec_id in xsec_map:
-            groups[xsec_id].append(row)
+        xsec_id = _endpoint_xsec_id(row, endpoint_role, xsec_map)
+        if xsec_id is not None:
+            groups[int(xsec_id)].append(row)
     out: dict[int, list[dict[str, Any]]] = {}
     for xsec_id, group_rows in groups.items():
         xsec_line = xsec_map[int(xsec_id)].geometry_metric()

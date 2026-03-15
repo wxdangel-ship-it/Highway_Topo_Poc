@@ -2373,6 +2373,45 @@ def test_t05v2_build_endpoint_intervals_assigns_non_overlapping_same_xsec_start_
     assert float(src_b["width_m"]) == pytest.approx(1.0, abs=1e-6)
 
 
+def test_t05v2_build_endpoint_intervals_keeps_both_endpoint_roles_for_alias_arc_without_traj() -> None:
+    xsec_map = {
+        55353307: BaseCrossSection(nodeid=55353307, geometry_coords=((0.0, -5.0), (0.0, 5.0))),
+        608638238: BaseCrossSection(nodeid=608638238, geometry_coords=((100.0, -5.0), (100.0, 5.0))),
+    }
+    rows = [
+        {
+            "pair": "55353307:608638238",
+            "raw_pair": "23287538:608638238",
+            "src": 23287538,
+            "dst": 608638238,
+            "raw_src_nodeid": 23287538,
+            "raw_dst_nodeid": 608638238,
+            "canonical_src_xsec_id": 55353307,
+            "canonical_dst_xsec_id": 608638238,
+            "src_alias_applied": True,
+            "dst_alias_applied": False,
+            "topology_arc_id": "arc_alias_both_roles",
+            "line_coords": [[0.0, 1.0], [100.0, 1.0]],
+            "support_reference_coords": [[0.0, 1.0], [100.0, 1.0]],
+            "traj_support_segments": [],
+        }
+    ]
+    payload = build_endpoint_intervals(
+        rows=rows,
+        traj_rows=[],
+        xsec_map=xsec_map,
+        selected_segments_by_arc={},
+        drivable_surface=Polygon([(-1.0, -5.0), (101.0, -5.0), (101.0, 5.0), (-1.0, 5.0)]),
+        params=dict(DEFAULT_PARAMS),
+    )
+
+    assigned = payload["assigned_intervals_by_arc"]["arc_alias_both_roles"]
+    assert "src" in assigned
+    assert "dst" in assigned
+    assert int(assigned["src"]["xsec_id"]) == 55353307
+    assert int(assigned["dst"]["xsec_id"]) == 608638238
+
+
 def test_t05v2_arc_first_partial_support_recovers_same_arc_without_terminal_crossing(tmp_path: Path) -> None:
     patch_id = "arc_first_partial"
     data_root = tmp_path / "data"
