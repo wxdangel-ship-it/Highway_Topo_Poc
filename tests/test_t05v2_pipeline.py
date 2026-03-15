@@ -6,10 +6,12 @@ import subprocess
 import sys
 from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from shapely.geometry import LineString, Point, Polygon
 
+from highway_topo_poc.modules.t05_topology_between_rc_v2 import step5_conservative_road as _step5_road
 from highway_topo_poc.modules.t05_topology_between_rc_v2.io import InputFrame, PatchInputs
 from highway_topo_poc.modules.t05_topology_between_rc_v2.audit_acceptance import (
     build_arc_selection_structure,
@@ -66,6 +68,7 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_arc_evidence impo
     classify_topology_gap_rows,
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.step5_conservative_road import (
+    _rcsdroad_trend_extended_candidate_line,
     build_slot,
 )
 from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_corridor_identity import (
@@ -2102,6 +2105,183 @@ def test_t05v2_build_final_road_uses_support_reference_candidate_to_avoid_divstr
     assert result["candidate_attempts"][0]["mode"] == "witness_reference_projected_anchored"
     assert float(result["candidate_attempts"][0]["divstrip_overlap_ratio"]) > 0.0
     assert all(attempt["mode"] != "traj_support_slot_anchored" or float(attempt["drivezone_ratio"]) >= float(DEFAULT_PARAMS["ROAD_MIN_DRIVEZONE_RATIO"]) for attempt in result["candidate_attempts"])
+
+
+def test_t05v2_rcsdroad_trend_extended_candidate_line_uses_endpoint_trend() -> None:
+    src_slot = SlotInterval(
+        segment_id="seg_trend",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, -10.0), (0.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=0.0,
+            end_s=20.0,
+            center_s=10.0,
+            length_m=20.0,
+            rank=0,
+            geometry_coords=((0.0, -10.0), (0.0, 10.0)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    dst_slot = SlotInterval(
+        segment_id="seg_trend",
+        endpoint_tag="dst",
+        xsec_nodeid=20,
+        xsec_coords=((100.0, -10.0), (100.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=0.0,
+            end_s=20.0,
+            center_s=10.0,
+            length_m=20.0,
+            rank=0,
+            geometry_coords=((100.0, -10.0), (100.0, 10.0)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    candidate = _rcsdroad_trend_extended_candidate_line(
+        LineString([(10.0, 0.0), (50.0, 2.0), (90.0, 4.0)]),
+        src_slot,
+        dst_slot,
+    )
+
+    assert candidate is not None
+    coords = list(candidate.coords)
+    assert float(coords[0][0]) == pytest.approx(0.0)
+    assert float(coords[0][1]) == pytest.approx(-0.5, abs=1e-6)
+    assert float(coords[-1][0]) == pytest.approx(100.0)
+    assert float(coords[-1][1]) == pytest.approx(4.5, abs=1e-6)
+
+
+def test_t05v2_build_final_road_uses_rcsdroad_trend_extension_as_last_fallback() -> None:
+    segment = Segment(
+        segment_id="seg_rcsd_fallback",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((10.0, 0.0), (50.0, 2.0), (90.0, 4.0)),
+        candidate_ids=("cand_rcsd",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_rcsd",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="traj_supported_cluster",
+        length_m=80.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_rcsd_fallback",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        same_pair_rank=1,
+        kept_reason="",
+    )
+    witness = CorridorWitness(
+        segment_id="seg_rcsd_fallback",
+        status="selected",
+        reason="witness_interval_selected",
+        line_coords=((0.0, 6.0), (100.0, 6.0)),
+        sample_s_norm=0.5,
+        intervals=tuple(),
+        selected_interval_rank=None,
+        selected_interval_start_s=None,
+        selected_interval_end_s=None,
+        exclusive_interval=True,
+        stability_score=1.0,
+        neighbor_match_count=1,
+        axis_vector=(0.0, 1.0),
+    )
+    identity = CorridorIdentity(
+        segment_id="seg_rcsd_fallback",
+        state="witness_based",
+        reason="witness_selected",
+        risk_flags=tuple(),
+        witness_interval_rank=None,
+        prior_supported=False,
+    )
+    src_slot = SlotInterval(
+        segment_id="seg_rcsd_fallback",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, -2.0), (0.0, 14.0)),
+        interval=CorridorInterval(
+            start_s=0.0,
+            end_s=16.0,
+            center_s=8.0,
+            length_m=16.0,
+            rank=0,
+            geometry_coords=((0.0, -2.0), (0.0, 14.0)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    dst_slot = SlotInterval(
+        segment_id="seg_rcsd_fallback",
+        endpoint_tag="dst",
+        xsec_nodeid=20,
+        xsec_coords=((100.0, -2.0), (100.0, 14.0)),
+        interval=CorridorInterval(
+            start_s=0.0,
+            end_s=16.0,
+            center_s=8.0,
+            length_m=16.0,
+            rank=0,
+            geometry_coords=((100.0, -2.0), (100.0, 14.0)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    trend_line = _rcsdroad_trend_extended_candidate_line(segment.geometry_metric(), src_slot, dst_slot)
+    assert trend_line is not None
+    inputs = PatchInputs(
+        patch_id="rcsdroad_trend_case",
+        patch_dir=Path("rcsdroad_trend_case"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=trend_line.buffer(0.4, cap_style=2, join_style=2),
+        divstrip_zone_metric=Polygon(),
+        road_prior_path=None,
+        input_summary={},
+    )
+    params = dict(DEFAULT_PARAMS)
+    params["ROAD_MIN_DRIVEZONE_RATIO"] = 0.98
+
+    with (
+        patch.object(_step5_road, "_surface_envelope_candidate_line", return_value=None),
+        patch.object(_step5_road, "_append_side_constrained_candidates", return_value=None),
+    ):
+        road, result = _build_final_road(
+            patch_id="rcsdroad_trend_case",
+            segment=segment,
+            identity=identity,
+            witness=witness,
+            src_slot=src_slot,
+            dst_slot=dst_slot,
+            inputs=inputs,
+            prior_roads=[],
+            params=params,
+        )
+
+    assert road is not None
+    assert result["reason"] == "built"
+    assert str(result["shape_ref_mode"]).startswith("rcsdroad_trend_extended")
+    assert any(str(item["mode"]).startswith("rcsdroad_trend_extended") for item in result["candidate_attempts"])
+    assert float(result["drivezone_ratio"]) >= 0.98
 
 
 def test_t05v2_build_final_road_allows_same_pair_multi_arc_with_side_constrained_candidate() -> None:

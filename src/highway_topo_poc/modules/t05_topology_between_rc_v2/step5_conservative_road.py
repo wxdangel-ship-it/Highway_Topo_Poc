@@ -356,6 +356,129 @@ def _surface_envelope_candidate_line(
     return candidate
 
 
+def _endpoint_trend_ray(
+    base_line: LineString,
+    *,
+    at_start: bool,
+) -> tuple[LineString, Point] | None:
+    if base_line.is_empty or float(base_line.length) <= 1e-6:
+        return None
+    coords = list(base_line.coords)
+    if len(coords) < 2:
+        return None
+    if at_start:
+        endpoint = coords[0]
+        neighbor = next(
+            (coord for coord in coords[1:] if (float(coord[0]), float(coord[1])) != (float(endpoint[0]), float(endpoint[1]))),
+            None,
+        )
+    else:
+        endpoint = coords[-1]
+        neighbor = next(
+            (coord for coord in reversed(coords[:-1]) if (float(coord[0]), float(coord[1])) != (float(endpoint[0]), float(endpoint[1]))),
+            None,
+        )
+    if neighbor is None:
+        return None
+    endpoint_pt = Point(float(endpoint[0]), float(endpoint[1]))
+    dx = float(endpoint[0]) - float(neighbor[0])
+    dy = float(endpoint[1]) - float(neighbor[1])
+    norm = hypot(float(dx), float(dy))
+    if norm <= 1e-6:
+        return None
+    ray_len = max(float(base_line.length), 50.0)
+    far_pt = Point(
+        float(endpoint_pt.x) + float(dx / norm) * float(ray_len),
+        float(endpoint_pt.y) + float(dy / norm) * float(ray_len),
+    )
+    return LineString(
+        [
+            (float(endpoint_pt.x), float(endpoint_pt.y)),
+            (float(far_pt.x), float(far_pt.y)),
+        ]
+    ), endpoint_pt
+
+
+def _closest_point_on_geometry(geometry: Any, reference_point: Point) -> Point | None:
+    if geometry is None or getattr(geometry, "is_empty", True):
+        return None
+    if isinstance(geometry, Point):
+        return geometry
+    if isinstance(geometry, LineString):
+        try:
+            return nearest_points(geometry, reference_point)[0]
+        except Exception:
+            return None
+    candidates: list[Point] = []
+    for geom in getattr(geometry, "geoms", []) or []:
+        point = _closest_point_on_geometry(geom, reference_point)
+        if point is not None:
+            candidates.append(point)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: float(item.distance(reference_point)))
+
+
+def _slot_trend_anchor_point(
+    slot: SlotInterval,
+    reference_line: LineString,
+    safe_surface: Any | None,
+    *,
+    at_start: bool,
+) -> Point:
+    slot_line = _slot_interval_line(slot)
+    if slot_line is None:
+        pipeline = _pipeline()
+        return pipeline._midpoint_of_interval(slot.interval)
+    slot_geom = slot_line
+    if safe_surface is not None and not getattr(safe_surface, "is_empty", True):
+        try:
+            clipped = slot_line.intersection(safe_surface)
+        except Exception:
+            clipped = slot_line
+        line_components = _iter_line_components(clipped)
+        if line_components:
+            slot_geom = max(line_components, key=lambda item: float(item.length))
+        elif isinstance(clipped, Point):
+            return clipped
+    trend_ray = _endpoint_trend_ray(reference_line, at_start=bool(at_start))
+    if trend_ray is None:
+        return _slot_surface_anchor_point(slot, reference_line, safe_surface)
+    ray_line, endpoint_pt = trend_ray
+    try:
+        intersection = slot_geom.intersection(ray_line)
+    except Exception:
+        intersection = None
+    trend_point = _closest_point_on_geometry(intersection, endpoint_pt)
+    if trend_point is not None:
+        return trend_point
+    try:
+        return nearest_points(slot_geom, ray_line)[0]
+    except Exception:
+        return _slot_surface_anchor_point(slot, reference_line, safe_surface)
+
+
+def _rcsdroad_trend_extended_candidate_line(
+    base_line: LineString,
+    src_slot: SlotInterval,
+    dst_slot: SlotInterval,
+    *,
+    safe_surface: Any | None = None,
+    use_safe_core: bool = False,
+) -> LineString | None:
+    if base_line.is_empty or float(base_line.length) <= 1e-6:
+        return None
+    core_line = _surface_envelope_core_line(base_line, safe_surface) if use_safe_core else base_line
+    if core_line is None or core_line.is_empty or float(core_line.length) <= 1e-6:
+        return None
+    start_anchor = _slot_trend_anchor_point(src_slot, core_line, safe_surface, at_start=True)
+    end_anchor = _slot_trend_anchor_point(dst_slot, core_line, safe_surface, at_start=False)
+    candidate = _anchor_along_base_line(core_line, start_anchor, end_anchor)
+    if candidate.is_empty or float(candidate.length) <= 1e-6:
+        return None
+    return candidate
+
+
 def slot_reference_line(
     *,
     segment: Segment,
@@ -775,6 +898,22 @@ def build_final_road(
             "prior_reference_slot_anchored_safe_envelope",
             priority=str(identity.state) == "prior_based",
         )
+    rcsdroad_trend_safe = _rcsdroad_trend_extended_candidate_line(
+        segment.geometry_metric(),
+        src_slot,
+        dst_slot,
+        safe_surface=safe_surface,
+        use_safe_core=True,
+    )
+    _append_candidate_line(candidate_lines, rcsdroad_trend_safe, "rcsdroad_trend_extended_safe_envelope")
+    rcsdroad_trend = _rcsdroad_trend_extended_candidate_line(
+        segment.geometry_metric(),
+        src_slot,
+        dst_slot,
+        safe_surface=safe_surface,
+        use_safe_core=False,
+    )
+    _append_candidate_line(candidate_lines, rcsdroad_trend, "rcsdroad_trend_extended")
     attempts: list[dict[str, Any]] = []
     selected_candidate: tuple[LineString, str, float, float, bool] | None = None
     best_candidate: tuple[LineString, str, float, float, bool] | None = None
