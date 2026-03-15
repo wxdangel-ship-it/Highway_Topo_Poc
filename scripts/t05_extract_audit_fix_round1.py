@@ -113,6 +113,11 @@ def _patch_rows(run_dir: Path, patch_id: str) -> list[dict[str, Any]]:
                     or registry.get("production_support_geometry_mode")
                     or ""
                 ),
+                "step3_anchor_interval_review": dict(
+                    prod.get("production_anchor_interval_review")
+                    or registry.get("production_anchor_interval_review")
+                    or {}
+                ),
                 "same_pair_explainability": {
                     "same_pair_support_deconflict_reason": str(
                         same_pair.get("same_pair_support_deconflict_reason")
@@ -156,6 +161,7 @@ def _patch_rows(run_dir: Path, patch_id: str) -> list[dict[str, Any]]:
                 "final_reason": str(step5.get("final_reason") or metric.get("unresolved_reason") or ""),
                 "final_road_source_family": str(step5.get("shape_ref_source_family", "")),
                 "shape_ref_mode": str(step5.get("shape_ref_mode", "")),
+                "step5_endpoint_anchor_policy": str(step5.get("step5_endpoint_anchor_policy", "")),
                 "production_geometry_fallback_reason": str(
                     prod.get("production_geometry_fallback_reason")
                     or registry.get("production_geometry_fallback_reason")

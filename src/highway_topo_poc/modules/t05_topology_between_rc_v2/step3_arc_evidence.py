@@ -2011,6 +2011,180 @@ def _xsec_midpoint(xsec_line: LineString | None) -> Point | None:
     return xsec_line.interpolate(0.5, normalized=True)
 
 
+def _closest_point_on_geometry(geometry: Any, reference_point: Point | None) -> Point | None:
+    if geometry is None or getattr(geometry, "is_empty", True):
+        return None
+    if isinstance(geometry, Point):
+        return geometry if not geometry.is_empty else None
+    if isinstance(geometry, LineString):
+        if reference_point is None or reference_point.is_empty:
+            midpoint = _xsec_midpoint(geometry)
+            return midpoint if midpoint is not None else _endpoint_from_line(geometry, endpoint_tag="src")
+        try:
+            return nearest_points(geometry, reference_point)[0]
+        except Exception:
+            return None
+    candidates: list[Point] = []
+    for geom in getattr(geometry, "geoms", []) or []:
+        point = _closest_point_on_geometry(geom, reference_point)
+        if point is not None:
+            candidates.append(point)
+    if not candidates:
+        return None
+    if reference_point is None or reference_point.is_empty:
+        return candidates[0]
+    return min(candidates, key=lambda item: float(item.distance(reference_point)))
+
+
+def _reference_s_on_xsec(xsec_line: LineString | None, geometry: Any) -> float | None:
+    point = _nearest_point_on_xsec(xsec_line, geometry)
+    return _safe_line_project(xsec_line, point)
+
+
+def _point_on_interval(
+    interval_line: LineString | None,
+    *,
+    preferred_point: Point | None,
+    reference_line: LineString | None,
+    endpoint_tag: str,
+) -> tuple[Point | None, str]:
+    if not _line_is_usable(interval_line):
+        return None, "interval_missing"
+    if preferred_point is not None and not preferred_point.is_empty:
+        try:
+            preferred_nearest = nearest_points(interval_line, preferred_point)[0]
+        except Exception:
+            preferred_nearest = None
+        if preferred_nearest is not None and not preferred_nearest.is_empty:
+            return preferred_nearest, "preferred_anchor_interval_nearest"
+    reference_endpoint = _endpoint_from_line(reference_line, endpoint_tag=endpoint_tag)
+    if _line_is_usable(reference_line):
+        try:
+            intersection = interval_line.intersection(reference_line)
+        except Exception:
+            intersection = None
+        point = _closest_point_on_geometry(intersection, reference_endpoint)
+        if point is not None:
+            return point, "reference_line_interval_intersection"
+        try:
+            interval_point = nearest_points(interval_line, reference_line)[0]
+        except Exception:
+            interval_point = None
+        if interval_point is not None and not interval_point.is_empty:
+            return interval_point, "reference_line_interval_nearest"
+    if reference_endpoint is not None and not reference_endpoint.is_empty:
+        try:
+            interval_point = nearest_points(interval_line, reference_endpoint)[0]
+        except Exception:
+            interval_point = None
+        if interval_point is not None and not interval_point.is_empty:
+            return interval_point, "reference_endpoint_interval_nearest"
+    midpoint = _xsec_midpoint(interval_line)
+    if midpoint is not None:
+        return midpoint, "interval_midpoint"
+    fallback = _endpoint_from_line(interval_line, endpoint_tag="src")
+    if fallback is not None:
+        return fallback, "interval_endpoint_fallback"
+    return None, "interval_point_missing"
+
+
+def _anchor_point_on_xsec_interval(
+    *,
+    xsec_line: LineString | None,
+    preferred_anchor_coords: Any,
+    preferred_label: str,
+    base_line: LineString | None,
+    base_label: str,
+    preliminary_line: LineString | None,
+    endpoint_tag: str,
+    drivable_surface: Any | None,
+    params: dict[str, Any],
+) -> tuple[Point, str, dict[str, Any]]:
+    fallback_point, fallback_label = _anchor_point_on_xsec(
+        xsec_line=xsec_line,
+        preferred_anchor_coords=preferred_anchor_coords,
+        preferred_label=preferred_label,
+        base_line=base_line,
+        base_label=base_label,
+        preliminary_line=preliminary_line,
+        endpoint_tag=endpoint_tag,
+    )
+    pipeline = _pipeline()
+    review = {
+        "policy": "xsec_point_fallback",
+        "interval_count": 0,
+        "interval_rank": None,
+        "interval_reason": "",
+        "point_reason": str(fallback_label),
+    }
+    if xsec_line is None or xsec_line.is_empty or float(xsec_line.length) <= 1e-6:
+        return fallback_point, str(fallback_label), review
+    if drivable_surface is None or getattr(drivable_surface, "is_empty", True):
+        return fallback_point, str(fallback_label), review
+    reference_line = base_line or preliminary_line
+    align_vector = None if not _line_is_usable(reference_line) else pipeline._line_direction(reference_line)
+    intervals = pipeline._intervals_on_xsec(
+        xsec_line,
+        drivable_surface,
+        align_vector=align_vector,
+        min_len_m=float(params.get("INTERVAL_MIN_LEN_M", 1.0)),
+    )
+    review["interval_count"] = int(len(intervals))
+    if not intervals:
+        return fallback_point, str(fallback_label), review
+    tolerance_m = max(float(params.get("STEP5_SLOT_ANCHOR_TOL_M", 0.75)), 0.5)
+    preferred_point = _point_from_coords_payload(preferred_anchor_coords)
+    interval = None
+    interval_reason = ""
+    reference_sources = [
+        (_reference_s_on_xsec(xsec_line, preferred_point), f"{preferred_label}_contains_interval"),
+        (_reference_s_on_xsec(xsec_line, base_line), f"{base_label}_contains_interval"),
+        (_reference_s_on_xsec(xsec_line, preliminary_line), "preliminary_hint_contains_interval"),
+    ]
+    for ref_s, reason_label in reference_sources:
+        if ref_s is None:
+            continue
+        for item in intervals:
+            if float(item.start_s) - float(tolerance_m) <= float(ref_s) <= float(item.end_s) + float(tolerance_m):
+                interval = item
+                interval_reason = str(reason_label)
+                break
+        if interval is not None:
+            break
+        interval = min(intervals, key=lambda item: abs(float(item.center_s) - float(ref_s)))
+        interval_reason = str(reason_label).replace("_contains_interval", "_nearest_interval")
+        break
+    if interval is None:
+        interval = min(
+            intervals,
+            key=lambda item: abs(float(item.center_s) - float(xsec_line.project(fallback_point))),
+        )
+        interval_reason = "fallback_point_nearest_interval"
+    interval_line = coords_to_line(tuple((float(x), float(y)) for x, y in interval.geometry_coords))
+    point, point_reason = _point_on_interval(
+        interval_line,
+        preferred_point=preferred_point,
+        reference_line=reference_line,
+        endpoint_tag=endpoint_tag,
+    )
+    if point is None:
+        return fallback_point, str(fallback_label), review
+    review.update(
+        {
+            "policy": "xsec_interval_anchor",
+            "interval_rank": int(interval.rank),
+            "interval_reason": str(interval_reason),
+            "point_reason": str(point_reason),
+            "interval_start_s": float(interval.start_s),
+            "interval_end_s": float(interval.end_s),
+            "interval_center_s": float(interval.center_s),
+            "interval_length_m": float(interval.length_m),
+            "interval_coords": [[float(x), float(y)] for x, y in interval.geometry_coords],
+        }
+    )
+    return point, f"{interval_reason}|{point_reason}", review
+
+
 def _anchor_point_on_xsec(
     *,
     xsec_line: LineString | None,
@@ -2186,7 +2360,7 @@ def build_production_working_segment(
     dst_xsec = xsec_map.get(int(row.get("dst", 0)))
     src_xsec_line = None if src_xsec is None else src_xsec.geometry_metric()
     dst_xsec_line = None if dst_xsec is None else dst_xsec.geometry_metric()
-    start_pt, start_anchor_provenance = _anchor_point_on_xsec(
+    start_pt, start_anchor_provenance, start_anchor_review = _anchor_point_on_xsec_interval(
         xsec_line=src_xsec_line,
         preferred_anchor_coords=(
             support_geometry.get("src_anchor_coords")
@@ -2202,8 +2376,10 @@ def build_production_working_segment(
         base_label="support_or_arc",
         preliminary_line=preliminary_line,
         endpoint_tag="src",
+        drivable_surface=drivable_surface,
+        params=params,
     )
-    end_pt, end_anchor_provenance = _anchor_point_on_xsec(
+    end_pt, end_anchor_provenance, end_anchor_review = _anchor_point_on_xsec_interval(
         xsec_line=dst_xsec_line,
         preferred_anchor_coords=(
             support_geometry.get("dst_anchor_coords")
@@ -2219,6 +2395,8 @@ def build_production_working_segment(
         base_label="support_or_arc",
         preliminary_line=preliminary_line,
         endpoint_tag="dst",
+        drivable_surface=drivable_surface,
+        params=params,
     )
     support_candidate_line = None
     support_geometry_mode = "support_missing"
@@ -2586,6 +2764,10 @@ def build_production_working_segment(
         "production_anchor_provenance": {
             "src": str(start_anchor_provenance),
             "dst": str(end_anchor_provenance),
+        },
+        "production_anchor_interval_review": {
+            "src": dict(start_anchor_review),
+            "dst": dict(end_anchor_review),
         },
         "production_support_provenance": str(production_segment.support_provenance),
         "production_geometry_quality_metrics": {
@@ -3244,6 +3426,9 @@ def build_arc_evidence_attach(
             current["production_anchor_provenance"] = dict(
                 production_review.get("production_anchor_provenance", {})
             )
+            current["production_anchor_interval_review"] = dict(
+                production_review.get("production_anchor_interval_review", {})
+            )
             current["production_support_provenance"] = str(
                 production_review.get("production_support_provenance", "")
             )
@@ -3294,6 +3479,9 @@ def build_arc_evidence_attach(
                         current.get("production_support_geometry_mode", "")
                     ),
                     "production_anchor_provenance": dict(current.get("production_anchor_provenance", {})),
+                    "production_anchor_interval_review": dict(
+                        current.get("production_anchor_interval_review", {})
+                    ),
                     "production_support_provenance": str(current.get("production_support_provenance", "")),
                     "support_interval_reference_source": str(
                         current.get("support_interval_reference_source", "")

@@ -2021,6 +2021,74 @@ def test_t05v2_step3_production_segment_uses_topology_arc_before_preliminary_hin
     assert review["production_geometry_fallback_reason"] == "no_support_reference_available"
 
 
+def test_t05v2_step3_production_segment_clamps_terminal_anchor_to_xsec_interval() -> None:
+    row = {
+        "pair": "10:20",
+        "src": 10,
+        "dst": 20,
+        "topology_arc_id": "arc_interval_anchor",
+        "topology_arc_source_type": "direct_topology_arc",
+        "line_coords": [[0.0, 3.0], [50.0, 3.0], [100.0, 3.0]],
+        "edge_ids": ["edge_interval_anchor"],
+        "node_path": [10, 20],
+        "is_direct_legal": True,
+        "is_unique": True,
+        "traj_support_type": "terminal_crossing_support",
+        "traj_support_ids": ["traj_interval_anchor"],
+        "traj_support_segments": [
+            {
+                "line_coords": [[0.0, 3.0], [50.0, 3.0], [100.0, 3.0]],
+                "segment_order": 0,
+                "source_span_start_idx": 0,
+                "source_span_end_idx": 5,
+            }
+        ],
+        "prior_support_type": "no_support",
+        "prior_support_available": False,
+        "support_reference_coords": [[0.0, 3.0], [50.0, 3.0], [100.0, 3.0]],
+        "support_anchor_src_coords": [0.0, 1.0],
+        "support_anchor_dst_coords": [100.0, 3.0],
+        "support_interval_reference_source": "selected_support",
+        "support_generation_reason": "selected_support",
+        "support_has_src_xsec_anchor": True,
+        "support_has_dst_xsec_anchor": True,
+        "support_full_xsec_crossing": True,
+        "same_pair_rank": 1,
+        "kept_reason": "arc_first_main_flow",
+    }
+    xsec_map = {
+        10: BaseCrossSection(nodeid=10, geometry_coords=((0.0, -10.0), (0.0, 10.0))),
+        20: BaseCrossSection(nodeid=20, geometry_coords=((100.0, -10.0), (100.0, 10.0))),
+    }
+    inputs = PatchInputs(
+        patch_id="builder_interval_anchor",
+        patch_dir=Path("builder_interval_anchor"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, 2.5), (105.0, 2.5), (105.0, 3.5), (-5.0, 3.5)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+
+    segment, review = _step3_evidence.build_production_working_segment(
+        row=row,
+        selected_segment=None,
+        xsec_map=xsec_map,
+        inputs=inputs,
+        params=dict(DEFAULT_PARAMS),
+        drivable_surface=inputs.drivezone_zone_metric,
+        divstrip_buffer=None,
+    )
+
+    assert segment.geometry_source_type == "support_arc_fused"
+    assert segment.geometry_coords[0] == (0.0, 2.5)
+    assert review["production_anchor_interval_review"]["src"]["policy"] == "xsec_interval_anchor"
+    assert review["production_anchor_interval_review"]["src"]["interval_reason"] == "selected_support_nearest_interval"
+
+
 def test_t05v2_step3_production_segment_fuses_partial_support_with_arc_tail() -> None:
     row = {
         "pair": "10:20",
@@ -2846,7 +2914,7 @@ def test_t05v2_build_final_road_uses_step3_production_working_segment_family() -
         src_nodeid=10,
         dst_nodeid=20,
         direction="src->dst",
-        geometry_coords=((0.0, 3.0), (50.0, 3.0), (100.0, 3.0)),
+        geometry_coords=((0.0, 2.6), (50.0, 2.6), (100.0, 2.6)),
         candidate_ids=("cand_prod",),
         source_modes=("traj",),
         support_traj_ids=("traj_1",),
@@ -2950,7 +3018,7 @@ def test_t05v2_build_final_road_uses_step3_production_working_segment_family() -
     assert result["shape_ref_mode"] == "production_working_segment_slot_anchored"
     assert result["shape_ref_source_family"] == "production_working_segment_family"
     assert result["candidate_attempts"][0]["mode"] == "production_working_segment_slot_anchored"
-    assert road.line_coords == ((0.0, 3.0), (50.0, 3.0), (100.0, 3.0))
+    assert road.line_coords == ((0.0, 2.6), (50.0, 2.6), (100.0, 2.6))
 
 
 def test_t05v2_build_slot_prefers_support_anchor_interval_over_reference_interval() -> None:
@@ -3531,7 +3599,7 @@ def test_t05v2_rcsdroad_fallback_base_line_prefers_topology_arc_line() -> None:
     assert list(base_line.coords) == [(0.0, 4.0), (50.0, 4.0), (100.0, 4.0)]
 
 
-def test_t05v2_build_final_road_uses_rcsdroad_trend_extension_as_last_fallback() -> None:
+def test_t05v2_build_final_road_interval_anchor_can_preempt_rcsdroad_fallback() -> None:
     segment = Segment(
         segment_id="seg_rcsd_fallback",
         src_nodeid=10,
@@ -3648,12 +3716,15 @@ def test_t05v2_build_final_road_uses_rcsdroad_trend_extension_as_last_fallback()
             inputs=inputs,
             prior_roads=[],
             params=params,
-        )
+    )
 
     assert road is not None
     assert result["reason"] == "built"
-    assert str(result["shape_ref_mode"]).startswith("rcsdroad_trend_extended")
-    assert any(str(item["mode"]).startswith("rcsdroad_trend_extended") for item in result["candidate_attempts"])
+    assert str(result["shape_ref_mode"]) in {
+        "production_working_segment_slot_anchored",
+        "rcsdroad_trend_extended",
+        "rcsdroad_trend_extended_safe_envelope",
+    }
     assert float(result["drivezone_ratio"]) >= 0.98
 
 

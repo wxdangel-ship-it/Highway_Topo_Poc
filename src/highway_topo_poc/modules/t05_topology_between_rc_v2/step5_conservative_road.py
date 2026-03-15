@@ -494,6 +494,25 @@ def _slot_surface_mid_anchor_point(
     return pipeline._midpoint_of_interval(slot.interval)
 
 
+def _anchor_line_to_slot_intervals(
+    base_line: LineString,
+    src_slot: SlotInterval,
+    dst_slot: SlotInterval,
+    *,
+    safe_surface: Any | None = None,
+    prefer_trend: bool = False,
+    anchor_reference_line: LineString | None = None,
+) -> LineString:
+    anchor_line = anchor_reference_line if anchor_reference_line is not None else base_line
+    if prefer_trend:
+        start_anchor = _slot_trend_anchor_point(src_slot, anchor_line, safe_surface, at_start=True)
+        end_anchor = _slot_trend_anchor_point(dst_slot, anchor_line, safe_surface, at_start=False)
+    else:
+        start_anchor = _slot_surface_anchor_point(src_slot, anchor_line, safe_surface)
+        end_anchor = _slot_surface_anchor_point(dst_slot, anchor_line, safe_surface)
+    return _anchor_along_base_line(base_line, start_anchor, end_anchor)
+
+
 def _surface_envelope_candidate_line(
     base_line: LineString,
     src_slot: SlotInterval,
@@ -787,6 +806,36 @@ def _trusted_support_shape_ref_line(
     return None
 
 
+def _trusted_support_reference_line(
+    *,
+    arc_row: dict[str, Any] | None,
+) -> tuple[LineString, str] | None:
+    if not isinstance(arc_row, dict) or not arc_row:
+        return None
+    support_trusted = bool(arc_row.get("selected_support_interval_reference_trusted", False))
+    stitched_trusted = bool(arc_row.get("stitched_support_interval_reference_trusted", False))
+    preferred_source = str(arc_row.get("support_interval_reference_source", "") or "")
+    ordered: list[tuple[str, Any]] = []
+    if preferred_source == "selected_support" and support_trusted:
+        ordered.append(("selected_support", arc_row.get("support_reference_coords", [])))
+        if stitched_trusted:
+            ordered.append(("stitched_support", arc_row.get("stitched_support_reference_coords", [])))
+    elif preferred_source == "stitched_support" and stitched_trusted:
+        ordered.append(("stitched_support", arc_row.get("stitched_support_reference_coords", [])))
+        if support_trusted:
+            ordered.append(("selected_support", arc_row.get("support_reference_coords", [])))
+    else:
+        if support_trusted:
+            ordered.append(("selected_support", arc_row.get("support_reference_coords", [])))
+        if stitched_trusted:
+            ordered.append(("stitched_support", arc_row.get("stitched_support_reference_coords", [])))
+    for label, coords in ordered:
+        reference_line = _line_from_coords(list(coords or []))
+        if reference_line is not None:
+            return reference_line, str(label)
+    return None
+
+
 def shape_ref_line(
     *,
     segment: Segment,
@@ -798,29 +847,30 @@ def shape_ref_line(
     arc_row: dict[str, Any] | None = None,
     prior_index: dict[tuple[int, int], list[Any]] | None = None,
 ) -> tuple[LineString, str]:
-    pipeline = _pipeline()
     base_line, mode = slot_reference_line(segment=segment, identity=identity, prior_roads=prior_roads, prior_index=prior_index)
     if src_slot.interval is None or dst_slot.interval is None:
         return base_line, str(mode)
-    start_pt = pipeline._midpoint_of_interval(src_slot.interval)
-    end_pt = pipeline._midpoint_of_interval(dst_slot.interval)
     if _segment_prefers_production_shape_ref(segment):
-        return _replace_endpoints(base_line, start_pt, end_pt), f"{mode}_slot_anchored"
-    trusted_support_ref = _trusted_support_shape_ref_line(
-        arc_row=arc_row,
-        start_pt=start_pt,
-        end_pt=end_pt,
-    )
+        return _anchor_line_to_slot_intervals(base_line, src_slot, dst_slot), f"{mode}_slot_anchored"
+    trusted_support_ref = _trusted_support_reference_line(arc_row=arc_row)
     if trusted_support_ref is not None:
-        return trusted_support_ref
+        trusted_line, trusted_label = trusted_support_ref
+        return _anchor_line_to_slot_intervals(trusted_line, src_slot, dst_slot), f"{trusted_label}_reference_projected_anchored"
     if str(identity.state) == "witness_based":
-        witness_reference = _witness_reference_projected_line(witness=witness, start_pt=start_pt, end_pt=end_pt)
-        if witness_reference is not None:
-            return witness_reference, "witness_reference_projected_anchored"
+        witness_reference = None if witness is None else witness.geometry_metric()
+        if witness_reference is not None and not witness_reference.is_empty and float(witness_reference.length) > 1e-6:
+            return _anchor_line_to_slot_intervals(
+                witness_reference,
+                src_slot,
+                dst_slot,
+                anchor_reference_line=base_line,
+            ), "witness_reference_projected_anchored"
+        start_pt = _slot_surface_anchor_point(src_slot, base_line, None)
+        end_pt = _slot_surface_anchor_point(dst_slot, base_line, None)
         legacy_centerline = _legacy_witness_centerline(witness=witness, start_pt=start_pt, end_pt=end_pt)
         if legacy_centerline is not None:
             return legacy_centerline, "witness_centerline"
-    return _replace_endpoints(base_line, start_pt, end_pt), f"{mode}_slot_anchored"
+    return _anchor_line_to_slot_intervals(base_line, src_slot, dst_slot), f"{mode}_slot_anchored"
 
 
 def _midpoint_between_points(point_a: Point, point_b: Point) -> Point:
@@ -1506,8 +1556,8 @@ def _refine_built_road_geometry(
             )
         )
         return road, review, empty_artifacts
-    mid_start_pt = _slot_surface_mid_anchor_point(src_slot, safe_surface)
-    mid_end_pt = _slot_surface_mid_anchor_point(dst_slot, safe_surface)
+    slot_start_pt = _slot_surface_anchor_point(src_slot, original_line, safe_surface)
+    slot_end_pt = _slot_surface_anchor_point(dst_slot, original_line, safe_surface)
     lane_boundary_line, lane_boundary_meta = _lane_boundary_centerline_for_road(
         road_line=original_line,
         lane_boundaries=tuple(inputs.lane_boundaries_metric),
@@ -1523,18 +1573,18 @@ def _refine_built_road_geometry(
     build_shape_ref_line = _line_from_coords(list(build_result.get("shape_ref_coords", [])))
     trusted_support_ref = _trusted_support_shape_ref_line(
         arc_row=arc_row,
-        start_pt=mid_start_pt,
-        end_pt=mid_end_pt,
+        start_pt=slot_start_pt,
+        end_pt=slot_end_pt,
     )
     traj_guided_line: LineString | None = None
     source_line: LineString | None = None
     source_label = ""
     if _segment_prefers_production_shape_ref(segment):
         if build_shape_ref_line is not None and str(build_shape_ref_family) == "production_working_segment_family":
-            source_line = _anchor_along_base_line(build_shape_ref_line, mid_start_pt, mid_end_pt)
+            source_line = _anchor_along_base_line(build_shape_ref_line, slot_start_pt, slot_end_pt)
             source_label = build_shape_ref_mode or "production_working_segment_slot_anchored"
         else:
-            source_line = _anchor_along_base_line(segment.geometry_metric(), mid_start_pt, mid_end_pt)
+            source_line = _anchor_along_base_line(segment.geometry_metric(), slot_start_pt, slot_end_pt)
             source_label = "production_working_segment_slot_anchored"
         traj_guided_line = source_line
         review["traj_guided_used"] = True
@@ -1544,23 +1594,23 @@ def _refine_built_road_geometry(
         review["support_trend_used"] = True
         review["traj_guided_used"] = True
     elif lane_boundary_line is not None and lane_boundary_quality_score >= float(params.get("GEOMETRY_REFINE_LANE_BOUNDARY_MIN_QUALITY_SCORE", 0.45)):
-        source_line = _anchor_along_base_line(lane_boundary_line, mid_start_pt, mid_end_pt)
+        source_line = _anchor_along_base_line(lane_boundary_line, slot_start_pt, slot_end_pt)
         source_label = "lane_boundary_centerline"
         review["lane_boundary_used"] = True
     elif str(identity.state) == "witness_based":
-        source_line = _witness_reference_projected_line(witness=witness, start_pt=mid_start_pt, end_pt=mid_end_pt)
+        source_line = _witness_reference_projected_line(witness=witness, start_pt=slot_start_pt, end_pt=slot_end_pt)
         source_label = "witness_reference_projected_anchored"
         if source_line is None:
-            source_line = _legacy_witness_centerline(witness=witness, start_pt=mid_start_pt, end_pt=mid_end_pt)
+            source_line = _legacy_witness_centerline(witness=witness, start_pt=slot_start_pt, end_pt=slot_end_pt)
             source_label = "witness_centerline" if source_line is not None else ""
     elif str(identity.state) == "prior_based":
         prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
         if prior_line is not None:
-            source_line = _anchor_along_base_line(prior_line, mid_start_pt, mid_end_pt)
+            source_line = _anchor_along_base_line(prior_line, slot_start_pt, slot_end_pt)
             source_label = "prior_reference_projected_anchored"
     if source_line is None:
         if build_shape_ref_line is not None and not str(build_shape_ref_mode).startswith("traj_support"):
-            source_line = _anchor_along_base_line(build_shape_ref_line, mid_start_pt, mid_end_pt)
+            source_line = _anchor_along_base_line(build_shape_ref_line, slot_start_pt, slot_end_pt)
             source_label = "selected_shape_ref"
     if source_line is None or source_line.is_empty or float(source_line.length) <= 1e-6:
         review["skip_reason"] = "no_trusted_ref_source"
@@ -2252,6 +2302,7 @@ def build_final_road(
         "topology_gap_decision": str(segment.topology_gap_decision),
         "topology_gap_reason": str(segment.topology_gap_reason),
         "reject_stage": "",
+        "endpoint_anchor_policy": "slot_interval_surface",
     }
     final_gate_reason = ""
     has_topology_assignment = bool(
@@ -2303,8 +2354,6 @@ def build_final_road(
         result["bridge_decision_reason"] = "bridge_slot_not_established" if bridge_retained else str(result["bridge_decision_reason"])
         result["reason"] = "bridge_slot_not_established" if bridge_retained else "slot_unresolved"
         return None, result
-    start_pt = pipeline._midpoint_of_interval(src_slot.interval)
-    end_pt = pipeline._midpoint_of_interval(dst_slot.interval)
     safe_surface = _safe_surface(inputs, divstrip_buffer)
     preferred_line, preferred_mode = shape_ref_line(
         segment=segment,
@@ -2316,6 +2365,8 @@ def build_final_road(
         arc_row=arc_row,
         prior_index=prior_index,
     )
+    start_pt = _slot_surface_anchor_point(src_slot, preferred_line, safe_surface)
+    end_pt = _slot_surface_anchor_point(dst_slot, preferred_line, safe_surface)
     candidate_lines: list[tuple[LineString, str]] = [(preferred_line, str(preferred_mode))]
     preferred_envelope = _surface_envelope_candidate_line(preferred_line, src_slot, dst_slot, safe_surface)
     _append_candidate_line(candidate_lines, preferred_envelope, f"{preferred_mode}_safe_envelope", priority=True)
@@ -2372,7 +2423,12 @@ def build_final_road(
             "traj_support_trend_extended",
             priority=bool(prefer_support_trend_extension),
         )
-        support_anchor = _anchor_along_base_line(support_reference_line, start_pt, end_pt)
+        support_anchor = _anchor_line_to_slot_intervals(
+            support_reference_line,
+            src_slot,
+            dst_slot,
+            safe_surface=safe_surface,
+        )
         _append_candidate_line(
             candidate_lines,
             support_anchor,
@@ -2391,7 +2447,12 @@ def build_final_road(
             start_pt=start_pt,
             end_pt=end_pt,
         )
-    segment_projected = _anchor_along_base_line(segment.geometry_metric(), start_pt, end_pt)
+    segment_projected = _anchor_line_to_slot_intervals(
+        segment.geometry_metric(),
+        src_slot,
+        dst_slot,
+        safe_surface=None,
+    )
     _append_candidate_line(candidate_lines, segment_projected, "production_working_segment_projected_anchored")
     segment_envelope = _surface_envelope_candidate_line(segment_projected, src_slot, dst_slot, safe_surface)
     _append_candidate_line(candidate_lines, segment_envelope, "production_working_segment_projected_anchored_safe_envelope")
@@ -2402,14 +2463,24 @@ def build_final_road(
         start_pt=start_pt,
         end_pt=end_pt,
     )
-    segment_anchor = _replace_endpoints(segment.geometry_metric(), start_pt, end_pt)
+    segment_anchor = _anchor_line_to_slot_intervals(
+        segment.geometry_metric(),
+        src_slot,
+        dst_slot,
+        safe_surface=safe_surface,
+    )
     if not segment_anchor.equals(preferred_line):
         _append_candidate_line(candidate_lines, segment_anchor, "production_working_segment_slot_anchored")
         segment_anchor_envelope = _surface_envelope_candidate_line(segment_anchor, src_slot, dst_slot, safe_surface)
         _append_candidate_line(candidate_lines, segment_anchor_envelope, "production_working_segment_slot_anchored_safe_envelope")
     prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
     if prior_line is not None:
-        prior_projected = _anchor_along_base_line(prior_line, start_pt, end_pt)
+        prior_projected = _anchor_line_to_slot_intervals(
+            prior_line,
+            src_slot,
+            dst_slot,
+            safe_surface=None,
+        )
         _append_candidate_line(
             candidate_lines,
             prior_projected,
@@ -2431,7 +2502,12 @@ def build_final_road(
             end_pt=end_pt,
             prefer_early=str(identity.state) == "prior_based",
         )
-        prior_anchor = _replace_endpoints(prior_line, start_pt, end_pt)
+        prior_anchor = _anchor_line_to_slot_intervals(
+            prior_line,
+            src_slot,
+            dst_slot,
+            safe_surface=safe_surface,
+        )
         _append_candidate_line(
             candidate_lines,
             prior_anchor,
@@ -2478,7 +2554,12 @@ def build_final_road(
             "topology_arc_trend_extended",
             priority=bool(prefer_topology_arc_trend),
         )
-        topology_arc_projected = _anchor_along_base_line(topology_arc_line, start_pt, end_pt)
+        topology_arc_projected = _anchor_line_to_slot_intervals(
+            topology_arc_line,
+            src_slot,
+            dst_slot,
+            safe_surface=None,
+        )
         _append_candidate_line(
             candidate_lines,
             topology_arc_projected,
@@ -3092,6 +3173,7 @@ def write_road_outputs(
                         _shape_ref_source_family(build_result.get("shape_ref_mode", "")),
                     )
                 ),
+                "step5_endpoint_anchor_policy": str(build_result.get("endpoint_anchor_policy", "")),
                 "built_final_road": bool(road is not None),
                 "final_reason": str(build_result.get("reason", "")),
                 "same_pair_arc_finalize_allowed": bool(
