@@ -17,8 +17,9 @@ from .arc_selection_rules import (
     apply_multi_arc_rule,
 )
 from .io import write_features_geojson, write_json, write_lines_geojson
-from .models import Segment, coords_to_line, line_to_coords
+from .models import EndpointInterval, Segment, coords_to_line, line_to_coords
 from .step3_corridor_identity import build_patch_geometry_cache, build_prior_reference_index
+from .xsec_endpoint_interval import build_endpoint_intervals
 
 _DEFAULT_TOPOLOGY_GAP_PAIR_IDS = (
     "55353246:37687913",
@@ -2099,6 +2100,7 @@ def _anchor_point_on_xsec_interval(
     endpoint_tag: str,
     drivable_surface: Any | None,
     params: dict[str, Any],
+    assigned_interval_payload: Any = None,
 ) -> tuple[Point, str, dict[str, Any]]:
     fallback_point, fallback_label = _anchor_point_on_xsec(
         xsec_line=xsec_line,
@@ -2119,9 +2121,51 @@ def _anchor_point_on_xsec_interval(
     }
     if xsec_line is None or xsec_line.is_empty or float(xsec_line.length) <= 1e-6:
         return fallback_point, str(fallback_label), review
+    assigned_interval = None
+    if isinstance(assigned_interval_payload, dict) and assigned_interval_payload:
+        try:
+            assigned_interval = EndpointInterval.from_dict(dict(assigned_interval_payload))
+        except Exception:
+            assigned_interval = None
+    reference_line = base_line or preliminary_line
+    preferred_point = _point_from_coords_payload(preferred_anchor_coords)
+    if assigned_interval is not None:
+        interval_line = assigned_interval.geometry_metric()
+        point, point_reason = _point_on_interval(
+            interval_line,
+            preferred_point=preferred_point,
+            reference_line=reference_line,
+            endpoint_tag=endpoint_tag,
+        )
+        if point is not None:
+            review.update(
+                {
+                    "policy": "assigned_endpoint_interval_anchor",
+                    "interval_count": 1,
+                    "interval_rank": 0,
+                    "interval_reason": str(
+                        assigned_interval.deconflict_reason
+                        or assigned_interval.ownership_reason
+                        or assigned_interval.fallback_reason
+                        or "assigned_endpoint_interval"
+                    ),
+                    "point_reason": str(point_reason),
+                    "interval_start_s": float(assigned_interval.interval_start_s),
+                    "interval_end_s": float(assigned_interval.interval_end_s),
+                    "interval_center_s": float(assigned_interval.interval_center_s),
+                    "interval_length_m": float(assigned_interval.width_m),
+                    "interval_coords": [[float(x), float(y)] for x, y in assigned_interval.geometry_coords],
+                    "evidence_mode": str(assigned_interval.evidence_mode),
+                    "traj_cross_count": int(assigned_interval.traj_cross_count),
+                    "ownership_reason": str(assigned_interval.ownership_reason),
+                    "deconflict_reason": str(assigned_interval.deconflict_reason),
+                    "fallback_reason": str(assigned_interval.fallback_reason),
+                    "relative_order_satisfied": bool(assigned_interval.relative_order_satisfied),
+                }
+            )
+            return point, f"assigned_endpoint_interval|{point_reason}", review
     if drivable_surface is None or getattr(drivable_surface, "is_empty", True):
         return fallback_point, str(fallback_label), review
-    reference_line = base_line or preliminary_line
     align_vector = None if not _line_is_usable(reference_line) else pipeline._line_direction(reference_line)
     intervals = pipeline._intervals_on_xsec(
         xsec_line,
@@ -2133,7 +2177,6 @@ def _anchor_point_on_xsec_interval(
     if not intervals:
         return fallback_point, str(fallback_label), review
     tolerance_m = max(float(params.get("STEP5_SLOT_ANCHOR_TOL_M", 0.75)), 0.5)
-    preferred_point = _point_from_coords_payload(preferred_anchor_coords)
     interval = None
     interval_reason = ""
     reference_sources = [
@@ -2360,6 +2403,7 @@ def build_production_working_segment(
     dst_xsec = xsec_map.get(int(row.get("dst", 0)))
     src_xsec_line = None if src_xsec is None else src_xsec.geometry_metric()
     dst_xsec_line = None if dst_xsec is None else dst_xsec.geometry_metric()
+    assigned_endpoint_intervals = dict(row.get("assigned_endpoint_intervals", {}) or {})
     start_pt, start_anchor_provenance, start_anchor_review = _anchor_point_on_xsec_interval(
         xsec_line=src_xsec_line,
         preferred_anchor_coords=(
@@ -2378,6 +2422,7 @@ def build_production_working_segment(
         endpoint_tag="src",
         drivable_surface=drivable_surface,
         params=params,
+        assigned_interval_payload=assigned_endpoint_intervals.get("src"),
     )
     end_pt, end_anchor_provenance, end_anchor_review = _anchor_point_on_xsec_interval(
         xsec_line=dst_xsec_line,
@@ -2397,6 +2442,7 @@ def build_production_working_segment(
         endpoint_tag="dst",
         drivable_surface=drivable_surface,
         params=params,
+        assigned_interval_payload=assigned_endpoint_intervals.get("dst"),
     )
     support_candidate_line = None
     support_geometry_mode = "support_missing"
@@ -3375,6 +3421,45 @@ def build_arc_evidence_attach(
                 else "same_pair_arc_finalize_allowed"
             )
 
+    endpoint_interval_seed_started = perf_counter()
+    provisional_segments_by_arc: dict[str, Segment] = {}
+    for current in rows:
+        if not bool(current.get("entered_main_flow", False)):
+            continue
+        selected_segment = selected_by_arc.get(str(current.get("topology_arc_id", "")))
+        provisional_row = dict(current)
+        provisional_row["assigned_endpoint_intervals"] = {}
+        provisional_segment, _ = _materialize_working_segment(
+            row=provisional_row,
+            selected_segment=selected_segment,
+            xsec_map=xsec_map,
+            inputs=inputs,
+            params=params,
+            drivable_surface=patch_geometry_cache.get("drivable_surface"),
+            divstrip_buffer=divstrip_buffer,
+        )
+        provisional_segments_by_arc[str(current.get("topology_arc_id", ""))] = provisional_segment
+    runtime_totals["endpoint_interval_seed_materialize_time_ms"] = float(
+        (perf_counter() - endpoint_interval_seed_started) * 1000.0
+    )
+
+    endpoint_interval_started = perf_counter()
+    endpoint_interval_payload = build_endpoint_intervals(
+        rows=rows,
+        traj_rows=traj_rows,
+        xsec_map=xsec_map,
+        selected_segments_by_arc=selected_by_arc,
+        production_segments_by_arc=provisional_segments_by_arc,
+        drivable_surface=patch_geometry_cache.get("drivable_surface"),
+        params=params,
+    )
+    runtime_totals["endpoint_interval_build_time_ms"] = float((perf_counter() - endpoint_interval_started) * 1000.0)
+    assigned_intervals_by_arc = dict(endpoint_interval_payload.get("assigned_intervals_by_arc", {}) or {})
+    for current in rows:
+        current["assigned_endpoint_intervals"] = dict(
+            assigned_intervals_by_arc.get(str(current.get("topology_arc_id", "")), {})
+        )
+
     for current in rows:
         selected_segment = selected_by_arc.get(str(current.get("topology_arc_id", "")))
         if bool(current.get("entered_main_flow", False)):
@@ -3610,6 +3695,12 @@ def build_arc_evidence_attach(
         "audit_rows": support_debug_rows,
         "production_review_rows": production_review_rows,
         "same_pair_review_rows": same_pair_review_rows,
+        "endpoint_interval_review_rows": list(endpoint_interval_payload.get("review_rows", [])),
+        "endpoint_interval_surface_features": list(endpoint_interval_payload.get("surface_features", [])),
+        "endpoint_interval_crossing_features": list(endpoint_interval_payload.get("crossing_features", [])),
+        "endpoint_interval_raw_features": list(endpoint_interval_payload.get("raw_interval_features", [])),
+        "endpoint_interval_assigned_features": list(endpoint_interval_payload.get("assigned_interval_features", [])),
+        "endpoint_interval_allocator_features": list(endpoint_interval_payload.get("allocator_features", [])),
         "preprocessed_traj_rows": preprocessed_traj_rows,
         "runtime": {
             **runtime_totals,
@@ -3808,6 +3899,22 @@ def run_witness_stage(
         },
     )
     write_json(
+        step_dir / "xsec_endpoint_interval_review.json",
+        {
+            "rows": list(evidence.get("endpoint_interval_review_rows", [])),
+            "summary": {
+                "row_count": int(len(evidence.get("endpoint_interval_review_rows", []))),
+                "assigned_count": int(
+                    sum(
+                        1
+                        for item in evidence.get("endpoint_interval_review_rows", [])
+                        if bool(item.get("assigned_interval"))
+                    )
+                ),
+            },
+        },
+    )
+    write_json(
         dbg_dir / "prefilter_stats.json",
         {
             "summary": {
@@ -3842,6 +3949,26 @@ def run_witness_stage(
     write_lines_geojson(
         dbg_dir / "arc_first_working_segments.geojson",
         [_segment_feature(segment, row_by_segment_id.get(str(segment.segment_id), {})) for segment in evidence["working_segments"]],
+    )
+    write_lines_geojson(
+        dbg_dir / "xsec_surface_legal_intervals.geojson",
+        list(evidence.get("endpoint_interval_surface_features", [])),
+    )
+    write_features_geojson(
+        dbg_dir / "xsec_endpoint_crossings.geojson",
+        list(evidence.get("endpoint_interval_crossing_features", [])),
+    )
+    write_lines_geojson(
+        step_dir / "xsec_endpoint_raw_intervals.geojson",
+        list(evidence.get("endpoint_interval_raw_features", [])),
+    )
+    write_lines_geojson(
+        step_dir / "xsec_endpoint_assigned_intervals.geojson",
+        list(evidence.get("endpoint_interval_assigned_features", [])),
+    )
+    write_lines_geojson(
+        dbg_dir / "xsec_endpoint_allocator.geojson",
+        list(evidence.get("endpoint_interval_allocator_features", [])),
     )
     write_lines_geojson(
         step_dir / "step3_production_working_segments.geojson",

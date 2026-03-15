@@ -108,6 +108,78 @@ class CorridorInterval:
 
 
 @dataclass(frozen=True)
+class EndpointInterval:
+    xsec_id: int
+    arc_id: str
+    endpoint_role: str
+    interval_start_s: float
+    interval_end_s: float
+    interval_center_s: float
+    width_m: float
+    geometry_coords: Coords2D
+    evidence_mode: str
+    traj_cross_count: int
+    traj_ids: tuple[str, ...]
+    ownership_reason: str
+    deconflict_reason: str
+    fallback_reason: str
+    relative_order_satisfied: bool
+
+    def geometry_metric(self) -> LineString:
+        return coords_to_line(self.geometry_coords)
+
+    def to_corridor_interval(self, *, rank: int = 0) -> CorridorInterval:
+        return CorridorInterval(
+            start_s=float(self.interval_start_s),
+            end_s=float(self.interval_end_s),
+            center_s=float(self.interval_center_s),
+            length_m=float(max(0.0, self.interval_end_s - self.interval_start_s)),
+            rank=int(rank),
+            geometry_coords=self.geometry_coords,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "xsec_id": int(self.xsec_id),
+            "arc_id": str(self.arc_id),
+            "endpoint_role": str(self.endpoint_role),
+            "interval_start_s": float(self.interval_start_s),
+            "interval_end_s": float(self.interval_end_s),
+            "interval_center_s": float(self.interval_center_s),
+            "width_m": float(self.width_m),
+            "geometry_coords": [[float(x), float(y)] for x, y in self.geometry_coords],
+            "evidence_mode": str(self.evidence_mode),
+            "traj_cross_count": int(self.traj_cross_count),
+            "traj_ids": [str(v) for v in self.traj_ids],
+            "ownership_reason": str(self.ownership_reason),
+            "deconflict_reason": str(self.deconflict_reason),
+            "fallback_reason": str(self.fallback_reason),
+            "relative_order_satisfied": bool(self.relative_order_satisfied),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EndpointInterval":
+        coords = tuple((float(x), float(y)) for x, y in payload.get("geometry_coords", []))
+        return cls(
+            xsec_id=int(payload.get("xsec_id", 0)),
+            arc_id=str(payload.get("arc_id", "")),
+            endpoint_role=str(payload.get("endpoint_role", "")),
+            interval_start_s=float(payload.get("interval_start_s", 0.0)),
+            interval_end_s=float(payload.get("interval_end_s", 0.0)),
+            interval_center_s=float(payload.get("interval_center_s", 0.0)),
+            width_m=float(payload.get("width_m", 0.0)),
+            geometry_coords=coords,
+            evidence_mode=str(payload.get("evidence_mode", "")),
+            traj_cross_count=int(payload.get("traj_cross_count", 0)),
+            traj_ids=tuple(str(v) for v in payload.get("traj_ids", [])),
+            ownership_reason=str(payload.get("ownership_reason", "")),
+            deconflict_reason=str(payload.get("deconflict_reason", "")),
+            fallback_reason=str(payload.get("fallback_reason", "")),
+            relative_order_satisfied=bool(payload.get("relative_order_satisfied", False)),
+        )
+
+
+@dataclass(frozen=True)
 class Segment:
     segment_id: str
     src_nodeid: int

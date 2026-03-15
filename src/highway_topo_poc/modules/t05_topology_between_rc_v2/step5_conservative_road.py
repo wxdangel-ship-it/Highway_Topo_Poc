@@ -12,7 +12,7 @@ from shapely.geometry import LineString, Point
 from shapely.ops import nearest_points, substring, unary_union
 
 from .io import write_features_geojson, write_json, write_lines_geojson
-from .models import BaseCrossSection, CorridorIdentity, CorridorInterval, CorridorWitness, FinalRoad, Segment, SlotInterval, line_to_coords
+from .models import BaseCrossSection, CorridorIdentity, CorridorInterval, CorridorWitness, EndpointInterval, FinalRoad, Segment, SlotInterval, line_to_coords
 from .step3_corridor_identity import (
     build_patch_geometry_cache,
     build_prior_reference_index,
@@ -794,6 +794,29 @@ def _slot_anchor_candidates(
         if isinstance(coords, (list, tuple)) and len(coords) >= 2:
             out.append((coords, label))
     return out
+
+
+def _assigned_endpoint_interval(
+    *,
+    arc_row: dict[str, Any] | None,
+    endpoint_tag: str,
+    xsec_nodeid: int,
+) -> EndpointInterval | None:
+    if not isinstance(arc_row, dict) or not arc_row:
+        return None
+    payload = None
+    assigned = arc_row.get("assigned_endpoint_intervals")
+    if isinstance(assigned, dict):
+        payload = assigned.get(str(endpoint_tag)) or assigned.get(endpoint_tag)
+    if not isinstance(payload, dict) or not payload:
+        return None
+    try:
+        interval = EndpointInterval.from_dict(dict(payload))
+    except Exception:
+        return None
+    if int(interval.xsec_id) != int(xsec_nodeid) or str(interval.endpoint_role) != str(endpoint_tag):
+        return None
+    return interval
 
 
 def _trusted_support_shape_ref_line(
@@ -2200,6 +2223,30 @@ def build_slot(
             method="unresolved",
             reason="corridor_identity_unresolved",
             interval_count=int(len(intervals)),
+        )
+    assigned_interval = _assigned_endpoint_interval(
+        arc_row=arc_row,
+        endpoint_tag=endpoint_tag,
+        xsec_nodeid=int(xsec.nodeid),
+    )
+    if assigned_interval is not None:
+        assigned_corridor_interval = assigned_interval.to_corridor_interval(rank=0)
+        return SlotInterval(
+            segment_id=str(segment.segment_id),
+            endpoint_tag=str(endpoint_tag),
+            xsec_nodeid=int(xsec.nodeid),
+            xsec_coords=xsec.geometry_coords,
+            interval=assigned_corridor_interval,
+            resolved=True,
+            method="assigned_interval",
+            reason=str(
+                assigned_interval.deconflict_reason
+                or assigned_interval.ownership_reason
+                or assigned_interval.fallback_reason
+                or assigned_interval.evidence_mode
+                or "assigned_interval"
+            ),
+            interval_count=1,
         )
     nearest = _safe_nearest_points(xsec_line, line)
     ref_point = nearest[0] if nearest is not None else pipeline._midpoint_of_interval(intervals[0]) if intervals else Point()

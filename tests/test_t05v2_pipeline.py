@@ -74,6 +74,9 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.step5_conservative_road
     _rcsdroad_trend_extended_candidate_line,
     build_slot,
 )
+from highway_topo_poc.modules.t05_topology_between_rc_v2.xsec_endpoint_interval import (
+    build_endpoint_intervals,
+)
 from highway_topo_poc.modules.t05_topology_between_rc_v2.step3_corridor_identity import (
     build_corridor_identities,
     build_patch_geometry_cache,
@@ -1787,7 +1790,7 @@ def test_t05v2_short_direct_arc_with_terminal_support_can_build(tmp_path: Path) 
     assert bool(gate["overall_pass"]) is True
 
 
-def test_t05v2_slot_mapping_uses_witness_fraction_not_nearest_point(tmp_path: Path) -> None:
+def test_t05v2_slot_mapping_consumes_assigned_endpoint_intervals(tmp_path: Path) -> None:
     patch_id = "slot_fraction"
     data_root = tmp_path / "data"
     road_fc = _fc([_line_feature([(0.0, -6.0), (100.0, 6.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
@@ -1809,12 +1812,22 @@ def test_t05v2_slot_mapping_uses_witness_fraction_not_nearest_point(tmp_path: Pa
     )
     out_root = tmp_path / "out"
     run_full_pipeline(data_root=data_root, patch_id=patch_id, run_id="run6", out_root=out_root)
-    roads = _read_json(out_root / "run6" / "patches" / patch_id / "Road.geojson")
     metrics = _read_json(out_root / "run6" / "patches" / patch_id / "metrics.json")
-    start_x, start_y = roads["features"][0]["geometry"]["coordinates"][0]
+    review = _read_json(out_root / "run6" / "patches" / patch_id / "step3" / "xsec_endpoint_interval_review.json")
+    slot_mapping = _read_json(out_root / "run6" / "patches" / patch_id / "step5" / "slot_mapping.json")
+    input_sources = _read_json(
+        out_root / "run6" / "patches" / patch_id / "step5" / "step5_geometry_input_sources.json"
+    )
+    review_by_role = {str(item["endpoint_role"]): item for item in review["rows"]}
+    slot_entry = slot_mapping["slot_mapping"]["prodseg::arc_1_2_1"]
     assert metrics["segments"][0]["corridor_identity"] == "witness_based"
-    assert start_y >= 4.0
-    assert abs(start_y - (-6.0)) > 5.0
+    assert slot_entry["src"]["method"] == "assigned_interval"
+    assert slot_entry["dst"]["method"] == "assigned_interval"
+    assert float(slot_entry["src"]["interval"]["center_s"]) == pytest.approx(9.0)
+    assert float(slot_entry["dst"]["interval"]["center_s"]) == pytest.approx(21.0)
+    assert review_by_role["src"]["assigned_interval"]["evidence_mode"] == "clean_traj_crossing"
+    assert review_by_role["dst"]["assigned_interval"]["fallback_reason"] == "support_projection_fallback"
+    assert input_sources["rows"][0]["step5_endpoint_anchor_policy"] == "slot_interval_surface"
 
 
 def test_t05v2_arc_first_registry_enters_direct_unique_arc_without_selected_segment() -> None:
@@ -2297,6 +2310,67 @@ def test_t05v2_step3_production_segment_avoids_soft_failed_weak_partial_support(
 
     assert segment.geometry_source_type == "topology_arc_anchored"
     assert review["production_geometry_fallback_reason"] == "weak_partial_support_surface_inconsistent_arc_fallback"
+
+
+def test_t05v2_build_endpoint_intervals_assigns_non_overlapping_same_xsec_start_intervals() -> None:
+    xsec_map = {
+        10: BaseCrossSection(nodeid=10, geometry_coords=((0.0, 0.0), (0.0, 5.0))),
+        20: BaseCrossSection(nodeid=20, geometry_coords=((10.0, 0.0), (10.0, 5.0))),
+        30: BaseCrossSection(nodeid=30, geometry_coords=((10.0, 0.0), (10.0, 5.0))),
+    }
+    rows = [
+        {
+            "pair": "10:20",
+            "src": 10,
+            "dst": 20,
+            "topology_arc_id": "arc_start_a",
+            "line_coords": [[0.0, 1.0], [10.0, 1.0]],
+            "support_reference_coords": [[0.0, 1.0], [10.0, 1.0]],
+            "traj_support_segments": [],
+        },
+        {
+            "pair": "10:30",
+            "src": 10,
+            "dst": 30,
+            "topology_arc_id": "arc_start_b",
+            "line_coords": [[0.0, 3.0], [10.0, 3.0]],
+            "support_reference_coords": [[0.0, 3.0], [10.0, 3.0]],
+            "traj_support_segments": [],
+        },
+    ]
+    traj_rows = [
+        {
+            "traj_id": "traj_a",
+            "source_traj_id": "traj_a",
+            "coords": ((-1.0, 1.0), (0.0, 1.0), (1.0, 1.0), (2.0, 1.0)),
+            "points": (Point(-1.0, 1.0), Point(0.0, 1.0), Point(1.0, 1.0), Point(2.0, 1.0)),
+            "events": ({"nodeid": 10, "index": 1, "point": Point(0.0, 1.0), "crossing_order_on_traj": 0},),
+        },
+        {
+            "traj_id": "traj_b",
+            "source_traj_id": "traj_b",
+            "coords": ((-1.0, 3.0), (0.0, 3.0), (1.0, 3.0), (2.0, 3.0)),
+            "points": (Point(-1.0, 3.0), Point(0.0, 3.0), Point(1.0, 3.0), Point(2.0, 3.0)),
+            "events": ({"nodeid": 10, "index": 1, "point": Point(0.0, 3.0), "crossing_order_on_traj": 0},),
+        },
+    ]
+    drivable_surface = Polygon([(-1.0, 0.0), (11.0, 0.0), (11.0, 5.0), (-1.0, 5.0)])
+
+    payload = build_endpoint_intervals(
+        rows=rows,
+        traj_rows=traj_rows,
+        xsec_map=xsec_map,
+        selected_segments_by_arc={},
+        drivable_surface=drivable_surface,
+        params=dict(DEFAULT_PARAMS),
+    )
+
+    assigned = payload["assigned_intervals_by_arc"]
+    src_a = assigned["arc_start_a"]["src"]
+    src_b = assigned["arc_start_b"]["src"]
+    assert float(src_a["interval_end_s"]) <= float(src_b["interval_start_s"])
+    assert float(src_a["width_m"]) == pytest.approx(1.0, abs=1e-6)
+    assert float(src_b["width_m"]) == pytest.approx(1.0, abs=1e-6)
 
 
 def test_t05v2_arc_first_partial_support_recovers_same_arc_without_terminal_crossing(tmp_path: Path) -> None:
@@ -3021,6 +3095,104 @@ def test_t05v2_build_final_road_uses_step3_production_working_segment_family() -
     assert road.line_coords == ((0.0, 2.6), (50.0, 2.6), (100.0, 2.6))
 
 
+def test_t05v2_step3_production_segment_uses_assigned_endpoint_intervals() -> None:
+    row = {
+        "pair": "10:20",
+        "src": 10,
+        "dst": 20,
+        "topology_arc_id": "arc_assigned_interval",
+        "topology_arc_source_type": "direct_topology_arc",
+        "line_coords": [[0.0, 2.0], [50.0, 2.0], [100.0, 2.0]],
+        "edge_ids": ["edge_assigned_interval"],
+        "node_path": [10, 20],
+        "is_direct_legal": True,
+        "is_unique": True,
+        "traj_support_type": "no_support",
+        "traj_support_ids": [],
+        "traj_support_segments": [],
+        "prior_support_type": "no_support",
+        "prior_support_available": False,
+        "support_reference_coords": [],
+        "support_anchor_src_coords": None,
+        "support_anchor_dst_coords": None,
+        "support_interval_reference_source": "none",
+        "support_generation_reason": "none",
+        "support_competing_arc_preferred": False,
+        "support_full_xsec_crossing": False,
+        "support_has_src_xsec_anchor": False,
+        "support_has_dst_xsec_anchor": False,
+        "same_pair_rank": 1,
+        "kept_reason": "assigned_interval_test",
+        "assigned_endpoint_intervals": {
+            "src": {
+                "xsec_id": 10,
+                "arc_id": "arc_assigned_interval",
+                "endpoint_role": "src",
+                "interval_start_s": 1.0,
+                "interval_end_s": 1.2,
+                "interval_center_s": 1.1,
+                "width_m": 0.2,
+                "geometry_coords": [[0.0, 1.0], [0.0, 1.2]],
+                "evidence_mode": "clean_traj_crossing",
+                "traj_cross_count": 1,
+                "traj_ids": ["traj_a"],
+                "ownership_reason": "support_corridor",
+                "deconflict_reason": "allocator_preserved_order",
+                "fallback_reason": "",
+                "relative_order_satisfied": True,
+            },
+            "dst": {
+                "xsec_id": 20,
+                "arc_id": "arc_assigned_interval",
+                "endpoint_role": "dst",
+                "interval_start_s": 1.4,
+                "interval_end_s": 1.6,
+                "interval_center_s": 1.5,
+                "width_m": 0.2,
+                "geometry_coords": [[100.0, 1.4], [100.0, 1.6]],
+                "evidence_mode": "clean_traj_crossing",
+                "traj_cross_count": 1,
+                "traj_ids": ["traj_a"],
+                "ownership_reason": "support_corridor",
+                "deconflict_reason": "allocator_preserved_order",
+                "fallback_reason": "",
+                "relative_order_satisfied": True,
+            },
+        },
+    }
+    xsec_map = {
+        10: BaseCrossSection(nodeid=10, geometry_coords=((0.0, 0.0), (0.0, 5.0))),
+        20: BaseCrossSection(nodeid=20, geometry_coords=((100.0, 0.0), (100.0, 5.0))),
+    }
+    inputs = PatchInputs(
+        patch_id="assigned_interval_builder",
+        patch_dir=Path("assigned_interval_builder"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, 0.0), (105.0, 0.0), (105.0, 5.0), (-5.0, 5.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+
+    segment, review = _step3_evidence.build_production_working_segment(
+        row=row,
+        selected_segment=None,
+        xsec_map=xsec_map,
+        inputs=inputs,
+        params=dict(DEFAULT_PARAMS),
+        drivable_surface=inputs.drivezone_zone_metric,
+        divstrip_buffer=None,
+    )
+
+    assert review["production_anchor_interval_review"]["src"]["policy"] == "assigned_endpoint_interval_anchor"
+    assert review["production_anchor_interval_review"]["dst"]["policy"] == "assigned_endpoint_interval_anchor"
+    assert float(segment.geometry_coords[0][1]) == pytest.approx(1.2)
+    assert 1.4 <= float(segment.geometry_coords[-1][1]) <= 1.6
+
+
 def test_t05v2_build_final_road_suppresses_support_override_after_arc_fallback() -> None:
     segment = Segment(
         segment_id="prodseg::seg_step5_arc_fallback",
@@ -3208,6 +3380,94 @@ def test_t05v2_build_slot_prefers_support_anchor_interval_over_reference_interva
     assert slot.method == "selected_support_contains"
     assert slot.reason == "selected_support_anchor_on_interval"
     assert float(slot.interval.center_s) > 0.0
+
+
+def test_t05v2_build_slot_uses_assigned_endpoint_interval_without_reselection() -> None:
+    segment = Segment(
+        segment_id="seg_assigned_slot",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 2.0), (100.0, 2.0)),
+        candidate_ids=("cand_assigned_slot",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_assigned_slot",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="assigned_interval_test",
+        length_m=100.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_assigned_slot",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        geometry_role="step3_production_working_segment",
+        production_consumable_default=True,
+    )
+    identity = CorridorIdentity(
+        segment_id="seg_assigned_slot",
+        state="witness_based",
+        reason="witness_selected",
+        risk_flags=tuple(),
+        witness_interval_rank=None,
+        prior_supported=False,
+    )
+    xsec = BaseCrossSection(nodeid=10, geometry_coords=((0.0, 0.0), (0.0, 5.0)))
+    inputs = PatchInputs(
+        patch_id="assigned_slot_case",
+        patch_dir=Path("assigned_slot_case"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-1.0, 0.0), (1.0, 0.0), (1.0, 5.0), (-1.0, 5.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+    slot = build_slot(
+        segment=segment,
+        witness=None,
+        identity=identity,
+        xsec=xsec,
+        line=LineString([(0.0, 2.0), (100.0, 2.0)]),
+        inputs=inputs,
+        params=dict(DEFAULT_PARAMS),
+        endpoint_tag="src",
+        drivable_surface=inputs.drivezone_zone_metric,
+        arc_row={
+            "assigned_endpoint_intervals": {
+                "src": {
+                    "xsec_id": 10,
+                    "arc_id": "arc_assigned_slot",
+                    "endpoint_role": "src",
+                    "interval_start_s": 0.8,
+                    "interval_end_s": 1.8,
+                    "interval_center_s": 1.3,
+                    "width_m": 1.0,
+                    "geometry_coords": [[0.0, 0.8], [0.0, 1.8]],
+                    "evidence_mode": "clean_traj_crossing",
+                    "traj_cross_count": 1,
+                    "traj_ids": ["traj_assigned_slot"],
+                    "ownership_reason": "support_corridor",
+                    "deconflict_reason": "allocator_preserved_order",
+                    "fallback_reason": "",
+                    "relative_order_satisfied": True,
+                }
+            }
+        },
+    )
+
+    assert slot.resolved is True
+    assert slot.method == "assigned_interval"
+    assert slot.interval is not None
+    assert float(slot.interval.start_s) == pytest.approx(0.8)
+    assert float(slot.interval.end_s) == pytest.approx(1.8)
 
 
 def test_t05v2_build_slot_prefers_trusted_support_anchor_over_witness_interval() -> None:
