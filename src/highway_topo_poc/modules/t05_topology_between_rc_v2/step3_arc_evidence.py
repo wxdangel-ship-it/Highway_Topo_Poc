@@ -572,35 +572,65 @@ def _hashable_support_signature(value: Any) -> Any:
     return value
 
 
-def _support_candidate_cluster_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
-    corridor_signature = _hashable_support_signature(candidate.get("support_corridor_signature", ()))
+def _support_candidate_cluster_key(
+    candidate: dict[str, Any],
+    *,
+    side_resolution: float = 0.2,
+    anchor_resolution_m: float = 10.0,
+) -> tuple[Any, ...]:
     side_cluster_signature = _support_side_cluster_signature(
         candidate.get("support_surface_side_signature", ()),
-        resolution=0.1,
+        resolution=side_resolution,
     )
+    if bool(candidate.get("support_full_xsec_crossing", False)) and side_cluster_signature:
+        return ("full_crossing_side", side_cluster_signature)
+    corridor_signature = _hashable_support_signature(candidate.get("support_corridor_signature", ()))
     if corridor_signature or side_cluster_signature:
         return ("corridor_side", corridor_signature, side_cluster_signature)
     return (
         "anchor",
-        _bucket_point(candidate.get("support_anchor_src_coords"), resolution_m=6.0),
-        _bucket_point(candidate.get("support_anchor_dst_coords"), resolution_m=6.0),
+        _bucket_point(candidate.get("support_anchor_src_coords"), resolution_m=anchor_resolution_m),
+        _bucket_point(candidate.get("support_anchor_dst_coords"), resolution_m=anchor_resolution_m),
     )
 
 
-def _annotate_support_candidate_clusters(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _annotate_support_candidate_clusters(
+    candidates: list[dict[str, Any]],
+    *,
+    params: dict[str, Any],
+) -> list[dict[str, Any]]:
     terminal_candidates = [
         item
         for item in candidates
         if bool(item.get("support_full_xsec_crossing", False))
     ]
-    cluster_counter: Counter[tuple[Any, ...]] = Counter(
-        _support_candidate_cluster_key(item)
+    candidate_pool = [
+        item
         for item in (terminal_candidates or candidates)
         if str(item.get("traj_support_type", "")) != "no_support"
+    ]
+    grouped_source_ids: dict[tuple[Any, ...], set[str]] = defaultdict(set)
+    for item in candidate_pool:
+        cluster_key = _support_candidate_cluster_key(
+            item,
+            side_resolution=float(params.get("ARC_SUPPORT_FULL_XSEC_SIDE_CLUSTER_RESOLUTION", 0.2)),
+            anchor_resolution_m=float(params.get("ARC_SUPPORT_ANCHOR_CLUSTER_RESOLUTION_M", 10.0)),
+        )
+        source_traj_id = str(item.get("selected_support_traj_id", item.get("traj_id", "")))
+        grouped_source_ids[cluster_key].add(source_traj_id or str(item.get("traj_id", "")))
+    cluster_counter: Counter[tuple[Any, ...]] = Counter(
+        {
+            cluster_key: len(source_ids)
+            for cluster_key, source_ids in grouped_source_ids.items()
+        }
     )
     dominant_count = max(cluster_counter.values(), default=0)
     for item in candidates:
-        cluster_key = _support_candidate_cluster_key(item)
+        cluster_key = _support_candidate_cluster_key(
+            item,
+            side_resolution=float(params.get("ARC_SUPPORT_FULL_XSEC_SIDE_CLUSTER_RESOLUTION", 0.2)),
+            anchor_resolution_m=float(params.get("ARC_SUPPORT_ANCHOR_CLUSTER_RESOLUTION_M", 10.0)),
+        )
         cluster_count = int(cluster_counter.get(cluster_key, 0))
         item["support_cluster_key"] = list(cluster_key)
         item["support_cluster_support_count"] = int(cluster_count)
@@ -608,8 +638,92 @@ def _annotate_support_candidate_clusters(candidates: list[dict[str, Any]]) -> li
     return candidates
 
 
+def _support_side_signature_distance(
+    sig_a: list[float] | tuple[float, ...] | None,
+    sig_b: list[float] | tuple[float, ...] | None,
+) -> float:
+    vals_a = [float(value) for value in (sig_a or [])]
+    vals_b = [float(value) for value in (sig_b or [])]
+    if not vals_a or not vals_b or len(vals_a) != len(vals_b):
+        return float("inf")
+    return float(max(abs(a - b) for a, b in zip(vals_a, vals_b)))
+
+
+def _support_anchor_distance_m(
+    coords_a: list[float] | tuple[float, float] | None,
+    coords_b: list[float] | tuple[float, float] | None,
+) -> float:
+    if coords_a is None or coords_b is None or len(coords_a) < 2 or len(coords_b) < 2:
+        return float("inf")
+    try:
+        point_a = Point(float(coords_a[0]), float(coords_a[1]))
+        point_b = Point(float(coords_b[0]), float(coords_b[1]))
+    except Exception:
+        return float("inf")
+    return float(point_a.distance(point_b))
+
+
+def _stitched_interval_reference_trusted(stitched_summary: dict[str, Any]) -> bool:
+    return bool(
+        stitched_summary.get("stitched_support_available", False)
+        and stitched_summary.get("stitched_support_ready", False)
+        and stitched_summary.get("stitched_support_anchor_src_coords") is not None
+        and stitched_summary.get("stitched_support_anchor_dst_coords") is not None
+    )
+
+
+def _annotate_support_candidate_interval_reference_trust(
+    candidates: list[dict[str, Any]],
+    *,
+    stitched_summary: dict[str, Any],
+    params: dict[str, Any],
+) -> list[dict[str, Any]]:
+    stitched_trusted = _stitched_interval_reference_trusted(stitched_summary)
+    min_cluster_count = int(params.get("ARC_TRUSTED_FULL_XSEC_SINGLE_CLUSTER_MIN_COUNT", 2))
+    stitched_side_tol = float(params.get("ARC_TRUSTED_SINGLE_STITCHED_SIDE_TOL", 0.15))
+    stitched_anchor_tol_m = float(params.get("ARC_TRUSTED_SINGLE_STITCHED_ANCHOR_TOL_M", 8.0))
+    for item in candidates:
+        trusted = False
+        reason = ""
+        if not bool(item.get("support_full_xsec_crossing", False)):
+            reason = "single_not_full_xsec_crossing"
+        elif not bool(item.get("support_cluster_is_dominant", False)):
+            reason = "single_full_xsec_cluster_not_dominant"
+        elif int(item.get("support_cluster_support_count", 0)) >= min_cluster_count:
+            trusted = True
+            reason = "single_full_xsec_dominant_cluster"
+        elif stitched_trusted:
+            side_distance = _support_side_signature_distance(
+                item.get("support_surface_side_signature", ()),
+                stitched_summary.get("stitched_support_surface_side_signature", ()),
+            )
+            src_anchor_distance = _support_anchor_distance_m(
+                item.get("support_anchor_src_coords"),
+                stitched_summary.get("stitched_support_anchor_src_coords"),
+            )
+            dst_anchor_distance = _support_anchor_distance_m(
+                item.get("support_anchor_dst_coords"),
+                stitched_summary.get("stitched_support_anchor_dst_coords"),
+            )
+            if (
+                side_distance <= stitched_side_tol
+                and src_anchor_distance <= stitched_anchor_tol_m
+                and dst_anchor_distance <= stitched_anchor_tol_m
+            ):
+                trusted = True
+                reason = "single_full_xsec_matches_stitched_terminal_anchor"
+            else:
+                reason = "single_full_xsec_conflicts_with_stitched_terminal_anchor"
+        else:
+            reason = "single_full_xsec_cluster_too_small"
+        item["support_interval_reference_trusted"] = bool(trusted)
+        item["support_interval_reference_reason"] = str(reason)
+    return candidates
+
+
 def _support_selection_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
     return (
+        0 if bool(candidate.get("support_interval_reference_trusted", False)) else 1,
         0 if bool(candidate.get("support_full_xsec_crossing", False)) else 1,
         0 if bool(candidate.get("support_cluster_is_dominant", False)) else 1,
         -int(candidate.get("support_cluster_support_count", 0)),
@@ -642,10 +756,19 @@ def _support_candidate_public_fields(candidate: dict[str, Any]) -> dict[str, Any
         "support_full_xsec_crossing": bool(candidate.get("support_full_xsec_crossing", False)),
         "support_cluster_support_count": int(candidate.get("support_cluster_support_count", 0)),
         "support_cluster_is_dominant": bool(candidate.get("support_cluster_is_dominant", False)),
+        "support_interval_reference_trusted": bool(candidate.get("support_interval_reference_trusted", False)),
+        "selected_support_interval_reference_trusted": bool(candidate.get("support_interval_reference_trusted", False)),
+        "support_interval_reference_source": (
+            "selected_support" if bool(candidate.get("support_interval_reference_trusted", False)) else "none"
+        ),
+        "support_interval_reference_reason": str(candidate.get("support_interval_reference_reason", "")),
     }
 
 
 def _same_pair_support_conflict_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
+    existing = candidate.get("support_cluster_key")
+    if isinstance(existing, (list, tuple)) and existing:
+        return _hashable_support_signature(existing)
     return _support_candidate_cluster_key(candidate)
 
 
@@ -860,6 +983,10 @@ def _support_type_for_arc(
             "support_full_xsec_crossing": False,
             "support_cluster_support_count": 0,
             "support_cluster_is_dominant": False,
+            "selected_support_interval_reference_trusted": False,
+            "stitched_support_interval_reference_trusted": False,
+            "support_interval_reference_source": "none",
+            "support_interval_reference_reason": "arc_line_missing",
             "stitched_support_available": False,
             "stitched_support_ready": False,
             "stitched_support_coverage_ratio": 0.0,
@@ -1154,6 +1281,12 @@ def _support_type_for_arc(
         "stitched_support_anchor_dst_coords": stitched_support_anchor_dst_coords,
         "stitched_support_corridor_signature": stitched_support_corridor_signature,
         "stitched_support_surface_side_signature": stitched_support_surface_side_signature,
+        "stitched_support_interval_reference_trusted": bool(_stitched_interval_reference_trusted({
+            "stitched_support_available": bool(stitched_surface_consistent),
+            "stitched_support_ready": bool(stitched_ready),
+            "stitched_support_anchor_src_coords": stitched_support_anchor_src_coords,
+            "stitched_support_anchor_dst_coords": stitched_support_anchor_dst_coords,
+        })),
     }
     qualified_single_evals = [
         dict(item)
@@ -1161,8 +1294,18 @@ def _support_type_for_arc(
         if str(item.get("traj_support_type", "")) != "no_support"
         and int(item.get("surface_consistent_segment_count", 0)) >= 1
     ]
-    qualified_single_evals = _annotate_support_candidate_clusters(qualified_single_evals)
+    qualified_single_evals = _annotate_support_candidate_clusters(qualified_single_evals, params=params)
+    qualified_single_evals = _annotate_support_candidate_interval_reference_trust(
+        qualified_single_evals,
+        stitched_summary=stitched_summary,
+        params=params,
+    )
     ranked_single_candidates = sorted(qualified_single_evals, key=_support_selection_key)
+    trusted_single_candidates = [
+        dict(item)
+        for item in ranked_single_candidates
+        if bool(item.get("support_interval_reference_trusted", False))
+    ]
     support_candidate_options = [
         {
             **dict(item),
@@ -1170,8 +1313,8 @@ def _support_type_for_arc(
         }
         for rank, item in enumerate(ranked_single_candidates, start=1)
     ]
-    if ranked_single_candidates:
-        best_single = dict(ranked_single_candidates[0])
+    if trusted_single_candidates:
+        best_single = dict(trusted_single_candidates[0])
         _mark_support_segments_selected(list(best_single.get("traj_support_segments", [])))
         return {
             "traj_support_type": str(best_single.get("traj_support_type", "no_support")),
@@ -1184,7 +1327,7 @@ def _support_type_for_arc(
             "support_anchor_src_coords": best_single.get("support_anchor_src_coords"),
             "support_anchor_dst_coords": best_single.get("support_anchor_dst_coords"),
             "support_generation_mode": "single",
-            "support_generation_reason": "single_traj_surface_consistent_preferred",
+            "support_generation_reason": "trusted_full_xsec_single_cluster_preferred",
             "selected_support_traj_id": str(best_single.get("selected_support_traj_id", "")),
             "selected_support_segment_traj_id": str(
                 best_single.get("selected_support_segment_traj_id", best_single.get("traj_id", ""))
@@ -1194,6 +1337,10 @@ def _support_type_for_arc(
             "support_full_xsec_crossing": bool(best_single.get("support_full_xsec_crossing", False)),
             "support_cluster_support_count": int(best_single.get("support_cluster_support_count", 0)),
             "support_cluster_is_dominant": bool(best_single.get("support_cluster_is_dominant", False)),
+            "selected_support_interval_reference_trusted": bool(best_single.get("support_interval_reference_trusted", False)),
+            "stitched_support_interval_reference_trusted": bool(stitched_summary.get("stitched_support_interval_reference_trusted", False)),
+            "support_interval_reference_source": "selected_support",
+            "support_interval_reference_reason": str(best_single.get("support_interval_reference_reason", "")),
             **stitched_summary,
             "single_traj_support_segments": single_traj_support_segments,
             "stitched_traj_support_segments": stitched_traj_support_segments,
@@ -1217,7 +1364,11 @@ def _support_type_for_arc(
             "support_anchor_src_coords": stitched_support_anchor_src_coords,
             "support_anchor_dst_coords": stitched_support_anchor_dst_coords,
             "support_generation_mode": "stitched",
-            "support_generation_reason": "zero_surface_consistent_single_traj_support",
+            "support_generation_reason": (
+                "stitched_fallback_due_to_untrusted_or_missing_full_xsec_single_support"
+                if ranked_single_candidates
+                else "zero_surface_consistent_single_traj_support"
+            ),
             "selected_support_traj_id": "",
             "selected_support_segment_traj_id": "",
             "support_corridor_signature": stitched_support_corridor_signature,
@@ -1225,11 +1376,61 @@ def _support_type_for_arc(
             "support_full_xsec_crossing": bool(stitched_has_src_xsec_anchor and stitched_has_dst_xsec_anchor),
             "support_cluster_support_count": int(len(stitched_traj_support_segments)),
             "support_cluster_is_dominant": True,
+            "selected_support_interval_reference_trusted": False,
+            "stitched_support_interval_reference_trusted": bool(stitched_summary.get("stitched_support_interval_reference_trusted", False)),
+            "support_interval_reference_source": (
+                "stitched_support"
+                if bool(stitched_summary.get("stitched_support_interval_reference_trusted", False))
+                else "none"
+            ),
+            "support_interval_reference_reason": (
+                "stitched_terminal_reference_fallback"
+                if bool(stitched_summary.get("stitched_support_interval_reference_trusted", False))
+                else "stitched_interval_reference_untrusted"
+            ),
             **stitched_summary,
             "single_traj_support_segments": single_traj_support_segments,
             "stitched_traj_support_segments": stitched_traj_support_segments,
             "single_traj_candidate_count": int(len(candidate_traj_rows)),
             "single_traj_surface_consistent_count": 0,
+            "support_candidate_options": support_candidate_options,
+            "prior_support_type": prior_support_type,
+            "prior_support_available": bool(prior_available),
+        }
+
+    if ranked_single_candidates:
+        best_single = dict(ranked_single_candidates[0])
+        _mark_support_segments_selected(list(best_single.get("traj_support_segments", [])))
+        return {
+            "traj_support_type": str(best_single.get("traj_support_type", "no_support")),
+            "traj_support_ids": [str(v) for v in best_single.get("traj_support_ids", [])],
+            "traj_support_span_count": int(best_single.get("traj_support_span_count", 0)),
+            "traj_support_coverage_ratio": float(best_single.get("traj_support_coverage_ratio", 0.0) or 0.0),
+            "traj_support_spans": list(best_single.get("traj_support_spans", [])),
+            "traj_support_segments": list(best_single.get("traj_support_segments", [])),
+            "support_reference_coords": list(best_single.get("support_reference_coords", [])),
+            "support_anchor_src_coords": best_single.get("support_anchor_src_coords"),
+            "support_anchor_dst_coords": best_single.get("support_anchor_dst_coords"),
+            "support_generation_mode": "single",
+            "support_generation_reason": "single_traj_surface_consistent_fallback_untrusted",
+            "selected_support_traj_id": str(best_single.get("selected_support_traj_id", "")),
+            "selected_support_segment_traj_id": str(
+                best_single.get("selected_support_segment_traj_id", best_single.get("traj_id", ""))
+            ),
+            "support_corridor_signature": list(best_single.get("support_corridor_signature", [])),
+            "support_surface_side_signature": list(best_single.get("support_surface_side_signature", [])),
+            "support_full_xsec_crossing": bool(best_single.get("support_full_xsec_crossing", False)),
+            "support_cluster_support_count": int(best_single.get("support_cluster_support_count", 0)),
+            "support_cluster_is_dominant": bool(best_single.get("support_cluster_is_dominant", False)),
+            "selected_support_interval_reference_trusted": bool(best_single.get("support_interval_reference_trusted", False)),
+            "stitched_support_interval_reference_trusted": bool(stitched_summary.get("stitched_support_interval_reference_trusted", False)),
+            "support_interval_reference_source": "none",
+            "support_interval_reference_reason": str(best_single.get("support_interval_reference_reason", "")),
+            **stitched_summary,
+            "single_traj_support_segments": single_traj_support_segments,
+            "stitched_traj_support_segments": stitched_traj_support_segments,
+            "single_traj_candidate_count": int(len(candidate_traj_rows)),
+            "single_traj_surface_consistent_count": int(len(ranked_single_candidates)),
             "support_candidate_options": support_candidate_options,
             "prior_support_type": prior_support_type,
             "prior_support_available": bool(prior_available),
@@ -1264,6 +1465,10 @@ def _support_type_for_arc(
         "support_full_xsec_crossing": False,
         "support_cluster_support_count": 0,
         "support_cluster_is_dominant": False,
+        "selected_support_interval_reference_trusted": False,
+        "stitched_support_interval_reference_trusted": bool(stitched_summary.get("stitched_support_interval_reference_trusted", False)),
+        "support_interval_reference_source": "none",
+        "support_interval_reference_reason": "no_trusted_support_interval_reference",
         **stitched_summary,
         "single_traj_support_segments": single_traj_support_segments,
         "stitched_traj_support_segments": stitched_traj_support_segments,
@@ -1375,6 +1580,9 @@ def _apply_support_candidate_to_row(
                 "support_full_xsec_crossing": False,
                 "support_cluster_support_count": 0,
                 "support_cluster_is_dominant": False,
+                "selected_support_interval_reference_trusted": False,
+                "support_interval_reference_source": "none",
+                "support_interval_reference_reason": str(reason),
                 "stitched_support_available": bool(row.get("stitched_support_available", False)),
                 "stitched_support_ready": bool(row.get("stitched_support_ready", False)),
                 "stitched_support_coverage_ratio": float(row.get("stitched_support_coverage_ratio", 0.0) or 0.0),
@@ -1383,6 +1591,9 @@ def _apply_support_candidate_to_row(
                 "stitched_support_anchor_dst_coords": row.get("stitched_support_anchor_dst_coords"),
                 "stitched_support_corridor_signature": list(row.get("stitched_support_corridor_signature", [])),
                 "stitched_support_surface_side_signature": list(row.get("stitched_support_surface_side_signature", [])),
+                "stitched_support_interval_reference_trusted": bool(
+                    row.get("stitched_support_interval_reference_trusted", False)
+                ),
                 "same_pair_support_deconflict_reason": str(reason),
             }
         )
@@ -1452,6 +1663,12 @@ def _same_pair_support_deconflict(
                             "support_full_xsec_crossing": bool(row.get("support_full_xsec_crossing", False)),
                             "support_cluster_support_count": int(row.get("support_cluster_support_count", 0)),
                             "support_cluster_is_dominant": bool(row.get("support_cluster_is_dominant", False)),
+                            "support_interval_reference_trusted": bool(
+                                row.get("selected_support_interval_reference_trusted", False)
+                            ),
+                            "support_interval_reference_reason": str(
+                                row.get("support_interval_reference_reason", "")
+                            ),
                             "candidate_quality_rank": topk + 1,
                         },
                         xsec_by_nodeid=xsec_by_nodeid,
@@ -1815,6 +2032,14 @@ def build_arc_evidence_attach(
                 "support_full_xsec_crossing": bool(support.get("support_full_xsec_crossing", False)),
                 "support_cluster_support_count": int(support.get("support_cluster_support_count", 0)),
                 "support_cluster_is_dominant": bool(support.get("support_cluster_is_dominant", False)),
+                "selected_support_interval_reference_trusted": bool(
+                    support.get("selected_support_interval_reference_trusted", False)
+                ),
+                "stitched_support_interval_reference_trusted": bool(
+                    support.get("stitched_support_interval_reference_trusted", False)
+                ),
+                "support_interval_reference_source": str(support.get("support_interval_reference_source", "")),
+                "support_interval_reference_reason": str(support.get("support_interval_reference_reason", "")),
                 "stitched_support_available": bool(support.get("stitched_support_available", False)),
                 "stitched_support_ready": bool(support.get("stitched_support_ready", False)),
                 "stitched_support_coverage_ratio": float(support.get("stitched_support_coverage_ratio", 0.0) or 0.0),
@@ -2281,6 +2506,18 @@ def run_witness_stage(
                 "support_full_xsec_crossing": bool(target_support_review.get("support_full_xsec_crossing", False)),
                 "support_cluster_support_count": int(target_support_review.get("support_cluster_support_count", 0)),
                 "support_cluster_is_dominant": bool(target_support_review.get("support_cluster_is_dominant", False)),
+                "selected_support_interval_reference_trusted": bool(
+                    target_support_review.get("selected_support_interval_reference_trusted", False)
+                ),
+                "stitched_support_interval_reference_trusted": bool(
+                    target_support_review.get("stitched_support_interval_reference_trusted", False)
+                ),
+                "support_interval_reference_source": str(
+                    target_support_review.get("support_interval_reference_source", "")
+                ),
+                "support_interval_reference_reason": str(
+                    target_support_review.get("support_interval_reference_reason", "")
+                ),
                 "stitched_support_available": bool(target_support_review.get("stitched_support_available", False)),
                 "stitched_support_ready": bool(target_support_review.get("stitched_support_ready", False)),
                 "stitched_support_coverage_ratio": float(target_support_review.get("stitched_support_coverage_ratio", 0.0) or 0.0),

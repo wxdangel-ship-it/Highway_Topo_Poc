@@ -404,23 +404,44 @@ def _slot_anchor_candidates(
     *,
     arc_row: dict[str, Any] | None,
     endpoint_tag: str,
+    trusted_only: bool = False,
 ) -> list[tuple[list[float] | tuple[float, float], str]]:
     if not isinstance(arc_row, dict) or not arc_row:
         return []
     endpoint_key = "src" if str(endpoint_tag) == "src" else "dst"
     stitched_anchor = arc_row.get(f"stitched_support_anchor_{endpoint_key}_coords")
     support_anchor = arc_row.get(f"support_anchor_{endpoint_key}_coords")
-    prefer_stitched = bool(arc_row.get("stitched_support_available", False)) and (
-        not bool(arc_row.get("support_full_xsec_crossing", False))
-        or not bool(arc_row.get("support_cluster_is_dominant", False))
-    )
-    ordered = [
-        (stitched_anchor, "stitched_support"),
-        (support_anchor, "selected_support"),
-    ] if prefer_stitched else [
-        (support_anchor, "selected_support"),
-        (stitched_anchor, "stitched_support"),
-    ]
+    support_trusted = bool(arc_row.get("selected_support_interval_reference_trusted", False))
+    stitched_trusted = bool(arc_row.get("stitched_support_interval_reference_trusted", False))
+    preferred_source = str(arc_row.get("support_interval_reference_source", "") or "")
+    ordered: list[tuple[Any, str]] = []
+    if trusted_only:
+        if preferred_source == "selected_support" and support_trusted:
+            ordered.append((support_anchor, "selected_support"))
+            if stitched_trusted:
+                ordered.append((stitched_anchor, "stitched_support"))
+        elif preferred_source == "stitched_support" and stitched_trusted:
+            ordered.append((stitched_anchor, "stitched_support"))
+            if support_trusted:
+                ordered.append((support_anchor, "selected_support"))
+        else:
+            if support_trusted:
+                ordered.append((support_anchor, "selected_support"))
+            if stitched_trusted:
+                ordered.append((stitched_anchor, "stitched_support"))
+    else:
+        prefer_stitched = bool(arc_row.get("stitched_support_available", False)) and (
+            not bool(arc_row.get("support_full_xsec_crossing", False))
+            or not bool(arc_row.get("support_cluster_is_dominant", False))
+            or not bool(arc_row.get("selected_support_interval_reference_trusted", False))
+        )
+        ordered = [
+            (stitched_anchor, "stitched_support"),
+            (support_anchor, "selected_support"),
+        ] if prefer_stitched else [
+            (support_anchor, "selected_support"),
+            (stitched_anchor, "stitched_support"),
+        ]
     out: list[tuple[list[float] | tuple[float, float], str]] = []
     for coords, label in ordered:
         if isinstance(coords, (list, tuple)) and len(coords) >= 2:
@@ -495,7 +516,25 @@ def build_slot(
     interval = None
     method = "unresolved"
     reason = "no_legal_interval"
+    anchor_tolerance_m = float(params.get("STEP5_SLOT_ANCHOR_TOL_M", 0.75))
+    if len(intervals) > 1:
+        for anchor_coords, label in _slot_anchor_candidates(
+            arc_row=arc_row,
+            endpoint_tag=endpoint_tag,
+            trusted_only=True,
+        ):
+            interval, method, reason = _resolve_interval_from_anchor(
+                intervals=intervals,
+                xsec_line=xsec_line,
+                anchor_coords=anchor_coords,
+                tolerance_m=anchor_tolerance_m,
+                label=label,
+            )
+            if interval is not None:
+                break
     if (
+        interval is None
+        and
         str(identity.state) == "witness_based"
         and witness is not None
         and witness.selected_interval_start_s is not None
@@ -514,9 +553,12 @@ def build_slot(
             interval = min(intervals, key=lambda item: abs((float(item.center_s) / max(float(xsec_line.length), 1e-6)) - float(witness_fraction)))
             method = "fraction_match"
             reason = "witness_fraction_match"
-    anchor_tolerance_m = float(params.get("STEP5_SLOT_ANCHOR_TOL_M", 0.75))
     if interval is None and len(intervals) > 1:
-        for anchor_coords, label in _slot_anchor_candidates(arc_row=arc_row, endpoint_tag=endpoint_tag):
+        for anchor_coords, label in _slot_anchor_candidates(
+            arc_row=arc_row,
+            endpoint_tag=endpoint_tag,
+            trusted_only=False,
+        ):
             interval, method, reason = _resolve_interval_from_anchor(
                 intervals=intervals,
                 xsec_line=xsec_line,

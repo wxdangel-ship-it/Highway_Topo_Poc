@@ -1481,8 +1481,8 @@ def test_t05v2_arc_first_stitched_support_uses_same_arc_fragments(tmp_path: Path
         intersection_fc=_simple_intersections(),
         drivezone_fc=_fc([_poly_feature([(-5.0, -4.0), (105.0, -4.0), (105.0, 4.0), (-5.0, 4.0)])], "EPSG:3857"),
         traj_tracks=[
-            [(5.0, 0.0), (20.0, 0.0), (35.0, 0.0), (45.0, 0.0)],
-            [(55.0, 0.0), (70.0, 0.0), (85.0, 0.0), (95.0, 0.0)],
+            [(0.0, 0.0), (20.0, 0.0), (35.0, 0.0), (45.0, 0.0)],
+            [(55.0, 0.0), (70.0, 0.0), (85.0, 0.0), (100.0, 0.0)],
         ],
         road_fc=road_fc,
     )
@@ -1493,18 +1493,21 @@ def test_t05v2_arc_first_stitched_support_uses_same_arc_fragments(tmp_path: Path
     patch_dir = out_root / "run_arcfirst2" / "patches" / patch_id
     step3_payload = _read_json(patch_dir / "step3" / "witnesses.json")
     row = step3_payload["full_legal_arc_registry"][0]
-    assert row["traj_support_type"] == "partial_arc_support"
-    assert row["support_generation_mode"] == "single"
-    assert row["selected_support_traj_id"] in {"traj_00", "traj_01"}
-    assert len(row["traj_support_segments"]) == 1
-    assert all(not bool(item["is_stitched"]) for item in row["traj_support_segments"])
+    assert row["traj_support_type"] == "stitched_arc_support"
+    assert row["support_generation_mode"] == "stitched"
+    assert row["support_generation_reason"] == "stitched_fallback_due_to_untrusted_or_missing_full_xsec_single_support"
+    assert row["selected_support_traj_id"] == ""
+    assert len(row["traj_support_segments"]) >= 2
+    assert all(bool(item["is_stitched"]) for item in row["traj_support_segments"])
+    assert bool(row["stitched_support_interval_reference_trusted"]) is True
+    assert row["support_interval_reference_source"] == "stitched_support"
     assert (patch_dir / "step3" / "preprocessed_traj_lines.geojson").exists()
     assert (patch_dir / "step3" / "arc_single_traj_support_segments.geojson").exists()
     assert (patch_dir / "step3" / "arc_stitched_support_segments.geojson").exists()
     stitched_debug = _read_json(patch_dir / "step3" / "arc_stitched_support_segments.geojson")
     assert len(stitched_debug["features"]) >= 2
     assert all(bool(item["properties"]["is_stitched"]) for item in stitched_debug["features"])
-    assert all(not bool(item["properties"]["accepted_for_production"]) for item in stitched_debug["features"])
+    assert any(bool(item["properties"]["accepted_for_production"]) for item in stitched_debug["features"])
 
 
 def test_t05v2_arc_first_prefers_dominant_terminal_crossing_cluster(tmp_path: Path) -> None:
@@ -1534,6 +1537,8 @@ def test_t05v2_arc_first_prefers_dominant_terminal_crossing_cluster(tmp_path: Pa
     assert bool(row["support_full_xsec_crossing"]) is True
     assert bool(row["support_cluster_is_dominant"]) is True
     assert int(row["support_cluster_support_count"]) == 2
+    assert bool(row["selected_support_interval_reference_trusted"]) is True
+    assert row["support_interval_reference_source"] == "selected_support"
 
 
 def test_t05v2_arc_first_prefilter_keeps_same_arc_support_and_skips_far_traj(tmp_path: Path) -> None:
@@ -1844,6 +1849,118 @@ def test_t05v2_build_slot_prefers_support_anchor_interval_over_reference_interva
             "support_anchor_src_coords": [0.0, 3.0],
             "support_full_xsec_crossing": True,
             "support_cluster_is_dominant": True,
+            "stitched_support_available": False,
+        },
+    )
+
+    assert slot.resolved is True
+    assert slot.interval is not None
+    assert slot.method == "selected_support_contains"
+    assert slot.reason == "selected_support_anchor_on_interval"
+    assert float(slot.interval.center_s) > 0.0
+
+
+def test_t05v2_build_slot_prefers_trusted_support_anchor_over_witness_interval() -> None:
+    segment = Segment(
+        segment_id="seg_slot_trusted",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((-10.0, -7.0), (10.0, -7.0)),
+        candidate_ids=("cand_1",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_1",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="traj_supported_cluster",
+        length_m=20.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_slot_trusted",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+    )
+    identity = CorridorIdentity(
+        segment_id="seg_slot_trusted",
+        state="witness_based",
+        reason="witness_selected",
+        risk_flags=tuple(),
+        witness_interval_rank=0,
+        prior_supported=False,
+    )
+    xsec = BaseCrossSection(
+        nodeid=10,
+        geometry_coords=((0.0, -10.0), (0.0, 10.0)),
+        properties={},
+    )
+    witness = CorridorWitness(
+        segment_id="seg_slot_trusted",
+        status="resolved",
+        reason="test_witness",
+        line_coords=((-10.0, -7.0), (10.0, -7.0)),
+        sample_s_norm=0.5,
+        intervals=(
+            CorridorInterval(
+                start_s=1.0,
+                end_s=3.0,
+                center_s=2.0,
+                length_m=2.0,
+                rank=0,
+                geometry_coords=((0.0, -9.0), (0.0, -7.0)),
+            ),
+            CorridorInterval(
+                start_s=11.0,
+                end_s=13.0,
+                center_s=12.0,
+                length_m=2.0,
+                rank=1,
+                geometry_coords=((0.0, 1.0), (0.0, 3.0)),
+            ),
+        ),
+        selected_interval_rank=0,
+        selected_interval_start_s=1.0,
+        selected_interval_end_s=3.0,
+        exclusive_interval=False,
+        stability_score=1.0,
+        neighbor_match_count=2,
+        axis_vector=(1.0, 0.0),
+    )
+    surface = Polygon([(-1.0, -8.0), (1.0, -8.0), (1.0, -6.0), (-1.0, -6.0)]).union(
+        Polygon([(-1.0, 2.0), (1.0, 2.0), (1.0, 4.0), (-1.0, 4.0)])
+    )
+    inputs = PatchInputs(
+        patch_id="slot_trusted_patch",
+        patch_dir=Path("."),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=surface,
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+    slot = build_slot(
+        segment=segment,
+        witness=witness,
+        identity=identity,
+        xsec=xsec,
+        line=LineString([(-10.0, -7.0), (10.0, -7.0)]),
+        inputs=inputs,
+        params=dict(DEFAULT_PARAMS),
+        endpoint_tag="src",
+        drivable_surface=surface,
+        arc_row={
+            "support_anchor_src_coords": [0.0, 3.0],
+            "support_full_xsec_crossing": True,
+            "support_cluster_is_dominant": True,
+            "selected_support_interval_reference_trusted": True,
+            "support_interval_reference_source": "selected_support",
             "stitched_support_available": False,
         },
     )

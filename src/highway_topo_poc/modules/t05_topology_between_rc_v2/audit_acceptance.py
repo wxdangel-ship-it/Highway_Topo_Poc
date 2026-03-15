@@ -616,6 +616,14 @@ def build_pair_decisions(run_root: Path | str, complex_patch_id: str) -> dict[st
                 "support_full_xsec_crossing": bool(resolved.get("support_full_xsec_crossing", False)),
                 "support_cluster_support_count": int(resolved.get("support_cluster_support_count", 0)),
                 "support_cluster_is_dominant": bool(resolved.get("support_cluster_is_dominant", False)),
+                "selected_support_interval_reference_trusted": bool(
+                    resolved.get("selected_support_interval_reference_trusted", False)
+                ),
+                "stitched_support_interval_reference_trusted": bool(
+                    resolved.get("stitched_support_interval_reference_trusted", False)
+                ),
+                "support_interval_reference_source": str(resolved.get("support_interval_reference_source", "")),
+                "support_interval_reference_reason": str(resolved.get("support_interval_reference_reason", "")),
                 "stitched_support_available": bool(resolved.get("stitched_support_available", False)),
                 "stitched_support_ready": bool(resolved.get("stitched_support_ready", False)),
                 "stitched_support_coverage_ratio": float(resolved.get("stitched_support_coverage_ratio", 0.0) or 0.0),
@@ -2265,6 +2273,14 @@ def build_same_pair_provisional_allow_review(
                 "support_full_xsec_crossing": bool(row.get("support_full_xsec_crossing", False)),
                 "support_cluster_support_count": int(row.get("support_cluster_support_count", 0)),
                 "support_cluster_is_dominant": bool(row.get("support_cluster_is_dominant", False)),
+                "selected_support_interval_reference_trusted": bool(
+                    row.get("selected_support_interval_reference_trusted", False)
+                ),
+                "stitched_support_interval_reference_trusted": bool(
+                    row.get("stitched_support_interval_reference_trusted", False)
+                ),
+                "support_interval_reference_source": str(row.get("support_interval_reference_source", "")),
+                "support_interval_reference_reason": str(row.get("support_interval_reference_reason", "")),
                 "stitched_support_available": bool(row.get("stitched_support_available", False)),
                 "stitched_support_ready": bool(row.get("stitched_support_ready", False)),
                 "stitched_support_coverage_ratio": float(row.get("stitched_support_coverage_ratio", 0.0) or 0.0),
@@ -2399,6 +2415,25 @@ def build_multi_arc_review(
                 },
                 "support_cluster_is_dominant": {
                     str(row.get("topology_arc_id", "")): bool(row.get("support_cluster_is_dominant", False))
+                    for row in pair_registry_rows
+                    if str(row.get("topology_arc_id", ""))
+                },
+                "selected_support_interval_reference_trusted": {
+                    str(row.get("topology_arc_id", "")): bool(
+                        row.get("selected_support_interval_reference_trusted", False)
+                    )
+                    for row in pair_registry_rows
+                    if str(row.get("topology_arc_id", ""))
+                },
+                "stitched_support_interval_reference_trusted": {
+                    str(row.get("topology_arc_id", "")): bool(
+                        row.get("stitched_support_interval_reference_trusted", False)
+                    )
+                    for row in pair_registry_rows
+                    if str(row.get("topology_arc_id", ""))
+                },
+                "support_interval_reference_sources": {
+                    str(row.get("topology_arc_id", "")): str(row.get("support_interval_reference_source", ""))
                     for row in pair_registry_rows
                     if str(row.get("topology_arc_id", ""))
                 },
