@@ -1504,7 +1504,7 @@ def test_t05v2_unique_witness_based_full_pipeline(tmp_path: Path) -> None:
     assert metrics["segments"][0]["slot_dst_status"] == "resolved"
     assert metrics["segments"][0]["failure_classification"] == "built"
     assert float(metrics["segments"][0]["road_in_drivezone_ratio"]) >= 0.99
-    assert metrics["segments"][0]["shape_ref_mode"] == "witness_reference_projected_anchored"
+    assert metrics["segments"][0]["shape_ref_mode"] == "production_working_segment_slot_anchored"
     assert bool(gate["overall_pass"]) is True
     assert len(roads["features"]) == 1
     assert len(shape_ref["features"]) == 1
@@ -1716,6 +1716,7 @@ def test_t05v2_geometry_refine_finite_guard_avoids_runtime_warning() -> None:
 def test_t05v2_geometry_refine_source_family_prefers_traj_guided() -> None:
     assert _step5_road._geometry_refine_source_family("selected_support_reference_projected_anchored") == "traj_guided"
     assert _step5_road._geometry_refine_source_family("stitched_support_reference_projected_anchored") == "traj_guided"
+    assert _step5_road._geometry_refine_source_family("production_working_segment_slot_anchored") == "traj_guided"
     assert _step5_road._geometry_refine_source_family("lane_boundary_centerline") == "lane_boundary_guided"
 
 
@@ -1746,7 +1747,7 @@ def test_t05v2_prior_based_for_short_prior_segment(tmp_path: Path) -> None:
     roads = _read_json(out_root / "run4" / "patches" / patch_id / "Road.geojson")
     assert metrics["segments"][0]["corridor_identity"] == "prior_based"
     assert metrics["segments"][0]["failure_classification"] == "built"
-    assert metrics["segments"][0]["shape_ref_mode"] == "prior_reference_slot_anchored"
+    assert metrics["segments"][0]["shape_ref_mode"] == "production_working_segment_slot_anchored"
     assert roads["features"][0]["properties"]["corridor_state"] == "prior_based"
     assert bool(gate["overall_pass"]) is True
     assert any(bp["reason"] == "prior_based_fallback" for bp in gate["soft_breakpoints"])
@@ -2936,12 +2937,19 @@ def test_t05v2_build_final_road_uses_step3_production_working_segment_family() -
         inputs=inputs,
         prior_roads=[],
         params=dict(DEFAULT_PARAMS),
+        arc_row={
+            "support_reference_coords": [[0.0, 2.8], [50.0, 2.8], [100.0, 2.8]],
+            "selected_support_interval_reference_trusted": True,
+            "support_interval_reference_source": "selected_support",
+            "stitched_support_interval_reference_trusted": False,
+        },
     )
 
     assert road is not None
     assert result["reason"] == "built"
     assert result["shape_ref_mode"] == "production_working_segment_slot_anchored"
     assert result["shape_ref_source_family"] == "production_working_segment_family"
+    assert result["candidate_attempts"][0]["mode"] == "production_working_segment_slot_anchored"
     assert road.line_coords == ((0.0, 3.0), (50.0, 3.0), (100.0, 3.0))
 
 

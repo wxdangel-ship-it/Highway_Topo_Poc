@@ -642,6 +642,10 @@ def slot_reference_line(
     prior_roads: list[Any],
     prior_index: dict[tuple[int, int], list[Any]] | None = None,
 ) -> tuple[LineString, str]:
+    if bool(getattr(segment, "production_consumable_default", False)) and str(
+        getattr(segment, "geometry_role", "")
+    ) == "step3_production_working_segment":
+        return segment.geometry_metric(), "production_working_segment"
     if str(identity.state) == "prior_based":
         prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
         if prior_line is not None:
@@ -664,6 +668,12 @@ def _shape_ref_source_family(mode: str) -> str:
     if text.startswith("rcsdroad"):
         return "rcsdroad_family"
     return "other_family"
+
+
+def _segment_prefers_production_shape_ref(segment: Segment) -> bool:
+    return bool(getattr(segment, "production_consumable_default", False)) and str(
+        getattr(segment, "geometry_role", "")
+    ) == "step3_production_working_segment"
 
 
 def _project_anchor_s_on_xsec(xsec_line: LineString, anchor_coords: list[float] | tuple[float, float] | None) -> float | None:
@@ -794,6 +804,8 @@ def shape_ref_line(
         return base_line, str(mode)
     start_pt = pipeline._midpoint_of_interval(src_slot.interval)
     end_pt = pipeline._midpoint_of_interval(dst_slot.interval)
+    if _segment_prefers_production_shape_ref(segment):
+        return _replace_endpoints(base_line, start_pt, end_pt), f"{mode}_slot_anchored"
     trusted_support_ref = _trusted_support_shape_ref_line(
         arc_row=arc_row,
         start_pt=start_pt,
@@ -1097,6 +1109,8 @@ def _lane_boundary_centerline_for_road(
 def _geometry_refine_source_family(source_label: str) -> str:
     label = str(source_label or "")
     if label.startswith(("selected_support_", "stitched_support_")):
+        return "traj_guided"
+    if label.startswith("production_working_segment"):
         return "traj_guided"
     if label.startswith("lane_boundary"):
         return "lane_boundary_guided"
@@ -1504,6 +1518,9 @@ def _refine_built_road_geometry(
     review["lane_boundary_quality_score"] = lane_boundary_quality_score
     review["lane_boundary_center_offset"] = lane_boundary_meta.get("center_offset")
     review["lane_boundary_use_reason"] = str(lane_boundary_meta.get("use_reason", "") or "")
+    build_shape_ref_mode = str(build_result.get("shape_ref_mode", ""))
+    build_shape_ref_family = _shape_ref_source_family(build_shape_ref_mode)
+    build_shape_ref_line = _line_from_coords(list(build_result.get("shape_ref_coords", [])))
     trusted_support_ref = _trusted_support_shape_ref_line(
         arc_row=arc_row,
         start_pt=mid_start_pt,
@@ -1512,7 +1529,16 @@ def _refine_built_road_geometry(
     traj_guided_line: LineString | None = None
     source_line: LineString | None = None
     source_label = ""
-    if trusted_support_ref is not None:
+    if _segment_prefers_production_shape_ref(segment):
+        if build_shape_ref_line is not None and str(build_shape_ref_family) == "production_working_segment_family":
+            source_line = _anchor_along_base_line(build_shape_ref_line, mid_start_pt, mid_end_pt)
+            source_label = build_shape_ref_mode or "production_working_segment_slot_anchored"
+        else:
+            source_line = _anchor_along_base_line(segment.geometry_metric(), mid_start_pt, mid_end_pt)
+            source_label = "production_working_segment_slot_anchored"
+        traj_guided_line = source_line
+        review["traj_guided_used"] = True
+    elif trusted_support_ref is not None:
         traj_guided_line, source_label = trusted_support_ref
         source_line = traj_guided_line
         review["support_trend_used"] = True
@@ -1533,9 +1559,8 @@ def _refine_built_road_geometry(
             source_line = _anchor_along_base_line(prior_line, mid_start_pt, mid_end_pt)
             source_label = "prior_reference_projected_anchored"
     if source_line is None:
-        shape_ref_line = _line_from_coords(list(build_result.get("shape_ref_coords", [])))
-        if shape_ref_line is not None and not str(build_result.get("shape_ref_mode", "")).startswith("traj_support"):
-            source_line = _anchor_along_base_line(shape_ref_line, mid_start_pt, mid_end_pt)
+        if build_shape_ref_line is not None and not str(build_shape_ref_mode).startswith("traj_support"):
+            source_line = _anchor_along_base_line(build_shape_ref_line, mid_start_pt, mid_end_pt)
             source_label = "selected_shape_ref"
     if source_line is None or source_line.is_empty or float(source_line.length) <= 1e-6:
         review["skip_reason"] = "no_trusted_ref_source"
