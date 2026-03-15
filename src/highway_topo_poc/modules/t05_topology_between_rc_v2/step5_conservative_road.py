@@ -582,6 +582,39 @@ def _slot_anchor_candidates(
     return out
 
 
+def _trusted_support_shape_ref_line(
+    *,
+    arc_row: dict[str, Any] | None,
+    start_pt: Point,
+    end_pt: Point,
+) -> tuple[LineString, str] | None:
+    if not isinstance(arc_row, dict) or not arc_row:
+        return None
+    support_trusted = bool(arc_row.get("selected_support_interval_reference_trusted", False))
+    stitched_trusted = bool(arc_row.get("stitched_support_interval_reference_trusted", False))
+    preferred_source = str(arc_row.get("support_interval_reference_source", "") or "")
+    ordered: list[tuple[str, Any]] = []
+    if preferred_source == "selected_support" and support_trusted:
+        ordered.append(("selected_support", arc_row.get("support_reference_coords", [])))
+        if stitched_trusted:
+            ordered.append(("stitched_support", arc_row.get("stitched_support_reference_coords", [])))
+    elif preferred_source == "stitched_support" and stitched_trusted:
+        ordered.append(("stitched_support", arc_row.get("stitched_support_reference_coords", [])))
+        if support_trusted:
+            ordered.append(("selected_support", arc_row.get("support_reference_coords", [])))
+    else:
+        if support_trusted:
+            ordered.append(("selected_support", arc_row.get("support_reference_coords", [])))
+        if stitched_trusted:
+            ordered.append(("stitched_support", arc_row.get("stitched_support_reference_coords", [])))
+    for label, coords in ordered:
+        reference_line = _line_from_coords(list(coords or []))
+        if reference_line is None:
+            continue
+        return _anchor_along_base_line(reference_line, start_pt, end_pt), f"{label}_reference_projected_anchored"
+    return None
+
+
 def shape_ref_line(
     *,
     segment: Segment,
@@ -590,6 +623,7 @@ def shape_ref_line(
     src_slot: SlotInterval,
     dst_slot: SlotInterval,
     prior_roads: list[Any],
+    arc_row: dict[str, Any] | None = None,
     prior_index: dict[tuple[int, int], list[Any]] | None = None,
 ) -> tuple[LineString, str]:
     pipeline = _pipeline()
@@ -598,6 +632,13 @@ def shape_ref_line(
         return base_line, str(mode)
     start_pt = pipeline._midpoint_of_interval(src_slot.interval)
     end_pt = pipeline._midpoint_of_interval(dst_slot.interval)
+    trusted_support_ref = _trusted_support_shape_ref_line(
+        arc_row=arc_row,
+        start_pt=start_pt,
+        end_pt=end_pt,
+    )
+    if trusted_support_ref is not None:
+        return trusted_support_ref
     if str(identity.state) == "witness_based":
         witness_reference = _witness_reference_projected_line(witness=witness, start_pt=start_pt, end_pt=end_pt)
         if witness_reference is not None:
@@ -798,6 +839,7 @@ def build_final_road(
             src_slot=src_slot,
             dst_slot=dst_slot,
             prior_roads=prior_roads,
+            arc_row=arc_row,
             prior_index=prior_index,
         )
         result["shape_ref_mode"] = str(fallback_mode)
@@ -816,6 +858,7 @@ def build_final_road(
         src_slot=src_slot,
         dst_slot=dst_slot,
         prior_roads=prior_roads,
+        arc_row=arc_row,
         prior_index=prior_index,
     )
     candidate_lines: list[tuple[LineString, str]] = [(preferred_line, str(preferred_mode))]

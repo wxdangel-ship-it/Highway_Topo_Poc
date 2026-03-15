@@ -2220,6 +2220,138 @@ def test_t05v2_build_final_road_uses_support_reference_candidate_to_avoid_divstr
     assert all(attempt["mode"] != "traj_support_slot_anchored" or float(attempt["drivezone_ratio"]) >= float(DEFAULT_PARAMS["ROAD_MIN_DRIVEZONE_RATIO"]) for attempt in result["candidate_attempts"])
 
 
+def test_t05v2_build_final_road_prefers_trusted_support_reference_before_witness_reference() -> None:
+    segment = Segment(
+        segment_id="seg_support_preferred",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 1.0), (50.0, 1.0), (100.0, 1.0)),
+        candidate_ids=("cand_1",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_1",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=0,
+        prior_supported=False,
+        formation_reason="arc_first_terminal_support",
+        length_m=100.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_support_preferred",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        same_pair_rank=1,
+        kept_reason="",
+    )
+    witness_interval = CorridorInterval(
+        start_s=0.5,
+        end_s=1.5,
+        center_s=1.0,
+        length_m=1.0,
+        rank=0,
+        geometry_coords=((50.0, -0.5), (50.0, 0.5)),
+    )
+    witness = CorridorWitness(
+        segment_id="seg_support_preferred",
+        status="selected",
+        reason="witness_interval_selected",
+        line_coords=((50.0, -10.0), (50.0, 10.0)),
+        sample_s_norm=0.5,
+        intervals=(witness_interval,),
+        selected_interval_rank=0,
+        selected_interval_start_s=0.5,
+        selected_interval_end_s=1.5,
+        exclusive_interval=True,
+        stability_score=1.0,
+        neighbor_match_count=2,
+        axis_vector=(0.0, 1.0),
+    )
+    identity = CorridorIdentity(
+        segment_id="seg_support_preferred",
+        state="witness_based",
+        reason="witness_selected",
+        risk_flags=tuple(),
+        witness_interval_rank=0,
+        prior_supported=False,
+    )
+    src_slot = SlotInterval(
+        segment_id="seg_support_preferred",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, -10.0), (0.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=12.5,
+            end_s=13.5,
+            center_s=13.0,
+            length_m=1.0,
+            rank=0,
+            geometry_coords=((0.0, 2.5), (0.0, 3.5)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    dst_slot = SlotInterval(
+        segment_id="seg_support_preferred",
+        endpoint_tag="dst",
+        xsec_nodeid=20,
+        xsec_coords=((100.0, -10.0), (100.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=12.5,
+            end_s=13.5,
+            center_s=13.0,
+            length_m=1.0,
+            rank=0,
+            geometry_coords=((100.0, 2.5), (100.0, 3.5)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    inputs = PatchInputs(
+        patch_id="support_preferred_case",
+        patch_dir=Path("support_preferred_case"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, 0.0), (105.0, 0.0), (105.0, 4.0), (-5.0, 4.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+
+    road, result = _build_final_road(
+        patch_id="support_preferred_case",
+        segment=segment,
+        identity=identity,
+        witness=witness,
+        src_slot=src_slot,
+        dst_slot=dst_slot,
+        inputs=inputs,
+        prior_roads=[],
+        params=dict(DEFAULT_PARAMS),
+        arc_row={
+            "support_reference_coords": [[0.0, 3.0], [50.0, 3.0], [100.0, 3.0]],
+            "selected_support_interval_reference_trusted": True,
+            "support_interval_reference_source": "selected_support",
+            "stitched_support_interval_reference_trusted": False,
+        },
+    )
+
+    assert road is not None
+    assert result["reason"] == "built"
+    assert result["shape_ref_mode"] == "selected_support_reference_projected_anchored"
+    assert result["candidate_attempts"][0]["mode"] == "selected_support_reference_projected_anchored"
+    assert road.line_coords == ((0.0, 3.0), (50.0, 3.0), (100.0, 3.0))
+
+
 def test_t05v2_rcsdroad_trend_extended_candidate_line_uses_endpoint_trend() -> None:
     src_slot = SlotInterval(
         segment_id="seg_trend",
