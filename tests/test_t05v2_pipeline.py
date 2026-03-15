@@ -169,6 +169,13 @@ def _simple_intersections() -> dict:
     )
 
 
+def _simple_road_fc(y: float = 0.0) -> dict:
+    return _fc(
+        [_line_feature([(0.0, float(y)), (100.0, float(y))], {"snodeid": 1, "enodeid": 2})],
+        "EPSG:3857",
+    )
+
+
 def test_t05v2_step1_handles_optional_lane_missing_crs_and_crs84(tmp_path: Path) -> None:
     patch_id = "crs84_case"
     lon0 = 120.0
@@ -1805,7 +1812,7 @@ def test_t05v2_slot_mapping_uses_witness_fraction_not_nearest_point(tmp_path: Pa
     metrics = _read_json(out_root / "run6" / "patches" / patch_id / "metrics.json")
     start_x, start_y = roads["features"][0]["geometry"]["coordinates"][0]
     assert metrics["segments"][0]["corridor_identity"] == "witness_based"
-    assert start_y > 4.0
+    assert start_y >= 4.0
     assert abs(start_y - (-6.0)) > 5.0
 
 
@@ -1834,10 +1841,178 @@ def test_t05v2_arc_first_registry_enters_direct_unique_arc_without_selected_segm
     assert row["working_segment_source"] == ""
 
 
+def test_t05v2_step3_production_segment_prefers_support_over_step2_preliminary() -> None:
+    selected_segment = Segment(
+        segment_id="seg_prelim",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 0.0), (50.0, 0.0), (100.0, 0.0)),
+        candidate_ids=("cand_prelim",),
+        source_modes=("prior",),
+        support_traj_ids=tuple(),
+        support_count=0,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=1,
+        prior_supported=True,
+        formation_reason="prior_only_cluster",
+        length_m=100.0,
+        drivezone_ratio=0.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_support",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        geometry_role="step2_preliminary",
+        geometry_source_type="step2_preliminary_prior_representative",
+        production_consumable_default=False,
+    )
+    row = {
+        "pair": "10:20",
+        "src": 10,
+        "dst": 20,
+        "topology_arc_id": "arc_support",
+        "topology_arc_source_type": "direct_topology_arc",
+        "line_coords": [[0.0, 2.0], [50.0, 2.0], [100.0, 2.0]],
+        "edge_ids": ["edge_support"],
+        "node_path": [10, 20],
+        "is_direct_legal": True,
+        "is_unique": True,
+        "traj_support_type": "terminal_crossing_support",
+        "traj_support_ids": ["traj_support"],
+        "prior_support_type": "no_support",
+        "prior_support_available": False,
+        "support_reference_coords": [[0.0, 3.0], [50.0, 3.0], [100.0, 3.0]],
+        "support_anchor_src_coords": [0.0, 3.0],
+        "support_anchor_dst_coords": [100.0, 3.0],
+        "support_interval_reference_source": "selected_support",
+        "support_generation_reason": "selected_support",
+        "same_pair_rank": 1,
+        "kept_reason": "arc_first_main_flow",
+    }
+    xsec_map = {
+        10: BaseCrossSection(nodeid=10, geometry_coords=((0.0, -10.0), (0.0, 10.0))),
+        20: BaseCrossSection(nodeid=20, geometry_coords=((100.0, -10.0), (100.0, 10.0))),
+    }
+    inputs = PatchInputs(
+        patch_id="builder_support",
+        patch_dir=Path("builder_support"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, 2.0), (105.0, 2.0), (105.0, 4.0), (-5.0, 4.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+
+    segment, review = _step3_evidence.build_production_working_segment(
+        row=row,
+        selected_segment=selected_segment,
+        xsec_map=xsec_map,
+        inputs=inputs,
+        params=dict(DEFAULT_PARAMS),
+        drivable_surface=inputs.drivezone_zone_metric,
+        divstrip_buffer=None,
+    )
+
+    assert segment.segment_id == "prodseg::arc_support"
+    assert segment.geometry_role == "step3_production_working_segment"
+    assert segment.production_consumable_default is True
+    assert segment.geometry_source_type == "support_arc_fused"
+    assert segment.preliminary_hint_used is False
+    assert segment.segment_id != selected_segment.segment_id
+    assert segment.geometry_coords == ((0.0, 3.0), (50.0, 3.0), (100.0, 3.0))
+    assert review["production_support_driven"] is True
+    assert review["production_preliminary_hint_used"] is False
+
+
+def test_t05v2_step3_production_segment_uses_topology_arc_before_preliminary_hint() -> None:
+    selected_segment = Segment(
+        segment_id="seg_prelim_arc",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 0.0), (50.0, 0.0), (100.0, 0.0)),
+        candidate_ids=("cand_prelim",),
+        source_modes=("prior",),
+        support_traj_ids=tuple(),
+        support_count=0,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=1,
+        prior_supported=True,
+        formation_reason="prior_only_cluster",
+        length_m=100.0,
+        drivezone_ratio=0.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_only",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        geometry_role="step2_preliminary",
+        geometry_source_type="step2_preliminary_prior_representative",
+        production_consumable_default=False,
+    )
+    row = {
+        "pair": "10:20",
+        "src": 10,
+        "dst": 20,
+        "topology_arc_id": "arc_only",
+        "topology_arc_source_type": "direct_topology_arc",
+        "line_coords": [[0.0, 2.0], [50.0, 2.0], [100.0, 2.0]],
+        "edge_ids": ["edge_only"],
+        "node_path": [10, 20],
+        "is_direct_legal": True,
+        "is_unique": True,
+        "traj_support_type": "no_support",
+        "traj_support_ids": [],
+        "prior_support_type": "no_support",
+        "prior_support_available": False,
+        "same_pair_rank": 1,
+        "kept_reason": "arc_first_main_flow",
+    }
+    xsec_map = {
+        10: BaseCrossSection(nodeid=10, geometry_coords=((0.0, -10.0), (0.0, 10.0))),
+        20: BaseCrossSection(nodeid=20, geometry_coords=((100.0, -10.0), (100.0, 10.0))),
+    }
+    inputs = PatchInputs(
+        patch_id="builder_arc_only",
+        patch_dir=Path("builder_arc_only"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, 1.0), (105.0, 1.0), (105.0, 3.0), (-5.0, 3.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+
+    segment, review = _step3_evidence.build_production_working_segment(
+        row=row,
+        selected_segment=selected_segment,
+        xsec_map=xsec_map,
+        inputs=inputs,
+        params=dict(DEFAULT_PARAMS),
+        drivable_surface=inputs.drivezone_zone_metric,
+        divstrip_buffer=None,
+    )
+
+    assert segment.geometry_source_type == "topology_arc_anchored"
+    assert segment.preliminary_hint_used is False
+    assert segment.geometry_coords == ((0.0, 2.0), (50.0, 2.0), (100.0, 2.0))
+    assert review["production_geometry_fallback_reason"] == "no_support_reference_available"
+
+
 def test_t05v2_arc_first_partial_support_recovers_same_arc_without_terminal_crossing(tmp_path: Path) -> None:
     patch_id = "arc_first_partial"
     data_root = tmp_path / "data"
-    road_fc = _fc([_line_feature([(0.0, 0.0), (100.0, 0.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
+    road_fc = _simple_road_fc(0.0)
     _write_patch(
         data_root,
         patch_id=patch_id,
@@ -1859,13 +2034,13 @@ def test_t05v2_arc_first_partial_support_recovers_same_arc_without_terminal_cros
     assert row["support_reference_coords"]
     assert row["support_anchor_src_coords"] is not None
     assert row["support_anchor_dst_coords"] is not None
-    assert row["working_segment_source"] in {"arc_first_materialized_segment", "step2_selected_segment"}
+    assert row["working_segment_source"] == "step3_support_driven_production"
 
 
 def test_t05v2_arc_first_stitched_support_uses_same_arc_fragments(tmp_path: Path) -> None:
     patch_id = "arc_first_stitched"
     data_root = tmp_path / "data"
-    road_fc = _fc([_line_feature([(0.0, 0.0), (100.0, 0.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
+    road_fc = _simple_road_fc(0.0)
     _write_patch(
         data_root,
         patch_id=patch_id,
@@ -1901,10 +2076,40 @@ def test_t05v2_arc_first_stitched_support_uses_same_arc_fragments(tmp_path: Path
     assert any(bool(item["properties"]["accepted_for_production"]) for item in stitched_debug["features"])
 
 
+def test_t05v2_pipeline_writes_preliminary_production_and_step5_input_reviews(tmp_path: Path) -> None:
+    patch_id = "production_review_artifacts"
+    data_root = tmp_path / "data"
+    _write_patch(
+        data_root,
+        patch_id=patch_id,
+        intersection_fc=_simple_intersections(),
+        drivezone_fc=_fc([_poly_feature([(-5.0, -1.0), (105.0, -1.0), (105.0, 4.0), (-5.0, 4.0)])], "EPSG:3857"),
+        traj_tracks=[[(0.0, 3.0), (50.0, 3.0), (100.0, 3.0)]],
+        road_fc=_simple_road_fc(0.0),
+    )
+    out_root = tmp_path / "out"
+    run_full_pipeline(data_root=data_root, patch_id=patch_id, run_id="run_prod_review", out_root=out_root)
+    patch_dir = out_root / "run_prod_review" / "patches" / patch_id
+
+    assert (patch_dir / "step2" / "step2_preliminary_segments.geojson").exists()
+    assert (patch_dir / "step3" / "step3_production_working_segments.geojson").exists()
+    assert (patch_dir / "step3" / "step3_production_geometry_review.json").exists()
+    assert (patch_dir / "step3" / "step3_same_pair_deconflict_review.json").exists()
+    assert (patch_dir / "step4" / "step4_corridor_identity_review.json").exists()
+    assert (patch_dir / "step5" / "step5_geometry_input_sources.json").exists()
+
+    step3_review = _read_json(patch_dir / "step3" / "step3_production_geometry_review.json")
+    step5_inputs = _read_json(patch_dir / "step5" / "step5_geometry_input_sources.json")
+    assert int(step3_review["summary"]["row_count"]) >= 1
+    assert step3_review["rows"][0]["production_geometry_source_type"]
+    assert int(step5_inputs["summary"]["row_count"]) >= 1
+    assert step5_inputs["rows"][0]["shape_ref_source_family"]
+
+
 def test_t05v2_arc_first_prefers_dominant_terminal_crossing_cluster(tmp_path: Path) -> None:
     patch_id = "arc_first_terminal_cluster"
     data_root = tmp_path / "data"
-    road_fc = _fc([_line_feature([(0.0, 2.0), (100.0, 2.0)], {"snodeid": 1, "enodeid": 2})], "EPSG:3857")
+    road_fc = _simple_road_fc(2.0)
     _write_patch(
         data_root,
         patch_id=patch_id,
@@ -2411,6 +2616,112 @@ def test_t05v2_build_final_road_prefers_projected_witness_reference_before_segme
     assert result["candidate_attempts"][0]["mode"] == "witness_reference_projected_anchored"
     assert float(result["candidate_attempts"][0]["drivezone_ratio"]) >= float(DEFAULT_PARAMS["ROAD_MIN_DRIVEZONE_RATIO"])
     assert road.line_coords == ((0.0, 1.0), (50.0, 1.0), (100.0, 1.0))
+
+
+def test_t05v2_build_final_road_uses_step3_production_working_segment_family() -> None:
+    segment = Segment(
+        segment_id="prodseg::seg_step5",
+        src_nodeid=10,
+        dst_nodeid=20,
+        direction="src->dst",
+        geometry_coords=((0.0, 3.0), (50.0, 3.0), (100.0, 3.0)),
+        candidate_ids=("cand_prod",),
+        source_modes=("traj",),
+        support_traj_ids=("traj_1",),
+        support_count=1,
+        dedup_count=1,
+        representative_offset_m=0.0,
+        other_xsec_crossing_count=0,
+        tolerated_other_xsec_crossings=1,
+        prior_supported=False,
+        formation_reason="arc_first_support_driven",
+        length_m=100.0,
+        drivezone_ratio=1.0,
+        crosses_divstrip=False,
+        topology_arc_id="arc_step5",
+        topology_arc_source_type="direct_topology_arc",
+        topology_arc_is_direct_legal=True,
+        topology_arc_is_unique=True,
+        geometry_role="step3_production_working_segment",
+        geometry_source_type="support_arc_fused",
+        support_provenance="selected_support:terminal_crossing_support",
+        anchor_provenance="src:selected_support_xsec_projection|dst:selected_support_xsec_projection",
+        production_consumable_default=True,
+    )
+    identity = CorridorIdentity(
+        segment_id="prodseg::seg_step5",
+        state="witness_based",
+        reason="synthetic_witness_state",
+        risk_flags=tuple(),
+        witness_interval_rank=None,
+        prior_supported=False,
+    )
+    src_slot = SlotInterval(
+        segment_id="prodseg::seg_step5",
+        endpoint_tag="src",
+        xsec_nodeid=10,
+        xsec_coords=((0.0, -10.0), (0.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=12.5,
+            end_s=13.5,
+            center_s=13.0,
+            length_m=1.0,
+            rank=0,
+            geometry_coords=((0.0, 2.5), (0.0, 3.5)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    dst_slot = SlotInterval(
+        segment_id="prodseg::seg_step5",
+        endpoint_tag="dst",
+        xsec_nodeid=20,
+        xsec_coords=((100.0, -10.0), (100.0, 10.0)),
+        interval=CorridorInterval(
+            start_s=12.5,
+            end_s=13.5,
+            center_s=13.0,
+            length_m=1.0,
+            rank=0,
+            geometry_coords=((100.0, 2.5), (100.0, 3.5)),
+        ),
+        resolved=True,
+        method="selected",
+        reason="resolved",
+        interval_count=1,
+    )
+    inputs = PatchInputs(
+        patch_id="step5_production_family",
+        patch_dir=Path("step5_production_family"),
+        metric_crs="EPSG:3857",
+        intersection_lines=tuple(),
+        lane_boundaries_metric=tuple(),
+        trajectories=tuple(),
+        drivezone_zone_metric=Polygon([(-5.0, 2.0), (105.0, 2.0), (105.0, 4.0), (-5.0, 4.0)]),
+        divstrip_zone_metric=None,
+        road_prior_path=None,
+        input_summary={},
+    )
+
+    road, result = _build_final_road(
+        patch_id="step5_production_family",
+        segment=segment,
+        identity=identity,
+        witness=None,
+        src_slot=src_slot,
+        dst_slot=dst_slot,
+        inputs=inputs,
+        prior_roads=[],
+        params=dict(DEFAULT_PARAMS),
+    )
+
+    assert road is not None
+    assert result["reason"] == "built"
+    assert result["shape_ref_mode"] == "production_working_segment_slot_anchored"
+    assert result["shape_ref_source_family"] == "production_working_segment_family"
+    assert road.line_coords == ((0.0, 3.0), (50.0, 3.0), (100.0, 3.0))
 
 
 def test_t05v2_build_slot_prefers_support_anchor_interval_over_reference_interval() -> None:

@@ -2046,6 +2046,24 @@ def _segment_feature_properties(segment: Segment, *, status: str, reason: str = 
         "support_count": int(segment.support_count),
         "dedup_count": int(segment.dedup_count),
         "source_modes": list(segment.source_modes),
+        "geometry_role": str(segment.geometry_role),
+        "geometry_source_type": str(segment.geometry_source_type),
+        "support_provenance": str(segment.support_provenance),
+        "anchor_provenance": str(segment.anchor_provenance),
+        "preliminary_hint_used": bool(segment.preliminary_hint_used),
+        "production_consumable_default": bool(segment.production_consumable_default),
+        "geometry_fallback_reason": str(segment.geometry_fallback_reason),
+        "preliminary_geometry_source": (
+            str(segment.geometry_source_type)
+            if str(segment.geometry_role) == "step2_preliminary"
+            else ""
+        ),
+        "is_production_geometry_seed": bool(str(segment.geometry_role) == "step2_preliminary"),
+        "preliminary_only_reason": (
+            "step2_pre_support_cluster_selection"
+            if str(segment.geometry_role) == "step2_preliminary"
+            else ""
+        ),
         "prior_supported": bool(segment.prior_supported),
         "crossing_dist": int(segment.other_xsec_crossing_count),
         "other_xsec_crossing_count": int(segment.other_xsec_crossing_count),
@@ -2826,6 +2844,17 @@ def _cluster_segments(candidates: list[dict[str, Any]], frame: InputFrame, param
                         if representative.get("topology_arc_assignment_score_gap_m") is None
                         else float(representative.get("topology_arc_assignment_score_gap_m"))
                     ),
+                    geometry_role="step2_preliminary",
+                    geometry_source_type=(
+                        "step2_preliminary_mixed_cluster_representative"
+                        if len(source_modes) > 1
+                        else f"step2_preliminary_{str(representative.get('source', 'arc'))}_representative"
+                    ),
+                    support_provenance="step2_candidate_cluster",
+                    anchor_provenance="step2_candidate_endpoints",
+                    preliminary_hint_used=False,
+                    production_consumable_default=False,
+                    geometry_fallback_reason="",
                 )
             )
     return out
@@ -4009,6 +4038,7 @@ def _stage2_segment(
         "step2_metrics": {**candidate_bundle["stats"], **step2_metrics, **pair_scoped_exception_metrics},
     }
     dbg_dir = debug_dir(out_root, run_id, patch_id)
+    step_dir = stage_dir(out_root, run_id, patch_id, "step2_segment")
     write_json(_artifact_path(out_root, run_id, patch_id, "step2_segment"), artifact)
     all_candidate_features = list(candidate_bundle["candidate_debug_features"])
     dropped_segment_features = [
@@ -4027,8 +4057,10 @@ def _stage2_segment(
     write_lines_geojson(dbg_dir / "step2_segment_candidates_all.geojson", all_candidate_features)
     write_lines_geojson(dbg_dir / "segment_candidates.geojson", all_candidate_features)
     write_lines_geojson(dbg_dir / "step2_segment_selected.geojson", selected_segment_features)
+    write_lines_geojson(dbg_dir / "step2_preliminary_segments.geojson", selected_segment_features)
     write_lines_geojson(dbg_dir / "segment_selected.geojson", selected_segment_features)
     write_lines_geojson(dbg_dir / "step2_segment_dropped.geojson", dropped_segment_features)
+    write_lines_geojson(step_dir / "step2_preliminary_segments.geojson", selected_segment_features)
     write_json(dbg_dir / "step2_traj_crossings_raw.geojson", _make_feature_collection(list(candidate_bundle.get("raw_crossing_features", []))))
     write_json(
         dbg_dir / "step2_traj_crossings_filtered.geojson",

@@ -616,17 +616,76 @@ def run_corridor_identity_stage(
     corridor_resolved_arc_count = int(sum(1 for item in registry_rows if str(item.get("corridor_identity", "")) in {"witness_based", "prior_based"}))
     legal_arc_funnel = dict(witnesses_payload.get("legal_arc_funnel", {}))
     legal_arc_funnel["corridor_resolved_arc_count"] = corridor_resolved_arc_count
+    identity_by_segment_id = {str(item.segment_id): item for item in identities}
+    registry_by_working_segment = {
+        str(item.get("working_segment_id", "")): dict(item)
+        for item in registry_rows
+        if str(item.get("working_segment_id", ""))
+    }
+    registry_by_arc_id = {
+        str(item.get("topology_arc_id", "")): dict(item)
+        for item in registry_rows
+        if str(item.get("topology_arc_id", ""))
+    }
+    review_rows = [
+        {
+            "pair": f"{int(segment.src_nodeid)}:{int(segment.dst_nodeid)}",
+            "topology_arc_id": str(segment.topology_arc_id),
+            "working_segment_id": str(segment.segment_id),
+            "geometry_role": str(segment.geometry_role),
+            "geometry_source_type": str(segment.geometry_source_type),
+            "production_consumable_default": bool(segment.production_consumable_default),
+            "preliminary_hint_used": bool(segment.preliminary_hint_used),
+            "geometry_fallback_reason": str(segment.geometry_fallback_reason),
+            "support_provenance": str(segment.support_provenance),
+            "anchor_provenance": str(segment.anchor_provenance),
+            "corridor_identity_state": str(identity_by_segment_id[str(segment.segment_id)].state),
+            "corridor_reason": str(identity_by_segment_id[str(segment.segment_id)].reason),
+            "risk_flags": list(identity_by_segment_id[str(segment.segment_id)].risk_flags),
+            "prior_supported": bool(identity_by_segment_id[str(segment.segment_id)].prior_supported),
+            "witness_interval_rank": identity_by_segment_id[str(segment.segment_id)].witness_interval_rank,
+            "production_geometry_source_type": str(
+                (
+                    registry_by_working_segment.get(str(segment.segment_id))
+                    or registry_by_arc_id.get(str(segment.topology_arc_id))
+                    or {}
+                ).get("production_geometry_source_type", "")
+            ),
+            "preliminary_segment_id": str(
+                (
+                    registry_by_working_segment.get(str(segment.segment_id))
+                    or registry_by_arc_id.get(str(segment.topology_arc_id))
+                    or {}
+                ).get("preliminary_segment_id", "")
+            ),
+        }
+        for segment in segments
+    ]
     artifact = {
         "corridor_identities": [identity.to_dict() for identity in identities],
         "legal_arc_registry": [dict(item) for item in registry_rows if bool(item.get("entered_main_flow", False))],
         "full_legal_arc_registry": registry_rows,
         "working_segments": [segment.to_dict() for segment in segments],
         "legal_arc_funnel": legal_arc_funnel,
+        "corridor_identity_review": review_rows,
         "runtime": {"stage_runtime_ms": float((perf_counter() - stage_started) * 1000.0)},
     }
     dbg_dir = pipeline.debug_dir(out_root, run_id, patch_id)
+    step_dir = pipeline.stage_dir(out_root, run_id, patch_id, "step4_corridor_identity")
     write_json(pipeline._artifact_path(out_root, run_id, patch_id, "step4_corridor_identity"), artifact)
     write_json(dbg_dir / "corridor_identity.json", artifact)
+    write_json(
+        step_dir / "step4_corridor_identity_review.json",
+        {
+            "rows": review_rows,
+            "summary": {
+                "row_count": int(len(review_rows)),
+                "witness_based_count": int(sum(1 for item in review_rows if str(item["corridor_identity_state"]) == "witness_based")),
+                "prior_based_count": int(sum(1 for item in review_rows if str(item["corridor_identity_state"]) == "prior_based")),
+                "unresolved_count": int(sum(1 for item in review_rows if str(item["corridor_identity_state"]) == "unresolved")),
+            },
+        },
+    )
     return {
         "artifact": artifact,
         "segments": segments,

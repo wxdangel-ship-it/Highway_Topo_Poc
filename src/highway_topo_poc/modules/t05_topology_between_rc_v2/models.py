@@ -167,6 +167,13 @@ class Segment:
     multi_arc_rule_reason: str = ""
     same_pair_rank: int | None = None
     kept_reason: str = ""
+    geometry_role: str = "step2_preliminary"
+    geometry_source_type: str = ""
+    support_provenance: str = ""
+    anchor_provenance: str = ""
+    preliminary_hint_used: bool = False
+    production_consumable_default: bool = False
+    geometry_fallback_reason: str = ""
 
     def geometry_metric(self) -> LineString:
         return coords_to_line(self.geometry_coords)
@@ -177,6 +184,13 @@ class Segment:
             "src_nodeid": int(self.src_nodeid),
             "dst_nodeid": int(self.dst_nodeid),
             "direction": str(self.direction),
+            "geometry_role": str(self.geometry_role),
+            "geometry_source_type": str(self.geometry_source_type),
+            "support_provenance": str(self.support_provenance),
+            "anchor_provenance": str(self.anchor_provenance),
+            "preliminary_hint_used": bool(self.preliminary_hint_used),
+            "production_consumable_default": bool(self.production_consumable_default),
+            "geometry_fallback_reason": str(self.geometry_fallback_reason),
             "topology_arc_id": str(self.topology_arc_id),
             "topology_arc_source_type": str(self.topology_arc_source_type),
             "topology_arc_edge_ids": [str(v) for v in self.topology_arc_edge_ids],
@@ -261,6 +275,13 @@ class Segment:
             src_nodeid=int(payload.get("src_nodeid")),
             dst_nodeid=int(payload.get("dst_nodeid")),
             direction=str(payload.get("direction", "src->dst")),
+            geometry_role=str(payload.get("geometry_role", "step2_preliminary")),
+            geometry_source_type=str(payload.get("geometry_source_type", "")),
+            support_provenance=str(payload.get("support_provenance", "")),
+            anchor_provenance=str(payload.get("anchor_provenance", "")),
+            preliminary_hint_used=bool(payload.get("preliminary_hint_used", False)),
+            production_consumable_default=bool(payload.get("production_consumable_default", False)),
+            geometry_fallback_reason=str(payload.get("geometry_fallback_reason", "")),
             topology_arc_id=str(payload.get("topology_arc_id", "")),
             topology_arc_source_type=str(payload.get("topology_arc_source_type", "")),
             topology_arc_edge_ids=tuple(str(v) for v in payload.get("topology_arc_edge_ids", [])),

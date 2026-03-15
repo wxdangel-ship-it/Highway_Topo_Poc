@@ -170,6 +170,29 @@ def build_full_legal_arc_registry(
                 "selected_segment_ids": [str(getattr(segment, "segment_id", "")) for segment in attached_segments],
                 "selected_segment_count": int(len(attached_segments)),
                 "selected_segment_id": "" if not attached_segments else str(attached_segments[0].segment_id),
+                "preliminary_segment_ids": [str(getattr(segment, "segment_id", "")) for segment in attached_segments],
+                "preliminary_segment_count": int(len(attached_segments)),
+                "preliminary_segment_id": "" if not attached_segments else str(attached_segments[0].segment_id),
+                "preliminary_segment_role": (
+                    ""
+                    if not attached_segments
+                    else str(getattr(attached_segments[0], "geometry_role", "step2_preliminary"))
+                ),
+                "preliminary_geometry_source": (
+                    ""
+                    if not attached_segments
+                    else str(getattr(attached_segments[0], "geometry_source_type", ""))
+                ),
+                "preliminary_only_reason": (
+                    ""
+                    if not attached_segments
+                    else "step2_pre_support_cluster_selection"
+                ),
+                "is_production_geometry_seed": bool(attached_segments),
+                "production_consumable_default": False,
+                "production_geometry_source_type": "",
+                "production_geometry_fallback_reason": "",
+                "production_preliminary_hint_used": False,
                 "same_pair_multi_arc_candidate": bool(
                     getattr(selected_segment, "same_pair_multi_arc_candidate", False)
                 )
@@ -229,7 +252,7 @@ def build_full_legal_arc_registry(
                 ),
                 "unbuilt_reason": str(hard_block_reason or blocked_diagnostic_reason),
                 "working_segment_id": "" if not attached_segments else str(attached_segments[0].segment_id),
-                "working_segment_source": "step2_selected_segment" if attached_segments else "",
+                "working_segment_source": "step2_preliminary_segment" if attached_segments else "",
             }
         )
 

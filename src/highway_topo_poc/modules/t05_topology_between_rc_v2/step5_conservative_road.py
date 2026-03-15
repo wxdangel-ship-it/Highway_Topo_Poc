@@ -646,7 +646,24 @@ def slot_reference_line(
         prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
         if prior_line is not None:
             return prior_line, "prior_reference"
-    return segment.geometry_metric(), "segment_support"
+    return segment.geometry_metric(), "production_working_segment"
+
+
+def _shape_ref_source_family(mode: str) -> str:
+    text = str(mode or "")
+    if text.startswith(("selected_support_", "stitched_support_", "traj_support_")):
+        return "support_reference_family"
+    if text.startswith("witness"):
+        return "witness_family"
+    if text.startswith("prior"):
+        return "prior_family"
+    if text.startswith("topology_arc"):
+        return "topology_arc_family"
+    if text.startswith(("production_working_segment", "segment_support")):
+        return "production_working_segment_family"
+    if text.startswith("rcsdroad"):
+        return "rcsdroad_family"
+    return "other_family"
 
 
 def _project_anchor_s_on_xsec(xsec_line: LineString, anchor_coords: list[float] | tuple[float, float] | None) -> float | None:
@@ -2183,6 +2200,7 @@ def build_final_road(
         "segment_id": str(segment.segment_id),
         "corridor_state": str(identity.state),
         "shape_ref_mode": "",
+        "shape_ref_source_family": "",
         "shape_ref_coords": [],
         "candidate_attempts": [],
         "drivezone_ratio": 0.0,
@@ -2254,6 +2272,7 @@ def build_final_road(
             prior_index=prior_index,
         )
         result["shape_ref_mode"] = str(fallback_mode)
+        result["shape_ref_source_family"] = str(_shape_ref_source_family(fallback_mode))
         result["shape_ref_coords"] = [[float(x), float(y)] for x, y in line_to_coords(fallback_shape_ref)]
         result["bridge_decision_stage"] = "bridge_final_decision" if bridge_retained else str(result["bridge_decision_stage"])
         result["bridge_decision_reason"] = "bridge_slot_not_established" if bridge_retained else str(result["bridge_decision_reason"])
@@ -2348,21 +2367,21 @@ def build_final_road(
             end_pt=end_pt,
         )
     segment_projected = _anchor_along_base_line(segment.geometry_metric(), start_pt, end_pt)
-    _append_candidate_line(candidate_lines, segment_projected, "segment_support_projected_anchored")
+    _append_candidate_line(candidate_lines, segment_projected, "production_working_segment_projected_anchored")
     segment_envelope = _surface_envelope_candidate_line(segment_projected, src_slot, dst_slot, safe_surface)
-    _append_candidate_line(candidate_lines, segment_envelope, "segment_support_projected_anchored_safe_envelope")
+    _append_candidate_line(candidate_lines, segment_envelope, "production_working_segment_projected_anchored_safe_envelope")
     _append_side_constrained_candidates(
         candidate_lines,
         segment_projected,
-        "segment_support_projected_anchored",
+        "production_working_segment_projected_anchored",
         start_pt=start_pt,
         end_pt=end_pt,
     )
     segment_anchor = _replace_endpoints(segment.geometry_metric(), start_pt, end_pt)
     if not segment_anchor.equals(preferred_line):
-        _append_candidate_line(candidate_lines, segment_anchor, "segment_support_slot_anchored")
+        _append_candidate_line(candidate_lines, segment_anchor, "production_working_segment_slot_anchored")
         segment_anchor_envelope = _surface_envelope_candidate_line(segment_anchor, src_slot, dst_slot, safe_surface)
-        _append_candidate_line(candidate_lines, segment_anchor_envelope, "segment_support_slot_anchored_safe_envelope")
+        _append_candidate_line(candidate_lines, segment_anchor_envelope, "production_working_segment_slot_anchored_safe_envelope")
     prior_line = find_prior_reference_line(segment, prior_roads, prior_index=prior_index)
     if prior_line is not None:
         prior_projected = _anchor_along_base_line(prior_line, start_pt, end_pt)
@@ -2558,6 +2577,7 @@ def build_final_road(
     )
     result["candidate_attempts"] = attempts
     result["shape_ref_mode"] = str(chosen_mode)
+    result["shape_ref_source_family"] = str(_shape_ref_source_family(chosen_mode))
     result["shape_ref_coords"] = [[float(x), float(y)] for x, y in line_to_coords(chosen_line)]
     result["drivezone_ratio"] = float(drivezone_ratio)
     result["divstrip_overlap_ratio"] = float(divstrip_overlap_ratio)
@@ -2740,12 +2760,28 @@ def write_road_outputs(
     bridge_trial_entries: list[dict[str, Any]] = []
     road_map = {str(road.segment_id): road for road in roads}
     result_map = {str(item["segment_id"]): item for item in road_results}
+    registry_by_working_segment = {
+        str(item.get("working_segment_id", "")): dict(item)
+        for item in list(full_registry_rows or [])
+        if str(item.get("working_segment_id", ""))
+    }
+    registry_by_arc_id = {
+        str(item.get("topology_arc_id", "")): dict(item)
+        for item in list(full_registry_rows or [])
+        if str(item.get("topology_arc_id", ""))
+    }
+    geometry_input_source_rows: list[dict[str, Any]] = []
     for segment in segments:
         identity = identities[str(segment.segment_id)]
         witness = witnesses.get(str(segment.segment_id))
         src_slot = slots[str(segment.segment_id)]["src"]
         dst_slot = slots[str(segment.segment_id)]["dst"]
         build_result = result_map.get(str(segment.segment_id), {})
+        registry_row = (
+            registry_by_working_segment.get(str(segment.segment_id))
+            or registry_by_arc_id.get(str(segment.topology_arc_id))
+            or {}
+        )
         shape_ref_coords = build_result.get("shape_ref_coords") or [[float(x), float(y)] for x, y in segment.geometry_coords]
         shape_ref_line = pipeline.coords_to_line(tuple((float(x), float(y)) for x, y in shape_ref_coords))
         failure_classification = classify_segment_outcome(
@@ -2763,9 +2799,17 @@ def write_road_outputs(
                     "src_nodeid": int(segment.src_nodeid),
                     "dst_nodeid": int(segment.dst_nodeid),
                     "corridor_state": str(identity.state),
-                    "shape_ref_mode": str(build_result.get("shape_ref_mode", "segment_support")),
+                    "shape_ref_mode": str(build_result.get("shape_ref_mode", "production_working_segment")),
+                    "shape_ref_source_family": str(
+                        build_result.get(
+                            "shape_ref_source_family",
+                            _shape_ref_source_family(build_result.get("shape_ref_mode", "")),
+                        )
+                    ),
                     "no_geometry_candidate": bool(str(build_result.get("reason", "")) != "built"),
                     "no_geometry_reason": str(build_result.get("reason", "")),
+                    "geometry_role": str(segment.geometry_role),
+                    "geometry_source_type": str(segment.geometry_source_type),
                     "topology_arc_id": str(segment.topology_arc_id),
                     "topology_arc_source_type": str(segment.topology_arc_source_type),
                     "topology_arc_is_direct_legal": bool(segment.topology_arc_is_direct_legal),
@@ -2876,6 +2920,12 @@ def write_road_outputs(
                 "src_slot_status": "resolved" if bool(src_slot.resolved) else "unresolved",
                 "dst_slot_status": "resolved" if bool(dst_slot.resolved) else "unresolved",
                 "chosen_shape_ref_mode": str(build_result.get("shape_ref_mode", "")),
+                "chosen_shape_ref_source_family": str(
+                    build_result.get(
+                        "shape_ref_source_family",
+                        _shape_ref_source_family(build_result.get("shape_ref_mode", "")),
+                    )
+                ),
                 "candidate_attempts": list(build_result.get("candidate_attempts") or []),
                 "drivezone_ratio": float(build_result.get("drivezone_ratio", 0.0) or 0.0),
                 "road_intersects_divstrip": bool(build_result.get("road_intersects_divstrip", False)),
@@ -2944,6 +2994,12 @@ def write_road_outputs(
             "road_crosses_divstrip": bool(road_crosses_divstrip),
             "road_intersects_divstrip": bool(road_crosses_divstrip),
             "shape_ref_mode": str(build_result.get("shape_ref_mode", "")),
+            "shape_ref_source_family": str(
+                build_result.get(
+                    "shape_ref_source_family",
+                    _shape_ref_source_family(build_result.get("shape_ref_mode", "")),
+                )
+            ),
             "no_geometry_candidate": bool(road is None),
             "no_geometry_candidate_reason": str(unresolved_reason),
             "unresolved_reason": str(unresolved_reason),
@@ -2987,6 +3043,38 @@ def write_road_outputs(
             "failure_classification": str(failure_classification),
         }
         metrics_segments.append(metrics_entry)
+        geometry_input_source_rows.append(
+            {
+                "segment_id": str(segment.segment_id),
+                "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                "topology_arc_id": str(segment.topology_arc_id),
+                "geometry_role": str(segment.geometry_role),
+                "production_geometry_source_type": str(segment.geometry_source_type),
+                "production_support_provenance": str(segment.support_provenance),
+                "production_anchor_provenance": str(segment.anchor_provenance),
+                "production_geometry_fallback_reason": str(segment.geometry_fallback_reason),
+                "preliminary_hint_used": bool(segment.preliminary_hint_used),
+                "step3_working_segment_source": str(registry_row.get("working_segment_source", "")),
+                "step3_support_source_type": str(registry_row.get("production_support_source_type", "")),
+                "step3_support_driven": bool(registry_row.get("production_support_driven", False)),
+                "step3_preliminary_segment_id": str(registry_row.get("preliminary_segment_id", "")),
+                "step3_preliminary_geometry_source": str(registry_row.get("preliminary_geometry_source", "")),
+                "corridor_identity_state": str(identity.state),
+                "shape_ref_mode": str(build_result.get("shape_ref_mode", "")),
+                "shape_ref_source_family": str(
+                    build_result.get(
+                        "shape_ref_source_family",
+                        _shape_ref_source_family(build_result.get("shape_ref_mode", "")),
+                    )
+                ),
+                "built_final_road": bool(road is not None),
+                "final_reason": str(build_result.get("reason", "")),
+                "same_pair_arc_finalize_allowed": bool(
+                    getattr(segment, "same_pair_arc_finalize_allowed", False)
+                ),
+                "production_multi_arc_allowed": bool(segment.production_multi_arc_allowed),
+            }
+        )
         if bool(segment.bridge_candidate_retained):
             bridge_trial_entries.append(
                 {
@@ -3240,6 +3328,30 @@ def write_road_outputs(
     write_json(patch_dir / "metrics.json", metrics)
     write_json(patch_dir / "gate.json", gate)
     write_json(patch_dir / "geometry_refine_review.json", geometry_refine_review)
+    write_json(
+        pipeline.stage_dir(out_root, run_id, patch_id, "step5_slot_mapping") / "step5_geometry_input_sources.json",
+        {
+            "rows": geometry_input_source_rows,
+            "summary": {
+                "row_count": int(len(geometry_input_source_rows)),
+                "built_count": int(sum(1 for item in geometry_input_source_rows if bool(item["built_final_road"]))),
+                "production_working_segment_family_count": int(
+                    sum(
+                        1
+                        for item in geometry_input_source_rows
+                        if str(item["shape_ref_source_family"]) == "production_working_segment_family"
+                    )
+                ),
+                "support_reference_family_count": int(
+                    sum(
+                        1
+                        for item in geometry_input_source_rows
+                        if str(item["shape_ref_source_family"]) == "support_reference_family"
+                    )
+                ),
+            },
+        },
+    )
     (patch_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
     write_lines_geojson(dbg_dir / "shape_ref_line.geojson", shape_ref_features)
     write_lines_geojson(dbg_dir / "road_final.geojson", road_features)
@@ -3252,6 +3364,7 @@ def write_road_outputs(
     write_lines_geojson(dbg_dir / "geometry_refine_core_skeleton.geojson", geometry_refine_core_features)
     write_lines_geojson(dbg_dir / "geometry_refine_entry_exit.geojson", geometry_refine_entry_exit_features)
     write_json(dbg_dir / "geometry_refine_review.json", geometry_refine_review)
+    write_json(dbg_dir / "step5_geometry_input_sources.json", {"rows": geometry_input_source_rows})
     write_json(
         dbg_dir / "reason_trace.json",
         {

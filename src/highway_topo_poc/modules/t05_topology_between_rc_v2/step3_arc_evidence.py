@@ -7,6 +7,7 @@ from time import perf_counter
 from typing import Any
 
 from shapely.geometry import LineString, Point
+from shapely.ops import nearest_points
 
 from .arc_selection_rules import (
     STRUCTURE_MERGE_MULTI_UPSTREAM,
@@ -1751,9 +1752,18 @@ def _support_source_modes(traj_support_type: str, prior_support_type: str) -> tu
     return ("arc",)
 
 
-def _support_formation_reason(traj_support_type: str, prior_support_type: str, selected_segment_id: str) -> str:
-    if str(selected_segment_id):
-        return "arc_first_selected_segment"
+def _support_formation_reason(
+    traj_support_type: str,
+    prior_support_type: str,
+    production_geometry_source_type: str,
+    preliminary_hint_used: bool,
+) -> str:
+    if bool(preliminary_hint_used):
+        return "arc_first_preliminary_hint_fallback"
+    if str(production_geometry_source_type).startswith("support"):
+        return "arc_first_support_driven"
+    if str(production_geometry_source_type).startswith("topology_arc"):
+        return "arc_first_topology_arc_fallback"
     if str(traj_support_type) == "terminal_crossing_support":
         return "arc_first_terminal_support"
     if str(traj_support_type) == "partial_arc_support":
@@ -1763,6 +1773,550 @@ def _support_formation_reason(traj_support_type: str, prior_support_type: str, s
     if str(prior_support_type) == "prior_fallback_support":
         return "arc_first_prior_fallback"
     return "arc_first_no_support"
+
+
+def _line_from_coords_payload(coords: Any) -> LineString | None:
+    pts = tuple(
+        (float(item[0]), float(item[1]))
+        for item in list(coords or [])
+        if isinstance(item, (list, tuple)) and len(item) >= 2
+    )
+    if len(pts) < 2:
+        return None
+    line = coords_to_line(pts)
+    if line.is_empty or line.length <= 1e-6:
+        return None
+    return line
+
+
+def _point_from_coords_payload(coords: Any) -> Point | None:
+    if not isinstance(coords, (list, tuple)) or len(coords) < 2:
+        return None
+    try:
+        point = Point(float(coords[0]), float(coords[1]))
+    except Exception:
+        return None
+    if point.is_empty:
+        return None
+    return point
+
+
+def _endpoint_from_line(line: LineString | None, *, endpoint_tag: str) -> Point | None:
+    if line is None or line.is_empty or line.length <= 1e-6:
+        return None
+    coord = line.coords[0] if str(endpoint_tag) == "src" else line.coords[-1]
+    return Point(float(coord[0]), float(coord[1]))
+
+
+def _replace_line_endpoints(line: LineString, start_pt: Point, end_pt: Point) -> LineString:
+    coords = list(line.coords)
+    middle: list[tuple[float, float]] = []
+    for coord in coords[1:-1]:
+        xy = (float(coord[0]), float(coord[1]))
+        if not middle or xy != middle[-1]:
+            middle.append(xy)
+    deduped: list[tuple[float, float]] = []
+    for xy in [
+        (float(start_pt.x), float(start_pt.y)),
+        *middle,
+        (float(end_pt.x), float(end_pt.y)),
+    ]:
+        if not deduped or xy != deduped[-1]:
+            deduped.append(xy)
+    if len(deduped) < 2:
+        deduped = [(float(start_pt.x), float(start_pt.y)), (float(end_pt.x), float(end_pt.y))]
+    return LineString(deduped)
+
+
+def _nearest_point_on_xsec(xsec_line: LineString | None, geometry: Any) -> Point | None:
+    if xsec_line is None or xsec_line.is_empty or xsec_line.length <= 1e-6:
+        return None
+    if geometry is None or getattr(geometry, "is_empty", True):
+        return None
+    try:
+        point_on_xsec, _ = nearest_points(xsec_line, geometry)
+    except Exception:
+        return None
+    if point_on_xsec.is_empty:
+        return None
+    return point_on_xsec
+
+
+def _xsec_midpoint(xsec_line: LineString | None) -> Point | None:
+    if xsec_line is None or xsec_line.is_empty or xsec_line.length <= 1e-6:
+        return None
+    return xsec_line.interpolate(0.5, normalized=True)
+
+
+def _anchor_point_on_xsec(
+    *,
+    xsec_line: LineString | None,
+    preferred_anchor_coords: Any,
+    preferred_label: str,
+    base_line: LineString | None,
+    base_label: str,
+    preliminary_line: LineString | None,
+    endpoint_tag: str,
+) -> tuple[Point, str]:
+    preferred_point = _point_from_coords_payload(preferred_anchor_coords)
+    if preferred_point is not None:
+        snapped = _nearest_point_on_xsec(xsec_line, preferred_point)
+        if snapped is not None:
+            return snapped, f"{preferred_label}_xsec_projection"
+    snapped = _nearest_point_on_xsec(xsec_line, base_line)
+    if snapped is not None:
+        return snapped, f"{base_label}_xsec_projection"
+    snapped = _nearest_point_on_xsec(xsec_line, preliminary_line)
+    if snapped is not None:
+        return snapped, "preliminary_hint_xsec_projection"
+    midpoint = _xsec_midpoint(xsec_line)
+    if midpoint is not None:
+        return midpoint, "xsec_midpoint"
+    fallback = _endpoint_from_line(base_line, endpoint_tag=endpoint_tag) or _endpoint_from_line(
+        preliminary_line,
+        endpoint_tag=endpoint_tag,
+    )
+    if fallback is not None:
+        return fallback, "line_endpoint_fallback"
+    origin = Point(0.0, 0.0)
+    return origin, "origin_fallback"
+
+
+def _preferred_support_geometry(row: dict[str, Any]) -> dict[str, Any]:
+    preferred_source = str(row.get("support_interval_reference_source", "") or "")
+    ordered: list[tuple[str, Any, Any, Any]] = []
+    if preferred_source == "stitched_support":
+        ordered = [
+            (
+                "stitched_support",
+                row.get("stitched_support_reference_coords", []),
+                row.get("stitched_support_anchor_src_coords"),
+                row.get("stitched_support_anchor_dst_coords"),
+            ),
+            (
+                "selected_support",
+                row.get("support_reference_coords", []),
+                row.get("support_anchor_src_coords"),
+                row.get("support_anchor_dst_coords"),
+            ),
+        ]
+    elif preferred_source == "selected_support":
+        ordered = [
+            (
+                "selected_support",
+                row.get("support_reference_coords", []),
+                row.get("support_anchor_src_coords"),
+                row.get("support_anchor_dst_coords"),
+            ),
+            (
+                "stitched_support",
+                row.get("stitched_support_reference_coords", []),
+                row.get("stitched_support_anchor_src_coords"),
+                row.get("stitched_support_anchor_dst_coords"),
+            ),
+        ]
+    else:
+        ordered = [
+            (
+                "selected_support",
+                row.get("support_reference_coords", []),
+                row.get("support_anchor_src_coords"),
+                row.get("support_anchor_dst_coords"),
+            ),
+            (
+                "stitched_support",
+                row.get("stitched_support_reference_coords", []),
+                row.get("stitched_support_anchor_src_coords"),
+                row.get("stitched_support_anchor_dst_coords"),
+            ),
+        ]
+    for source_type, coords, src_anchor, dst_anchor in ordered:
+        line = _line_from_coords_payload(coords)
+        if line is None:
+            continue
+        return {
+            "source_type": str(source_type),
+            "line": line,
+            "src_anchor_coords": src_anchor,
+            "dst_anchor_coords": dst_anchor,
+        }
+    return {
+        "source_type": "none",
+        "line": None,
+        "src_anchor_coords": None,
+        "dst_anchor_coords": None,
+    }
+
+
+def _production_surface_ok(metrics: dict[str, Any], params: dict[str, Any]) -> bool:
+    return bool(
+        float(metrics.get("on_drivable_surface_ratio", 0.0) or 0.0)
+        >= float(params.get("ARC_SUPPORT_MIN_DRIVABLE_RATIO", 0.70))
+        and float(metrics.get("drivezone_overlap_ratio", 0.0) or 0.0)
+        >= float(params.get("ROAD_MIN_DRIVEZONE_RATIO", params.get("ARC_SUPPORT_MIN_DRIVEZONE_RATIO", 0.85)))
+        and float(metrics.get("divstrip_overlap_ratio", 0.0) or 0.0)
+        <= max(float(params.get("ARC_SUPPORT_MAX_DIVSTRIP_RATIO", 0.05)), 0.10)
+    )
+
+
+def build_production_working_segment(
+    *,
+    row: dict[str, Any],
+    selected_segment: Segment | None,
+    xsec_map: dict[int, Any],
+    inputs: Any,
+    params: dict[str, Any],
+    drivable_surface: Any | None,
+    divstrip_buffer: Any | None,
+) -> tuple[Segment, dict[str, Any]]:
+    pipeline = _pipeline()
+    arc_line = _arc_line(row)
+    preliminary_line = selected_segment.geometry_metric() if selected_segment is not None else None
+    support_geometry = _preferred_support_geometry(row)
+    support_line = support_geometry["line"]
+    support_source_type = str(support_geometry["source_type"])
+    preferred_base_line = support_line or arc_line or preliminary_line
+    src_xsec = xsec_map.get(int(row.get("src", 0)))
+    dst_xsec = xsec_map.get(int(row.get("dst", 0)))
+    src_xsec_line = None if src_xsec is None else src_xsec.geometry_metric()
+    dst_xsec_line = None if dst_xsec is None else dst_xsec.geometry_metric()
+    start_pt, start_anchor_provenance = _anchor_point_on_xsec(
+        xsec_line=src_xsec_line,
+        preferred_anchor_coords=support_geometry.get("src_anchor_coords"),
+        preferred_label=support_source_type if support_source_type != "none" else "support",
+        base_line=preferred_base_line,
+        base_label="support_or_arc",
+        preliminary_line=preliminary_line,
+        endpoint_tag="src",
+    )
+    end_pt, end_anchor_provenance = _anchor_point_on_xsec(
+        xsec_line=dst_xsec_line,
+        preferred_anchor_coords=support_geometry.get("dst_anchor_coords"),
+        preferred_label=support_source_type if support_source_type != "none" else "support",
+        base_line=preferred_base_line,
+        base_label="support_or_arc",
+        preliminary_line=preliminary_line,
+        endpoint_tag="dst",
+    )
+
+    candidate_rows: list[dict[str, Any]] = []
+
+    def _candidate_record(
+        line: LineString | None,
+        *,
+        source_type: str,
+        support_driven: bool,
+        preliminary_hint_used: bool,
+    ) -> None:
+        if line is None or line.is_empty or line.length <= 1e-6:
+            return
+        anchored = _replace_line_endpoints(line, start_pt, end_pt)
+        metrics = _line_surface_metrics(
+            anchored,
+            drivezone=inputs.drivezone_zone_metric,
+            drivable_surface=drivable_surface,
+            divstrip_buffer=divstrip_buffer,
+        )
+        candidate_rows.append(
+            {
+                "line": anchored,
+                "source_type": str(source_type),
+                "support_driven": bool(support_driven),
+                "preliminary_hint_used": bool(preliminary_hint_used),
+                "surface_ok": bool(_production_surface_ok(metrics, params)),
+                "metrics": {
+                    **dict(metrics),
+                    "length_m": float(anchored.length),
+                    "arc_offset_m": (
+                        None
+                        if arc_line is None
+                        else float(anchored.distance(arc_line))
+                    ),
+                    "preliminary_offset_m": (
+                        None
+                        if preliminary_line is None
+                        else float(anchored.distance(preliminary_line))
+                    ),
+                },
+            }
+        )
+
+    if support_line is not None and str(row.get("traj_support_type", "no_support")) != "no_support":
+        _candidate_record(
+            support_line,
+            source_type=(
+                "support_arc_fused"
+                if arc_line is not None
+                else "support_reference_anchored"
+            ),
+            support_driven=True,
+            preliminary_hint_used=False,
+        )
+    if arc_line is not None:
+        _candidate_record(
+            arc_line,
+            source_type="topology_arc_anchored",
+            support_driven=False,
+            preliminary_hint_used=False,
+        )
+    if preliminary_line is not None:
+        _candidate_record(
+            preliminary_line,
+            source_type="preliminary_hint_anchored",
+            support_driven=False,
+            preliminary_hint_used=True,
+        )
+    if not candidate_rows:
+        raise ValueError(f"production_geometry_missing:{row.get('topology_arc_id', '')}")
+
+    support_candidate = next((item for item in candidate_rows if bool(item["support_driven"])), None)
+    arc_candidate = next((item for item in candidate_rows if str(item["source_type"]) == "topology_arc_anchored"), None)
+    preliminary_candidate = next((item for item in candidate_rows if bool(item["preliminary_hint_used"])), None)
+
+    chosen = None
+    fallback_reason = ""
+    if support_candidate is not None and bool(support_candidate["surface_ok"]):
+        chosen = support_candidate
+    elif arc_candidate is not None and bool(arc_candidate["surface_ok"]):
+        chosen = arc_candidate
+        fallback_reason = (
+            "no_support_reference_available"
+            if support_candidate is None
+            else "support_surface_inconsistent"
+        )
+    elif preliminary_candidate is not None and bool(preliminary_candidate["surface_ok"]):
+        chosen = preliminary_candidate
+        fallback_reason = (
+            "support_very_weak_preliminary_hint_fallback"
+            if support_candidate is None
+            else "support_and_arc_surface_inconsistent_preliminary_hint_fallback"
+        )
+    else:
+        chosen = sorted(
+            candidate_rows,
+            key=lambda item: (
+                int(bool(item["surface_ok"])),
+                float(item["metrics"].get("drivezone_overlap_ratio", 0.0) or 0.0),
+                -float(item["metrics"].get("divstrip_overlap_ratio", 0.0) or 0.0),
+                float(item["metrics"].get("on_drivable_surface_ratio", 0.0) or 0.0),
+            ),
+            reverse=True,
+        )[0]
+        if bool(chosen["preliminary_hint_used"]):
+            fallback_reason = "no_surface_consistent_support_or_arc_preliminary_hint_used"
+        elif bool(chosen["support_driven"]):
+            fallback_reason = "support_surface_soft_failed_but_best_available"
+        else:
+            fallback_reason = "support_surface_soft_failed_arc_fallback"
+
+    support_ids = tuple(
+        sorted(
+            set(
+                [
+                    *(
+                        []
+                        if selected_segment is None
+                        else [str(v) for v in selected_segment.support_traj_ids]
+                    ),
+                    *[str(v) for v in row.get("traj_support_ids", [])],
+                ]
+            )
+        )
+    )
+    chosen_metrics = dict(chosen["metrics"])
+    production_segment = Segment(
+        segment_id=f"prodseg::{row['topology_arc_id']}",
+        src_nodeid=int(row["src"]),
+        dst_nodeid=int(row["dst"]),
+        direction="src->dst",
+        geometry_coords=line_to_coords(chosen["line"]),
+        candidate_ids=(
+            tuple(selected_segment.candidate_ids)
+            if selected_segment is not None
+            else (f"arc::{row['topology_arc_id']}",)
+        ),
+        source_modes=_support_source_modes(
+            str(row.get("traj_support_type", "")),
+            str(row.get("prior_support_type", "")),
+        ),
+        support_traj_ids=support_ids,
+        support_count=max(
+            int(len(support_ids)),
+            0 if selected_segment is None else int(selected_segment.support_count),
+        ),
+        dedup_count=1 if selected_segment is None else int(selected_segment.dedup_count),
+        representative_offset_m=0.0 if selected_segment is None else float(selected_segment.representative_offset_m),
+        other_xsec_crossing_count=0 if selected_segment is None else int(selected_segment.other_xsec_crossing_count),
+        tolerated_other_xsec_crossings=1
+        if selected_segment is None
+        else int(selected_segment.tolerated_other_xsec_crossings),
+        prior_supported=bool(row.get("prior_support_available", False) or (selected_segment is not None and selected_segment.prior_supported)),
+        formation_reason=str(
+            _support_formation_reason(
+                str(row.get("traj_support_type", "")),
+                str(row.get("prior_support_type", "")),
+                str(chosen["source_type"]),
+                bool(chosen["preliminary_hint_used"]),
+            )
+        ),
+        length_m=float(chosen["line"].length),
+        drivezone_ratio=float(chosen_metrics.get("drivezone_overlap_ratio", 0.0) or 0.0),
+        crosses_divstrip=bool((chosen_metrics.get("divstrip_overlap_ratio", 0.0) or 0.0) > 0.0),
+        topology_arc_id=str(row["topology_arc_id"]),
+        topology_arc_source_type=str(row["topology_arc_source_type"]),
+        topology_arc_edge_ids=tuple(str(v) for v in row.get("edge_ids", [])),
+        topology_arc_node_path=tuple(int(v) for v in row.get("node_path", [])),
+        topology_arc_is_direct_legal=bool(row.get("is_direct_legal", False)),
+        topology_arc_is_unique=bool(row.get("is_unique", False)),
+        blocked_diagnostic_only=bool(row.get("blocked_diagnostic_only", False)),
+        controlled_entry_allowed=bool(
+            row.get(
+                "controlled_entry_allowed",
+                False if selected_segment is None else getattr(selected_segment, "controlled_entry_allowed", False),
+            )
+        ),
+        hard_block_reason="" if selected_segment is None else str(getattr(selected_segment, "hard_block_reason", "")),
+        topology_gap_decision=str(
+            row.get(
+                "topology_gap_decision",
+                "" if selected_segment is None else getattr(selected_segment, "topology_gap_decision", ""),
+            )
+        ),
+        topology_gap_reason=str(
+            row.get(
+                "topology_gap_reason",
+                "" if selected_segment is None else getattr(selected_segment, "topology_gap_reason", ""),
+            )
+        ),
+        bridge_candidate_retained=False,
+        bridge_chain_exists=False if selected_segment is None else bool(selected_segment.bridge_chain_exists),
+        bridge_chain_unique=False if selected_segment is None else bool(selected_segment.bridge_chain_unique),
+        bridge_chain_nodes=tuple() if selected_segment is None else tuple(selected_segment.bridge_chain_nodes),
+        bridge_chain_source="" if selected_segment is None else str(selected_segment.bridge_chain_source),
+        bridge_diagnostic_reason="" if selected_segment is None else str(selected_segment.bridge_diagnostic_reason),
+        bridge_decision_stage="" if selected_segment is None else str(selected_segment.bridge_decision_stage),
+        bridge_decision_reason="" if selected_segment is None else str(selected_segment.bridge_decision_reason),
+        raw_src_nodeid=(
+            row.get("raw_src_nodeid", row["src"])
+            if selected_segment is None
+            else getattr(selected_segment, "raw_src_nodeid", selected_segment.src_nodeid)
+        ),
+        raw_dst_nodeid=(
+            row.get("raw_dst_nodeid", row["dst"])
+            if selected_segment is None
+            else getattr(selected_segment, "raw_dst_nodeid", selected_segment.dst_nodeid)
+        ),
+        canonical_src_xsec_id=(
+            row.get("canonical_src_xsec_id", row["src"])
+            if selected_segment is None
+            else getattr(selected_segment, "canonical_src_xsec_id", selected_segment.src_nodeid)
+        ),
+        canonical_dst_xsec_id=(
+            row.get("canonical_dst_xsec_id", row["dst"])
+            if selected_segment is None
+            else getattr(selected_segment, "canonical_dst_xsec_id", selected_segment.dst_nodeid)
+        ),
+        src_alias_applied=bool(
+            row.get("src_alias_applied", False)
+            if selected_segment is None
+            else getattr(selected_segment, "src_alias_applied", False)
+        ),
+        dst_alias_applied=bool(
+            row.get("dst_alias_applied", False)
+            if selected_segment is None
+            else getattr(selected_segment, "dst_alias_applied", False)
+        ),
+        same_pair_multi_arc_candidate=bool(
+            row.get("same_pair_multi_arc_candidate", False)
+            if selected_segment is None
+            else getattr(selected_segment, "same_pair_multi_arc_candidate", False)
+        ),
+        same_pair_provisional_allowed=bool(
+            row.get("same_pair_provisional_allowed", False)
+            if selected_segment is None
+            else getattr(selected_segment, "same_pair_provisional_allowed", False)
+        ),
+        same_pair_distinct_path_signal=tuple(
+            str(v)
+            for v in row.get(
+                "same_pair_distinct_path_signal",
+                [] if selected_segment is None else getattr(selected_segment, "same_pair_distinct_path_signal", ()),
+            )
+            if str(v)
+        ),
+        topology_arc_assignment_mode=str(
+            row.get(
+                "topology_arc_assignment_mode",
+                "" if selected_segment is None else getattr(selected_segment, "topology_arc_assignment_mode", ""),
+            )
+        ),
+        topology_arc_assignment_line_distance_m=(
+            row.get("topology_arc_assignment_line_distance_m")
+            if selected_segment is None
+            else getattr(selected_segment, "topology_arc_assignment_line_distance_m", None)
+        ),
+        topology_arc_assignment_anchor_fit_m=(
+            row.get("topology_arc_assignment_anchor_fit_m")
+            if selected_segment is None
+            else getattr(selected_segment, "topology_arc_assignment_anchor_fit_m", None)
+        ),
+        topology_arc_assignment_geometry_fit_m=(
+            row.get("topology_arc_assignment_geometry_fit_m")
+            if selected_segment is None
+            else getattr(selected_segment, "topology_arc_assignment_geometry_fit_m", None)
+        ),
+        topology_arc_assignment_score_gap_m=(
+            row.get("topology_arc_assignment_score_gap_m")
+            if selected_segment is None
+            else getattr(selected_segment, "topology_arc_assignment_score_gap_m", None)
+        ),
+        production_multi_arc_allowed=bool(row.get("production_multi_arc_allowed", False)),
+        same_pair_arc_finalize_allowed=bool(row.get("same_pair_arc_finalize_allowed", False)),
+        multi_arc_evidence_mode=str(row.get("multi_arc_evidence_mode", "")),
+        multi_arc_structure_type=str(row.get("multi_arc_structure_type", "")),
+        multi_arc_rule_reason=str(row.get("multi_arc_rule_reason", "")),
+        same_pair_rank=int(row.get("same_pair_rank", 1) or 1),
+        kept_reason=str(row.get("kept_reason", "arc_first_main_flow") or "arc_first_main_flow"),
+        geometry_role="step3_production_working_segment",
+        geometry_source_type=str(chosen["source_type"]),
+        support_provenance=(
+            "none"
+            if support_source_type == "none"
+            else f"{support_source_type}:{str(row.get('support_generation_reason', ''))}"
+        ),
+        anchor_provenance=f"src:{start_anchor_provenance}|dst:{end_anchor_provenance}",
+        preliminary_hint_used=bool(chosen["preliminary_hint_used"]),
+        production_consumable_default=True,
+        geometry_fallback_reason=str(fallback_reason),
+    )
+    review = {
+        "production_segment_id": str(production_segment.segment_id),
+        "production_segment_role": str(production_segment.geometry_role),
+        "production_geometry_source_type": str(chosen["source_type"]),
+        "production_support_source_type": str(support_source_type),
+        "production_support_driven": bool(chosen["support_driven"]),
+        "production_preliminary_hint_used": bool(chosen["preliminary_hint_used"]),
+        "production_geometry_fallback_reason": str(fallback_reason),
+        "production_anchor_provenance": {
+            "src": str(start_anchor_provenance),
+            "dst": str(end_anchor_provenance),
+        },
+        "production_support_provenance": str(production_segment.support_provenance),
+        "production_geometry_quality_metrics": {
+            "chosen": dict(chosen_metrics),
+            "candidates": [
+                {
+                    "source_type": str(item["source_type"]),
+                    "support_driven": bool(item["support_driven"]),
+                    "preliminary_hint_used": bool(item["preliminary_hint_used"]),
+                    "surface_ok": bool(item["surface_ok"]),
+                    "metrics": dict(item["metrics"]),
+                }
+                for item in candidate_rows
+            ],
+        },
+    }
+    return production_segment, review
 
 
 def _xsec_by_nodeid(frame: Any) -> dict[int, LineString]:
@@ -2013,172 +2567,20 @@ def _materialize_working_segment(
     *,
     row: dict[str, Any],
     selected_segment: Segment | None,
+    xsec_map: dict[int, Any],
     inputs: Any,
     params: dict[str, Any],
+    drivable_surface: Any | None,
     divstrip_buffer: Any | None,
-) -> Segment:
-    pipeline = _pipeline()
-    if selected_segment is not None:
-        support_ids = tuple(sorted(set([*selected_segment.support_traj_ids, *[str(v) for v in row.get("traj_support_ids", [])]])))
-        return Segment(
-            segment_id=str(selected_segment.segment_id),
-            src_nodeid=int(selected_segment.src_nodeid),
-            dst_nodeid=int(selected_segment.dst_nodeid),
-            direction=str(selected_segment.direction),
-            geometry_coords=tuple(selected_segment.geometry_coords),
-            candidate_ids=tuple(selected_segment.candidate_ids),
-            source_modes=_support_source_modes(str(row.get("traj_support_type", "")), str(row.get("prior_support_type", ""))),
-            support_traj_ids=support_ids,
-            support_count=max(int(selected_segment.support_count), int(len(support_ids))),
-            dedup_count=int(selected_segment.dedup_count),
-            representative_offset_m=float(selected_segment.representative_offset_m),
-            other_xsec_crossing_count=int(selected_segment.other_xsec_crossing_count),
-            tolerated_other_xsec_crossings=int(selected_segment.tolerated_other_xsec_crossings),
-            prior_supported=bool(row.get("prior_support_available", False) or selected_segment.prior_supported),
-            formation_reason=str(_support_formation_reason(str(row.get("traj_support_type", "")), str(row.get("prior_support_type", "")), str(selected_segment.segment_id))),
-            length_m=float(selected_segment.length_m),
-            drivezone_ratio=float(selected_segment.drivezone_ratio),
-            crosses_divstrip=bool(selected_segment.crosses_divstrip),
-            topology_arc_id=str(selected_segment.topology_arc_id),
-            topology_arc_source_type=str(selected_segment.topology_arc_source_type),
-            topology_arc_edge_ids=tuple(selected_segment.topology_arc_edge_ids),
-            topology_arc_node_path=tuple(selected_segment.topology_arc_node_path),
-            topology_arc_is_direct_legal=bool(selected_segment.topology_arc_is_direct_legal),
-            topology_arc_is_unique=bool(selected_segment.topology_arc_is_unique),
-            blocked_diagnostic_only=bool(getattr(selected_segment, "blocked_diagnostic_only", False)),
-            controlled_entry_allowed=bool(row.get("controlled_entry_allowed", getattr(selected_segment, "controlled_entry_allowed", False))),
-            hard_block_reason=str(getattr(selected_segment, "hard_block_reason", "")),
-            topology_gap_decision=str(row.get("topology_gap_decision", getattr(selected_segment, "topology_gap_decision", ""))),
-            topology_gap_reason=str(row.get("topology_gap_reason", getattr(selected_segment, "topology_gap_reason", ""))),
-            bridge_candidate_retained=False,
-            bridge_chain_exists=bool(selected_segment.bridge_chain_exists),
-            bridge_chain_unique=bool(selected_segment.bridge_chain_unique),
-            bridge_chain_nodes=tuple(selected_segment.bridge_chain_nodes),
-            bridge_chain_source=str(selected_segment.bridge_chain_source),
-            bridge_diagnostic_reason=str(selected_segment.bridge_diagnostic_reason),
-            bridge_decision_stage=str(selected_segment.bridge_decision_stage),
-            bridge_decision_reason=str(selected_segment.bridge_decision_reason),
-            raw_src_nodeid=getattr(selected_segment, "raw_src_nodeid", selected_segment.src_nodeid),
-            raw_dst_nodeid=getattr(selected_segment, "raw_dst_nodeid", selected_segment.dst_nodeid),
-            canonical_src_xsec_id=getattr(selected_segment, "canonical_src_xsec_id", selected_segment.src_nodeid),
-            canonical_dst_xsec_id=getattr(selected_segment, "canonical_dst_xsec_id", selected_segment.dst_nodeid),
-            src_alias_applied=bool(getattr(selected_segment, "src_alias_applied", False)),
-            dst_alias_applied=bool(getattr(selected_segment, "dst_alias_applied", False)),
-            same_pair_multi_arc_candidate=bool(getattr(selected_segment, "same_pair_multi_arc_candidate", False)),
-            same_pair_provisional_allowed=bool(getattr(selected_segment, "same_pair_provisional_allowed", False)),
-            same_pair_distinct_path_signal=tuple(getattr(selected_segment, "same_pair_distinct_path_signal", ())),
-            topology_arc_assignment_mode=str(getattr(selected_segment, "topology_arc_assignment_mode", "")),
-            topology_arc_assignment_line_distance_m=getattr(selected_segment, "topology_arc_assignment_line_distance_m", None),
-            topology_arc_assignment_anchor_fit_m=getattr(selected_segment, "topology_arc_assignment_anchor_fit_m", None),
-            topology_arc_assignment_geometry_fit_m=getattr(selected_segment, "topology_arc_assignment_geometry_fit_m", None),
-            topology_arc_assignment_score_gap_m=getattr(selected_segment, "topology_arc_assignment_score_gap_m", None),
-            production_multi_arc_allowed=bool(
-                row.get(
-                    "production_multi_arc_allowed",
-                    getattr(selected_segment, "production_multi_arc_allowed", False),
-                )
-            ),
-            same_pair_arc_finalize_allowed=bool(
-                row.get(
-                    "same_pair_arc_finalize_allowed",
-                    getattr(selected_segment, "same_pair_arc_finalize_allowed", False),
-                )
-            ),
-            multi_arc_evidence_mode=str(
-                row.get(
-                    "multi_arc_evidence_mode",
-                    getattr(selected_segment, "multi_arc_evidence_mode", ""),
-                )
-            ),
-            multi_arc_structure_type=str(
-                row.get(
-                    "multi_arc_structure_type",
-                    getattr(selected_segment, "multi_arc_structure_type", ""),
-                )
-            ),
-            multi_arc_rule_reason=str(
-                row.get(
-                    "multi_arc_rule_reason",
-                    getattr(selected_segment, "multi_arc_rule_reason", ""),
-                )
-            ),
-            same_pair_rank=int(
-                row.get(
-                    "same_pair_rank",
-                    getattr(selected_segment, "same_pair_rank", 1) or 1,
-                )
-            ),
-            kept_reason=str(
-                row.get("kept_reason", getattr(selected_segment, "kept_reason", "arc_first_main_flow"))
-                or "arc_first_main_flow"
-            ),
-        )
-
-    arc_line = _arc_line(row)
-    if arc_line is None:
-        raise ValueError(f"arc_line_missing:{row.get('topology_arc_id', '')}")
-    drivezone_ratio = float(pipeline._drivezone_ratio(arc_line, inputs.drivezone_zone_metric))
-    crosses_divstrip = bool(divstrip_buffer is not None and (not divstrip_buffer.is_empty) and arc_line.intersects(divstrip_buffer))
-    support_ids = tuple(sorted(str(v) for v in row.get("traj_support_ids", [])))
-    return Segment(
-        segment_id=f"arcseg::{row['topology_arc_id']}",
-        src_nodeid=int(row["src"]),
-        dst_nodeid=int(row["dst"]),
-        direction="src->dst",
-        geometry_coords=line_to_coords(arc_line),
-        candidate_ids=(f"arc::{row['topology_arc_id']}",),
-        source_modes=_support_source_modes(str(row.get("traj_support_type", "")), str(row.get("prior_support_type", ""))),
-        support_traj_ids=support_ids,
-        support_count=int(len(support_ids)),
-        dedup_count=1,
-        representative_offset_m=0.0,
-        other_xsec_crossing_count=0,
-        tolerated_other_xsec_crossings=1,
-        prior_supported=bool(row.get("prior_support_available", False)),
-        formation_reason=str(_support_formation_reason(str(row.get("traj_support_type", "")), str(row.get("prior_support_type", "")), "")),
-        length_m=float(arc_line.length),
-        drivezone_ratio=drivezone_ratio,
-        crosses_divstrip=crosses_divstrip,
-        topology_arc_id=str(row["topology_arc_id"]),
-        topology_arc_source_type=str(row["topology_arc_source_type"]),
-        topology_arc_edge_ids=tuple(str(v) for v in row.get("edge_ids", [])),
-        topology_arc_node_path=tuple(int(v) for v in row.get("node_path", [])),
-        topology_arc_is_direct_legal=bool(row.get("is_direct_legal", False)),
-        topology_arc_is_unique=bool(row.get("is_unique", False)),
-        blocked_diagnostic_only=bool(row.get("blocked_diagnostic_only", False)),
-        controlled_entry_allowed=bool(row.get("controlled_entry_allowed", False)),
-        hard_block_reason=str(row.get("hard_block_reason", "")),
-        topology_gap_decision=str(row.get("topology_gap_decision", "")),
-        topology_gap_reason=str(row.get("topology_gap_reason", "")),
-        bridge_candidate_retained=False,
-        bridge_chain_exists=False,
-        bridge_chain_unique=False,
-        bridge_chain_nodes=tuple(),
-        bridge_chain_source="",
-        bridge_diagnostic_reason="",
-        bridge_decision_stage="",
-        bridge_decision_reason="",
-        raw_src_nodeid=row.get("raw_src_nodeid", row["src"]),
-        raw_dst_nodeid=row.get("raw_dst_nodeid", row["dst"]),
-        canonical_src_xsec_id=row.get("canonical_src_xsec_id", row["src"]),
-        canonical_dst_xsec_id=row.get("canonical_dst_xsec_id", row["dst"]),
-        src_alias_applied=bool(row.get("src_alias_applied", False)),
-        dst_alias_applied=bool(row.get("dst_alias_applied", False)),
-        same_pair_multi_arc_candidate=bool(row.get("same_pair_multi_arc_candidate", False)),
-        same_pair_provisional_allowed=bool(row.get("same_pair_provisional_allowed", False)),
-        same_pair_distinct_path_signal=tuple(str(v) for v in row.get("same_pair_distinct_path_signal", [])),
-        topology_arc_assignment_mode=str(row.get("topology_arc_assignment_mode", "")),
-        topology_arc_assignment_line_distance_m=row.get("topology_arc_assignment_line_distance_m"),
-        topology_arc_assignment_anchor_fit_m=row.get("topology_arc_assignment_anchor_fit_m"),
-        topology_arc_assignment_geometry_fit_m=row.get("topology_arc_assignment_geometry_fit_m"),
-        topology_arc_assignment_score_gap_m=row.get("topology_arc_assignment_score_gap_m"),
-        production_multi_arc_allowed=bool(row.get("production_multi_arc_allowed", False)),
-        same_pair_arc_finalize_allowed=bool(row.get("same_pair_arc_finalize_allowed", False)),
-        multi_arc_evidence_mode=str(row.get("multi_arc_evidence_mode", "")),
-        multi_arc_structure_type=str(row.get("multi_arc_structure_type", "")),
-        multi_arc_rule_reason=str(row.get("multi_arc_rule_reason", "")),
-        same_pair_rank=int(row.get("same_pair_rank", 1) or 1),
-        kept_reason=str(row.get("kept_reason", "arc_first_main_flow") or "arc_first_main_flow"),
+) -> tuple[Segment, dict[str, Any]]:
+    return build_production_working_segment(
+        row=row,
+        selected_segment=selected_segment,
+        xsec_map=xsec_map,
+        inputs=inputs,
+        params=params,
+        drivable_surface=drivable_surface,
+        divstrip_buffer=divstrip_buffer,
     )
 
 
@@ -2242,9 +2644,32 @@ def build_arc_evidence_attach(
     rows: list[dict[str, Any]] = []
     working_segments: list[Segment] = []
     support_debug_rows: list[dict[str, Any]] = []
+    production_review_rows: list[dict[str, Any]] = []
+    same_pair_review_rows: list[dict[str, Any]] = []
     for row in full_registry_rows:
         current = dict(row)
         selected_segment = selected_by_arc.get(str(current.get("topology_arc_id", "")))
+        current["preliminary_segment_id"] = (
+            ""
+            if selected_segment is None
+            else str(selected_segment.segment_id)
+        )
+        current["preliminary_segment_role"] = (
+            ""
+            if selected_segment is None
+            else str(getattr(selected_segment, "geometry_role", "step2_preliminary"))
+        )
+        current["preliminary_geometry_source"] = (
+            ""
+            if selected_segment is None
+            else str(getattr(selected_segment, "geometry_source_type", ""))
+        )
+        current["preliminary_only_reason"] = (
+            ""
+            if selected_segment is None
+            else "step2_pre_support_cluster_selection"
+        )
+        current["production_consumable_default"] = False
         arc_line = _arc_line(current)
         prefilter_started = perf_counter()
         candidate_traj_rows = (
@@ -2483,15 +2908,51 @@ def build_arc_evidence_attach(
         selected_segment = selected_by_arc.get(str(current.get("topology_arc_id", "")))
         if bool(current.get("entered_main_flow", False)):
             materialize_started = perf_counter()
-            working_segment = _materialize_working_segment(
+            working_segment, production_review = _materialize_working_segment(
                 row=current,
                 selected_segment=selected_segment,
+                xsec_map=xsec_map,
                 inputs=inputs,
                 params=params,
+                drivable_surface=patch_geometry_cache.get("drivable_surface"),
                 divstrip_buffer=divstrip_buffer,
             )
             current["working_segment_id"] = str(working_segment.segment_id)
-            current["working_segment_source"] = "step2_selected_segment" if selected_segment is not None else "arc_first_materialized_segment"
+            current["working_segment_source"] = (
+                "step3_support_driven_production"
+                if bool(production_review.get("production_support_driven", False))
+                else "step3_preliminary_hint_fallback"
+                if bool(production_review.get("production_preliminary_hint_used", False))
+                else "step3_topology_arc_fallback"
+                if str(production_review.get("production_geometry_source_type", "")).startswith("topology_arc")
+                else "step3_production_materialized"
+            )
+            current["production_segment_role"] = str(production_review.get("production_segment_role", ""))
+            current["production_geometry_source_type"] = str(
+                production_review.get("production_geometry_source_type", "")
+            )
+            current["production_support_source_type"] = str(
+                production_review.get("production_support_source_type", "")
+            )
+            current["production_support_driven"] = bool(
+                production_review.get("production_support_driven", False)
+            )
+            current["production_preliminary_hint_used"] = bool(
+                production_review.get("production_preliminary_hint_used", False)
+            )
+            current["production_geometry_fallback_reason"] = str(
+                production_review.get("production_geometry_fallback_reason", "")
+            )
+            current["production_anchor_provenance"] = dict(
+                production_review.get("production_anchor_provenance", {})
+            )
+            current["production_support_provenance"] = str(
+                production_review.get("production_support_provenance", "")
+            )
+            current["production_geometry_quality_metrics"] = dict(
+                production_review.get("production_geometry_quality_metrics", {})
+            )
+            current["production_consumable_default"] = True
             current["entered_main_flow"] = True
             if (
                 str(current.get("unbuilt_stage", "")) == ""
@@ -2501,7 +2962,81 @@ def build_arc_evidence_attach(
                 current["unbuilt_stage"] = "step3_no_support"
                 current["unbuilt_reason"] = "no_traj_support"
             working_segments.append(working_segment)
+            production_review_rows.append(
+                {
+                    "pair": str(current.get("pair", "")),
+                    "raw_pair": str(current.get("raw_pair", "")),
+                    "canonical_pair": str(current.get("canonical_pair", "")),
+                    "topology_arc_id": str(current.get("topology_arc_id", "")),
+                    "raw_src_nodeid": current.get("raw_src_nodeid"),
+                    "raw_dst_nodeid": current.get("raw_dst_nodeid"),
+                    "canonical_src_xsec_id": current.get("canonical_src_xsec_id"),
+                    "canonical_dst_xsec_id": current.get("canonical_dst_xsec_id"),
+                    "src_alias_applied": bool(current.get("src_alias_applied", False)),
+                    "dst_alias_applied": bool(current.get("dst_alias_applied", False)),
+                    "preliminary_segment_id": str(current.get("preliminary_segment_id", "")),
+                    "preliminary_geometry_source": str(current.get("preliminary_geometry_source", "")),
+                    "production_segment_id": str(current.get("working_segment_id", "")),
+                    "production_geometry_source_type": str(current.get("production_geometry_source_type", "")),
+                    "production_support_source_type": str(current.get("production_support_source_type", "")),
+                    "production_support_driven": bool(current.get("production_support_driven", False)),
+                    "production_preliminary_hint_used": bool(
+                        current.get("production_preliminary_hint_used", False)
+                    ),
+                    "production_geometry_fallback_reason": str(
+                        current.get("production_geometry_fallback_reason", "")
+                    ),
+                    "production_anchor_provenance": dict(current.get("production_anchor_provenance", {})),
+                    "production_support_provenance": str(current.get("production_support_provenance", "")),
+                    "support_interval_reference_source": str(
+                        current.get("support_interval_reference_source", "")
+                    ),
+                    "support_interval_reference_reason": str(
+                        current.get("support_interval_reference_reason", "")
+                    ),
+                    "same_pair_support_deconflict_reason": str(
+                        current.get("same_pair_support_deconflict_reason", "")
+                    ),
+                    "production_geometry_quality_metrics": dict(
+                        current.get("production_geometry_quality_metrics", {})
+                    ),
+                }
+            )
             runtime_totals["working_segment_materialize_time_ms"] += float((perf_counter() - materialize_started) * 1000.0)
+
+        if bool(current.get("same_pair_multi_arc_candidate", False)) or bool(current.get("same_pair_provisional_allowed", False)):
+            same_pair_review_rows.append(
+                {
+                    "pair": str(current.get("pair", "")),
+                    "canonical_pair": str(current.get("canonical_pair", "")),
+                    "topology_arc_id": str(current.get("topology_arc_id", "")),
+                    "multi_arc_structure_type": str(current.get("multi_arc_structure_type", "")),
+                    "multi_arc_rule_reason": str(current.get("multi_arc_rule_reason", "")),
+                    "multi_arc_evidence_mode": str(current.get("multi_arc_evidence_mode", "")),
+                    "production_multi_arc_allowed": bool(current.get("production_multi_arc_allowed", False)),
+                    "same_pair_arc_finalize_allowed": bool(
+                        current.get("same_pair_arc_finalize_allowed", False)
+                    ),
+                    "same_pair_support_deconflict_reason": str(
+                        current.get("same_pair_support_deconflict_reason", "")
+                    ),
+                    "preliminary_segment_id": str(current.get("preliminary_segment_id", "")),
+                    "working_segment_id": str(current.get("working_segment_id", "")),
+                    "working_segment_source": str(current.get("working_segment_source", "")),
+                    "production_geometry_source_type": str(
+                        current.get("production_geometry_source_type", "")
+                    ),
+                    "binding_basis": {
+                        "topology_arc_assignment_mode": str(
+                            current.get("topology_arc_assignment_mode", "")
+                        ),
+                        "support_interval_reference_source": str(
+                            current.get("support_interval_reference_source", "")
+                        ),
+                        "same_pair_rank": current.get("same_pair_rank"),
+                    },
+                }
+            )
 
         support_debug_rows.append(
             {
@@ -2533,8 +3068,18 @@ def build_arc_evidence_attach(
                 "multi_arc_evidence_mode": str(current.get("multi_arc_evidence_mode", "")),
                 "production_multi_arc_allowed": bool(current.get("production_multi_arc_allowed", False)),
                 "same_pair_arc_finalize_allowed": bool(current.get("same_pair_arc_finalize_allowed", False)),
+                "preliminary_segment_id": str(current.get("preliminary_segment_id", "")),
+                "preliminary_geometry_source": str(current.get("preliminary_geometry_source", "")),
                 "working_segment_id": str(current.get("working_segment_id", "")),
                 "working_segment_source": str(current.get("working_segment_source", "")),
+                "production_geometry_source_type": str(current.get("production_geometry_source_type", "")),
+                "production_support_source_type": str(current.get("production_support_source_type", "")),
+                "production_preliminary_hint_used": bool(
+                    current.get("production_preliminary_hint_used", False)
+                ),
+                "production_geometry_fallback_reason": str(
+                    current.get("production_geometry_fallback_reason", "")
+                ),
             }
         )
         current.pop("_prefilter_candidate_traj_count", None)
@@ -2559,6 +3104,8 @@ def build_arc_evidence_attach(
             "working_segment_count": int(len(working_segments)),
         },
         "audit_rows": support_debug_rows,
+        "production_review_rows": production_review_rows,
+        "same_pair_review_rows": same_pair_review_rows,
         "preprocessed_traj_rows": preprocessed_traj_rows,
         "runtime": {
             **runtime_totals,
@@ -2577,6 +3124,9 @@ def _segment_feature(segment: Segment, row: dict[str, Any]) -> tuple[LineString,
             "src_nodeid": int(segment.src_nodeid),
             "dst_nodeid": int(segment.dst_nodeid),
             "topology_arc_id": str(segment.topology_arc_id),
+            "geometry_role": str(segment.geometry_role),
+            "geometry_source_type": str(segment.geometry_source_type),
+            "production_consumable_default": bool(segment.production_consumable_default),
             "traj_support_type": str(row.get("traj_support_type", "")),
             "prior_support_type": str(row.get("prior_support_type", "")),
             "traj_support_coverage_ratio": float(row.get("traj_support_coverage_ratio", 0.0)),
@@ -2692,12 +3242,67 @@ def run_witness_stage(
         "full_legal_arc_registry": list(evidence["rows"]),
         "legal_arc_funnel": dict(evidence["summary"]),
         "arc_evidence_attach_audit": list(evidence["audit_rows"]),
+        "production_geometry_review": list(evidence.get("production_review_rows", [])),
+        "same_pair_deconflict_review": list(evidence.get("same_pair_review_rows", [])),
         "runtime": runtime,
     }
     dbg_dir = pipeline.debug_dir(out_root, run_id, patch_id)
     step_dir = pipeline.stage_dir(out_root, run_id, patch_id, "step3_witness")
     write_json(pipeline._artifact_path(out_root, run_id, patch_id, "step3_witness"), artifact)
     write_json(dbg_dir / "arc_evidence_attach.json", {"arcs": evidence["audit_rows"], "summary": evidence["summary"], "runtime": runtime})
+    write_json(
+        step_dir / "step3_production_geometry_review.json",
+        {
+            "rows": list(evidence.get("production_review_rows", [])),
+            "summary": {
+                "row_count": int(len(evidence.get("production_review_rows", []))),
+                "support_driven_count": int(
+                    sum(
+                        1
+                        for item in evidence.get("production_review_rows", [])
+                        if bool(item.get("production_support_driven", False))
+                    )
+                ),
+                "preliminary_hint_fallback_count": int(
+                    sum(
+                        1
+                        for item in evidence.get("production_review_rows", [])
+                        if bool(item.get("production_preliminary_hint_used", False))
+                    )
+                ),
+                "topology_arc_fallback_count": int(
+                    sum(
+                        1
+                        for item in evidence.get("production_review_rows", [])
+                        if str(item.get("production_geometry_source_type", "")).startswith("topology_arc")
+                    )
+                ),
+            },
+        },
+    )
+    write_json(
+        step_dir / "step3_same_pair_deconflict_review.json",
+        {
+            "rows": list(evidence.get("same_pair_review_rows", [])),
+            "summary": {
+                "row_count": int(len(evidence.get("same_pair_review_rows", []))),
+                "production_multi_arc_allowed_count": int(
+                    sum(
+                        1
+                        for item in evidence.get("same_pair_review_rows", [])
+                        if bool(item.get("production_multi_arc_allowed", False))
+                    )
+                ),
+                "arc_finalize_allowed_count": int(
+                    sum(
+                        1
+                        for item in evidence.get("same_pair_review_rows", [])
+                        if bool(item.get("same_pair_arc_finalize_allowed", False))
+                    )
+                ),
+            },
+        },
+    )
     write_json(
         dbg_dir / "prefilter_stats.json",
         {
@@ -2732,6 +3337,10 @@ def run_witness_stage(
     )
     write_lines_geojson(
         dbg_dir / "arc_first_working_segments.geojson",
+        [_segment_feature(segment, row_by_segment_id.get(str(segment.segment_id), {})) for segment in evidence["working_segments"]],
+    )
+    write_lines_geojson(
+        step_dir / "step3_production_working_segments.geojson",
         [_segment_feature(segment, row_by_segment_id.get(str(segment.segment_id), {})) for segment in evidence["working_segments"]],
     )
     write_features_geojson(

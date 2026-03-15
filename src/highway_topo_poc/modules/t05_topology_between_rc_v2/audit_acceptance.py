@@ -1272,7 +1272,7 @@ def _patch_full_registry_rows(run_root: Path | str, patch_id: str) -> list[dict[
             "selected_segment_count": 1 if str(row.get("segment_id", "")) else 0,
             "selected_segment_id": str(row.get("segment_id", "")),
             "working_segment_id": str(row.get("segment_id", "")),
-            "working_segment_source": "step2_selected_segment" if str(row.get("segment_id", "")) else "",
+            "working_segment_source": "step2_preliminary_segment" if str(row.get("segment_id", "")) else "",
             "traj_support_type": "no_support",
             "prior_support_type": "no_support",
             "corridor_identity": "unresolved",
@@ -1444,7 +1444,13 @@ def build_legal_arc_coverage(run_root: Path | str, patch_ids: list[str]) -> dict
                 "top_recovered_examples": [
                     _registry_example(row)
                     for row in entered_rows
-                    if str(row.get("working_segment_source", "")) == "arc_first_materialized_segment"
+                    if str(row.get("working_segment_source", "")) in {
+                        "arc_first_materialized_segment",
+                        "step3_support_driven_production",
+                        "step3_topology_arc_fallback",
+                        "step3_production_materialized",
+                        "step3_preliminary_hint_fallback",
+                    }
                 ][:8],
             }
         )
