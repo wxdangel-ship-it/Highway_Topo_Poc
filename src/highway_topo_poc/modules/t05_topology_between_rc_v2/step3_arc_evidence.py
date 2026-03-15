@@ -552,6 +552,22 @@ def _support_corridor_signature(
     )
 
 
+def _support_corridor_cluster_signature(
+    support_reference_coords: list[list[float]],
+    support_anchor_src_coords: list[float] | None,
+    support_anchor_dst_coords: list[float] | None,
+    *,
+    midpoint_resolution_m: float,
+    anchor_resolution_m: float,
+) -> tuple[Any, ...]:
+    midpoint_coords = _line_midpoint_coords(support_reference_coords)
+    return (
+        _bucket_point(midpoint_coords, resolution_m=midpoint_resolution_m),
+        _bucket_point(support_anchor_src_coords, resolution_m=anchor_resolution_m),
+        _bucket_point(support_anchor_dst_coords, resolution_m=anchor_resolution_m),
+    )
+
+
 def _support_surface_side_signature(
     *,
     support_anchor_src_coords: list[float] | None,
@@ -603,7 +619,8 @@ def _build_competing_arc_lines_by_arc_id(
         arc_line = _arc_line(row)
         if not arc_id or arc_line is None:
             continue
-        by_src[int(row.get("src", 0))].append((arc_id, arc_line))
+        src_group_id = int(row.get("canonical_src_xsec_id", row.get("src", 0)) or row.get("src", 0))
+        by_src[src_group_id].append((arc_id, arc_line))
     out: dict[str, list[LineString]] = {}
     for items in by_src.values():
         for arc_id, _line in items:
@@ -636,10 +653,19 @@ def _support_candidate_cluster_key(
     *,
     side_resolution: float = 0.2,
     anchor_resolution_m: float = 10.0,
+    corridor_midpoint_resolution_m: float = 8.0,
+    corridor_anchor_resolution_m: float = 12.0,
 ) -> tuple[Any, ...]:
     side_cluster_signature = _support_side_cluster_signature(
         candidate.get("support_surface_side_signature", ()),
         resolution=side_resolution,
+    )
+    corridor_cluster_signature = _support_corridor_cluster_signature(
+        list(candidate.get("support_reference_coords", []) or []),
+        candidate.get("support_anchor_src_coords"),
+        candidate.get("support_anchor_dst_coords"),
+        midpoint_resolution_m=float(corridor_midpoint_resolution_m),
+        anchor_resolution_m=float(corridor_anchor_resolution_m),
     )
     support_full_xsec_mode = str(candidate.get("support_full_xsec_mode", "") or "")
     shared_xsec_alias = bool(candidate.get("src_alias_applied", False) or candidate.get("dst_alias_applied", False))
@@ -650,21 +676,20 @@ def _support_candidate_cluster_key(
         and support_full_xsec_mode == "partial_dual_anchor"
     ):
         return (
-            "near_full_crossing_anchor",
-            _bucket_point(candidate.get("support_anchor_src_coords"), resolution_m=anchor_resolution_m),
-            _bucket_point(candidate.get("support_anchor_dst_coords"), resolution_m=anchor_resolution_m),
+            "near_full_crossing_corridor_side",
+            corridor_cluster_signature,
+            side_cluster_signature,
         )
     if bool(candidate.get("support_full_xsec_crossing", False)) and shared_xsec_alias:
-        corridor_signature = _hashable_support_signature(candidate.get("support_corridor_signature", ()))
         return (
             "full_crossing_shared_xsec",
-            corridor_signature,
+            corridor_cluster_signature,
             side_cluster_signature,
             _bucket_point(candidate.get("support_anchor_src_coords"), resolution_m=anchor_resolution_m),
             _bucket_point(candidate.get("support_anchor_dst_coords"), resolution_m=anchor_resolution_m),
         )
-    if bool(candidate.get("support_full_xsec_crossing", False)) and side_cluster_signature:
-        return ("full_crossing_side", side_cluster_signature)
+    if bool(candidate.get("support_full_xsec_crossing", False)) and (corridor_cluster_signature or side_cluster_signature):
+        return ("full_crossing_corridor_side", corridor_cluster_signature, side_cluster_signature)
     corridor_signature = _hashable_support_signature(candidate.get("support_corridor_signature", ()))
     if corridor_signature or side_cluster_signature:
         return ("corridor_side", corridor_signature, side_cluster_signature)
@@ -696,6 +721,12 @@ def _annotate_support_candidate_clusters(
             item,
             side_resolution=float(params.get("ARC_SUPPORT_FULL_XSEC_SIDE_CLUSTER_RESOLUTION", 0.2)),
             anchor_resolution_m=float(params.get("ARC_SUPPORT_ANCHOR_CLUSTER_RESOLUTION_M", 10.0)),
+            corridor_midpoint_resolution_m=float(
+                params.get("ARC_SUPPORT_CLUSTER_CORRIDOR_MID_RESOLUTION_M", 8.0)
+            ),
+            corridor_anchor_resolution_m=float(
+                params.get("ARC_SUPPORT_CLUSTER_CORRIDOR_ANCHOR_RESOLUTION_M", 12.0)
+            ),
         )
         source_traj_id = str(item.get("selected_support_traj_id", item.get("traj_id", "")))
         grouped_source_ids[cluster_key].add(source_traj_id or str(item.get("traj_id", "")))
@@ -711,6 +742,12 @@ def _annotate_support_candidate_clusters(
             item,
             side_resolution=float(params.get("ARC_SUPPORT_FULL_XSEC_SIDE_CLUSTER_RESOLUTION", 0.2)),
             anchor_resolution_m=float(params.get("ARC_SUPPORT_ANCHOR_CLUSTER_RESOLUTION_M", 10.0)),
+            corridor_midpoint_resolution_m=float(
+                params.get("ARC_SUPPORT_CLUSTER_CORRIDOR_MID_RESOLUTION_M", 8.0)
+            ),
+            corridor_anchor_resolution_m=float(
+                params.get("ARC_SUPPORT_CLUSTER_CORRIDOR_ANCHOR_RESOLUTION_M", 12.0)
+            ),
         )
         cluster_count = int(cluster_counter.get(cluster_key, 0))
         item["support_cluster_key"] = list(cluster_key)
@@ -894,6 +931,15 @@ def _support_candidate_public_fields(candidate: dict[str, Any]) -> dict[str, Any
         "support_competing_arc_preferred": bool(candidate.get("support_competing_arc_preferred", True)),
         "support_competing_arc_distance_m": candidate.get("support_competing_arc_distance_m"),
         "support_competing_arc_margin_m": candidate.get("support_competing_arc_margin_m"),
+        "support_reference_on_drivable_surface_ratio": float(
+            candidate.get("support_reference_on_drivable_surface_ratio", 0.0) or 0.0
+        ),
+        "support_reference_drivezone_overlap_ratio": float(
+            candidate.get("support_reference_drivezone_overlap_ratio", 0.0) or 0.0
+        ),
+        "support_reference_divstrip_overlap_ratio": float(
+            candidate.get("support_reference_divstrip_overlap_ratio", 0.0) or 0.0
+        ),
         "support_interval_reference_trusted": bool(candidate.get("support_interval_reference_trusted", False)),
         "selected_support_interval_reference_trusted": bool(candidate.get("support_interval_reference_trusted", False)),
         "support_interval_reference_source": (
@@ -1281,6 +1327,18 @@ def _support_type_for_arc(
             traj_support_spans = []
         support_anchor_src_coords, support_anchor_dst_coords = _support_anchors_from_segments(traj_production_segments)
         support_reference_coords = _best_support_reference_coords(traj_production_segments)
+        reference_pts = tuple(
+            (float(item[0]), float(item[1]))
+            for item in support_reference_coords
+            if isinstance(item, (list, tuple)) and len(item) >= 2
+        )
+        support_reference_line = coords_to_line(reference_pts) if len(reference_pts) >= 2 else None
+        support_reference_surface_metrics = _line_surface_metrics(
+            support_reference_line,
+            drivezone=drivezone,
+            drivable_surface=drivable_surface,
+            divstrip_buffer=divstrip_buffer,
+        )
         support_corridor_signature = _support_corridor_signature(
             support_reference_coords,
             support_anchor_src_coords,
@@ -1374,6 +1432,15 @@ def _support_type_for_arc(
                 ),
                 "support_competing_arc_margin_m": (
                     None if best_competing_arc_distance_m == float("inf") else float(support_competing_arc_margin_m)
+                ),
+                "support_reference_on_drivable_surface_ratio": float(
+                    support_reference_surface_metrics.get("on_drivable_surface_ratio", 0.0) or 0.0
+                ),
+                "support_reference_drivezone_overlap_ratio": float(
+                    support_reference_surface_metrics.get("drivezone_overlap_ratio", 0.0) or 0.0
+                ),
+                "support_reference_divstrip_overlap_ratio": float(
+                    support_reference_surface_metrics.get("divstrip_overlap_ratio", 0.0) or 0.0
                 ),
                 "src_alias_applied": bool(row.get("src_alias_applied", False)),
                 "dst_alias_applied": bool(row.get("dst_alias_applied", False)),

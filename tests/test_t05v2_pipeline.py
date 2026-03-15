@@ -1805,6 +1805,111 @@ def test_t05v2_near_full_partial_support_cluster_beats_isolated_terminal_outlier
     assert bool(outlier["support_interval_reference_trusted"]) is False
 
 
+def test_t05v2_full_crossing_cluster_uses_corridor_plus_side_not_side_only() -> None:
+    params = dict(DEFAULT_PARAMS)
+    candidates = [
+        {
+            "traj_id": "wrong_terminal",
+            "selected_support_traj_id": "wrong_terminal",
+            "traj_support_type": "terminal_crossing_support",
+            "traj_support_ids": ["wrong_terminal"],
+            "traj_support_span_count": 1,
+            "traj_support_coverage_ratio": 1.0,
+            "traj_support_segments": [],
+            "support_reference_coords": [[0.0, 8.0], [50.0, 8.0], [100.0, 8.0]],
+            "support_anchor_src_coords": [0.0, 8.0],
+            "support_anchor_dst_coords": [100.0, 8.0],
+            "support_corridor_signature": [[0.0, 8.0], [50.0, 8.0], [100.0, 8.0]],
+            "support_surface_side_signature": [0.2, 0.2],
+            "support_full_xsec_crossing": True,
+            "support_full_xsec_mode": "strict_terminal",
+            "support_has_src_xsec_anchor": True,
+            "support_has_dst_xsec_anchor": True,
+            "surface_consistent_segment_count": 1,
+            "best_line_distance_m": 0.4,
+            "support_competing_arc_preferred": True,
+        },
+        {
+            "traj_id": "correct_terminal_a",
+            "selected_support_traj_id": "correct_terminal_a",
+            "traj_support_type": "terminal_crossing_support",
+            "traj_support_ids": ["correct_terminal_a"],
+            "traj_support_span_count": 1,
+            "traj_support_coverage_ratio": 1.0,
+            "traj_support_segments": [],
+            "support_reference_coords": [[0.0, 0.6], [50.0, 0.4], [100.0, 0.2]],
+            "support_anchor_src_coords": [0.0, 0.6],
+            "support_anchor_dst_coords": [100.0, 0.2],
+            "support_corridor_signature": [[0.0, 0.6], [50.0, 0.4], [100.0, 0.2]],
+            "support_surface_side_signature": [0.2, 0.2],
+            "support_full_xsec_crossing": True,
+            "support_full_xsec_mode": "strict_terminal",
+            "support_has_src_xsec_anchor": True,
+            "support_has_dst_xsec_anchor": True,
+            "surface_consistent_segment_count": 1,
+            "best_line_distance_m": 1.0,
+            "support_competing_arc_preferred": True,
+        },
+        {
+            "traj_id": "correct_terminal_b",
+            "selected_support_traj_id": "correct_terminal_b",
+            "traj_support_type": "terminal_crossing_support",
+            "traj_support_ids": ["correct_terminal_b"],
+            "traj_support_span_count": 1,
+            "traj_support_coverage_ratio": 1.0,
+            "traj_support_segments": [],
+            "support_reference_coords": [[0.0, 0.2], [50.0, 0.3], [100.0, 0.1]],
+            "support_anchor_src_coords": [0.0, 0.3],
+            "support_anchor_dst_coords": [100.0, 0.1],
+            "support_corridor_signature": [[0.0, 0.2], [50.0, 0.3], [100.0, 0.1]],
+            "support_surface_side_signature": [0.2, 0.2],
+            "support_full_xsec_crossing": True,
+            "support_full_xsec_mode": "strict_terminal",
+            "support_has_src_xsec_anchor": True,
+            "support_has_dst_xsec_anchor": True,
+            "surface_consistent_segment_count": 1,
+            "best_line_distance_m": 1.1,
+            "support_competing_arc_preferred": True,
+        },
+    ]
+
+    annotated = _step3_evidence._annotate_support_candidate_clusters(list(candidates), params=params)
+    annotated = _step3_evidence._annotate_support_candidate_interval_reference_trust(
+        annotated,
+        stitched_summary={},
+        params=params,
+    )
+    ranked = sorted(annotated, key=_step3_evidence._support_selection_key)
+
+    assert ranked[0]["traj_id"] in {"correct_terminal_a", "correct_terminal_b"}
+    wrong = next(item for item in annotated if item["traj_id"] == "wrong_terminal")
+    assert int(wrong["support_cluster_support_count"]) == 1
+    assert bool(wrong["support_cluster_is_dominant"]) is False
+    assert bool(wrong["support_interval_reference_trusted"]) is False
+
+
+def test_t05v2_competing_arc_grouping_uses_canonical_src_for_alias_rows() -> None:
+    rows = [
+        {
+            "topology_arc_id": "arc_alias",
+            "src": 23287538,
+            "canonical_src_xsec_id": 55353307,
+            "line_coords": [[0.0, 0.0], [100.0, 0.0]],
+        },
+        {
+            "topology_arc_id": "arc_peer",
+            "src": 55353307,
+            "canonical_src_xsec_id": 55353307,
+            "line_coords": [[0.0, 4.0], [100.0, 4.0]],
+        },
+    ]
+
+    grouped = _step3_evidence._build_competing_arc_lines_by_arc_id(rows)
+
+    assert len(grouped["arc_alias"]) == 1
+    assert len(grouped["arc_peer"]) == 1
+
+
 def test_t05v2_arc_first_prefilter_keeps_same_arc_support_and_skips_far_traj(tmp_path: Path) -> None:
     patch_id = "arc_first_prefilter"
     data_root = tmp_path / "data"
