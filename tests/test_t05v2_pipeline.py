@@ -1227,6 +1227,45 @@ def test_t05v2_same_pair_conflict_key_coalesces_nearly_identical_surface_sides()
     assert evidence_module._same_pair_support_conflict_key(candidate_a) == evidence_module._same_pair_support_conflict_key(candidate_b)
 
 
+def test_t05v2_support_segment_feature_exports_raw_and_canonical_alias_fields() -> None:
+    feature = _step3_evidence._support_segment_feature(
+        patch_id="5417632623039346",
+        row={
+            "pair": "55353307:765141",
+            "raw_pair": "23287538:765141",
+            "canonical_pair": "55353307:765141",
+            "src": 55353307,
+            "dst": 765141,
+            "raw_src_nodeid": 23287538,
+            "raw_dst_nodeid": 765141,
+            "canonical_src_xsec_id": 55353307,
+            "canonical_dst_xsec_id": 765141,
+            "src_alias_applied": True,
+            "dst_alias_applied": False,
+            "src_xsec_nodeids": [23287538, 55353307],
+            "dst_xsec_nodeids": [765141],
+            "topology_arc_id": "arc_55353307_765141_1",
+        },
+        item={
+            "traj_id": "11001_demo__seg0001",
+            "source_traj_id": "11001_demo",
+            "line_coords": [[0.0, 0.0], [10.0, 0.0]],
+            "support_type": "terminal_crossing_support",
+            "support_mode": "single",
+        },
+    )
+
+    assert feature is not None
+    _, props = feature
+    assert props["pair"] == "55353307:765141"
+    assert props["raw_pair"] == "23287538:765141"
+    assert props["canonical_pair"] == "55353307:765141"
+    assert props["raw_src_nodeid"] == 23287538
+    assert props["canonical_src_xsec_id"] == 55353307
+    assert props["src_alias_applied"] is True
+    assert props["src_xsec_nodeids"] == [23287538, 55353307]
+
+
 def test_t05v2_step2_writes_traj_crossing_and_support_audits(tmp_path: Path) -> None:
     patch_id = "traj_audit"
     data_root = tmp_path / "data"

@@ -2174,6 +2174,30 @@ def build_arc_evidence_attach(
                     and (not divstrip_buffer.is_empty)
                     and arc_line.intersects(divstrip_buffer)
                 ),
+                "src_xsec_nodeids": sorted(
+                    int(v)
+                    for v in (
+                        (
+                            xsec_map.get(int(current["src"])).properties.get("nodeids", [])
+                            if xsec_map.get(int(current["src"])) is not None
+                            else []
+                        )
+                        or []
+                    )
+                    if v is not None
+                ),
+                "dst_xsec_nodeids": sorted(
+                    int(v)
+                    for v in (
+                        (
+                            xsec_map.get(int(current["dst"])).properties.get("nodeids", [])
+                            if xsec_map.get(int(current["dst"])) is not None
+                            else []
+                        )
+                        or []
+                    )
+                    if v is not None
+                ),
             }
         )
         runtime_totals["terminal_partial_stitched_aggregation_time_ms"] += float((perf_counter() - aggregation_started) * 1000.0)
@@ -2406,8 +2430,18 @@ def _support_segment_feature(
         {
             "patch_id": str(patch_id),
             "pair": str(row.get("pair", "")),
+            "raw_pair": str(row.get("raw_pair", row.get("pair", ""))),
+            "canonical_pair": str(row.get("canonical_pair", row.get("pair", ""))),
             "src": int(row.get("src", 0)),
             "dst": int(row.get("dst", 0)),
+            "raw_src_nodeid": int(row.get("raw_src_nodeid", row.get("src", 0))),
+            "raw_dst_nodeid": int(row.get("raw_dst_nodeid", row.get("dst", 0))),
+            "canonical_src_xsec_id": int(row.get("canonical_src_xsec_id", row.get("src", 0))),
+            "canonical_dst_xsec_id": int(row.get("canonical_dst_xsec_id", row.get("dst", 0))),
+            "src_alias_applied": bool(row.get("src_alias_applied", False)),
+            "dst_alias_applied": bool(row.get("dst_alias_applied", False)),
+            "src_xsec_nodeids": [int(v) for v in row.get("src_xsec_nodeids", []) if v is not None],
+            "dst_xsec_nodeids": [int(v) for v in row.get("dst_xsec_nodeids", []) if v is not None],
             "topology_arc_id": str(row.get("topology_arc_id", item.get("topology_arc_id", ""))),
             "traj_id": str(item.get("traj_id", "")),
             "source_traj_id": str(item.get("source_traj_id", item.get("traj_id", ""))),
