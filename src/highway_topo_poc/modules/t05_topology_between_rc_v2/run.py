@@ -59,6 +59,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--witness_min_stability_score", type=float, default=float(DEFAULT_PARAMS["WITNESS_MIN_STABILITY_SCORE"]))
     parser.add_argument("--interval_min_len_m", type=float, default=float(DEFAULT_PARAMS["INTERVAL_MIN_LEN_M"]))
     parser.add_argument("--road_min_drivezone_ratio", type=float, default=float(DEFAULT_PARAMS["ROAD_MIN_DRIVEZONE_RATIO"]))
+    parser.add_argument("--global_fit_lane_hint_high_quality", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_LANE_HINT_HIGH_QUALITY"]))
+    parser.add_argument("--global_fit_center_correction_base_blend", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_CENTER_CORRECTION_BASE_BLEND"]))
+    parser.add_argument("--global_fit_center_correction_max_blend", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_CENTER_CORRECTION_MAX_BLEND"]))
+    parser.add_argument("--global_fit_center_correction_weak_scale", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_CENTER_CORRECTION_WEAK_SCALE"]))
+    parser.add_argument("--global_fit_center_correction_max_shift_m", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_CENTER_CORRECTION_MAX_SHIFT_M"]))
+    parser.add_argument("--global_fit_corrected_spine_weight", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_CORRECTED_SPINE_WEIGHT"]))
+    parser.add_argument("--global_fit_centerline_penalty_weight", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_CENTERLINE_PENALTY_WEIGHT"]))
+    parser.add_argument("--global_fit_endpoint_tangent_enable", type=int, default=int(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_TANGENT_ENABLE"]))
+    parser.add_argument("--global_fit_endpoint_tangent_window_m", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_TANGENT_WINDOW_M"]))
+    parser.add_argument("--global_fit_endpoint_tangent_sample_m", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_TANGENT_SAMPLE_M"]))
+    parser.add_argument("--global_fit_endpoint_tangent_weight", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_TANGENT_WEIGHT"]))
+    parser.add_argument("--global_fit_endpoint_neighborhood_weight", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_NEIGHBORHOOD_WEIGHT"]))
     return parser.parse_args(argv)
 
 
@@ -90,6 +102,18 @@ def _params_from_args(args: argparse.Namespace) -> dict[str, float | int]:
         "WITNESS_MIN_STABILITY_SCORE": float(args.witness_min_stability_score),
         "INTERVAL_MIN_LEN_M": float(args.interval_min_len_m),
         "ROAD_MIN_DRIVEZONE_RATIO": float(args.road_min_drivezone_ratio),
+        "GLOBAL_FIT_LANE_HINT_HIGH_QUALITY": float(args.global_fit_lane_hint_high_quality),
+        "GLOBAL_FIT_CENTER_CORRECTION_BASE_BLEND": float(args.global_fit_center_correction_base_blend),
+        "GLOBAL_FIT_CENTER_CORRECTION_MAX_BLEND": float(args.global_fit_center_correction_max_blend),
+        "GLOBAL_FIT_CENTER_CORRECTION_WEAK_SCALE": float(args.global_fit_center_correction_weak_scale),
+        "GLOBAL_FIT_CENTER_CORRECTION_MAX_SHIFT_M": float(args.global_fit_center_correction_max_shift_m),
+        "GLOBAL_FIT_CORRECTED_SPINE_WEIGHT": float(args.global_fit_corrected_spine_weight),
+        "GLOBAL_FIT_CENTERLINE_PENALTY_WEIGHT": float(args.global_fit_centerline_penalty_weight),
+        "GLOBAL_FIT_ENDPOINT_TANGENT_ENABLE": int(args.global_fit_endpoint_tangent_enable),
+        "GLOBAL_FIT_ENDPOINT_TANGENT_WINDOW_M": float(args.global_fit_endpoint_tangent_window_m),
+        "GLOBAL_FIT_ENDPOINT_TANGENT_SAMPLE_M": float(args.global_fit_endpoint_tangent_sample_m),
+        "GLOBAL_FIT_ENDPOINT_TANGENT_WEIGHT": float(args.global_fit_endpoint_tangent_weight),
+        "GLOBAL_FIT_ENDPOINT_NEIGHBORHOOD_WEIGHT": float(args.global_fit_endpoint_neighborhood_weight),
     }
 
 

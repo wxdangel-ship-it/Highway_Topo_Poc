@@ -108,9 +108,13 @@ for PATCH_ID in "${PATCH_IDS[@]}"; do
   if [ -d "$PATCH_DIR" ]; then
     cp -f "$PATCH_DIR/step5_final_geometry_trace.json" "$BUNDLE_OUT/${PATCH_ID}_step5_final_geometry_trace.json" 2>/dev/null || true
     cp -f "$PATCH_DIR/step5_global_fit_trace.json" "$BUNDLE_OUT/${PATCH_ID}_step5_global_fit_trace.json" 2>/dev/null || true
+    cp -f "$PATCH_DIR/step5_global_fit_v2_trace.json" "$BUNDLE_OUT/${PATCH_ID}_step5_global_fit_v2_trace.json" 2>/dev/null || true
     cp -f "$PATCH_DIR/step5_trajectory_spine.geojson" "$BUNDLE_OUT/${PATCH_ID}_step5_trajectory_spine.geojson" 2>/dev/null || true
+    cp -f "$PATCH_DIR/step5_center_corrected_spine.geojson" "$BUNDLE_OUT/${PATCH_ID}_step5_center_corrected_spine.geojson" 2>/dev/null || true
     cp -f "$PATCH_DIR/step5_lane_boundary_center_hints.geojson" "$BUNDLE_OUT/${PATCH_ID}_step5_lane_boundary_center_hints.geojson" 2>/dev/null || true
+    cp -f "$PATCH_DIR/step5_endpoint_tangent_trace.geojson" "$BUNDLE_OUT/${PATCH_ID}_step5_endpoint_tangent_trace.geojson" 2>/dev/null || true
     cp -f "$PATCH_DIR/step5_global_fit_samples.geojson" "$BUNDLE_OUT/${PATCH_ID}_step5_global_fit_samples.geojson" 2>/dev/null || true
+    cp -f "$PATCH_DIR/step5_global_fit_v2_samples.geojson" "$BUNDLE_OUT/${PATCH_ID}_step5_global_fit_v2_samples.geojson" 2>/dev/null || true
   fi
 done
 

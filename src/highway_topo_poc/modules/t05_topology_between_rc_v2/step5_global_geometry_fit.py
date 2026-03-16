@@ -524,6 +524,7 @@ def aggregate_trajectory_stations(
             {
                 "station_index": int(idx),
                 "station_norm": float(station_norm),
+                "station_distance_m": float(station_norm * float(guide_line.length)),
                 "guide_coords": _point_to_coords(guide_point),
                 "tangent": None if tangent is None else [float(tangent[0]), float(tangent[1])],
                 "sample_count": int(len(samples)),
@@ -541,30 +542,137 @@ def aggregate_trajectory_stations(
                     for item in samples
                 ],
                 "lane_boundary_center_hint_coords": None,
+                "lane_boundary_center_tangent": None,
                 "lane_boundary_quality_score": 0.0,
                 "lane_boundary_weight": 0.0,
+                "lane_boundary_usage_band": "skipped",
+                "center_corrected_spine_coords": None,
+                "center_correction_m": 0.0,
+                "center_correction_source": "",
+                "center_correction_applied_bool": False,
                 "fitted_coords": None,
             }
         )
     if rows:
         rows[0]["trajectory_robust_center_coords"] = _point_to_coords(start_anchor)
         rows[0]["trajectory_confidence"] = 1.0
+        rows[0]["center_corrected_spine_coords"] = _point_to_coords(start_anchor)
         rows[-1]["trajectory_robust_center_coords"] = _point_to_coords(end_anchor)
         rows[-1]["trajectory_confidence"] = 1.0
+        rows[-1]["center_corrected_spine_coords"] = _point_to_coords(end_anchor)
     return rows
 
 
-def _iter_station_points(rows: list[dict[str, Any]]) -> list[tuple[int, float, Point, tuple[float, float] | None]]:
+def _coords_to_point(coords: Any) -> Point | None:
+    if not isinstance(coords, list) or len(coords) < 2:
+        return None
+    return Point(float(coords[0]), float(coords[1]))
+
+
+def _normalize_vector(dx: float, dy: float) -> tuple[float, float] | None:
+    norm = hypot(float(dx), float(dy))
+    if norm <= 1e-6:
+        return None
+    return float(dx / norm), float(dy / norm)
+
+
+def _align_vector(
+    vector: tuple[float, float] | None,
+    reference: tuple[float, float] | None,
+) -> tuple[float, float] | None:
+    if vector is None:
+        return None
+    if reference is None:
+        return vector
+    dot = float(vector[0]) * float(reference[0]) + float(vector[1]) * float(reference[1])
+    if dot < 0.0:
+        return (-float(vector[0]), -float(vector[1]))
+    return vector
+
+
+def _blend_unit_vectors(
+    vectors: list[tuple[tuple[float, float], float]],
+    *,
+    fallback: tuple[float, float] | None = None,
+) -> tuple[tuple[float, float] | None, float]:
+    sx = 0.0
+    sy = 0.0
+    sw = 0.0
+    for vector, weight in vectors:
+        if vector is None or float(weight) <= 0.0:
+            continue
+        sx += float(vector[0]) * float(weight)
+        sy += float(vector[1]) * float(weight)
+        sw += float(weight)
+    blended = _normalize_vector(sx, sy)
+    if blended is None:
+        return fallback, 0.0 if fallback is None else min(1.0, float(sw))
+    return blended, min(1.0, float(sw) / max(1.0, float(sw)))
+
+
+def _vector_angle_deg(
+    vector_a: tuple[float, float] | None,
+    vector_b: tuple[float, float] | None,
+) -> float:
+    if vector_a is None or vector_b is None:
+        return 180.0
+    cross = float(vector_a[0]) * float(vector_b[1]) - float(vector_a[1]) * float(vector_b[0])
+    dot = float(vector_a[0]) * float(vector_b[0]) + float(vector_a[1]) * float(vector_b[1])
+    return abs(float(atan2(cross, dot))) * 180.0 / pi
+
+
+def _point_along_vector(
+    origin: Point,
+    tangent: tuple[float, float] | None,
+    distance_m: float,
+    *,
+    reverse: bool = False,
+) -> Point:
+    if tangent is None:
+        return Point(float(origin.x), float(origin.y))
+    sign = -1.0 if bool(reverse) else 1.0
+    return Point(
+        float(origin.x) + float(tangent[0]) * float(distance_m) * sign,
+        float(origin.y) + float(tangent[1]) * float(distance_m) * sign,
+    )
+
+
+def _station_reference_length(
+    station_rows: list[dict[str, Any]],
+    start_anchor: Point,
+    end_anchor: Point,
+) -> float:
+    guide_line = _line_from_coords([row.get("guide_coords") for row in station_rows if isinstance(row.get("guide_coords"), list)])
+    if _line_is_usable(guide_line):
+        return float(guide_line.length)
+    return max(1.0, float(start_anchor.distance(end_anchor)))
+
+
+def _copy_station_rows(station_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in station_rows:
+        current = dict(row)
+        if isinstance(current.get("trajectory_samples"), list):
+            current["trajectory_samples"] = [dict(item) for item in current["trajectory_samples"]]
+        out.append(current)
+    return out
+
+
+def _iter_station_points(
+    rows: list[dict[str, Any]],
+    *,
+    coords_key: str = "trajectory_robust_center_coords",
+) -> list[tuple[int, float, Point, tuple[float, float] | None]]:
     out: list[tuple[int, float, Point, tuple[float, float] | None]] = []
     for row in rows:
-        coords = row.get("trajectory_robust_center_coords") or row.get("guide_coords")
-        if not isinstance(coords, list) or len(coords) < 2:
+        coords = row.get(coords_key) or row.get("trajectory_robust_center_coords") or row.get("guide_coords")
+        point = _coords_to_point(coords)
+        if point is None:
             continue
-        point = Point(float(coords[0]), float(coords[1]))
         tangent_raw = row.get("tangent")
         tangent = None
         if isinstance(tangent_raw, list) and len(tangent_raw) >= 2:
-            tangent = (float(tangent_raw[0]), float(tangent_raw[1]))
+            tangent = _normalize_vector(float(tangent_raw[0]), float(tangent_raw[1]))
         out.append((int(row.get("station_index", len(out))), float(row.get("station_norm", 0.0)), point, tangent))
     return out
 
@@ -582,8 +690,13 @@ def extract_lane_boundary_center_hints(
     target_width_m = float(params.get("GLOBAL_FIT_LANE_BOUNDARY_TARGET_WIDTH_M", params.get("GEOMETRY_REFINE_LANE_BOUNDARY_TARGET_WIDTH_M", 6.0)))
     max_weight = float(params.get("GLOBAL_FIT_LANE_HINT_MAX_WEIGHT", 0.35))
     min_quality = float(params.get("GLOBAL_FIT_LANE_HINT_MIN_QUALITY", 0.45))
+    high_quality = float(params.get("GLOBAL_FIT_LANE_HINT_HIGH_QUALITY", 0.70))
     rows: list[dict[str, Any]] = []
+    high_quality_count = 0
+    weak_quality_count = 0
+    total_station_count = 0
     for station_index, station_norm, point, tangent in _iter_station_points(station_rows):
+        total_station_count += 1
         if tangent is None or len(lane_boundaries) < 2:
             continue
         normal = (-float(tangent[1]), float(tangent[0]))
@@ -604,7 +717,7 @@ def extract_lane_boundary_center_hints(
                 + (float(boundary_point.y) - float(point.y)) * float(normal[1])
             )
             boundary_norm = float(boundary.project(boundary_point) / max(boundary.length, 1e-6))
-            boundary_tangent = _sample_direction(boundary, boundary_norm)
+            boundary_tangent = _align_vector(_sample_direction(boundary, boundary_norm), tangent)
             tangent_align = 0.0
             if boundary_tangent is not None:
                 tangent_align = abs(
@@ -616,6 +729,7 @@ def extract_lane_boundary_center_hints(
                 "distance": float(distance),
                 "signed_offset": float(signed_offset),
                 "tangent_align": float(tangent_align),
+                "boundary_tangent": boundary_tangent,
                 "rank_score": float(tangent_align) - float(distance) / max(search_m, 1.0),
             }
             if signed_offset >= 0.0:
@@ -655,7 +769,20 @@ def extract_lane_boundary_center_hints(
         )
         if quality < min_quality:
             continue
-        weight = max(0.0, min(max_weight, float(quality) * max_weight))
+        usage_band = "high_quality" if float(quality) >= high_quality else "weak_constraint"
+        if usage_band == "high_quality":
+            high_quality_count += 1
+        else:
+            weak_quality_count += 1
+        weight_scale = 1.25 if usage_band == "high_quality" else 0.80
+        weight = max(0.0, min(max_weight, float(quality) * max_weight * weight_scale))
+        center_tangent, _ = _blend_unit_vectors(
+            [
+                (left["boundary_tangent"], max(0.1, float(left["tangent_align"]))),
+                (right["boundary_tangent"], max(0.1, float(right["tangent_align"]))),
+            ],
+            fallback=tangent,
+        )
         rows.append(
             {
                 "station_index": int(station_index),
@@ -666,6 +793,8 @@ def extract_lane_boundary_center_hints(
                 "width_m": float(separation),
                 "offset_from_spine_m": float(offset_m),
                 "tangent": [float(tangent[0]), float(tangent[1])],
+                "center_tangent": None if center_tangent is None else [float(center_tangent[0]), float(center_tangent[1])],
+                "usage_band": str(usage_band),
                 "source_lane_boundary_ids": [
                     f"lane_boundary_{int(left['boundary_index'])}",
                     f"lane_boundary_{int(right['boundary_index'])}",
@@ -678,7 +807,249 @@ def extract_lane_boundary_center_hints(
         "hint_count": int(len(rows)),
         "quality_mean": float(sum(quality_values) / max(len(quality_values), 1)) if quality_values else 0.0,
         "quality_max": max(quality_values, default=0.0),
+        "high_quality_count": int(high_quality_count),
+        "weak_quality_count": int(weak_quality_count),
+        "skipped_station_count": max(0, int(total_station_count) - int(len(rows))),
+        "total_station_count": int(total_station_count),
+        "usage_ratio": float(len(rows) / max(total_station_count, 1)) if total_station_count else 0.0,
         "used_bool": bool(rows),
+    }
+
+
+def build_center_corrected_spine(
+    *,
+    station_rows: list[dict[str, Any]],
+    start_anchor: Point,
+    end_anchor: Point,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    corrected_rows = _copy_station_rows(station_rows)
+    min_quality = float(params.get("GLOBAL_FIT_LANE_HINT_MIN_QUALITY", 0.45))
+    high_quality = float(params.get("GLOBAL_FIT_LANE_HINT_HIGH_QUALITY", 0.70))
+    base_blend = float(params.get("GLOBAL_FIT_CENTER_CORRECTION_BASE_BLEND", 0.48))
+    max_blend = float(params.get("GLOBAL_FIT_CENTER_CORRECTION_MAX_BLEND", 0.68))
+    weak_scale = float(params.get("GLOBAL_FIT_CENTER_CORRECTION_WEAK_SCALE", 0.55))
+    max_shift_m = float(params.get("GLOBAL_FIT_CENTER_CORRECTION_MAX_SHIFT_M", 2.6))
+    high_quality_count = 0
+    weak_quality_count = 0
+    skipped_count = 0
+    raw_correction_values: list[float] = []
+    for index, row in enumerate(corrected_rows):
+        base_point = _coords_to_point(row.get("trajectory_robust_center_coords") or row.get("guide_coords"))
+        if base_point is None:
+            row["center_corrected_spine_coords"] = row.get("trajectory_robust_center_coords") or row.get("guide_coords")
+            row["center_correction_m"] = 0.0
+            row["center_correction_source"] = ""
+            row["center_correction_applied_bool"] = False
+            row["lane_boundary_usage_band"] = "skipped"
+            skipped_count += 1
+            continue
+        if index == 0:
+            row["center_corrected_spine_coords"] = _point_to_coords(start_anchor)
+            row["center_correction_m"] = 0.0
+            row["center_correction_source"] = "authoritative_anchor"
+            row["center_correction_applied_bool"] = False
+            row["lane_boundary_usage_band"] = "skipped"
+            continue
+        if index == len(corrected_rows) - 1:
+            row["center_corrected_spine_coords"] = _point_to_coords(end_anchor)
+            row["center_correction_m"] = 0.0
+            row["center_correction_source"] = "authoritative_anchor"
+            row["center_correction_applied_bool"] = False
+            row["lane_boundary_usage_band"] = "skipped"
+            continue
+        hint_point = _coords_to_point(row.get("lane_boundary_center_hint_coords"))
+        hint_quality = float(row.get("lane_boundary_quality_score", 0.0) or 0.0)
+        if hint_point is None or hint_quality < min_quality:
+            row["center_corrected_spine_coords"] = _point_to_coords(base_point)
+            row["center_correction_m"] = 0.0
+            row["center_correction_source"] = ""
+            row["center_correction_applied_bool"] = False
+            row["lane_boundary_usage_band"] = "skipped"
+            skipped_count += 1
+            continue
+        usage_band = "high_quality" if hint_quality >= high_quality else "weak_constraint"
+        traj_confidence = max(0.15, float(row.get("trajectory_confidence", 0.0) or 0.0))
+        lane_weight = max(0.0, float(row.get("lane_boundary_weight", 0.0) or 0.0))
+        dx = float(hint_point.x) - float(base_point.x)
+        dy = float(hint_point.y) - float(base_point.y)
+        offset_norm = hypot(float(dx), float(dy))
+        if offset_norm <= 1e-6:
+            row["center_corrected_spine_coords"] = _point_to_coords(base_point)
+            row["center_correction_m"] = 0.0
+            row["center_correction_source"] = ""
+            row["center_correction_applied_bool"] = False
+            row["lane_boundary_usage_band"] = str(usage_band)
+            if usage_band == "high_quality":
+                high_quality_count += 1
+            else:
+                weak_quality_count += 1
+            continue
+        band_scale = 1.0 if usage_band == "high_quality" else weak_scale
+        blend = min(
+            max_blend,
+            max(
+                0.10,
+                float(base_blend) * float(band_scale) * max(0.75, 1.15 - 0.35 * float(traj_confidence)) * max(0.55, 0.8 + 1.2 * float(lane_weight)),
+            ),
+        )
+        correction_m = min(float(max_shift_m), float(offset_norm) * float(blend))
+        corrected_point = Point(
+            float(base_point.x) + float(dx) / float(offset_norm) * float(correction_m),
+            float(base_point.y) + float(dy) / float(offset_norm) * float(correction_m),
+        )
+        row["center_corrected_spine_coords"] = _point_to_coords(corrected_point)
+        row["center_correction_m"] = float(correction_m)
+        row["center_correction_source"] = f"lane_boundary_center_hint_{usage_band}"
+        row["center_correction_applied_bool"] = bool(correction_m > 1e-6)
+        row["lane_boundary_usage_band"] = str(usage_band)
+        raw_correction_values.append(float(correction_m))
+        if usage_band == "high_quality":
+            high_quality_count += 1
+        else:
+            weak_quality_count += 1
+    corrected_line, corrected_metrics = fit_global_centerline(
+        station_rows=corrected_rows,
+        start_anchor=start_anchor,
+        end_anchor=end_anchor,
+        params=params,
+        use_lane_hints=False,
+        target_key="center_corrected_spine_coords",
+        objective_name="center_corrected_spine",
+    )
+    if corrected_line is None:
+        corrected_line = _line_from_coords([row.get("center_corrected_spine_coords") for row in corrected_rows])
+    actual_correction_values: list[float] = []
+    if corrected_line is not None:
+        for row in corrected_rows:
+            corrected_point = _safe_line_interpolate(corrected_line, float(row.get("station_norm", 0.0)), normalized=True)
+            if corrected_point is None:
+                continue
+            row["center_corrected_spine_coords"] = _point_to_coords(corrected_point)
+            base_point = _coords_to_point(row.get("trajectory_robust_center_coords") or row.get("guide_coords"))
+            if base_point is not None:
+                actual_correction = float(corrected_point.distance(base_point))
+                row["center_correction_m"] = float(actual_correction)
+                if float(actual_correction) > 1e-6 and not str(row.get("center_correction_source", "")):
+                    row["center_correction_source"] = "smoothed_center_correction"
+                row["center_correction_applied_bool"] = bool(actual_correction > 1e-6)
+                actual_correction_values.append(float(actual_correction))
+    correction_values = actual_correction_values or raw_correction_values
+    return {
+        "station_rows": corrected_rows,
+        "corrected_line": corrected_line,
+        "corrected_spine_quality": float(corrected_metrics.get("fit_quality", 0.0) or 0.0),
+        "correction_enabled_bool": bool(correction_values),
+        "high_quality_count": int(high_quality_count),
+        "weak_quality_count": int(weak_quality_count),
+        "skipped_count": int(skipped_count),
+        "correction_mean_m": float(sum(correction_values) / max(len(correction_values), 1)) if correction_values else 0.0,
+        "correction_max_m": max(correction_values, default=0.0),
+        "correction_source": "lane_boundary_center_hint_centerline_correction" if correction_values else "",
+    }
+
+
+def estimate_endpoint_local_tangents(
+    *,
+    selected_rows: list[dict[str, Any]],
+    station_rows: list[dict[str, Any]],
+    corrected_spine_line: LineString | None,
+    start_anchor: Point,
+    end_anchor: Point,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    enabled = bool(params.get("GLOBAL_FIT_ENDPOINT_TANGENT_ENABLE", 1))
+    window_m = float(params.get("GLOBAL_FIT_ENDPOINT_TANGENT_WINDOW_M", 18.0))
+    sample_m = float(params.get("GLOBAL_FIT_ENDPOINT_TANGENT_SAMPLE_M", max(6.0, min(12.0, window_m * 0.75))))
+    reference_length = _station_reference_length(station_rows, start_anchor, end_anchor)
+    fallback_start = _direction_unit(corrected_spine_line, at_start=True) if _line_is_usable(corrected_spine_line) else _normalize_vector(float(end_anchor.x) - float(start_anchor.x), float(end_anchor.y) - float(start_anchor.y))
+    fallback_end = _direction_unit(corrected_spine_line, at_start=False) if _line_is_usable(corrected_spine_line) else fallback_start
+
+    def _build_endpoint_payload(*, at_start: bool) -> dict[str, Any]:
+        anchor = start_anchor if at_start else end_anchor
+        fallback = fallback_start if at_start else fallback_end
+        trajectory_vectors: list[tuple[tuple[float, float], float]] = []
+        for row in selected_rows:
+            line = row.get("line")
+            if not _line_is_usable(line):
+                continue
+            nearest = _safe_nearest_points(line, anchor)
+            if nearest is None:
+                continue
+            line_anchor = nearest[0]
+            anchor_distance = float(line_anchor.distance(anchor))
+            if anchor_distance > float(window_m) * 1.5:
+                continue
+            projected = float(line.project(line_anchor))
+            if at_start:
+                point_a = _safe_line_interpolate(line, projected)
+                point_b = _safe_line_interpolate(line, min(float(line.length), projected + float(sample_m)))
+            else:
+                point_a = _safe_line_interpolate(line, max(0.0, projected - float(sample_m)))
+                point_b = _safe_line_interpolate(line, projected)
+            if point_a is None or point_b is None:
+                continue
+            vector = _align_vector(
+                _normalize_vector(float(point_b.x) - float(point_a.x), float(point_b.y) - float(point_a.y)),
+                fallback,
+            )
+            if vector is None:
+                continue
+            weight = max(0.10, float(row.get("selection_weight", 0.0) or 0.0)) * max(0.10, 1.0 - anchor_distance / max(window_m * 1.5, 1.0))
+            trajectory_vectors.append((vector, float(weight)))
+        trajectory_vector, trajectory_confidence = _blend_unit_vectors(trajectory_vectors, fallback=None)
+
+        lane_vectors: list[tuple[tuple[float, float], float]] = []
+        for row in station_rows:
+            station_norm = float(row.get("station_norm", 0.0) or 0.0)
+            station_distance = float(row.get("station_distance_m", station_norm * reference_length) or 0.0)
+            endpoint_distance = station_distance if at_start else max(0.0, reference_length - station_distance)
+            if endpoint_distance > window_m:
+                continue
+            tangent_raw = row.get("lane_boundary_center_tangent") or row.get("tangent")
+            if not isinstance(tangent_raw, list) or len(tangent_raw) < 2:
+                continue
+            vector = _align_vector(_normalize_vector(float(tangent_raw[0]), float(tangent_raw[1])), fallback)
+            if vector is None:
+                continue
+            quality = max(0.0, float(row.get("lane_boundary_quality_score", 0.0) or 0.0))
+            weight = float(quality) * max(0.10, 1.0 - endpoint_distance / max(window_m, 1.0))
+            if weight <= 0.0:
+                continue
+            lane_vectors.append((vector, float(weight)))
+        lane_vector, lane_confidence = _blend_unit_vectors(lane_vectors, fallback=None)
+
+        blend_inputs: list[tuple[tuple[float, float], float]] = []
+        if trajectory_vector is not None:
+            blend_inputs.append((trajectory_vector, max(0.35, 1.35 * float(trajectory_confidence))))
+        if lane_vector is not None:
+            blend_inputs.append((lane_vector, max(0.15, 0.65 * float(lane_confidence))))
+        if fallback is not None:
+            blend_inputs.append((fallback, 0.25))
+        tangent, _ = _blend_unit_vectors(blend_inputs, fallback=fallback)
+        if tangent is None:
+            tangent = fallback
+        source_type = "corrected_spine_fallback"
+        if trajectory_vector is not None and lane_vector is not None and lane_confidence >= 0.35:
+            source_type = "trajectory_local_trend_blended_lane_hint"
+        elif trajectory_vector is not None:
+            source_type = "trajectory_local_trend"
+        elif lane_vector is not None:
+            source_type = "lane_boundary_local_tangent"
+        confidence = min(1.0, max(float(trajectory_confidence), 0.0) * 0.70 + max(float(lane_confidence), 0.0) * 0.20 + (0.10 if fallback is not None else 0.0))
+        return {
+            "tangent": None if tangent is None else [float(tangent[0]), float(tangent[1])],
+            "source_type": str(source_type),
+            "confidence": float(confidence),
+            "trajectory_candidate_count": int(len(trajectory_vectors)),
+            "lane_hint_count": int(len(lane_vectors)),
+            "window_m": float(window_m),
+        }
+
+    return {
+        "enabled_bool": bool(enabled),
+        "src": _build_endpoint_payload(at_start=True) if enabled else {"tangent": None, "source_type": "", "confidence": 0.0},
+        "dst": _build_endpoint_payload(at_start=False) if enabled else {"tangent": None, "source_type": "", "confidence": 0.0},
     }
 
 
@@ -689,22 +1060,40 @@ def fit_global_centerline(
     end_anchor: Point,
     params: dict[str, Any],
     use_lane_hints: bool,
+    target_key: str = "trajectory_robust_center_coords",
+    endpoint_tangents: dict[str, Any] | None = None,
+    objective_name: str = "global_fitted_line",
 ) -> tuple[LineString | None, dict[str, Any]]:
     if len(station_rows) < 2:
         return None, {"fit_quality": 0.0, "mean_traj_offset_m": float("inf"), "mean_lane_offset_m": float("inf")}
     smooth_weight = float(params.get("GLOBAL_FIT_SMOOTHNESS_WEIGHT", 1.8))
     guide_weight = float(params.get("GLOBAL_FIT_GUIDE_WEIGHT", 0.32))
     traj_base_weight = float(params.get("GLOBAL_FIT_TRAJECTORY_WEIGHT", 2.6))
+    corrected_spine_weight = float(params.get("GLOBAL_FIT_CORRECTED_SPINE_WEIGHT", max(3.1, traj_base_weight)))
     lane_max_weight = float(params.get("GLOBAL_FIT_LANE_HINT_MAX_WEIGHT", 0.35))
+    centerline_penalty_weight = float(params.get("GLOBAL_FIT_CENTERLINE_PENALTY_WEIGHT", 2.0))
+    endpoint_tangent_weight = float(params.get("GLOBAL_FIT_ENDPOINT_TANGENT_WEIGHT", 2.8))
+    endpoint_neighborhood_weight = float(params.get("GLOBAL_FIT_ENDPOINT_NEIGHBORHOOD_WEIGHT", 2.1))
+    endpoint_window_m = float(params.get("GLOBAL_FIT_ENDPOINT_TANGENT_WINDOW_M", 18.0))
     iterations = max(8, int(params.get("GLOBAL_FIT_SMOOTHING_ITERATIONS", 18)))
+    reference_length = _station_reference_length(station_rows, start_anchor, end_anchor)
+    src_tangent_raw = None if not isinstance(endpoint_tangents, dict) else (endpoint_tangents.get("src") or {}).get("tangent")
+    dst_tangent_raw = None if not isinstance(endpoint_tangents, dict) else (endpoint_tangents.get("dst") or {}).get("tangent")
+    src_tangent = None
+    dst_tangent = None
+    if isinstance(src_tangent_raw, list) and len(src_tangent_raw) >= 2:
+        src_tangent = _normalize_vector(float(src_tangent_raw[0]), float(src_tangent_raw[1]))
+    if isinstance(dst_tangent_raw, list) and len(dst_tangent_raw) >= 2:
+        dst_tangent = _normalize_vector(float(dst_tangent_raw[0]), float(dst_tangent_raw[1]))
     coords: list[tuple[float, float]] = []
     for row in station_rows:
-        target = row.get("trajectory_robust_center_coords") or row.get("guide_coords")
+        target = row.get(target_key) or row.get("trajectory_robust_center_coords") or row.get("guide_coords")
         if not isinstance(target, list) or len(target) < 2:
             return None, {"fit_quality": 0.0, "mean_traj_offset_m": float("inf"), "mean_lane_offset_m": float("inf")}
         coords.append((float(target[0]), float(target[1])))
     coords[0] = (float(start_anchor.x), float(start_anchor.y))
     coords[-1] = (float(end_anchor.x), float(end_anchor.y))
+    target_base_weight = float(corrected_spine_weight if target_key == "center_corrected_spine_coords" else traj_base_weight)
     for _ in range(iterations):
         next_coords = list(coords)
         for idx in range(1, len(coords) - 1):
@@ -712,12 +1101,12 @@ def fit_global_centerline(
             sx = 0.0
             sy = 0.0
             sw = 0.0
-            traj_coords = row.get("trajectory_robust_center_coords")
-            if isinstance(traj_coords, list) and len(traj_coords) >= 2:
-                traj_weight = max(0.2, float(traj_base_weight) * max(float(row.get("trajectory_confidence", 0.0)), 0.15))
-                sx += float(traj_coords[0]) * float(traj_weight)
-                sy += float(traj_coords[1]) * float(traj_weight)
-                sw += float(traj_weight)
+            target_coords = row.get(target_key) or row.get("trajectory_robust_center_coords") or row.get("guide_coords")
+            if isinstance(target_coords, list) and len(target_coords) >= 2:
+                target_weight = max(0.25, float(target_base_weight) * max(float(row.get("trajectory_confidence", 0.0) or 0.0), 0.15))
+                sx += float(target_coords[0]) * float(target_weight)
+                sy += float(target_coords[1]) * float(target_weight)
+                sw += float(target_weight)
             guide_coords = row.get("guide_coords")
             if isinstance(guide_coords, list) and len(guide_coords) >= 2:
                 sx += float(guide_coords[0]) * float(guide_weight)
@@ -725,7 +1114,12 @@ def fit_global_centerline(
                 sw += float(guide_weight)
             if use_lane_hints:
                 hint_coords = row.get("lane_boundary_center_hint_coords")
-                hint_weight = min(lane_max_weight, float(row.get("lane_boundary_weight", 0.0)))
+                hint_weight = min(
+                    float(lane_max_weight) * 2.25,
+                    max(0.0, float(row.get("lane_boundary_weight", 0.0) or 0.0))
+                    * float(centerline_penalty_weight)
+                    * (1.30 if str(row.get("lane_boundary_usage_band", "")) == "high_quality" else 0.80),
+                )
                 if isinstance(hint_coords, list) and len(hint_coords) >= 2 and hint_weight > 0.0:
                     sx += float(hint_coords[0]) * float(hint_weight)
                     sy += float(hint_coords[1]) * float(hint_weight)
@@ -735,6 +1129,34 @@ def fit_global_centerline(
             sx += float(smooth_x) * float(smooth_weight)
             sy += float(smooth_y) * float(smooth_weight)
             sw += float(smooth_weight)
+            station_norm = float(row.get("station_norm", 0.0) or 0.0)
+            station_distance = float(row.get("station_distance_m", station_norm * reference_length) or 0.0)
+            dist_from_start = float(station_distance)
+            dist_from_end = max(0.0, float(reference_length) - float(station_distance))
+            if src_tangent is not None and dist_from_start < endpoint_window_m:
+                ramp = max(0.0, 1.0 - float(dist_from_start) / max(endpoint_window_m, 1.0))
+                tangent_target = _point_along_vector(start_anchor, src_tangent, dist_from_start, reverse=False)
+                tangent_weight = float(endpoint_tangent_weight) * float(ramp)
+                sx += float(tangent_target.x) * float(tangent_weight)
+                sy += float(tangent_target.y) * float(tangent_weight)
+                sw += float(tangent_weight)
+                if isinstance(target_coords, list) and len(target_coords) >= 2:
+                    neighborhood_weight = float(endpoint_neighborhood_weight) * float(ramp)
+                    sx += float(target_coords[0]) * float(neighborhood_weight)
+                    sy += float(target_coords[1]) * float(neighborhood_weight)
+                    sw += float(neighborhood_weight)
+            if dst_tangent is not None and dist_from_end < endpoint_window_m:
+                ramp = max(0.0, 1.0 - float(dist_from_end) / max(endpoint_window_m, 1.0))
+                tangent_target = _point_along_vector(end_anchor, dst_tangent, dist_from_end, reverse=True)
+                tangent_weight = float(endpoint_tangent_weight) * float(ramp)
+                sx += float(tangent_target.x) * float(tangent_weight)
+                sy += float(tangent_target.y) * float(tangent_weight)
+                sw += float(tangent_weight)
+                if isinstance(target_coords, list) and len(target_coords) >= 2:
+                    neighborhood_weight = float(endpoint_neighborhood_weight) * float(ramp)
+                    sx += float(target_coords[0]) * float(neighborhood_weight)
+                    sy += float(target_coords[1]) * float(neighborhood_weight)
+                    sw += float(neighborhood_weight)
             if sw > 1e-6:
                 next_coords[idx] = (float(sx / sw), float(sy / sw))
         next_coords[0] = (float(start_anchor.x), float(start_anchor.y))
@@ -744,42 +1166,64 @@ def fit_global_centerline(
     if fitted_line is None:
         return None, {"fit_quality": 0.0, "mean_traj_offset_m": float("inf"), "mean_lane_offset_m": float("inf")}
     fitted_line = _replace_endpoints(fitted_line, start_anchor, end_anchor) or fitted_line
-    mean_traj_offset = 0.0
-    traj_count = 0
+    mean_target_offset = 0.0
+    target_count = 0
     mean_lane_offset = 0.0
     lane_count = 0
+    endpoint_neighborhood_offset = 0.0
+    endpoint_neighborhood_count = 0
     for row in station_rows:
         station_norm = float(row.get("station_norm", 0.0))
         fit_point = _safe_line_interpolate(fitted_line, station_norm, normalized=True)
         if fit_point is None:
             continue
         row["fitted_coords"] = _point_to_coords(fit_point)
-        traj_coords = row.get("trajectory_robust_center_coords")
-        if isinstance(traj_coords, list) and len(traj_coords) >= 2:
-            mean_traj_offset += float(fit_point.distance(Point(float(traj_coords[0]), float(traj_coords[1]))))
-            traj_count += 1
+        target_coords = row.get(target_key) or row.get("trajectory_robust_center_coords")
+        if isinstance(target_coords, list) and len(target_coords) >= 2:
+            distance_to_target = float(fit_point.distance(Point(float(target_coords[0]), float(target_coords[1]))))
+            mean_target_offset += float(distance_to_target)
+            target_count += 1
+            station_distance = float(row.get("station_distance_m", station_norm * reference_length) or 0.0)
+            dist_from_start = float(station_distance)
+            dist_from_end = max(0.0, float(reference_length) - float(station_distance))
+            if dist_from_start < endpoint_window_m or dist_from_end < endpoint_window_m:
+                endpoint_neighborhood_offset += float(distance_to_target)
+                endpoint_neighborhood_count += 1
         hint_coords = row.get("lane_boundary_center_hint_coords")
         if isinstance(hint_coords, list) and len(hint_coords) >= 2 and float(row.get("lane_boundary_weight", 0.0)) > 0.0:
             mean_lane_offset += float(fit_point.distance(Point(float(hint_coords[0]), float(hint_coords[1]))))
             lane_count += 1
-    mean_traj_offset /= max(traj_count, 1)
+    mean_target_offset /= max(target_count, 1)
     mean_lane_offset = (mean_lane_offset / max(lane_count, 1)) if lane_count else 0.0
+    endpoint_neighborhood_offset = (endpoint_neighborhood_offset / max(endpoint_neighborhood_count, 1)) if endpoint_neighborhood_count else 0.0
     smoothness_deg = _mean_turn_angle_deg(fitted_line)
+    fitted_src_tangent = _direction_unit(fitted_line, at_start=True)
+    fitted_dst_tangent = _direction_unit(fitted_line, at_start=False)
+    src_tangent_error = _vector_angle_deg(fitted_src_tangent, src_tangent) if src_tangent is not None else 0.0
+    dst_tangent_error = _vector_angle_deg(fitted_dst_tangent, dst_tangent) if dst_tangent is not None else 0.0
     fit_quality = max(
         0.0,
         min(
             1.0,
             1.0
-            - float(mean_traj_offset) / 8.0
-            - min(0.35, float(smoothness_deg) / 90.0)
-            - (0.0 if lane_count == 0 else min(0.25, float(mean_lane_offset) / 8.0)),
+            - float(mean_target_offset) / 8.0
+            - min(0.25, float(mean_lane_offset) / 8.0)
+            - min(0.18, float(endpoint_neighborhood_offset) / 8.0)
+            - min(0.18, (float(src_tangent_error) + float(dst_tangent_error)) / 180.0)
+            - min(0.28, float(smoothness_deg) / 90.0),
         ),
     )
     return fitted_line, {
         "fit_quality": float(fit_quality),
-        "mean_traj_offset_m": float(mean_traj_offset),
+        "objective_name": str(objective_name),
+        "target_key": str(target_key),
+        "mean_traj_offset_m": float(mean_target_offset),
+        "mean_target_offset_m": float(mean_target_offset),
         "mean_lane_offset_m": float(mean_lane_offset),
+        "endpoint_neighborhood_offset_m": float(endpoint_neighborhood_offset),
         "smoothness_angle_deg": float(smoothness_deg),
+        "src_tangent_error_deg": float(src_tangent_error),
+        "dst_tangent_error_deg": float(dst_tangent_error),
     }
 
 
@@ -830,21 +1274,45 @@ def build_global_geometry_fit(
         "guide_coords": [] if not _line_is_usable(guide_line) else [[float(x), float(y)] for x, y in line_to_coords(guide_line)],
         "trajectory_selection_rows": [],
         "trajectory_spine_coords": [],
+        "original_spine_coords": [],
         "trajectory_spine_source": "",
         "trajectory_spine_quality": 0.0,
         "trajectory_spine_support_count": int(len(selected_rows)),
         "trajectory_spine_weak_bool": False,
         "trajectory_spine_fallback_bool": False,
+        "center_corrected_spine_coords": [],
+        "center_corrected_spine_quality": 0.0,
+        "centerline_correction_enabled_bool": False,
+        "centerline_correction_summary": {
+            "high_quality_count": 0,
+            "weak_quality_count": 0,
+            "skipped_count": 0,
+            "correction_mean_m": 0.0,
+            "correction_max_m": 0.0,
+            "correction_source": "",
+        },
         "lane_boundary_hint_rows": [],
         "lane_boundary_hint_usage": {
             "hint_count": 0,
             "quality_mean": 0.0,
             "quality_max": 0.0,
+            "high_quality_count": 0,
+            "weak_quality_count": 0,
+            "skipped_station_count": 0,
+            "total_station_count": 0,
+            "usage_ratio": 0.0,
             "used_bool": False,
         },
+        "endpoint_tangent_trace": {
+            "enabled_bool": False,
+            "src": {"tangent": None, "source_type": "", "confidence": 0.0},
+            "dst": {"tangent": None, "source_type": "", "confidence": 0.0},
+        },
+        "endpoint_tangent_continuity_enabled_bool": False,
         "station_rows": [],
         "fitted_line_coords": [],
-        "fitting_mode": "trajectory_centered_global_fit",
+        "fitting_mode": "trajectory_centered_global_fit_v2",
+        "fitted_line_source": "center_corrected_spine_with_endpoint_tangent_continuity",
         "fitting_success_bool": False,
         "fallback_reason": "",
         "quality_gate_passed": False,
@@ -893,6 +1361,7 @@ def build_global_geometry_fit(
     weak_spine = bool(len(selected_rows) < 2 or spine_quality < float(params.get("GLOBAL_FIT_MIN_SPINE_QUALITY", 0.35)))
     trace["trajectory_spine_source"] = "trajectory_station_robust_center"
     trace["trajectory_spine_coords"] = [[float(x), float(y)] for x, y in line_to_coords(spine_line)]
+    trace["original_spine_coords"] = list(trace["trajectory_spine_coords"])
     trace["trajectory_spine_quality"] = float(spine_quality)
     trace["trajectory_spine_support_count"] = int(len(selected_rows))
     trace["trajectory_spine_weak_bool"] = bool(weak_spine)
@@ -918,24 +1387,69 @@ def build_global_geometry_fit(
         if hint is None:
             continue
         row["lane_boundary_center_hint_coords"] = list(hint.get("coords") or [])
+        row["lane_boundary_center_tangent"] = list(hint.get("center_tangent") or []) if isinstance(hint.get("center_tangent"), list) else None
         row["lane_boundary_quality_score"] = float(hint.get("quality_score", 0.0))
         row["lane_boundary_weight"] = float(hint.get("weight", 0.0))
+        row["lane_boundary_usage_band"] = str(hint.get("usage_band", "weak_constraint"))
 
-    fitted_line, fit_metrics = fit_global_centerline(
+    correction = build_center_corrected_spine(
         station_rows=spine_station_rows,
         start_anchor=start_anchor,
         end_anchor=end_anchor,
         params=params,
+    )
+    corrected_station_rows = list(correction["station_rows"])
+    corrected_spine_line = correction["corrected_line"]
+    trace["center_corrected_spine_coords"] = (
+        []
+        if corrected_spine_line is None
+        else [[float(x), float(y)] for x, y in line_to_coords(corrected_spine_line)]
+    )
+    trace["center_corrected_spine_quality"] = float(correction.get("corrected_spine_quality", 0.0) or 0.0)
+    trace["centerline_correction_enabled_bool"] = bool(correction.get("correction_enabled_bool", False))
+    trace["centerline_correction_summary"] = {
+        "high_quality_count": int(correction.get("high_quality_count", 0) or 0),
+        "weak_quality_count": int(correction.get("weak_quality_count", 0) or 0),
+        "skipped_count": int(correction.get("skipped_count", 0) or 0),
+        "correction_mean_m": float(correction.get("correction_mean_m", 0.0) or 0.0),
+        "correction_max_m": float(correction.get("correction_max_m", 0.0) or 0.0),
+        "correction_source": str(correction.get("correction_source", "")),
+    }
+
+    endpoint_tangent_trace = estimate_endpoint_local_tangents(
+        selected_rows=selected_rows,
+        station_rows=corrected_station_rows,
+        corrected_spine_line=corrected_spine_line,
+        start_anchor=start_anchor,
+        end_anchor=end_anchor,
+        params=params,
+    )
+    trace["endpoint_tangent_trace"] = dict(endpoint_tangent_trace)
+    trace["endpoint_tangent_continuity_enabled_bool"] = bool(endpoint_tangent_trace.get("enabled_bool", False))
+
+    fitted_line, fit_metrics = fit_global_centerline(
+        station_rows=corrected_station_rows,
+        start_anchor=start_anchor,
+        end_anchor=end_anchor,
+        params=params,
         use_lane_hints=True,
+        target_key="center_corrected_spine_coords",
+        endpoint_tangents=endpoint_tangent_trace,
+        objective_name="trajectory_centered_global_fit_v2",
     )
     trace["lane_boundary_hint_rows"] = hint_rows
     trace["lane_boundary_hint_usage"] = {
         "hint_count": int(hint_usage["hint_count"]),
         "quality_mean": float(hint_usage["quality_mean"]),
         "quality_max": float(hint_usage["quality_max"]),
+        "high_quality_count": int(hint_usage.get("high_quality_count", 0) or 0),
+        "weak_quality_count": int(hint_usage.get("weak_quality_count", 0) or 0),
+        "skipped_station_count": int(hint_usage.get("skipped_station_count", 0) or 0),
+        "total_station_count": int(hint_usage.get("total_station_count", 0) or 0),
+        "usage_ratio": float(hint_usage.get("usage_ratio", 0.0) or 0.0),
         "used_bool": bool(hint_usage["used_bool"]),
     }
-    trace["station_rows"] = spine_station_rows
+    trace["station_rows"] = corrected_station_rows
     if fitted_line is None:
         trace["fallback_reason"] = "global_fit_failed"
         return trace
@@ -971,9 +1485,14 @@ def build_global_geometry_fit(
     trace["fallback_reason"] = "" if quality_gate_passed else str(quality_gate_reason)
     trace["fit_metrics"] = {
         "fit_quality": float(fit_metrics["fit_quality"]),
+        "objective_name": str(fit_metrics.get("objective_name", "")),
         "mean_traj_offset_m": float(fit_metrics["mean_traj_offset_m"]),
+        "mean_target_offset_m": float(fit_metrics.get("mean_target_offset_m", fit_metrics["mean_traj_offset_m"])),
         "mean_lane_offset_m": float(fit_metrics["mean_lane_offset_m"]),
+        "endpoint_neighborhood_offset_m": float(fit_metrics.get("endpoint_neighborhood_offset_m", 0.0)),
         "smoothness_angle_deg": float(fit_metrics["smoothness_angle_deg"]),
+        "src_tangent_error_deg": float(fit_metrics.get("src_tangent_error_deg", 0.0)),
+        "dst_tangent_error_deg": float(fit_metrics.get("dst_tangent_error_deg", 0.0)),
         "lane_gate_mean_offset_m": float(lane_gate_mean_offset),
     }
     return trace
@@ -981,7 +1500,9 @@ def build_global_geometry_fit(
 
 __all__ = [
     "aggregate_trajectory_stations",
+    "build_center_corrected_spine",
     "build_global_geometry_fit",
+    "estimate_endpoint_local_tangents",
     "extract_lane_boundary_center_hints",
     "fit_global_centerline",
     "select_trajectory_evidence",

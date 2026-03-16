@@ -9,6 +9,8 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.models import Segment
 from highway_topo_poc.modules.t05_topology_between_rc_v2.pipeline import DEFAULT_PARAMS, run_full_pipeline
 from highway_topo_poc.modules.t05_topology_between_rc_v2.step5_global_geometry_fit import (
     aggregate_trajectory_stations,
+    build_center_corrected_spine,
+    estimate_endpoint_local_tangents,
     extract_lane_boundary_center_hints,
     fit_global_centerline,
     select_trajectory_evidence,
@@ -204,6 +206,54 @@ def test_extract_lane_boundary_center_hints_requires_good_pairs() -> None:
     assert bad["hint_count"] == 0
 
 
+def test_build_center_corrected_spine_prefers_high_quality_lane_hints() -> None:
+    station_rows = [
+        {"station_index": 0, "station_norm": 0.0, "station_distance_m": 0.0, "guide_coords": [0.0, 0.0], "trajectory_robust_center_coords": [0.0, 0.0], "trajectory_confidence": 1.0, "lane_boundary_center_hint_coords": None, "lane_boundary_quality_score": 0.0, "lane_boundary_weight": 0.0},
+        {"station_index": 1, "station_norm": 0.25, "station_distance_m": 25.0, "guide_coords": [25.0, 0.0], "trajectory_robust_center_coords": [25.0, 1.8], "trajectory_confidence": 0.9, "lane_boundary_center_hint_coords": [25.0, 0.9], "lane_boundary_quality_score": 0.82, "lane_boundary_weight": 0.35},
+        {"station_index": 2, "station_norm": 0.5, "station_distance_m": 50.0, "guide_coords": [50.0, 0.0], "trajectory_robust_center_coords": [50.0, 2.4], "trajectory_confidence": 0.9, "lane_boundary_center_hint_coords": [50.0, 1.1], "lane_boundary_quality_score": 0.78, "lane_boundary_weight": 0.35},
+        {"station_index": 3, "station_norm": 0.75, "station_distance_m": 75.0, "guide_coords": [75.0, 0.0], "trajectory_robust_center_coords": [75.0, 1.8], "trajectory_confidence": 0.9, "lane_boundary_center_hint_coords": [75.0, 0.9], "lane_boundary_quality_score": 0.82, "lane_boundary_weight": 0.35},
+        {"station_index": 4, "station_norm": 1.0, "station_distance_m": 100.0, "guide_coords": [100.0, 0.0], "trajectory_robust_center_coords": [100.0, 0.0], "trajectory_confidence": 1.0, "lane_boundary_center_hint_coords": None, "lane_boundary_quality_score": 0.0, "lane_boundary_weight": 0.0},
+    ]
+    correction = build_center_corrected_spine(
+        station_rows=[dict(row) for row in station_rows],
+        start_anchor=LineString([(0.0, 0.0), (100.0, 0.0)]).interpolate(0.0, normalized=True),
+        end_anchor=LineString([(0.0, 0.0), (100.0, 0.0)]).interpolate(1.0, normalized=True),
+        params=dict(DEFAULT_PARAMS),
+    )
+    corrected_rows = correction["station_rows"]
+    assert bool(correction["correction_enabled_bool"]) is True
+    assert int(correction["high_quality_count"]) >= 2
+    assert float(corrected_rows[2]["center_correction_m"]) > 0.0
+    assert float(corrected_rows[2]["center_corrected_spine_coords"][1]) < float(station_rows[2]["trajectory_robust_center_coords"][1])
+
+
+def test_estimate_endpoint_local_tangents_reports_source_and_confidence() -> None:
+    selected_rows = [
+        {"source_traj_id": "a", "selection_weight": 3.0, "line": LineString([(0.0, 0.0), (20.0, 0.8), (100.0, 0.0)])},
+        {"source_traj_id": "b", "selection_weight": 2.0, "line": LineString([(0.0, 0.1), (20.0, 0.9), (100.0, 0.1)])},
+    ]
+    station_rows = [
+        {"station_index": 0, "station_norm": 0.0, "station_distance_m": 0.0, "trajectory_robust_center_coords": [0.0, 0.0], "lane_boundary_center_tangent": [1.0, 0.02], "lane_boundary_quality_score": 0.8},
+        {"station_index": 1, "station_norm": 0.2, "station_distance_m": 20.0, "trajectory_robust_center_coords": [20.0, 0.8], "lane_boundary_center_tangent": [1.0, 0.02], "lane_boundary_quality_score": 0.8},
+        {"station_index": 2, "station_norm": 0.8, "station_distance_m": 80.0, "trajectory_robust_center_coords": [80.0, 0.8], "lane_boundary_center_tangent": [1.0, -0.02], "lane_boundary_quality_score": 0.8},
+        {"station_index": 3, "station_norm": 1.0, "station_distance_m": 100.0, "trajectory_robust_center_coords": [100.0, 0.0], "lane_boundary_center_tangent": [1.0, -0.02], "lane_boundary_quality_score": 0.8},
+    ]
+    tangents = estimate_endpoint_local_tangents(
+        selected_rows=selected_rows,
+        station_rows=station_rows,
+        corrected_spine_line=LineString([(0.0, 0.0), (50.0, 1.0), (100.0, 0.0)]),
+        start_anchor=LineString([(0.0, 0.0), (100.0, 0.0)]).interpolate(0.0, normalized=True),
+        end_anchor=LineString([(0.0, 0.0), (100.0, 0.0)]).interpolate(1.0, normalized=True),
+        params=dict(DEFAULT_PARAMS),
+    )
+    assert bool(tangents["enabled_bool"]) is True
+    assert isinstance(tangents["src"]["tangent"], list)
+    assert isinstance(tangents["dst"]["tangent"], list)
+    assert float(tangents["src"]["confidence"]) > 0.0
+    assert float(tangents["dst"]["confidence"]) > 0.0
+    assert str(tangents["src"]["source_type"])
+
+
 def test_fit_global_centerline_honors_hard_anchors_and_lane_hints() -> None:
     station_rows = [
         {"station_index": 0, "station_norm": 0.0, "guide_coords": [0.0, 0.0], "trajectory_robust_center_coords": [0.0, 0.0], "trajectory_confidence": 1.0, "lane_boundary_center_hint_coords": None, "lane_boundary_weight": 0.0},
@@ -230,6 +280,31 @@ def test_fit_global_centerline_honors_hard_anchors_and_lane_hints() -> None:
     assert tuple(with_hint_line.coords[0]) == (0.0, 0.0)
     assert tuple(with_hint_line.coords[-1]) == (100.0, 0.0)
     assert float(with_hint_line.interpolate(0.5, normalized=True).y) < float(no_hint_line.interpolate(0.5, normalized=True).y)
+
+
+def test_fit_global_centerline_enforces_endpoint_tangent_continuity() -> None:
+    station_rows = [
+        {"station_index": 0, "station_norm": 0.0, "station_distance_m": 0.0, "guide_coords": [0.0, 0.0], "center_corrected_spine_coords": [0.0, 0.0], "trajectory_robust_center_coords": [0.0, 0.0], "trajectory_confidence": 1.0},
+        {"station_index": 1, "station_norm": 0.2, "station_distance_m": 20.0, "guide_coords": [20.0, 0.0], "center_corrected_spine_coords": [20.0, 3.0], "trajectory_robust_center_coords": [20.0, 3.0], "trajectory_confidence": 0.9},
+        {"station_index": 2, "station_norm": 0.5, "station_distance_m": 50.0, "guide_coords": [50.0, 0.0], "center_corrected_spine_coords": [50.0, 4.0], "trajectory_robust_center_coords": [50.0, 4.0], "trajectory_confidence": 0.9},
+        {"station_index": 3, "station_norm": 0.8, "station_distance_m": 80.0, "guide_coords": [80.0, 0.0], "center_corrected_spine_coords": [80.0, 3.0], "trajectory_robust_center_coords": [80.0, 3.0], "trajectory_confidence": 0.9},
+        {"station_index": 4, "station_norm": 1.0, "station_distance_m": 100.0, "guide_coords": [100.0, 0.0], "center_corrected_spine_coords": [100.0, 0.0], "trajectory_robust_center_coords": [100.0, 0.0], "trajectory_confidence": 1.0},
+    ]
+    with_tangent_line, metrics = fit_global_centerline(
+        station_rows=[dict(row) for row in station_rows],
+        start_anchor=LineString([(0.0, 0.0), (100.0, 0.0)]).interpolate(0.0, normalized=True),
+        end_anchor=LineString([(0.0, 0.0), (100.0, 0.0)]).interpolate(1.0, normalized=True),
+        params=dict(DEFAULT_PARAMS),
+        use_lane_hints=False,
+        target_key="center_corrected_spine_coords",
+        endpoint_tangents={
+            "src": {"tangent": [1.0, 0.0]},
+            "dst": {"tangent": [1.0, 0.0]},
+        },
+    )
+    assert with_tangent_line is not None
+    assert float(metrics["src_tangent_error_deg"]) < 25.0
+    assert float(metrics["dst_tangent_error_deg"]) < 25.0
 
 
 def test_pipeline_uses_global_fit_as_default_final_export(tmp_path: Path) -> None:
@@ -273,3 +348,9 @@ def test_pipeline_uses_global_fit_as_default_final_export(tmp_path: Path) -> Non
     assert str(chosen["final_export_source"]).startswith("trajectory_centered_global_fit")
     assert bool(chosen["global_fit_used_bool"]) is True
     assert bool(chosen["geometry_refine_applied"]) is False
+    patch_out = out_root / "run_global_fit" / "patches" / patch_id
+    assert (patch_out / "step5_center_corrected_spine.geojson").exists()
+    assert (patch_out / "step5_endpoint_tangent_trace.geojson").exists()
+    assert (patch_out / "step5_global_fit_v2_trace.json").exists()
+    assert (patch_out / "step5_global_fit_v2_samples.geojson").exists()
+    assert (patch_out / "debug" / "final_geometry_global_fit_v2_components.geojson").exists()
