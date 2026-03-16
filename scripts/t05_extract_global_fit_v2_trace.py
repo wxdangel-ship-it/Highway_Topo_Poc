@@ -99,7 +99,8 @@ def _simple_patch_summary(run_dir: Path) -> dict[str, Any]:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="t05_extract_global_fit_v2_trace")
     parser.add_argument("--run_dir", required=True, help="Run directory like outputs/_work/<RUN_ID>")
-    parser.add_argument("--pairs", required=True, help="Comma-separated pair ids: src:dst,src:dst")
+    parser.add_argument("--patch_id", default="", help="Optional patch id filter")
+    parser.add_argument("--pairs", default="", help="Optional comma-separated pair ids: src:dst,src:dst")
     parser.add_argument("--output", default="", help="Optional JSON output path")
     return parser
 
@@ -108,14 +109,25 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     run_dir = Path(args.run_dir)
     target_pairs = set(_parse_pairs(args.pairs))
+    target_patch_id = str(args.patch_id or "").strip()
+    if not target_patch_id and not target_pairs:
+        raise SystemExit("ERROR: at least one of --patch_id or --pairs is required")
     rows: list[dict[str, Any]] = []
-    for patch_dir in sorted((run_dir / "patches").glob("*")):
+    patch_dirs: list[Path]
+    if target_patch_id:
+        patch_dirs = [run_dir / "patches" / target_patch_id]
+    else:
+        patch_dirs = sorted((run_dir / "patches").glob("*"))
+    for patch_dir in patch_dirs:
         if not patch_dir.is_dir():
             continue
         rows.extend(_merge_patch_rows(patch_dir))
-    filtered = [row for row in rows if str(row.get("pair", "")) in target_pairs]
+    filtered = rows
+    if target_pairs:
+        filtered = [row for row in filtered if str(row.get("pair", "")) in target_pairs]
     payload = {
         "run_dir": str(run_dir),
+        "requested_patch_id": str(target_patch_id),
         "requested_pairs": sorted(target_pairs),
         "row_count": int(len(filtered)),
         "rows": filtered,
