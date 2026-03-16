@@ -66,11 +66,23 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--global_fit_center_correction_max_shift_m", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_CENTER_CORRECTION_MAX_SHIFT_M"]))
     parser.add_argument("--global_fit_corrected_spine_weight", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_CORRECTED_SPINE_WEIGHT"]))
     parser.add_argument("--global_fit_centerline_penalty_weight", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_CENTERLINE_PENALTY_WEIGHT"]))
+    parser.add_argument("--global_fit_local_center_compensation_max_usage_ratio", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_MAX_USAGE_RATIO"]))
+    parser.add_argument("--global_fit_local_center_compensation_min_hint_count", type=int, default=int(DEFAULT_PARAMS["GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_MIN_HINT_COUNT"]))
+    parser.add_argument("--global_fit_local_center_compensation_min_high_quality_count", type=int, default=int(DEFAULT_PARAMS["GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_MIN_HIGH_QUALITY_COUNT"]))
+    parser.add_argument("--global_fit_local_center_compensation_window_m", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_WINDOW_M"]))
+    parser.add_argument("--global_fit_local_center_compensation_missing_blend", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_MISSING_BLEND"]))
+    parser.add_argument("--global_fit_local_center_compensation_weak_blend", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_WEAK_BLEND"]))
+    parser.add_argument("--global_fit_local_center_compensation_max_shift_m", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_MAX_SHIFT_M"]))
+    parser.add_argument("--global_fit_local_center_compensation_iterations", type=int, default=int(DEFAULT_PARAMS["GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_ITERATIONS"]))
     parser.add_argument("--global_fit_endpoint_tangent_enable", type=int, default=int(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_TANGENT_ENABLE"]))
     parser.add_argument("--global_fit_endpoint_tangent_window_m", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_TANGENT_WINDOW_M"]))
     parser.add_argument("--global_fit_endpoint_tangent_sample_m", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_TANGENT_SAMPLE_M"]))
     parser.add_argument("--global_fit_endpoint_tangent_weight", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_TANGENT_WEIGHT"]))
     parser.add_argument("--global_fit_endpoint_neighborhood_weight", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_NEIGHBORHOOD_WEIGHT"]))
+    parser.add_argument("--global_fit_endpoint_refit_threshold_deg", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_REFIT_THRESHOLD_DEG"]))
+    parser.add_argument("--global_fit_endpoint_refit_window_m", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_REFIT_WINDOW_M"]))
+    parser.add_argument("--global_fit_endpoint_refit_strength", type=float, default=float(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_REFIT_STRENGTH"]))
+    parser.add_argument("--global_fit_endpoint_refit_iterations", type=int, default=int(DEFAULT_PARAMS["GLOBAL_FIT_ENDPOINT_REFIT_ITERATIONS"]))
     return parser.parse_args(argv)
 
 
@@ -109,11 +121,23 @@ def _params_from_args(args: argparse.Namespace) -> dict[str, float | int]:
         "GLOBAL_FIT_CENTER_CORRECTION_MAX_SHIFT_M": float(args.global_fit_center_correction_max_shift_m),
         "GLOBAL_FIT_CORRECTED_SPINE_WEIGHT": float(args.global_fit_corrected_spine_weight),
         "GLOBAL_FIT_CENTERLINE_PENALTY_WEIGHT": float(args.global_fit_centerline_penalty_weight),
+        "GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_MAX_USAGE_RATIO": float(args.global_fit_local_center_compensation_max_usage_ratio),
+        "GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_MIN_HINT_COUNT": int(args.global_fit_local_center_compensation_min_hint_count),
+        "GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_MIN_HIGH_QUALITY_COUNT": int(args.global_fit_local_center_compensation_min_high_quality_count),
+        "GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_WINDOW_M": float(args.global_fit_local_center_compensation_window_m),
+        "GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_MISSING_BLEND": float(args.global_fit_local_center_compensation_missing_blend),
+        "GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_WEAK_BLEND": float(args.global_fit_local_center_compensation_weak_blend),
+        "GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_MAX_SHIFT_M": float(args.global_fit_local_center_compensation_max_shift_m),
+        "GLOBAL_FIT_LOCAL_CENTER_COMPENSATION_ITERATIONS": int(args.global_fit_local_center_compensation_iterations),
         "GLOBAL_FIT_ENDPOINT_TANGENT_ENABLE": int(args.global_fit_endpoint_tangent_enable),
         "GLOBAL_FIT_ENDPOINT_TANGENT_WINDOW_M": float(args.global_fit_endpoint_tangent_window_m),
         "GLOBAL_FIT_ENDPOINT_TANGENT_SAMPLE_M": float(args.global_fit_endpoint_tangent_sample_m),
         "GLOBAL_FIT_ENDPOINT_TANGENT_WEIGHT": float(args.global_fit_endpoint_tangent_weight),
         "GLOBAL_FIT_ENDPOINT_NEIGHBORHOOD_WEIGHT": float(args.global_fit_endpoint_neighborhood_weight),
+        "GLOBAL_FIT_ENDPOINT_REFIT_THRESHOLD_DEG": float(args.global_fit_endpoint_refit_threshold_deg),
+        "GLOBAL_FIT_ENDPOINT_REFIT_WINDOW_M": float(args.global_fit_endpoint_refit_window_m),
+        "GLOBAL_FIT_ENDPOINT_REFIT_STRENGTH": float(args.global_fit_endpoint_refit_strength),
+        "GLOBAL_FIT_ENDPOINT_REFIT_ITERATIONS": int(args.global_fit_endpoint_refit_iterations),
     }
 
 

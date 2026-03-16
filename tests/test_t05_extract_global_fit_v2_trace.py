@@ -124,6 +124,7 @@ def _build_run_dir(root: Path) -> Path:
                     "global_fit_used_bool": True,
                     "final_export_source": "trajectory_centered_global_fit_v2",
                     "built_final_road": True,
+                    "failure_classification": "built",
                 },
                 {
                     "pair": "55353307:608638238",
@@ -132,6 +133,7 @@ def _build_run_dir(root: Path) -> Path:
                     "global_fit_fallback_reason": "quality_gate_reject",
                     "global_fit_quality_gate_reason": "low_center_alignment",
                     "built_final_road": True,
+                    "failure_classification": "built",
                 },
                 {
                     "pair": "791873:791871",
@@ -139,6 +141,8 @@ def _build_run_dir(root: Path) -> Path:
                     "final_export_source": "legacy_fallback",
                     "global_fit_fallback_reason": "global_fit_failed",
                     "built_final_road": False,
+                    "failure_classification": "final_geometry_invalid",
+                    "final_reason": "topology_fail",
                 },
             ]
         },
@@ -171,6 +175,9 @@ def test_extract_global_fit_v2_trace_summary_only_json(tmp_path: Path) -> None:
     assert int(payload.get("row_count", 0)) == 3
     assert int(overview.get("fallback_count", 0)) == 2
     assert int(overview.get("built_false_count", 0)) == 1
+    assert int(overview.get("quality_gate_count", 0)) == 1
+    assert int(overview.get("geometry_population_count", 0)) == 1
+    assert int(overview.get("build_exception_count", 0)) == 1
     top_rows = list(summary.get("top_suspicious_rows") or [])
     assert top_rows
     assert str(top_rows[0].get("pair", "")) == "791873:791871"

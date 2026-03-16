@@ -2751,6 +2751,7 @@ def build_final_road(
         "global_fit_fallback_reason": "",
         "global_fit_quality_gate_reason": "",
         "global_fit_mode": "",
+        "global_fit_fitted_line_source": "",
         "global_fit_guide_source": "",
         "trajectory_selection_rows": [],
         "trajectory_spine_source": "",
@@ -2759,8 +2760,14 @@ def build_final_road(
         "trajectory_spine_support_count": 0,
         "trajectory_spine_weak_bool": False,
         "trajectory_spine_fallback_bool": False,
+        "lane_hint_sparse": False,
+        "compensated_centerline_spine_coords": [],
+        "local_center_compensation": {},
         "lane_boundary_hint_rows": [],
         "lane_boundary_hint_usage": {},
+        "endpoint_tangent_trace": {},
+        "endpoint_tangent_continuity_enabled_bool": False,
+        "endpoint_refit_trace": {},
         "global_fit_station_rows": [],
         "global_fit_fitted_line_coords": [],
     }
@@ -2900,10 +2907,14 @@ def build_final_road(
         "center_corrected_spine_quality": 0.0,
         "centerline_correction_enabled_bool": False,
         "centerline_correction_summary": {},
+        "lane_hint_sparse": False,
+        "compensated_centerline_spine_coords": [],
+        "local_center_compensation": {},
         "lane_boundary_hint_rows": [],
         "lane_boundary_hint_usage": {},
         "endpoint_tangent_trace": {},
         "endpoint_tangent_continuity_enabled_bool": False,
+        "endpoint_refit_trace": {},
         "station_rows": [],
         "fitted_line_coords": [],
         "fit_metrics": {},
@@ -2924,6 +2935,7 @@ def build_final_road(
     result["global_fit_fallback_reason"] = str(global_fit_trace.get("fallback_reason", ""))
     result["global_fit_quality_gate_reason"] = str(global_fit_trace.get("quality_gate_reason", ""))
     result["global_fit_mode"] = str(global_fit_trace.get("fitting_mode", ""))
+    result["global_fit_fitted_line_source"] = str(global_fit_trace.get("fitted_line_source", ""))
     result["global_fit_guide_source"] = str(global_fit_trace.get("guide_source", ""))
     result["trajectory_selection_rows"] = list(global_fit_trace.get("trajectory_selection_rows") or [])
     result["trajectory_spine_source"] = str(global_fit_trace.get("trajectory_spine_source", ""))
@@ -2937,10 +2949,14 @@ def build_final_road(
     result["center_corrected_spine_quality"] = float(global_fit_trace.get("center_corrected_spine_quality", 0.0) or 0.0)
     result["centerline_correction_enabled_bool"] = bool(global_fit_trace.get("centerline_correction_enabled_bool", False))
     result["centerline_correction_summary"] = dict(global_fit_trace.get("centerline_correction_summary") or {})
+    result["lane_hint_sparse"] = bool(global_fit_trace.get("lane_hint_sparse", False))
+    result["compensated_centerline_spine_coords"] = list(global_fit_trace.get("compensated_centerline_spine_coords") or [])
+    result["local_center_compensation"] = dict(global_fit_trace.get("local_center_compensation") or {})
     result["lane_boundary_hint_rows"] = list(global_fit_trace.get("lane_boundary_hint_rows") or [])
     result["lane_boundary_hint_usage"] = dict(global_fit_trace.get("lane_boundary_hint_usage") or {})
     result["endpoint_tangent_trace"] = dict(global_fit_trace.get("endpoint_tangent_trace") or {})
     result["endpoint_tangent_continuity_enabled_bool"] = bool(global_fit_trace.get("endpoint_tangent_continuity_enabled_bool", False))
+    result["endpoint_refit_trace"] = dict(global_fit_trace.get("endpoint_refit_trace") or {})
     result["global_fit_fit_metrics"] = dict(global_fit_trace.get("fit_metrics") or {})
     result["global_fit_station_rows"] = list(global_fit_trace.get("station_rows") or [])
     result["global_fit_fitted_line_coords"] = list(global_fit_trace.get("fitted_line_coords") or [])
@@ -3752,12 +3768,16 @@ def write_road_outputs(
     final_component_features: list[tuple[Any, dict[str, Any]]] = []
     trajectory_spine_features: list[tuple[Any, dict[str, Any]]] = []
     center_corrected_spine_features: list[tuple[Any, dict[str, Any]]] = []
+    local_center_compensation_features: list[tuple[Any, dict[str, Any]]] = []
     lane_boundary_hint_features: list[tuple[Any, dict[str, Any]]] = []
     endpoint_tangent_trace_features: list[tuple[Any, dict[str, Any]]] = []
+    endpoint_refit_features: list[tuple[Any, dict[str, Any]]] = []
     global_fit_sample_features: list[tuple[Any, dict[str, Any]]] = []
     global_fit_component_features: list[tuple[Any, dict[str, Any]]] = []
     global_fit_v2_component_features: list[tuple[Any, dict[str, Any]]] = []
     global_fit_trace_entries: list[dict[str, Any]] = []
+    outlier_optimization_trace_entries: list[dict[str, Any]] = []
+    outlier_case_features: list[tuple[Any, dict[str, Any]]] = []
     road_map = {str(road.segment_id): road for road in roads}
     result_map = {str(item["segment_id"]): item for item in road_results}
     registry_by_working_segment = {
@@ -4139,6 +4159,37 @@ def write_road_outputs(
                     },
                 )
             )
+        compensated_centerline_line = _line_from_coords(list(build_result.get("compensated_centerline_spine_coords") or []))
+        if compensated_centerline_line is not None:
+            compensation_props = {
+                "segment_id": str(segment.segment_id),
+                "arc_id": str(segment.topology_arc_id),
+                "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                "compensation_enabled": bool((build_result.get("local_center_compensation") or {}).get("compensation_enabled_bool", False)),
+                "compensation_source": str((build_result.get("local_center_compensation") or {}).get("compensation_source", "")),
+                "correction_magnitude": float((build_result.get("local_center_compensation") or {}).get("correction_max_m", 0.0) or 0.0),
+                "lane_hint_sparse": bool(build_result.get("lane_hint_sparse", False)),
+            }
+            local_center_compensation_features.append((compensated_centerline_line, compensation_props))
+            global_fit_v2_component_features.append(
+                (
+                    compensated_centerline_line,
+                    {
+                        **dict(compensation_props),
+                        "component_role": "compensated_centerline_spine",
+                    },
+                )
+            )
+            if bool(build_result.get("lane_hint_sparse", False)) or bool((build_result.get("local_center_compensation") or {}).get("compensation_enabled_bool", False)):
+                outlier_case_features.append(
+                    (
+                        compensated_centerline_line,
+                        {
+                            **dict(compensation_props),
+                            "component_role": "compensation_segment",
+                        },
+                    )
+                )
         for hint_row in list(build_result.get("lane_boundary_hint_rows") or []):
             hint_point = _safe_point_from_coords(hint_row.get("coords"))
             if hint_point is None:
@@ -4223,6 +4274,16 @@ def write_road_outputs(
                     },
                 )
             )
+            if bool((build_result.get("endpoint_refit_trace") or {}).get("refit_applied", False)):
+                outlier_case_features.append(
+                    (
+                        tangent_line,
+                        {
+                            **dict(tangent_props),
+                            "component_role": "outlier_endpoint_tangent",
+                        },
+                    )
+                )
         for station_row in list(build_result.get("global_fit_station_rows") or []):
             sample_common = {
                 "segment_id": str(segment.segment_id),
@@ -4239,6 +4300,7 @@ def write_road_outputs(
                 ("trajectory_robust_center", "trajectory_robust_center_coords"),
                 ("lane_boundary_center_hint", "lane_boundary_center_hint_coords"),
                 ("center_corrected_spine_sample", "center_corrected_spine_coords"),
+                ("compensated_centerline_spine_sample", "compensated_centerline_spine_coords"),
                 ("fitted_station", "fitted_coords"),
             ):
                 sample_point = _safe_point_from_coords(station_row.get(coords_key))
@@ -4277,6 +4339,29 @@ def write_road_outputs(
                     },
                 )
             )
+            endpoint_refit_trace = dict(build_result.get("endpoint_refit_trace") or {})
+            refit_props = {
+                "segment_id": str(segment.segment_id),
+                "arc_id": str(segment.topology_arc_id),
+                "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                "refit_applied": bool(endpoint_refit_trace.get("refit_applied", False)),
+                "tangent_before": dict(endpoint_refit_trace.get("tangent_before") or {}),
+                "tangent_after": dict(endpoint_refit_trace.get("tangent_after") or {}),
+                "correction_length": float(endpoint_refit_trace.get("correction_length_m", 0.0) or 0.0),
+            }
+            endpoint_refit_features.append((global_fit_fitted_line, refit_props))
+            if bool(endpoint_refit_trace.get("refit_applied", False)) or bool(build_result.get("lane_hint_sparse", False)):
+                outlier_case_features.append(
+                    (
+                        global_fit_fitted_line,
+                        {
+                            **dict(refit_props),
+                            "component_role": "outlier_final_fitted_line",
+                            "lane_hint_sparse": bool(build_result.get("lane_hint_sparse", False)),
+                            "final_export_source": str(build_result.get("final_export_source", "")),
+                        },
+                    )
+                )
         for role, coords_key, source_key, method_key in (
             ("entry_transition", "entry_transition_coords", "entry_transition_source", "entry_transition_method"),
             ("core_segment", "core_segment_coords", "core_segment_source", None),
@@ -4405,10 +4490,14 @@ def write_road_outputs(
                 "center_corrected_spine_quality": float(build_result.get("center_corrected_spine_quality", 0.0) or 0.0),
                 "centerline_correction_enabled_bool": bool(build_result.get("centerline_correction_enabled_bool", False)),
                 "centerline_correction_summary": dict(build_result.get("centerline_correction_summary") or {}),
+                "lane_hint_sparse": bool(build_result.get("lane_hint_sparse", False)),
+                "compensated_centerline_spine_coords": list(build_result.get("compensated_centerline_spine_coords") or []),
+                "local_center_compensation": dict(build_result.get("local_center_compensation") or {}),
                 "lane_boundary_hint_usage": dict(build_result.get("lane_boundary_hint_usage") or {}),
                 "endpoint_tangent_trace": dict(build_result.get("endpoint_tangent_trace") or {}),
                 "endpoint_tangent_continuity_enabled_bool": bool(build_result.get("endpoint_tangent_continuity_enabled_bool", False)),
-                "fitted_line_source": str(build_result.get("global_fit_mode", "")),
+                "endpoint_refit_trace": dict(build_result.get("endpoint_refit_trace") or {}),
+                "fitted_line_source": str(build_result.get("global_fit_fitted_line_source", "") or build_result.get("global_fit_mode", "")),
                 "fit_metrics": dict(build_result.get("global_fit_fit_metrics") or {}),
                 "fitting_mode": str(build_result.get("global_fit_mode", "")),
                 "fitting_success_bool": bool(build_result.get("global_fit_success_bool", False)),
@@ -4462,7 +4551,9 @@ def write_road_outputs(
                 "trajectory_spine_weak_bool": bool(build_result.get("trajectory_spine_weak_bool", False)),
                 "trajectory_spine_fallback_bool": bool(build_result.get("trajectory_spine_fallback_bool", False)),
                 "centerline_correction_enabled_bool": bool(build_result.get("centerline_correction_enabled_bool", False)),
+                "lane_hint_sparse": bool(build_result.get("lane_hint_sparse", False)),
                 "endpoint_tangent_continuity_enabled_bool": bool(build_result.get("endpoint_tangent_continuity_enabled_bool", False)),
+                "endpoint_refit_applied_bool": bool((build_result.get("endpoint_refit_trace") or {}).get("refit_applied", False)),
                 "final_export_source": str(build_result.get("final_export_source", "")),
                 "final_override_reason": str(build_result.get("final_override_reason", "")),
                 "final_clip_reason": str(build_result.get("final_clip_reason", "")),
@@ -4470,6 +4561,20 @@ def write_road_outputs(
                 "built_final_road": bool(road is not None),
                 "final_reason": str(build_result.get("reason", "")),
                 "failure_classification": str(failure_classification),
+            }
+        )
+        outlier_optimization_trace_entries.append(
+            {
+                "segment_id": str(segment.segment_id),
+                "pair": pipeline._pair_id_text(int(segment.src_nodeid), int(segment.dst_nodeid)),
+                "arc_id": str(segment.topology_arc_id),
+                "lane_hint_sparse": bool(build_result.get("lane_hint_sparse", False)),
+                "local_center_compensation": dict(build_result.get("local_center_compensation") or {}),
+                "endpoint_refit_applied": bool((build_result.get("endpoint_refit_trace") or {}).get("refit_applied", False)),
+                "tangent_error_before": dict((build_result.get("endpoint_refit_trace") or {}).get("tangent_before") or {}),
+                "tangent_error_after": dict((build_result.get("endpoint_refit_trace") or {}).get("tangent_after") or {}),
+                "final_export_source": str(build_result.get("final_export_source", "")),
+                "built_final_road": bool(road is not None),
             }
         )
         metrics_entry = {
@@ -4903,10 +5008,23 @@ def write_road_outputs(
     )
     write_lines_geojson(patch_dir / "step5_trajectory_spine.geojson", trajectory_spine_features)
     write_lines_geojson(patch_dir / "step5_center_corrected_spine.geojson", center_corrected_spine_features)
+    write_lines_geojson(patch_dir / "step5_local_center_compensation.geojson", local_center_compensation_features)
     write_features_geojson(patch_dir / "step5_lane_boundary_center_hints.geojson", lane_boundary_hint_features)
     write_features_geojson(patch_dir / "step5_endpoint_tangent_trace.geojson", endpoint_tangent_trace_features)
+    write_features_geojson(patch_dir / "step5_endpoint_refit.geojson", endpoint_refit_features)
     write_features_geojson(patch_dir / "step5_global_fit_samples.geojson", global_fit_sample_features)
     write_features_geojson(patch_dir / "step5_global_fit_v2_samples.geojson", global_fit_sample_features)
+    write_json(
+        patch_dir / "step5_outlier_optimization_trace.json",
+        {
+            "rows": outlier_optimization_trace_entries,
+            "summary": {
+                "row_count": int(len(outlier_optimization_trace_entries)),
+                "lane_hint_sparse_count": int(sum(1 for item in outlier_optimization_trace_entries if bool(item.get("lane_hint_sparse", False)))),
+                "endpoint_refit_applied_count": int(sum(1 for item in outlier_optimization_trace_entries if bool(item.get("endpoint_refit_applied", False)))),
+            },
+        },
+    )
     write_json(
         patch_dir / "step5_global_fit_trace.json",
         {
@@ -4970,6 +5088,7 @@ def write_road_outputs(
         patch_dir / "debug" / "final_geometry_global_fit_v2_components.geojson",
         global_fit_component_features + global_fit_v2_component_features,
     )
+    write_features_geojson(patch_dir / "debug" / "outlier_cases.geojson", outlier_case_features)
     (patch_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
     write_lines_geojson(dbg_dir / "shape_ref_line.geojson", shape_ref_features)
     write_lines_geojson(dbg_dir / "road_final.geojson", road_features)
@@ -4986,12 +5105,15 @@ def write_road_outputs(
     write_json(dbg_dir / "step5_final_geometry_trace.json", {"rows": final_geometry_trace_entries})
     write_lines_geojson(dbg_dir / "step5_trajectory_spine.geojson", trajectory_spine_features)
     write_lines_geojson(dbg_dir / "step5_center_corrected_spine.geojson", center_corrected_spine_features)
+    write_lines_geojson(dbg_dir / "step5_local_center_compensation.geojson", local_center_compensation_features)
     write_features_geojson(dbg_dir / "step5_lane_boundary_center_hints.geojson", lane_boundary_hint_features)
     write_features_geojson(dbg_dir / "step5_endpoint_tangent_trace.geojson", endpoint_tangent_trace_features)
+    write_features_geojson(dbg_dir / "step5_endpoint_refit.geojson", endpoint_refit_features)
     write_features_geojson(dbg_dir / "step5_global_fit_samples.geojson", global_fit_sample_features)
     write_features_geojson(dbg_dir / "step5_global_fit_v2_samples.geojson", global_fit_sample_features)
     write_json(dbg_dir / "step5_global_fit_trace.json", {"rows": global_fit_trace_entries})
     write_json(dbg_dir / "step5_global_fit_v2_trace.json", {"rows": global_fit_trace_entries})
+    write_json(dbg_dir / "step5_outlier_optimization_trace.json", {"rows": outlier_optimization_trace_entries})
     write_json(
         dbg_dir / "step5_refine_apply_review.json",
         {
@@ -5004,6 +5126,7 @@ def write_road_outputs(
     write_features_geojson(dbg_dir / "final_geometry_components.geojson", final_component_features)
     write_features_geojson(dbg_dir / "final_geometry_global_fit_components.geojson", global_fit_component_features)
     write_features_geojson(dbg_dir / "final_geometry_global_fit_v2_components.geojson", global_fit_component_features + global_fit_v2_component_features)
+    write_features_geojson(dbg_dir / "outlier_cases.geojson", outlier_case_features)
     write_json(
         dbg_dir / "reason_trace.json",
         {

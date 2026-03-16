@@ -88,6 +88,15 @@ def _fit_metric(row: dict[str, Any], key: str) -> float:
     return _safe_float(dict(row.get("fit_metrics") or {}).get(key), 0.0)
 
 
+def _quality_gate_label(row: dict[str, Any]) -> str:
+    return str(row.get("quality_gate_reason", "") or "").strip()
+
+
+def _quality_gate_failed(row: dict[str, Any]) -> bool:
+    label = _quality_gate_label(row)
+    return bool(label) and label != "ok"
+
+
 def _summary_examples(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
     examples: list[dict[str, Any]] = []
     for row in rows[:limit]:
@@ -128,8 +137,8 @@ def _row_issue_flags(
     fallback_reason = str(row.get("fallback_reason", "") or "")
     if fallback_reason:
         issues.append(f"fallback:{fallback_reason}")
-    quality_gate_reason = str(row.get("quality_gate_reason", "") or "")
-    if quality_gate_reason:
+    quality_gate_reason = _quality_gate_label(row)
+    if quality_gate_reason and quality_gate_reason != "ok":
         issues.append(f"quality_gate:{quality_gate_reason}")
     if _safe_float(row.get("center_corrected_spine_quality"), 0.0) < low_spine_quality:
         issues.append("low_corrected_spine_quality")
@@ -162,7 +171,7 @@ def _row_suspicion_score(
         score += 4.0
     if str(row.get("fallback_reason", "") or ""):
         score += 3.0
-    if str(row.get("quality_gate_reason", "") or ""):
+    if _quality_gate_failed(row):
         score += 2.0
     corrected_quality = _safe_float(row.get("center_corrected_spine_quality"), 0.0)
     if corrected_quality < low_spine_quality:
@@ -245,10 +254,11 @@ def _build_summary(
     high_endpoint_offset_m: float,
 ) -> dict[str, Any]:
     row_count = int(len(rows))
+    geometry_population_rows = [row for row in rows if bool(row.get("geometry_population_flag", False))]
     built_false_rows = [row for row in rows if not bool(row.get("built_final_road", False))]
     global_fit_not_used_rows = [row for row in rows if not bool(row.get("global_fit_used_bool", False))]
     fallback_rows = [row for row in rows if str(row.get("fallback_reason", "") or "")]
-    quality_gate_rows = [row for row in rows if str(row.get("quality_gate_reason", "") or "")]
+    quality_gate_rows = [row for row in rows if _quality_gate_failed(row)]
     low_corrected_spine_rows = [
         row for row in rows if _safe_float(row.get("center_corrected_spine_quality"), 0.0) < low_spine_quality
     ]
@@ -277,6 +287,8 @@ def _build_summary(
         "final_export_is_fitted_count": int(sum(1 for row in rows if bool(row.get("fitted_line_is_final_export", False)))),
         "fallback_count": int(len(fallback_rows)),
         "quality_gate_count": int(len(quality_gate_rows)),
+        "geometry_population_count": int(len(geometry_population_rows)),
+        "build_exception_count": int(sum(1 for row in rows if bool(row.get("build_exception_flag", False)))),
         "centerline_correction_enabled_count": int(
             sum(1 for row in rows if bool(row.get("centerline_correction_enabled_bool", False)))
         ),
@@ -294,22 +306,23 @@ def _build_summary(
     overview["endpoint_tangent_enabled_ratio"] = (
         float(overview["endpoint_tangent_enabled_count"] / row_count) if row_count else 0.0
     )
+    quality_rows = geometry_population_rows or rows
 
     quality_summary = {
-        "trajectory_spine_quality": _metric_stats([_safe_float(row.get("trajectory_spine_quality"), 0.0) for row in rows]),
+        "trajectory_spine_quality": _metric_stats([_safe_float(row.get("trajectory_spine_quality"), 0.0) for row in quality_rows]),
         "center_corrected_spine_quality": _metric_stats(
-            [_safe_float(row.get("center_corrected_spine_quality"), 0.0) for row in rows]
+            [_safe_float(row.get("center_corrected_spine_quality"), 0.0) for row in quality_rows]
         ),
-        "lane_hint_usage_ratio": _metric_stats([_lane_hint_usage_ratio(row) for row in rows]),
-        "center_correction_mean_m": _metric_stats([_correction_mean_m(row) for row in rows]),
-        "center_correction_max_m": _metric_stats([_correction_max_m(row) for row in rows]),
-        "src_tangent_confidence": _metric_stats([_tangent_confidence(row, "src_local_tangent") for row in rows]),
-        "dst_tangent_confidence": _metric_stats([_tangent_confidence(row, "dst_local_tangent") for row in rows]),
-        "src_tangent_error_deg": _metric_stats([_fit_metric(row, "src_tangent_error_deg") for row in rows]),
-        "dst_tangent_error_deg": _metric_stats([_fit_metric(row, "dst_tangent_error_deg") for row in rows]),
-        "mean_target_offset_m": _metric_stats([_fit_metric(row, "mean_target_offset_m") for row in rows]),
+        "lane_hint_usage_ratio": _metric_stats([_lane_hint_usage_ratio(row) for row in quality_rows]),
+        "center_correction_mean_m": _metric_stats([_correction_mean_m(row) for row in quality_rows]),
+        "center_correction_max_m": _metric_stats([_correction_max_m(row) for row in quality_rows]),
+        "src_tangent_confidence": _metric_stats([_tangent_confidence(row, "src_local_tangent") for row in quality_rows]),
+        "dst_tangent_confidence": _metric_stats([_tangent_confidence(row, "dst_local_tangent") for row in quality_rows]),
+        "src_tangent_error_deg": _metric_stats([_fit_metric(row, "src_tangent_error_deg") for row in quality_rows]),
+        "dst_tangent_error_deg": _metric_stats([_fit_metric(row, "dst_tangent_error_deg") for row in quality_rows]),
+        "mean_target_offset_m": _metric_stats([_fit_metric(row, "mean_target_offset_m") for row in quality_rows]),
         "endpoint_neighborhood_offset_m": _metric_stats(
-            [_fit_metric(row, "endpoint_neighborhood_offset_m") for row in rows]
+            [_fit_metric(row, "endpoint_neighborhood_offset_m") for row in quality_rows]
         ),
     }
 
@@ -430,6 +443,13 @@ def _render_summary_text(payload: dict[str, Any]) -> str:
             centerline_count=overview.get("centerline_correction_enabled_count", 0),
             row_count=overview.get("row_count", 0),
             endpoint_count=overview.get("endpoint_tangent_enabled_count", 0),
+        ),
+        (
+            "  geometry_population={geometry_count}/{row_count}, build_exception={build_exception_count}"
+        ).format(
+            geometry_count=overview.get("geometry_population_count", 0),
+            row_count=overview.get("row_count", 0),
+            build_exception_count=overview.get("build_exception_count", 0),
         ),
         "",
         "Abstract findings:",
@@ -558,9 +578,23 @@ def _merge_patch_rows(patch_dir: Path) -> list[dict[str, Any]]:
                 "fit_metrics": dict(item.get("fit_metrics") or {}),
                 "fallback_reason": str(item.get("fallback_reason", "") or final_row.get("global_fit_fallback_reason", "")),
                 "quality_gate_reason": str(item.get("quality_gate_reason", "") or final_row.get("global_fit_quality_gate_reason", "")),
+                "final_reason": str(final_row.get("final_reason", "")),
+                "failure_classification": str(final_row.get("failure_classification", "")),
                 "built_state": bool(item.get("built_final_road", final_row.get("built_final_road", False))),
                 "built_final_road": bool(item.get("built_final_road", final_row.get("built_final_road", False))),
             }
+        )
+    for row in rows:
+        failure_classification = str(row.get("failure_classification", "") or "")
+        final_reason = str(row.get("final_reason", "") or "")
+        row["geometry_population_flag"] = bool(
+            bool(row.get("built_final_road", False)) and bool(row.get("fitted_line_is_final_export", False))
+        )
+        row["build_exception_flag"] = bool(
+            (not bool(row.get("built_final_road", False)))
+            or (bool(failure_classification) and failure_classification != "built")
+            or ("topology" in final_reason)
+            or ("legal" in final_reason)
         )
     return rows
 
@@ -573,6 +607,13 @@ def _simple_patch_summary(run_dir: Path) -> dict[str, Any]:
         global_fit_payload = _global_fit_payload(patch_dir)
         rows = list(trace_payload.get("rows", []))
         global_rows = list(global_fit_payload.get("rows", []))
+        geometry_population_count = int(
+            sum(
+                1
+                for item in rows
+                if bool(item.get("built_final_road", False)) and bool(item.get("global_fit_used_bool", False))
+            )
+        )
         per_patch[patch_id] = {
             "row_count": int(len(rows)),
             "built_count": int(sum(1 for item in rows if bool(item.get("built_final_road", False)))),
@@ -585,6 +626,7 @@ def _simple_patch_summary(run_dir: Path) -> dict[str, Any]:
                 sum(1 for item in global_rows if bool(item.get("endpoint_tangent_continuity_enabled_bool", False)))
             ),
             "refine_applied_count": int(sum(1 for item in rows if bool(item.get("refine_applied_bool", False)))),
+            "geometry_population_count": int(geometry_population_count),
         }
     return per_patch
 

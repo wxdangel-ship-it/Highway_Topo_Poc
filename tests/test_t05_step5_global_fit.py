@@ -10,7 +10,9 @@ from highway_topo_poc.modules.t05_topology_between_rc_v2.pipeline import DEFAULT
 from highway_topo_poc.modules.t05_topology_between_rc_v2.step5_global_geometry_fit import (
     aggregate_trajectory_stations,
     build_center_corrected_spine,
+    build_local_center_compensation,
     estimate_endpoint_local_tangents,
+    endpoint_local_refit,
     extract_lane_boundary_center_hints,
     fit_global_centerline,
     select_trajectory_evidence,
@@ -254,6 +256,35 @@ def test_estimate_endpoint_local_tangents_reports_source_and_confidence() -> Non
     assert str(tangents["src"]["source_type"])
 
 
+def test_build_local_center_compensation_only_enables_for_sparse_lane_hints() -> None:
+    station_rows = [
+        {"station_index": 0, "station_norm": 0.0, "station_distance_m": 0.0, "guide_coords": [0.0, 0.0], "trajectory_robust_center_coords": [0.0, 0.0], "center_corrected_spine_coords": [0.0, 0.0], "lane_boundary_center_hint_coords": None, "lane_boundary_quality_score": 0.0, "lane_boundary_weight": 0.0, "lane_boundary_usage_band": "skipped"},
+        {"station_index": 1, "station_norm": 0.2, "station_distance_m": 20.0, "guide_coords": [20.0, 0.0], "trajectory_robust_center_coords": [20.0, 1.0], "center_corrected_spine_coords": [20.0, 1.0], "lane_boundary_center_hint_coords": [20.0, 0.4], "lane_boundary_quality_score": 0.82, "lane_boundary_weight": 0.32, "lane_boundary_usage_band": "high_quality"},
+        {"station_index": 2, "station_norm": 0.4, "station_distance_m": 40.0, "guide_coords": [40.0, 0.0], "trajectory_robust_center_coords": [40.0, 1.4], "center_corrected_spine_coords": [40.0, 1.4], "lane_boundary_center_hint_coords": None, "lane_boundary_quality_score": 0.0, "lane_boundary_weight": 0.0, "lane_boundary_usage_band": "skipped"},
+        {"station_index": 3, "station_norm": 0.6, "station_distance_m": 60.0, "guide_coords": [60.0, 0.0], "trajectory_robust_center_coords": [60.0, 1.5], "center_corrected_spine_coords": [60.0, 1.5], "lane_boundary_center_hint_coords": None, "lane_boundary_quality_score": 0.0, "lane_boundary_weight": 0.0, "lane_boundary_usage_band": "skipped"},
+        {"station_index": 4, "station_norm": 0.8, "station_distance_m": 80.0, "guide_coords": [80.0, 0.0], "trajectory_robust_center_coords": [80.0, 1.0], "center_corrected_spine_coords": [80.0, 1.0], "lane_boundary_center_hint_coords": [80.0, 0.5], "lane_boundary_quality_score": 0.80, "lane_boundary_weight": 0.30, "lane_boundary_usage_band": "high_quality"},
+        {"station_index": 5, "station_norm": 1.0, "station_distance_m": 100.0, "guide_coords": [100.0, 0.0], "trajectory_robust_center_coords": [100.0, 0.0], "center_corrected_spine_coords": [100.0, 0.0], "lane_boundary_center_hint_coords": None, "lane_boundary_quality_score": 0.0, "lane_boundary_weight": 0.0, "lane_boundary_usage_band": "skipped"},
+    ]
+    hint_usage = {
+        "hint_count": 2,
+        "usage_ratio": 0.333,
+        "high_quality_count": 2,
+    }
+    compensation = build_local_center_compensation(
+        station_rows=[dict(row) for row in station_rows],
+        start_anchor=LineString([(0.0, 0.0), (100.0, 0.0)]).interpolate(0.0, normalized=True),
+        end_anchor=LineString([(0.0, 0.0), (100.0, 0.0)]).interpolate(1.0, normalized=True),
+        safe_surface=LineString([(0.0, 0.0), (100.0, 0.0)]).buffer(8.0, cap_style=2),
+        hint_usage=hint_usage,
+        params=dict(DEFAULT_PARAMS),
+    )
+    rows = list(compensation["station_rows"])
+    assert bool(compensation["lane_hint_sparse"]) is True
+    assert bool(compensation["compensation_enabled_bool"]) is True
+    assert float(rows[2]["local_center_compensation_m"]) > 0.0
+    assert float(rows[2]["compensated_centerline_spine_coords"][1]) < float(rows[2]["center_corrected_spine_coords"][1])
+
+
 def test_fit_global_centerline_honors_hard_anchors_and_lane_hints() -> None:
     station_rows = [
         {"station_index": 0, "station_norm": 0.0, "guide_coords": [0.0, 0.0], "trajectory_robust_center_coords": [0.0, 0.0], "trajectory_confidence": 1.0, "lane_boundary_center_hint_coords": None, "lane_boundary_weight": 0.0},
@@ -307,6 +338,34 @@ def test_fit_global_centerline_enforces_endpoint_tangent_continuity() -> None:
     assert float(metrics["dst_tangent_error_deg"]) < 25.0
 
 
+def test_endpoint_local_refit_reduces_high_endpoint_tangent_error() -> None:
+    station_rows = [
+        {"station_index": 0, "station_norm": 0.0, "station_distance_m": 0.0, "guide_coords": [0.0, 0.0], "center_corrected_spine_coords": [0.0, 0.0], "trajectory_robust_center_coords": [0.0, 0.0]},
+        {"station_index": 1, "station_norm": 0.1, "station_distance_m": 10.0, "guide_coords": [10.0, 0.0], "center_corrected_spine_coords": [10.0, 4.8], "trajectory_robust_center_coords": [10.0, 4.8]},
+        {"station_index": 2, "station_norm": 0.2, "station_distance_m": 20.0, "guide_coords": [20.0, 0.0], "center_corrected_spine_coords": [20.0, 6.0], "trajectory_robust_center_coords": [20.0, 6.0]},
+        {"station_index": 3, "station_norm": 0.5, "station_distance_m": 50.0, "guide_coords": [50.0, 0.0], "center_corrected_spine_coords": [50.0, 6.5], "trajectory_robust_center_coords": [50.0, 6.5]},
+        {"station_index": 4, "station_norm": 0.8, "station_distance_m": 80.0, "guide_coords": [80.0, 0.0], "center_corrected_spine_coords": [80.0, 6.0], "trajectory_robust_center_coords": [80.0, 6.0]},
+        {"station_index": 5, "station_norm": 0.9, "station_distance_m": 90.0, "guide_coords": [90.0, 0.0], "center_corrected_spine_coords": [90.0, 4.8], "trajectory_robust_center_coords": [90.0, 4.8]},
+        {"station_index": 6, "station_norm": 1.0, "station_distance_m": 100.0, "guide_coords": [100.0, 0.0], "center_corrected_spine_coords": [100.0, 0.0], "trajectory_robust_center_coords": [100.0, 0.0]},
+    ]
+    fitted_line = LineString([(0.0, 0.0), (10.0, 4.8), (20.0, 6.0), (50.0, 6.5), (80.0, 6.0), (90.0, 4.8), (100.0, 0.0)])
+    refit_line, refit_trace = endpoint_local_refit(
+        fitted_line=fitted_line,
+        station_rows=[dict(row) for row in station_rows],
+        start_anchor=LineString([(0.0, 0.0), (100.0, 0.0)]).interpolate(0.0, normalized=True),
+        end_anchor=LineString([(0.0, 0.0), (100.0, 0.0)]).interpolate(1.0, normalized=True),
+        endpoint_tangents={"src": {"tangent": [1.0, 0.0]}, "dst": {"tangent": [1.0, 0.0]}},
+        params={**dict(DEFAULT_PARAMS), "GLOBAL_FIT_ENDPOINT_REFIT_WINDOW_M": 24.0},
+        target_key="center_corrected_spine_coords",
+        fit_metrics_before={"src_tangent_error_deg": 25.0, "dst_tangent_error_deg": 25.0},
+    )
+    assert refit_line is not None
+    assert bool(refit_trace["refit_applied"]) is True
+    assert float(refit_trace["tangent_after"]["src_error_deg"]) < float(refit_trace["tangent_before"]["src_error_deg"])
+    assert float(refit_trace["tangent_after"]["dst_error_deg"]) < float(refit_trace["tangent_before"]["dst_error_deg"])
+    assert abs(float(refit_line.interpolate(0.5, normalized=True).y) - float(fitted_line.interpolate(0.5, normalized=True).y)) < 1.0
+
+
 def test_pipeline_uses_global_fit_as_default_final_export(tmp_path: Path) -> None:
     patch_id = "global_fit_default"
     data_root = tmp_path / "data"
@@ -350,7 +409,11 @@ def test_pipeline_uses_global_fit_as_default_final_export(tmp_path: Path) -> Non
     assert bool(chosen["geometry_refine_applied"]) is False
     patch_out = out_root / "run_global_fit" / "patches" / patch_id
     assert (patch_out / "step5_center_corrected_spine.geojson").exists()
+    assert (patch_out / "step5_local_center_compensation.geojson").exists()
     assert (patch_out / "step5_endpoint_tangent_trace.geojson").exists()
+    assert (patch_out / "step5_endpoint_refit.geojson").exists()
     assert (patch_out / "step5_global_fit_v2_trace.json").exists()
     assert (patch_out / "step5_global_fit_v2_samples.geojson").exists()
+    assert (patch_out / "step5_outlier_optimization_trace.json").exists()
     assert (patch_out / "debug" / "final_geometry_global_fit_v2_components.geojson").exists()
+    assert (patch_out / "debug" / "outlier_cases.geojson").exists()
