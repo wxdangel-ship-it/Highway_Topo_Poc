@@ -1,12 +1,13 @@
-﻿# 目标结构
+# 目标结构
 
 ## 状态
 
-- 草案状态：Round 1 目标拓扑草案
+- 草案状态：Round 1 目标拓扑草案，已由 Round 2A 决策对齐补充修正
 - 来源依据：
   - `docs/codebase-research.md`
   - `docs/doc-governance/current-doc-inventory.md`
   - `specs/001-doc-governance-round1/plan.md`
+  - `specs/002-doc-governance-decision-alignment/spec.md`
 
 ## 分层职责
 
@@ -14,7 +15,7 @@
 |---|---|---|---|---|
 | 项目级源事实 | 项目级长期架构与上下文 | `docs/architecture/` | 目标、约束、上下文、方案策略、横切概念、质量、风险、术语 | 单次变更计划、模块级操作步骤 |
 | 模块级源事实 | 模块级长期架构与语义真相 | `modules/<module>/architecture/` + `INTERFACE_CONTRACT.md` | 模块目标、范围、约束、构件、质量、风险、术语、契约细节 | 项目级治理规则、临时阶段说明 |
-| 持久规则 | 稳定操作与协作规则 | `docs/*.md`、`modules/<module>/AGENTS.md` | 执行姿态、协作规则、文档指针 | 完整业务定义 |
+| 持久规则 | 稳定操作与协作规则 | repo root `AGENTS.md`、`modules/<module>/AGENTS.md` | 执行姿态、协作规则、文档指针 | 完整业务定义 |
 | 可复用工作流 | 可重复执行的操作流程 | `modules/<module>/SKILL.md`、少量流程型说明 | 操作步骤、可复用运行流程、排障检查点 | 完整模块真相 |
 | 变更专用规格 | 单次变更的推理与执行计划 | `specs/<change-id>/` | `spec`、`plan`、`tasks`、研究与审核指南 | 长期架构真相 |
 | 历史证据 | 保留的验收、审计与阶段历史 | 现有历史位置 | 审计报告、阶段说明、验收记录 | 活跃源事实身份 |
@@ -41,6 +42,7 @@ docs/
     +-- module-doc-status.csv
     +-- review-priority.md
     +-- round1-exec-report.md
+    +-- round2a-decision-alignment-report.md
 ```
 
 ## 模块级目标树
@@ -72,7 +74,7 @@ modules/<module_id>/
 
 ## 落位规则
 
-### AGENTS
+### `AGENTS.md`
 
 只保留：
 
@@ -80,7 +82,7 @@ modules/<module_id>/
 - 模块边界
 - 指向源事实文档的链接
 
-### SKILL
+### `SKILL.md`
 
 只保留：
 
@@ -88,7 +90,7 @@ modules/<module_id>/
 - 执行步骤
 - 常见运行排障
 
-### INTERFACE_CONTRACT
+### `INTERFACE_CONTRACT.md`
 
 继续作为稳定契约面，重点保留：
 
@@ -101,10 +103,17 @@ modules/<module_id>/
 
 ### 历史文档
 
-历史审计和阶段文档本轮继续保留原位，后续轮次再决定是否补指针或做归档整理。
+历史审计和阶段文档继续保留原位；后续轮次可补充源事实指针或归档说明，但不再以其承担活跃源事实职责。
 
-## T05 Family 规则
+## T05 规则
 
-- `t05_topology_between_rc` 继续作为 legacy T05 模块。
-- `t05_topology_between_rc_v2` 在 Round 1 继续保持物理独立模块路径。
-- 治理文档必须显式展示它们的家族关系，而不是把其中一个静默折叠进另一个。
+- `t05_topology_between_rc_v2` 为当前正式 T05 模块。
+- 物理路径保持 `modules/t05_topology_between_rc_v2/`，本轮不改名。
+- `t05_topology_between_rc` 为 legacy 历史参考模块。
+- 二者不再要求 family 连续治理；后续文档迁移以 V2 作为正式 T05 语义主体。
+- legacy T05 的资料继续保留，供未来择优提炼，但不再要求建立 family 级总览文档作为前置条件。
+
+## 退役模块口径
+
+- `t03_marking_entity`：已退役，不再占用当前活跃 taxonomy 槽位；仅在历史记录中保留可见性。
+- `t10`：已退役历史模块；保留现有文档与实现痕迹，但不再进入当前正式 taxonomy 或活跃治理主线。

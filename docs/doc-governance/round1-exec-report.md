@@ -1,4 +1,4 @@
-﻿# Round 1 执行报告
+# Round 1 执行报告（已由 Round 2A 决策对齐补充修正）
 
 ## 本轮信息
 
@@ -7,6 +7,10 @@
 - Git 分支：`codex/doc-governance-round1`
 - 范围类型：仅限 brownfield 文档治理
 - 运行时影响：无
+
+## 补充说明
+
+Round 1 报告原本保留了若干治理未决项。后续人工审核已在 Round 2A 给出正式结论，因此本报告中的相关结论已按 Round 2A 口径补充修正。该修正不改变 Round 1 当时“已交付了什么”，只更新后续阅读本报告时应采用的正式治理口径。
 
 ## 已交付产物
 
@@ -61,12 +65,15 @@
 - 未发现缺失的必需 spec-kit 产物。
 - 未发现有需求缺少对应的计划区域或任务族。
 
-### 已记录的未决项
+### Round 1 原未决项的后续处理结果
 
-- Round 1 之后 T05 family 的长期治理方式
-- `t03_marking_entity` 作为缺失 taxonomy 成员的处理方式
-- `t10` 的命名漂移与正式 taxonomy 落位
-- 是否在后续轮次生成 root 级 agent context
+以下事项已由 Round 2A 人工决策覆盖：
+
+- 当前正式 T05 = `t05_topology_between_rc_v2`
+- legacy T05 = 历史参考模块
+- `t03_marking_entity` = 已退役
+- `t10` = 已退役历史模块
+- root `AGENTS.md` = 已在 Round 2A 创建
 
 ## 必答问题
 
@@ -86,7 +93,7 @@
 
 需要额外说明的是：
 
-- `t03_marking_entity` 仍存在于项目 taxonomy 文档中，但不在当前 repo 树里。
+- `t03_marking_entity` 已退役，且当前不在 repo 树中。
 
 ### 2. 当前哪些文档属于源事实，哪些属于 AGENTS，哪些属于 Skill，哪些属于历史遗留
 
@@ -97,9 +104,10 @@
   - `docs/ARTIFACT_PROTOCOL.md`
   - `.specify/memory/constitution.md`
   - 各模块 `INTERFACE_CONTRACT.md`
+  - `docs/architecture/*`
 - AGENTS：
+  - repo root `AGENTS.md`
   - 各模块 `AGENTS.md`
-  - 其中多处目前语义过重，后续应收缩
 - Skill / 工作流：
   - 各模块 `SKILL.md`
   - `.specify/templates/*.md`
@@ -143,29 +151,30 @@ T04、T05-V2、T06 现在都具备：
 
 ### 5. T05-V2 的推荐定位是什么
 
-Round 1 的推荐定位是：
+经 Round 2A 对齐后，正式定位为：
 
-- 保持 `t05_topology_between_rc_v2` 作为独立模块路径
-- 同时明确将其记录为 `T05 family` 的第二代成员
-- 本轮不把它静默折叠进 legacy T05 文档体系
+- 当前正式 T05 模块 = `t05_topology_between_rc_v2`
+- 物理路径保持 `modules/t05_topology_between_rc_v2/`
+- legacy `t05_topology_between_rc` 只作为历史参考模块保留
 
 ### 6. 第二轮应该优先迁移哪些模块
 
 建议的下一轮优先顺序：
 
-1. T05 legacy family 治理
-2. T10 taxonomy 与命名归一化
-3. T07 架构规范化
-4. T02 文档规范化
-5. frozen 模块 T00/T01，以及对 T03 的明确决策
+1. T05-V2 正式模块文档迁移 / 正式化
+2. T04 与 T06 的模块级迁移深化
+3. T07 与 T02 的规范化
+4. frozen 模块 T00 / T01 的整理
 
 ### 7. 本轮哪些内容仍需人工确认
 
-- T05 legacy 与 T05-V2 的长期家族文档模型
-- `t03_marking_entity` 应恢复、退役，还是正式降级出范围
-- T10 是否应进入正式项目 taxonomy，以及采用哪个 canonical name
-- 后续是否需要生成 root 级 agent context
-- 哪些 legacy 文档最终保留为摘要，哪些应改为仅保留指针
+Round 2A 已覆盖 Round 1 最核心的 4 条未决治理问题。当前剩余需要人工把关的内容主要是：
+
+- legacy 文档最终保留粒度
+- 后续模块深迁移的排期与顺序
+- 是否在更后续轮次建立更细粒度 ADR 集
+
+这些问题不再影响当前治理基线。
 
 ### 8. 本轮没有做哪些事，为什么没做
 
@@ -179,10 +188,8 @@ Round 1 明确没有做的事情包括：
   因为这超出 Round 1 范围
 - 没有为所有模块创建深度审核包  
   因为本轮人工重点审核对象仅限 T04、T05-V2、T06
-- 没有做 T05 family 级别的整合架构文档  
-  因为 T05-V2 的定位需要先完成研究和映射，再进入整合
-- 没有运行 `update-agent-context.sh` 生成 root `AGENTS.md`  
-  因为在治理结构尚未稳定时引入新的长期文档面会增加歧义
+- 没有进入模块深迁移
+  因为 Round 1 只负责建立结构骨架与审核包
 
 ## 收尾评估
 
@@ -194,4 +201,4 @@ Round 1 已成功建立：
 - 三个重点模块审核包
 - 一套基于 spec-kit 的变更记录
 
-因此，Round 2 可以在更清晰的源事实边界上开始真正的迁移与重写工作。
+Round 2A 进一步把人工审核结论写回仓库，使后续轮次可以在明确的正式模块口径上继续推进。

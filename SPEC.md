@@ -46,15 +46,17 @@
 本次 POC 聚焦 5 个关键技术点（t01–t05），并要求外网提供可回归的合成数据能力（t00）：
 - t01 点云标量融合质量（参差区间识别）
 - t02 地面点云分割质量（POC 自研，后续可 skill 化复用；覆盖地面点分类 + Traj 纵向/横截 QC）
-- t03 标线实体化聚合（重点：导流带聚合）
+- t03 标线实体化聚合（已退役，仅保留历史技术点引用）
 - t04 RC 路口与 SW 路口锚定识别（细节接口契约放子 Agent）
-- t05 RC 路口间拓扑生产（以横截面为单元；细节接口契约放子 Agent）
+- t05 RC 路口间拓扑生产（当前正式模块为 `t05_topology_between_rc_v2`；legacy `t05_topology_between_rc` 仅作历史参考）
 - t00 合成/模拟数据生成（外网回归用；可注入可控异常）
 
 当前阶段模块状态：
-- Frozen（不再演进）：`t00_synth_data`、`t01_fusion_qc`、`t02_ground_seg_qc`、`t03_marking_entity`
-- Core（已通过测试数据验证，已上传基线版本）：`t04_rc_sw_anchor`、`t05_topology_between_rc`
+- Frozen（不再演进）：`t00_synth_data`、`t01_fusion_qc`、`t02_ground_seg_qc`
+- Core（已通过测试数据验证，已上传基线版本）：`t04_rc_sw_anchor`、`t05_topology_between_rc_v2`
 - New（仅定义契约与目录骨架，暂不实现逻辑）：`t06_patch_preprocess`、`t07_patch_postprocess`
+- Legacy（历史参考）：`t05_topology_between_rc`
+- Retired（已退役）：`t03_marking_entity`、`t10`
 
 ### 1.2 关键业务背景（全局认知）
 - RC/SW 是两套不同数据：
@@ -137,7 +139,8 @@
 
 ### 6.1 外网交付（GitHub 仓库）
 - modules/t00_synth_data/（本地合成/模拟测试数据生成；用于外网回归与 CI）
-- modules/t01_fusion_qc/ ... modules/t05_topology_between_rc/（五模块独立目录）
+- modules/t01_fusion_qc/ ... modules/t05_topology_between_rc_v2/（当前正式技术点目录）
+- modules/t05_topology_between_rc/（legacy 历史参考目录，继续保留）
 - common/（公共库：统计、schema 校验、文本摘要导出等）
 - schemas/（report 与 text bundle 的 JSON Schema）
 - configs/（示例 pipeline 配置、patch 清单样例）
@@ -246,11 +249,12 @@ modules/
   t00_synth_data/
   t01_fusion_qc/
   t02_ground_seg_qc/
-  t03_marking_entity/
   t04_rc_sw_anchor/
-  t05_topology_between_rc/
+  t05_topology_between_rc/        # legacy 历史参考
+  t05_topology_between_rc_v2/     # 当前正式 T05
   t06_patch_preprocess/
   t07_patch_postprocess/
+  t10/                            # 已退役历史模块
 ```
 
 ---
@@ -283,14 +287,17 @@ modules/
   - t02 不修改其它模块接口，不引入跨模块耦合。
   - t02 对外接口与详细键值以 `modules/t02_ground_seg_qc/INTERFACE_CONTRACT.md` 为准，主文档仅描述范围与产物摘要。
 
-### 11.3 t03 标线实体化（导流带）
-- 回传必须包含：实体数量（按类型）、碎片率/断裂率摘要、gore tip 数量与异常计数
+### 11.3 t03 标线实体化（导流带，已退役）
+- 本技术点已退役，保留本节仅用于解释历史文档、历史报告与旧配置。
+- 不再作为当前活跃模块要求。
 
 ### 11.4 t04 锚点识别（RC/SW）
 - 回传必须包含：RC/SW 锚点计数、置信度摘要、触发人工复核原因
 - 位置表达：推荐用 bin 区间（便于压缩与对比）
 
 ### 11.5 t05 拓扑生产
+- 当前正式模块：`t05_topology_between_rc_v2`
+- legacy 历史参考模块：`t05_topology_between_rc`
 - 回传必须包含：Road/Node 数量、smoothness/centered 分位数、断头率/孤立比例/自交计数、短辫折叠摘要
 
 ### 11.6 t06_patch_preprocess（新增）
@@ -314,7 +321,7 @@ modules/
 - 工作区约束：项目必须放在 Windows E: 盘（WSL 下通常 `/mnt/<drive>/...`）；外传文本只要求可粘贴（体积可控）
 
 ### 12.1 整 Patch 端到端验证计划（当前冻结）
-- 当前阶段先按单 Patch、分模块顺序执行：`t06_patch_preprocess -> t04_rc_sw_anchor -> t05_topology_between_rc -> t07_patch_postprocess`。
+- 当前阶段先按单 Patch、分模块顺序执行：`t06_patch_preprocess -> t04_rc_sw_anchor -> t05_topology_between_rc_v2 -> t07_patch_postprocess`。
 - 待单 Patch 路径稳定后，再新增批处理编排模块（本任务不创建该模块）。
 
 ---
@@ -368,12 +375,12 @@ modules:
       z_diff_threshold: 0.20
 
   t03_marking_entity:
-    enabled: true
+    enabled: false   # retired historical module
 
   t04_rc_sw_anchor:
     enabled: true
 
-  t05_topology_between_rc:
+  t05_topology_between_rc_v2:
     enabled: true
 
   t06_patch_preprocess:

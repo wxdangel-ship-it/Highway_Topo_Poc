@@ -24,6 +24,6 @@
 - 确认哪些规则应留在 contract，哪些应进入 architecture
 - 确认 README 在迁移后如何定位
 
-## 待确认问题
+## 后续观察点
 
-- 当 architecture 文档稳定后，T04 是否还需要保留 README 作为操作者友好摘要？
+- 当 `architecture/` 文档稳定后，可再决定 `README.md` 是否继续保留为操作者友好摘要。
