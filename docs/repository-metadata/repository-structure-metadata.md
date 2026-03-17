@@ -29,8 +29,8 @@
 
 ### `docs/repository-metadata/`
 
-- 放当前仓库结构说明与结构入口
-- 用来解释“目录是什么、文档应该放在哪里”
+- 放当前仓库结构说明、代码边界约束、执行入口治理与当前态审计
+- 用来解释“目录是什么、文档应该放在哪里、代码边界如何看、入口如何登记”
 
 ### `docs/metadata-cleanup/`
 
@@ -109,6 +109,9 @@
 
 - `README.md`
 - `repository-structure-metadata.md`
+- `code-boundaries-and-entrypoints.md`
+- `code-size-audit.md`
+- `entrypoint-registry.md`
 
 ### `docs/archive/nonstandard/`
 
@@ -191,10 +194,11 @@
 3. `docs/PROJECT_BRIEF.md`
 4. `docs/doc-governance/README.md`
 5. `docs/repository-metadata/README.md`
-6. `docs/doc-governance/module-lifecycle.md`
-7. `docs/doc-governance/current-module-inventory.md`
-8. `docs/doc-governance/current-doc-inventory.md`
-9. 进入活跃模块正式文档面
+6. `docs/repository-metadata/code-boundaries-and-entrypoints.md`
+7. `docs/doc-governance/module-lifecycle.md`
+8. `docs/doc-governance/current-module-inventory.md`
+9. `docs/doc-governance/current-doc-inventory.md`
+10. 进入活跃模块正式文档面
 
 ## 7. 当前模块状态简表
 

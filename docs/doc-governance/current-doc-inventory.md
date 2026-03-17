@@ -16,6 +16,9 @@
 | `docs/architecture/*.md` | 项目级长期架构说明 | `source_of_truth` | 当前项目级长期真相主表面 |
 | `docs/repository-metadata/README.md` | 仓库结构入口 | `durable_guidance` | 说明从哪里理解当前仓库结构 |
 | `docs/repository-metadata/repository-structure-metadata.md` | 仓库结构元数据主文件 | `source_of_truth` / `durable_guidance` | 解释当前位置白名单、归档规则和阅读顺序 |
+| `docs/repository-metadata/code-boundaries-and-entrypoints.md` | 代码边界与入口治理规则 | `durable_guidance` | 解释当前单文件体量约束与执行入口脚本治理 |
+| `docs/repository-metadata/code-size-audit.md` | 超阈值文件审计 | `audit_snapshot` | 记录当前超过 `100 KB` 的源码 / 脚本文件 |
+| `docs/repository-metadata/entrypoint-registry.md` | 执行入口注册表 | `audit_snapshot` / `durable_guidance` | 记录当前执行入口分布、状态与收敛建议 |
 | `docs/metadata-cleanup/README.md` | metadata cleanup 索引 | `durable_guidance` | 说明本目录只存放结构清理执行报告 |
 | `docs/doc-governance/README.md` | 治理主入口 | `durable_guidance` | 告诉维护者当前从哪里开始看治理文档 |
 | `docs/doc-governance/module-lifecycle.md` | 模块生命周期真相 | `source_of_truth` | 定义 Active / Retired / Historical Reference / Support Retained |
