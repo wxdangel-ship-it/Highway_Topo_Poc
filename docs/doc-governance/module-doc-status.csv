@@ -1,0 +1,11 @@
+module_name,module_path,has_module_docs,has_agents,has_skill,has_specs,current_status,recommended_priority,round1_action
+t00_synth_data,modules/t00_synth_data,yes,yes,yes,no,frozen,low,inventory_only
+t01_fusion_qc,modules/t01_fusion_qc,yes,yes,yes,no,frozen,low,inventory_only
+t02_ground_seg_qc,modules/t02_ground_seg_qc,yes,yes,yes,no,frozen,medium-low,inventory_only
+t03_marking_entity,modules/t03_marking_entity (missing),no,no,no,no,spec_only_missing,medium,record_gap_only
+t04_rc_sw_anchor,modules/t04_rc_sw_anchor,yes,yes,yes,no,core,high,deep_review_package
+t05_topology_between_rc,modules/t05_topology_between_rc,yes,yes,yes,no,core_legacy,medium,migration_context_only
+t05_topology_between_rc_v2,modules/t05_topology_between_rc_v2,yes,yes,no,no,active_independent_v2,high,deep_review_package
+t06_patch_preprocess,modules/t06_patch_preprocess,yes,yes,yes,no,implemented_taxonomy_drift,high,deep_review_package
+t07_patch_postprocess,modules/t07_patch_postprocess,yes,yes,yes,no,new_contract_first,medium-low,inventory_only
+t10,modules/t10,yes,yes,yes,no,extra_taxonomy_naming_drift,medium,inventory_only

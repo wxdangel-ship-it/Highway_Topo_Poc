@@ -1,50 +1,85 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+<!--
+同步影响说明
+- 版本变更: 1.0.0 -> 1.1.0
+- 本次补充:
+  - 默认文档语言规则
+-->
 
-## Core Principles
+# Highway_Topo_Poc 宪章
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+## 核心原则
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+### I. 分层源事实
+项目级源事实、模块级源事实、`AGENTS.md` 指南、`SKILL.md` 工作流以及变更专用规格必须严格分层。
+`SPEC.md` 与经确认的项目级架构文档定义全局范围与约束；模块级架构文档与
+`INTERFACE_CONTRACT.md` 定义模块级稳定真相；`AGENTS.md` 只承载稳定执行规则与指针；
+`SKILL.md` 只承载可复用操作流程；变更专用产物一律放在 `specs/` 下。
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+### II. 小而稳定的 AGENTS
+`AGENTS.md` 必须保持简短、稳定、耐久。它只能记录执行姿态、协作规则、边界和指向真实源事实文档的链接。
+`AGENTS.md` 不得成为模块业务规则、验收逻辑或架构真相的唯一承载位置。
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### III. 单一能力的 Skills
+每个 `SKILL.md` 必须只描述一种可跨轮次复用的能力工作流。Skill 不得演变成完整模块百科、
+隐藏需求库，或替代架构文档。若理解模块必须依赖某个业务定义，该定义应放在模块的源事实文档中，
+而不是藏在 Skill 里。
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+### IV. 基于 arc42 的架构文档
+稳定的源事实文档必须在项目级与模块级都采用 arc42 风格组织。项目级架构文档至少覆盖：
+目标、约束、上下文、方案策略、横切概念、质量要求、风险和术语表。模块级架构文档至少覆盖：
+模块目标、约束、范围、方案策略、构件视图、质量要求、风险和术语表。遇到不确定事实时，
+文档必须记录来源依据与待确认问题，而不是伪造确定结论。
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+### V. 先研究、可审核的 Brownfield 变更流程
+对于 brownfield 变更，必须先研究现状、盘点现有产物、澄清未决落位、完成计划，
+并在大范围改动前执行跨文档分析。迁移工作默认非破坏性：只有在替代结构、
+迁移映射和审核产物都存在后，旧文档才允许进入后续替换。每一轮都必须留下可审核产物、
+迁移说明，以及明确的“本轮未改什么”说明。
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+### VI. 默认中文文档
+项目内文档默认使用中文撰写；仅参数、代码、命令、路径、模块标识、配置键、接口字段等技术符号可保留英文。
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+## 文档拓扑标准
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+- 项目级稳定文档放在 `docs/`。
+- 项目级架构源事实文档放在 `docs/architecture/`。
+- 文档治理映射、盘点与轮次报告放在 `docs/doc-governance/`。
+- 模块级稳定文档放在 `modules/<module_id>/`。
+- 模块级架构源事实文档放在 `modules/<module_id>/architecture/`。
+- 可执行实现必须继续放在 `src/highway_topo_poc/modules/<module_id>/`。
+- 变更专用的 `spec`、`plan`、`tasks` 与配套研究文档放在 `specs/<change-id>/`。
+- 历史运行报告、审计快照和阶段说明可以暂时保留原位，但在迁移映射建立后，必须明确标注为非源事实引用。
 
-## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
+## 工作流与质量闸门
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+- Brownfield 文档整改必须遵循：
+  `constitution -> specify -> clarify -> plan -> tasks -> analyze`。
+- 若需要建立 brownfield 上下文，研究与盘点可以先于正式变更规格，但后续必须被吸收进 spec-kit 产物。
+- 在 `analyze` 完成前，不得进行大规模迁移、破坏性修改或广泛重写。
+- 每一轮都必须明确产出：
+  - 现状研究
+  - 目标结构
+  - 迁移映射
+  - 审核优先级
+  - 待确认问题
+  - 执行报告
+- 对本仓库而言，在文档治理轮次中，不得修改算法行为、模块运行逻辑或既有数据契约，除非后续实现型变更明确将其纳入范围。
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+## 治理约束
+
+本宪章取代本仓库过去零散的文档习惯。任何新的长期文档结构、迁移规则或工作流闸门，
+都必须与本宪章保持一致。
+
+修订策略：
+
+- `MAJOR`：移除或重定义核心原则，或对仓库文档治理模型做出不兼容变更。
+- `MINOR`：新增原则、强制章节族或新的工作流闸门。
+- `PATCH`：仅澄清表述，不改变约束义务。
+
+合规策略：
+
+- 每一轮文档治理都必须在 `plan`、`tasks` 和最终执行报告中验证与本宪章的一致性。
+- 任何例外都必须记录原因和后续动作。
+- 若需要修改原则本身，必须先显式修订宪章，再允许下游产物偏离原原则。
+
+**版本**: 1.1.0 | **批准日期**: 2026-03-17 | **最后修订**: 2026-03-17
