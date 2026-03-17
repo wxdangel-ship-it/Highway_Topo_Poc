@@ -2,60 +2,67 @@
 
 ## 状态
 
-- 草案状态：Round 1 迁移映射，已由 Round 2A 决策对齐补充修正
-- 策略：默认非破坏；先映射，再迁移
+- 当前状态：已吸收 Round 2A、Round 2B、Round 2C 与 Round 3A 的治理结论
+- 当前策略：按生命周期决定迁移动作，而不是默认所有模块都继续 formalize
+- 核心原则：默认非破坏；先校准生命周期，再决定是维护正式文档面、保留历史参考，还是仅补最小归档指针
 
 ## 项目级映射
 
 | 当前文档 / 家族 | 当前属性 | 目标文档面 | 当前动作 | 后续动作 |
 |---|---|---|---|---|
-| `SPEC.md` | `source_of_truth` | 继续保留在 `SPEC.md`，并从 `docs/architecture/01-04` 建立交叉链接 | 保留原位并修正当前正式模块口径 | 后续进一步收紧与项目级架构文档的边界 |
-| `docs/ARTIFACT_PROTOCOL.md` | `source_of_truth` | 继续保留在 `docs/`，并由 `docs/architecture/08-crosscutting-concepts.md` 与 `10-quality-requirements.md` 引用 | 保留原位 | 后续决定是否增加协议摘要页 |
-| `docs/AGENT_PLAYBOOK.md` | `durable_guidance` | 继续保留在 `docs/` | 保留原位 | 后续补充到架构与治理文档的显式指针 |
-| `docs/CODEX_GUARDRAILS.md` | `durable_guidance` | 继续保留在 `docs/` | 保留原位 | 后续补充到架构与治理文档的显式指针 |
-| `docs/CODEX_START_HERE.md` | `durable_guidance` | 继续保留在 `docs/` | 保留原位 | 后续与新的 onboarding 指针对齐 |
-| `docs/WORKSPACE_SETUP.md` | `durable_guidance` | 继续保留在 `docs/` | 保留原位 | 后续从 `02-constraints.md` 建立引用 |
-| `docs/PROJECT_BRIEF.md` | `legacy_candidate` | 摘要 / 参考层 | 保留原位并修正当前模块口径 | 后续转成带指针的 digest，或在审核后进一步收缩 |
-| `docs/t05_business_logic_summary.md` | `legacy_candidate` | legacy T05 历史参考 | 保留原位 | 后续指向 legacy T05 的历史参考说明 |
-| `docs/t05_business_audit_for_gpt_20260305.md` | `temporary_spec` | legacy T05 历史参考 | 保留原位 | 后续指向 legacy T05 的审核 / 归档区 |
+| `SPEC.md` | `source_of_truth` | 继续作为项目级总范围与模块状态真相 | 保留原位并写回正式生命周期口径 | 与 `docs/architecture/*`、`module-lifecycle.md` 保持一致 |
+| `docs/architecture/*.md` | `source_of_truth` | 继续作为项目级长期架构真相 | 保留原位 | 仅做增量维护 |
+| `docs/doc-governance/module-lifecycle.md` | `source_of_truth` | 生命周期专用真相面 | 新增并固定当前状态定义 | 后续所有模块状态调整都必须写回这里 |
+| `docs/PROJECT_BRIEF.md` | `legacy_candidate` | 项目级摘要 / digest 层 | 保留原位并同步项目级正式口径 | 继续保持摘要定位 |
+| `docs/ARTIFACT_PROTOCOL.md` | `source_of_truth` | 继续保留在 `docs/` | 保留原位 | 与项目级架构文档交叉引用 |
+| `docs/AGENT_PLAYBOOK.md` / `docs/CODEX_*` / `docs/WORKSPACE_SETUP.md` | `durable_guidance` | 继续作为规则面 | 保留原位 | 不承担业务生命周期真相 |
 
-## 模块级映射
+## 生命周期驱动的模块映射
 
-### 通用模块规则
+### Active 模块
 
-| 当前文档面 | 目标文档面 | 当前动作 | 后续动作 |
+| 对象 | 目标文档面 | 当前动作 | 后续动作 |
 |---|---|---|---|
-| `modules/<module>/INTERFACE_CONTRACT.md` | 继续作为 `architecture/` 旁的契约文档面 | 保留原位 | 待架构真相稳定后再削减重叠 |
-| `modules/<module>/AGENTS.md` | 继续作为规则面 | 保留原位 | 后续收缩为持久规则 + 指针 |
-| `modules/<module>/SKILL.md` | 继续作为工作流面 | 保留原位 | 后续收缩为可复用流程 |
+| `t04_rc_sw_anchor` | `architecture/*` + `INTERFACE_CONTRACT.md` + `AGENTS.md` + `SKILL.md` + `review-summary.md` | 维持正式文档面 | 只做增量维护 |
+| `t05_topology_between_rc_v2` | `architecture/*` + `INTERFACE_CONTRACT.md` + `AGENTS.md` + `SKILL.md` + `review-summary.md` | 维持正式文档面 | 作为正式 T05 持续维护 |
+| `t06_patch_preprocess` | `architecture/*` + `INTERFACE_CONTRACT.md` + `AGENTS.md` + `SKILL.md` + `review-summary.md` | 维持正式文档面 | 只做增量维护 |
 
-### 重点模块
+### Historical Reference 模块
 
-| 当前文档 / 家族 | 目标文档面 | 当前动作 | 后续动作 |
+| 对象 | 目标文档面 | 当前动作 | 后续动作 |
 |---|---|---|---|
-| `modules/t04_rc_sw_anchor/README.md` | `modules/t04_rc_sw_anchor/architecture/01-05` + `review-summary.md` | 保留并建立映射 | 后续视需要转成指针型摘要 |
-| `modules/t04_rc_sw_anchor/AGENTS.md` | `modules/t04_rc_sw_anchor/AGENTS.md` + 指向 `architecture/` 的链接 | 保留并建立映射 | 后续剥离业务真相 |
-| `modules/t04_rc_sw_anchor/SKILL.md` | `modules/t04_rc_sw_anchor/SKILL.md` + 指向 `architecture/` 的链接 | 保留并建立映射 | 后续剥离稳定规则内容 |
-| `modules/t05_topology_between_rc_v2/AGENTS.md` | `modules/t05_topology_between_rc_v2/AGENTS.md` + `architecture/` + `review-summary.md` | 保留并写回“当前正式 T05”口径 | 后续把模块真相继续迁移到 `architecture/` |
-| `modules/t05_topology_between_rc_v2/REAL_RUN_ACCEPTANCE.md` | 工作流 / 验收参考说明 | 保留原位 | 后续决定保留为 runbook 还是归入验收文档家族 |
-| `modules/t06_patch_preprocess/AGENTS.md` | `modules/t06_patch_preprocess/AGENTS.md` + `architecture/` | 保留并建立映射 | 后续削减与 contract 的重叠 |
-| `modules/t06_patch_preprocess/SKILL.md` | `modules/t06_patch_preprocess/SKILL.md` + `architecture/` | 保留并建立映射 | 后续削减与 contract 的重叠 |
+| legacy `t05_topology_between_rc` | 保留既有文档与历史证据 | 在现有入口文档补“历史参考”与“当前正式 T05”指针 | 只作为历史经验和证据来源，不进入 family 连续治理 |
 
-### 历史参考 / 历史遗留家族
+### Retired 模块
 
-| 当前文档 / 家族 | 目标文档面 | 当前动作 | 后续动作 |
+| 对象 | 目标文档面 | 当前动作 | 后续动作 |
 |---|---|---|---|
-| `modules/t05_topology_between_rc/*` | legacy T05 历史参考 | 保留原位 | 后续按需补充指针，不进入活跃 family 连续治理 |
-| `modules/t05_topology_between_rc/audits/*.md` | 历史证据家族 | 保留原位 | 后续补充源事实指针和归档说明 |
-| `modules/t05_topology_between_rc/audits/runs/...` | 历史证据家族 | 保留原位 | 后续视需要建立索引 |
-| `modules/t10/PHASE*.md` | T10 退役历史说明 | 保留原位 | 不再做正式 taxonomy 对齐 |
-| `modules/t10/REVIEW_USAGE.md` | T10 历史审核流程说明 | 保留原位 | 仅作为历史参考保留 |
+| `t02_ground_seg_qc` | 保留既有文档与实现 | 在入口文档补最小退役指针 | 不再进入正式化路线 |
+| `t03_marking_entity` | 项目级退役记录 | 在项目级文档保留退役记录 | 不创建替代目录或新正式文档面 |
+| `t07_patch_postprocess` | 保留既有文档与实现 | 在入口文档补最小退役指针 | 不再进入正式化路线 |
+| `t10` | 保留既有文档、实现痕迹与阶段资料 | 在入口文档补最小退役指针 | 不再推进 taxonomy / naming 正式化 |
 
-## 模块决策写回
+### 仓库保留支撑 / 测试模块
 
-| 对象 | 当前定义 | 当前动作 | 后续动作 |
+| 对象 | 目标文档面 | 当前动作 | 后续动作 |
 |---|---|---|---|
-| `t05_topology_between_rc_v2` | 当前正式 T05 模块，物理路径保持 V2 | 写回项目级与治理级正式口径 | 后续模块深迁移以其为正式主体 |
-| `t05_topology_between_rc` | legacy 历史参考模块 | 保留原位，改为历史参考口径 | 后续按需提炼历史经验，不做 family 连续治理 |
-| `t03_marking_entity` | 已退役，且无当前活跃目录 | 在治理文档中标记退役 | 保留历史可见性，不创建替代模块 |
-| `t10` | 已退役历史模块 | 在治理文档中标记退役 | 保留现有资料和实现痕迹，不再推进 taxonomy / 命名正式化 |
+| `t00_synth_data` | 保留既有支撑模块文档面 | 保持原位 | 后续单独做支撑模块整理 |
+| `t01_fusion_qc` | 保留既有支撑模块文档面 | 保持原位 | 后续单独做支撑模块整理 |
+
+## 入口指针策略
+
+| 生命周期 | 指针写法 | 放置位置 | 本轮限制 |
+|---|---|---|---|
+| `Active` | 一般不需要额外生命周期指针 | 正式文档面自然承载 | 不重复制造摘要层 |
+| `Historical Reference` | 说明“本模块已不是当前正式模块”，并指向当前正式模块与 `module-lifecycle.md` | 现有入口文档开头 | 不重写主体内容 |
+| `Retired` | 说明“本模块已退役，不再属于当前活跃模块集合”，并指向 `module-lifecycle.md` | 现有入口文档开头 | 不补新 `architecture/*` / `SKILL.md` / 契约正式化 |
+
+## 明确移出后续正式化路线的对象
+
+- `t02_ground_seg_qc`
+- `t03_marking_entity`
+- `t07_patch_postprocess`
+- `t10`
+- legacy `t05_topology_between_rc`
+
+这些对象当前只保留历史可见性、退役说明或历史参考指针，不再列入后续正式化迁移路线。

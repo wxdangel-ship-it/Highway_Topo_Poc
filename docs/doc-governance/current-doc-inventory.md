@@ -3,112 +3,119 @@
 ## 范围
 
 - 盘点日期：2026-03-17
-- 目的：在 Round 1 重构前建立文档分类基线，并由 Round 2A 补充修正已确认的治理口径
-- 解释说明：本盘点区分“长期源事实”“持久规则”“可复用流程”“单次变更规格”“历史遗留候选”
+- 当前基线：已吸收 Round 2A、Round 2B、Round 2C 与 Round 3A 的治理结论
+- 目的：识别当前仓库中哪些文档属于项目级 / 模块级源事实，哪些属于持久规则、可复用流程、临时变更规格或历史证据
 - 分类词汇：
-  - `source_of_truth`：稳定的业务或接口真相
+  - `source_of_truth`：稳定业务真相、架构真相或契约真相
   - `durable_guidance`：稳定执行 / 协作规则
-  - `workflow`：可复用流程或重复操作方法
-  - `temporary_spec`：变更专用、验收专用或阶段专用产物
-  - `legacy_candidate`：历史价值高但未来可能被替代或只保留指针的文档
+  - `workflow`：可复用操作流程
+  - `temporary_spec`：单轮变更、单次验收或阶段性说明
+  - `legacy_candidate`：保留为历史摘要、操作者总览或过渡材料的文档
 
 ## 项目级文档
 
 | 路径 | 当前角色 | 主属性 | 备注 |
 |---|---|---|---|
-| `SPEC.md` | 全局范围、约束、taxonomy、交付模型 | `source_of_truth` | 已按 Round 2A 写回“当前正式 T05 = T05-V2”“`t03` 退役”“`t10` 退役” |
-| `docs/ARTIFACT_PROTOCOL.md` | 外传文本 bundle 协议 | `source_of_truth` | 内外网文本交换的稳定项目契约 |
-| `docs/AGENT_PLAYBOOK.md` | 人与 agent 的协作模型 | `durable_guidance` | 稳定操作规则，不是业务真相 |
-| `docs/CODEX_GUARDRAILS.md` | 执行保护栏 | `durable_guidance` | 稳定操作规则 |
-| `docs/CODEX_START_HERE.md` | 入场清单与优先级 | `durable_guidance` | 启动与接管协议 |
-| `docs/WORKSPACE_SETUP.md` | WSL/路径设置规则 | `durable_guidance` | 环境策略 |
-| `docs/PROJECT_BRIEF.md` | 项目全局摘要 | `legacy_candidate` | 保留为摘要层，不替代 `SPEC.md` 与 `docs/architecture/*` |
-| `docs/t05_business_logic_summary.md` | legacy T05 业务逻辑总结 | `legacy_candidate` | 作为 legacy T05 历史参考保留 |
-| `docs/t05_business_audit_for_gpt_20260305.md` | 面向 GPT 的 T05 审计同步文档 | `temporary_spec` | 适合作为 legacy T05 的审核辅助，而非长期真相 |
-| `AGENTS.md` | repo 级 durable guidance | `durable_guidance` | Round 2A 新建，只承载 repo 级执行规则 |
+| `SPEC.md` | 项目级范围、模块状态、交付约束 | `source_of_truth` | 当前活跃模块、退役模块与历史参考模块的最高层口径之一 |
+| `docs/architecture/*.md` | 项目级架构骨架 | `source_of_truth` | 承载项目级长期架构真相 |
+| `docs/doc-governance/module-lifecycle.md` | 模块生命周期定义与当前状态表 | `source_of_truth` | Round 3A 新建，专门定义 `Active / Retired / Historical Reference` |
+| `docs/ARTIFACT_PROTOCOL.md` | 外传文本 bundle 协议 | `source_of_truth` | 内外网文本交换的长期协议 |
+| `AGENTS.md` | repo 级 durable guidance | `durable_guidance` | 只保留仓库级稳定执行规则 |
+| `docs/AGENT_PLAYBOOK.md` | 人与 agent 的协作模型 | `durable_guidance` | 协作规则，不承载业务真相 |
+| `docs/CODEX_GUARDRAILS.md` | 执行保护栏 | `durable_guidance` | 稳定执行规则 |
+| `docs/CODEX_START_HERE.md` | 入场与接管清单 | `durable_guidance` | 启动与接管协议 |
+| `docs/WORKSPACE_SETUP.md` | 环境与路径规则 | `durable_guidance` | 环境配置策略 |
+| `docs/PROJECT_BRIEF.md` | 项目摘要层 | `legacy_candidate` | 同步项目级正式口径，但不替代 `SPEC.md` 与 `docs/architecture/*` |
+| `docs/t05_business_logic_summary.md` | legacy T05 业务逻辑总结 | `legacy_candidate` | 仅作 legacy T05 历史参考 |
+| `docs/t05_business_audit_for_gpt_20260305.md` | legacy T05 审核辅助材料 | `temporary_spec` | 保留为历史审核辅助 |
 
-## Spec-Kit / 工作流基础设施
-
-| 路径 | 当前角色 | 主属性 | 备注 |
-|---|---|---|---|
-| `.specify/memory/constitution.md` | 项目文档治理宪章 | `source_of_truth` | 约束文档治理原则，不承载模块业务真相 |
-| `.specify/templates/*.md` | feature 工作流模板 | `workflow` | 属于 spec-kit 脚手架，不是项目业务真相 |
-| `.codex/prompts/speckit.*.md` | Codex 的 spec-kit slash command 提示 | `workflow` | 操作工作流文件 |
-| `specs/001-doc-governance-round1/` | Round 1 变更记录 | `temporary_spec` | 保留当时的研究与未决表述，作为历史记录 |
-| `specs/002-doc-governance-decision-alignment/` | Round 2A 变更记录 | `temporary_spec` | 记录本轮 decision alignment 过程 |
-
-## 模块级稳定文档
-
-### T00 / T01 / T02
+## Spec-Kit / 轮次工作流产物
 
 | 路径 | 当前角色 | 主属性 | 备注 |
 |---|---|---|---|
-| `modules/t00_synth_data/INTERFACE_CONTRACT.md` | frozen 模块契约 | `source_of_truth` | synthetic-data 范围的稳定契约 |
-| `modules/t00_synth_data/AGENTS.md` | 模块执行规则 | `durable_guidance` | 应保持简短 |
-| `modules/t00_synth_data/SKILL.md` | 模块操作流程 | `workflow` | 可复用流程 |
-| `modules/t01_fusion_qc/INTERFACE_CONTRACT.md` | frozen 模块契约 | `source_of_truth` | 当前权威模块契约 |
-| `modules/t01_fusion_qc/AGENTS.md` | 模块执行规则 | `durable_guidance` | 稳定，但应保持小而稳 |
-| `modules/t01_fusion_qc/SKILL.md` | 模块流程 | `workflow` | 后续应继续收缩 |
-| `modules/t02_ground_seg_qc/INTERFACE_CONTRACT.md` | 模块契约与输出要求 | `source_of_truth` | 细节较多的模块真相 |
-| `modules/t02_ground_seg_qc/AGENTS.md` | 模块执行规则 | `durable_guidance` | 混有流程和阶段说明 |
-| `modules/t02_ground_seg_qc/SKILL.md` | 可复用流程 | `workflow` | 部分内容与行为真相混杂 |
+| `.specify/memory/constitution.md` | 文档治理宪章 | `source_of_truth` | 定义文档治理原则，不承载模块业务真相 |
+| `.specify/templates/*.md` | spec-kit 模板 | `workflow` | 工作流基础设施 |
+| `.codex/prompts/speckit.*.md` | spec-kit 提示模板 | `workflow` | Codex 工作流提示，不是业务真相 |
+| `specs/001-doc-governance-round1/` | Round 1 变更规格 | `temporary_spec` | 记录当时的盘点与目标骨架 |
+| `specs/002-doc-governance-decision-alignment/` | Round 2A 决策对齐规格 | `temporary_spec` | 记录人工决策写回过程 |
+| `specs/003-t05v2-doc-formalization/` | Round 2B T05-V2 正式化规格 | `temporary_spec` | 记录 T05-V2 正式化过程 |
+| `specs/004-t04-t06-doc-formalization/` | Round 2C T04 / T06 正式化规格 | `temporary_spec` | 记录 T04 / T06 正式化过程 |
+| `specs/005-module-lifecycle-retirement-governance/` | Round 3A 生命周期治理规格 | `temporary_spec` | 记录本轮生命周期与退役治理过程 |
+
+## 活跃模块正式文档面
 
 ### T04
 
 | 路径 | 当前角色 | 主属性 | 备注 |
 |---|---|---|---|
-| `modules/t04_rc_sw_anchor/INTERFACE_CONTRACT.md` | 主导性的模块契约与业务规则来源 | `source_of_truth` | 当前承载最多稳定模块真相 |
-| `modules/t04_rc_sw_anchor/README.md` | 面向操作者的模块摘要 | `legacy_candidate` | 与未来架构文档重叠，但过渡期仍有价值 |
-| `modules/t04_rc_sw_anchor/AGENTS.md` | 模块执行与约束指南 | `durable_guidance` | 当前语义负担过重 |
-| `modules/t04_rc_sw_anchor/SKILL.md` | 可复用操作流程 | `workflow` | 当前也承载了稳定规则片段 |
-
-### legacy T05
-
-| 路径 | 当前角色 | 主属性 | 备注 |
-|---|---|---|---|
-| `modules/t05_topology_between_rc/INTERFACE_CONTRACT.md` | legacy 模块契约 | `source_of_truth` | 作为历史参考模块的主契约保留 |
-| `modules/t05_topology_between_rc/AGENTS.md` | legacy 模块规则 | `durable_guidance` | 继续保留为历史参考，不再作为活跃治理主线 |
-| `modules/t05_topology_between_rc/SKILL.md` | legacy 操作流程 | `workflow` | 保留历史流程语境 |
-| `modules/t05_topology_between_rc/DRIVEZONE_XSEC_GATE_SPEC.md` | 专项设计规则说明 | `temporary_spec` | 偏窄的设计 / 决策文档 |
-| `modules/t05_topology_between_rc/AUDIT_POINTCLOUD_USAGE.md` | 实现审计说明 | `temporary_spec` | 偏代码审计用途 |
-| `modules/t05_topology_between_rc/audits/*.md` | QA 流程与审计说明 | `workflow` / `legacy_candidate` | 作为历史证据保留 |
+| `modules/t04_rc_sw_anchor/architecture/*` | 模块级长期架构真相 | `source_of_truth` | Round 2C 后已形成正式模块文档面 |
+| `modules/t04_rc_sw_anchor/INTERFACE_CONTRACT.md` | 稳定契约面 | `source_of_truth` | 输入 / 输出 / 参数 / 验收标准的权威落点 |
+| `modules/t04_rc_sw_anchor/AGENTS.md` | 模块级 durable guidance | `durable_guidance` | 已收缩为规则面 |
+| `modules/t04_rc_sw_anchor/SKILL.md` | 模块级复用流程 | `workflow` | 不替代架构真相 |
+| `modules/t04_rc_sw_anchor/review-summary.md` | 当前治理摘要 | `legacy_candidate` | 适合作为快速审核入口 |
+| `modules/t04_rc_sw_anchor/README.md` | 操作者总览 | `legacy_candidate` | 过渡型摘要，不替代正式文档面 |
 
 ### T05-V2
 
 | 路径 | 当前角色 | 主属性 | 备注 |
 |---|---|---|---|
-| `modules/t05_topology_between_rc_v2/INTERFACE_CONTRACT.md` | 当前正式 T05 模块契约 | `source_of_truth` | 对输入输出与运行结构具有权威性 |
-| `modules/t05_topology_between_rc_v2/AGENTS.md` | 模块规则与身份说明 | `durable_guidance` | 已明确其为独立正式模块，而非旧 T05 参数分支 |
-| `modules/t05_topology_between_rc_v2/REAL_RUN_ACCEPTANCE.md` | 实跑验收与操作者清单 | `temporary_spec` | 审核价值高，但属于阶段 / 运行导向 |
+| `modules/t05_topology_between_rc_v2/architecture/*` | 模块级长期架构真相 | `source_of_truth` | 当前正式 T05 的长期真相面 |
+| `modules/t05_topology_between_rc_v2/INTERFACE_CONTRACT.md` | 稳定契约面 | `source_of_truth` | 输入 / 输出 / 参数 / 验收标准的权威落点 |
+| `modules/t05_topology_between_rc_v2/AGENTS.md` | 模块级 durable guidance | `durable_guidance` | 只保留稳定工作规则 |
+| `modules/t05_topology_between_rc_v2/SKILL.md` | 模块级复用流程 | `workflow` | Round 2B 新建的正式 skill 面 |
+| `modules/t05_topology_between_rc_v2/REAL_RUN_ACCEPTANCE.md` | 运行验收说明 | `temporary_spec` | 保留为运行 / 验收文档，不再承担长期源事实 |
+| `modules/t05_topology_between_rc_v2/review-summary.md` | 当前治理摘要 | `legacy_candidate` | 适合作为人工审核入口 |
 
-### T06 / T07
-
-| 路径 | 当前角色 | 主属性 | 备注 |
-|---|---|---|---|
-| `modules/t06_patch_preprocess/INTERFACE_CONTRACT.md` | 模块契约 | `source_of_truth` | 当前最清晰的 T06 稳定真相 |
-| `modules/t06_patch_preprocess/AGENTS.md` | 模块规则 | `durable_guidance` | 与 contract 重复较多 |
-| `modules/t06_patch_preprocess/SKILL.md` | 可复用流程 | `workflow` | 与 contract 重复较多 |
-| `modules/t07_patch_postprocess/INTERFACE_CONTRACT.md` | 模块契约 | `source_of_truth` | contract-first 的活跃模块文档 |
-| `modules/t07_patch_postprocess/AGENTS.md` | 模块规则 | `durable_guidance` | 后续可保持简洁 |
-| `modules/t07_patch_postprocess/SKILL.md` | 可复用流程 | `workflow` | 与 contract 相邻的工作流说明 |
-
-### T10（已退役）
+### T06
 
 | 路径 | 当前角色 | 主属性 | 备注 |
 |---|---|---|---|
-| `modules/t10/INTERFACE_CONTRACT.md` | 退役模块契约 | `source_of_truth` | 作为退役历史模块的主契约保留，不进入当前正式 taxonomy |
-| `modules/t10/AGENTS.md` | 退役模块执行规则 | `durable_guidance` | 仅作为历史模块规则保留 |
-| `modules/t10/SKILL.md` | 退役模块流程 | `workflow` | 历史流程资料 |
-| `modules/t10/INTERNAL_WSL_USAGE.md` | 环境 / 操作者说明 | `workflow` | 偏操作者使用说明 |
-| `modules/t10/PHASE*.md` | 阶段说明 | `temporary_spec` | 退役后的历史阶段文档 |
-| `modules/t10/REVIEW_USAGE.md` | 审核流程 | `workflow` | 可作为历史审核辅助 |
-| `modules/t10/T10_BASELINE_MANIFEST.json` | 基线清单 | `temporary_spec` | review / baseline 产物，而非当前长期叙述型文档 |
+| `modules/t06_patch_preprocess/architecture/*` | 模块级长期架构真相 | `source_of_truth` | Round 2C 后已形成正式模块文档面 |
+| `modules/t06_patch_preprocess/INTERFACE_CONTRACT.md` | 稳定契约面 | `source_of_truth` | 输入 / 输出 / 参数 / 验收标准的权威落点 |
+| `modules/t06_patch_preprocess/AGENTS.md` | 模块级 durable guidance | `durable_guidance` | 已收缩为规则面 |
+| `modules/t06_patch_preprocess/SKILL.md` | 模块级复用流程 | `workflow` | 只保留可复用工作流 |
+| `modules/t06_patch_preprocess/review-summary.md` | 当前治理摘要 | `legacy_candidate` | 适合作为快速审核入口 |
+
+## 历史参考与退役模块文档
+
+| 路径 | 当前角色 | 主属性 | 备注 |
+|---|---|---|---|
+| `modules/t05_topology_between_rc/INTERFACE_CONTRACT.md` | legacy T05 历史契约 | `source_of_truth` | 仅作历史参考，不再是正式 T05 契约面 |
+| `modules/t05_topology_between_rc/AGENTS.md` | legacy T05 历史规则入口 | `durable_guidance` | 仅保留历史参考指针与旧规则 |
+| `modules/t05_topology_between_rc/SKILL.md` | legacy T05 历史流程 | `workflow` | 仅供历史回看 |
+| `modules/t05_topology_between_rc/audits/*.md` | legacy T05 历史证据 | `workflow` / `legacy_candidate` | 保留历史 QA / 审核资料 |
+| `modules/t02_ground_seg_qc/INTERFACE_CONTRACT.md` | 退役模块历史契约 | `source_of_truth` | 保留历史可见性，不进入当前活跃治理主线 |
+| `modules/t02_ground_seg_qc/AGENTS.md` | 退役模块入口规则 | `durable_guidance` | 已补最小退役指针 |
+| `modules/t02_ground_seg_qc/SKILL.md` | 退役模块历史流程 | `workflow` | 仅作为历史流程保留 |
+| `modules/t07_patch_postprocess/INTERFACE_CONTRACT.md` | 退役模块历史契约 | `source_of_truth` | 保留历史可见性，不再作为活跃模块 |
+| `modules/t07_patch_postprocess/AGENTS.md` | 退役模块入口规则 | `durable_guidance` | 已补最小退役指针 |
+| `modules/t07_patch_postprocess/SKILL.md` | 退役模块历史流程 | `workflow` | 仅作为历史流程保留 |
+| `modules/t10/INTERFACE_CONTRACT.md` | 退役模块历史契约 | `source_of_truth` | 保留历史实现语义，不进入当前正式 taxonomy |
+| `modules/t10/AGENTS.md` | 退役模块入口规则 | `durable_guidance` | 已补最小退役指针 |
+| `modules/t10/SKILL.md` | 退役模块历史流程 | `workflow` | 仅作历史资料 |
+| `modules/t10/PHASE*.md` | 阶段性历史说明 | `temporary_spec` | 退役后的阶段资料 |
+| `modules/t10/REVIEW_USAGE.md` | 历史审核流程 | `workflow` | 仅作历史审核辅助 |
+
+## 仓库保留支撑模块
+
+| 路径 | 当前角色 | 主属性 | 备注 |
+|---|---|---|---|
+| `modules/t00_synth_data/INTERFACE_CONTRACT.md` | 支撑 / 测试模块契约 | `source_of_truth` | 不属于当前活跃模块集合 |
+| `modules/t00_synth_data/AGENTS.md` | 支撑模块规则 | `durable_guidance` | 仅作支撑模块说明 |
+| `modules/t00_synth_data/SKILL.md` | 支撑模块流程 | `workflow` | 仅作支撑模块流程 |
+| `modules/t01_fusion_qc/INTERFACE_CONTRACT.md` | 支撑 / 测试模块契约 | `source_of_truth` | 不属于当前活跃模块集合 |
+| `modules/t01_fusion_qc/AGENTS.md` | 支撑模块规则 | `durable_guidance` | 仅作支撑模块说明 |
+| `modules/t01_fusion_qc/SKILL.md` | 支撑模块流程 | `workflow` | 仅作支撑模块流程 |
+
+## 缺口记录
+
+- `t03_marking_entity` 已退役，当前无 `modules/t03_marking_entity/` 目录，也无现成入口文档可补指针。
+- 该缺口通过项目级文档和 `docs/doc-governance/module-lifecycle.md` 保留退役记录，而不是新增重型占位文档。
 
 ## 关键盘点结论
 
-1. 仓库已经具备稳定的全局规则层，并已建立项目级架构骨架。
-2. 各模块的 `INTERFACE_CONTRACT.md` 仍然是模块级源事实的主要落点。
-3. 很多 `AGENTS.md` 与 `SKILL.md` 仍承载过多稳定业务内容，后续需要继续收缩。
-4. 当前正式 T05 = `t05_topology_between_rc_v2`；legacy T05 仅作为历史参考保留，不再要求 family 连续治理。
-5. `t03_marking_entity` 与 `t10` 都已退役；相关资料只作为历史证据或历史参考保留，不进入当前活跃治理主线。
-6. root `AGENTS.md` 已建立，后续 repo 级 durable guidance 不再需要散落在轮次说明中。
+1. 当前真正承担正式模块源事实职责的活跃模块只有 `t04`、当前正式 T05（`t05_topology_between_rc_v2`）和 `t06`。
+2. `INTERFACE_CONTRACT.md` 与 `architecture/*` 是活跃模块的主源事实面；`AGENTS.md` 和 `SKILL.md` 只保留规则与流程职责。
+3. legacy T05 只作为 `Historical Reference` 保留，不再作为正式模块或 family 主线。
+4. `t02`、`t03`、`t07`、`t10` 都已进入退役口径，只保留历史文档与最小状态指针。
+5. `t00`、`t01` 仍保留在仓库中，但属于支撑 / 测试模块，而不是当前活跃模块集合。

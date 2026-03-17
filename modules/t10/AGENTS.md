@@ -1,5 +1,10 @@
 # AGENTS.md
 
+## 退役状态说明
+
+- 本模块已退役，不再属于当前活跃模块集合。
+- 后续仅保留为历史实现、历史文档与历史规则参考；当前项目模块状态以 `docs/doc-governance/module-lifecycle.md` 为准。
+
 ## 1. 模块身份与定位
 
 你是 Highway_Topo_Poc 项目下的子 Agent（模块：T10 - 复杂交叉路口建模）。

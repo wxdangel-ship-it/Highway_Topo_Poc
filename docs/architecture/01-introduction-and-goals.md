@@ -44,9 +44,10 @@
 
 当前项目级正式口径为：
 
-- 正式模块主线：`t00`、`t01`、`t02`、`t04`、当前正式 T05（即 `t05_topology_between_rc_v2`）、`t06`、`t07`
+- 当前活跃模块：`t04`、当前正式 T05（即 `t05_topology_between_rc_v2`）、`t06`
 - 历史参考模块：legacy `t05_topology_between_rc`
-- 已退役：`t03_marking_entity`、`t10`
+- 已退役模块：`t02`、`t03_marking_entity`、`t07`、`t10`
+- 仓库保留的支撑 / 测试模块：`t00`、`t01`
 
 这些分类用于文档治理，不代表当前轮次要对所有模块做同等深度迁移。
 

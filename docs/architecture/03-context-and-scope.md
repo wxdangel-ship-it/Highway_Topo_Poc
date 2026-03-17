@@ -26,18 +26,23 @@
 
 ## 当前功能范围
 
-当前项目正式范围覆盖：
+当前活跃治理范围覆盖：
 
-- 合成数据与 QC 支撑（`t00`、`t01`、`t02`）
 - 锚点生成（`t04`）
 - 当前正式 T05 拓扑生成（`t05_topology_between_rc_v2`）
-- patch 级预处理 / 后处理（`t06`、`t07`）
+- patch 级预处理（`t06`）
 
 历史参考或退役但仍需保留可见性的对象包括：
 
 - legacy `t05_topology_between_rc`
+- 已退役的 `t02_ground_seg_qc`
 - 已退役的 `t03_marking_entity`
+- 已退役的 `t07_patch_postprocess`
 - 已退役的 `t10`
+
+补充说明：
+
+- `t00_synth_data` 与 `t01_fusion_qc` 继续作为仓库保留的支撑 / 测试模块存在，但不属于当前活跃模块集合。
 
 ## 文档范围
 

@@ -4,6 +4,7 @@
 
 - 当前正式 T05 模块文档面位于 `modules/t05_topology_between_rc_v2/`。
 - 本目录仅保留 legacy 历史参考，不再按 T05 家族连续治理。
+- 本模块状态以 `docs/doc-governance/module-lifecycle.md` 为准。
 - 如需当前正式口径，请优先读取 `modules/t05_topology_between_rc_v2/architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、`SKILL.md`。
 
 ## Contract Delta

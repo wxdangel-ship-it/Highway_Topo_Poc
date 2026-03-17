@@ -51,13 +51,13 @@
 - t05 RC 路口间拓扑生产（当前正式模块为 `t05_topology_between_rc_v2`；legacy `t05_topology_between_rc` 仅作历史参考）
 - t00 合成/模拟数据生成（外网回归用；可注入可控异常）
 
-当前阶段模块状态：
-- Frozen（不再演进）：`t00_synth_data`、`t01_fusion_qc`、`t02_ground_seg_qc`
-- Core（已通过测试数据验证，已上传基线版本）：`t04_rc_sw_anchor`、`t05_topology_between_rc_v2`
-- Active（已实现，当前处于文档正式化阶段）：`t06_patch_preprocess`
-- New（仅定义契约与目录骨架，暂不实现逻辑）：`t07_patch_postprocess`
-- Legacy（历史参考）：`t05_topology_between_rc`
-- Retired（已退役）：`t03_marking_entity`、`t10`
+当前模块生命周期口径：
+- Active（当前正式活跃模块）：`t04_rc_sw_anchor`、`t05_topology_between_rc_v2`、`t06_patch_preprocess`
+- Historical Reference（历史参考模块）：`t05_topology_between_rc`
+- Retired（已退役模块）：`t02_ground_seg_qc`、`t03_marking_entity`、`t07_patch_postprocess`、`t10`
+
+补充说明：
+- `t00_synth_data`、`t01_fusion_qc` 继续保留在仓库中，作为支撑 / 测试模块存在；它们不属于当前活跃模块集合，也不是本轮退役归档动作的对象。
 
 ### 1.2 关键业务背景（全局认知）
 - RC/SW 是两套不同数据：
@@ -266,7 +266,7 @@ modules/
 ### 11.1 t01 参差区间识别
 - 回传必须包含：残差分位数（p50/p90/p99）、参差区间数量/长度占比、Top-K 区间（bin）、类型枚举（bias/drift/jump 等）
 
-### 11.2 t02 地面点云分割质量（POC 自研，后续可 skill 化复用）
+### 11.2 t02 地面点云分割质量（已退役，保留历史实现与文档）
 - 目标：在真实点云 + 轨迹上完成“地面点分类 + Traj 纵向（clearance）QC + Traj 横截（cross-track）QC”，并提供可解释质量门禁 `overall_pass`，支持自动自检（`auto_tune` 至 PASS）。
 - 输入：
   - PointCloud（LAS/LAZ/NPZ/NPY/CSV 等，至少 XYZ；若 LAS/LAZ 可读取 classification）
@@ -287,6 +287,7 @@ modules/
   - t02 是质量检查与可解释输出，不是高精地图生产，也不替代模型训练/推理。
   - t02 不修改其它模块接口，不引入跨模块耦合。
   - t02 对外接口与详细键值以 `modules/t02_ground_seg_qc/INTERFACE_CONTRACT.md` 为准，主文档仅描述范围与产物摘要。
+  - 当前已退役；本节保留仅用于解释历史实现、历史文档与历史验收口径。
 
 ### 11.3 t03 标线实体化（导流带，已退役）
 - 本技术点已退役，保留本节仅用于解释历史文档、历史报告与旧配置。
@@ -307,11 +308,11 @@ modules/
 - 输出摘要：Patch 级 `RCSDNode`（含 virtual node）与 Patch 级 `RCSDRoad`，以及 `metrics.json`、`fixed_roads.json` 等诊断产物。
 - 状态：仓库已具备实现与测试；当前轮次仅继续完成文档正式化，不改运行逻辑。
 
-### 11.7 t07_patch_postprocess（新增）
+### 11.7 t07_patch_postprocess（已退役）
 - 模块定位：Patch 后处理，基于二层路网拓扑要求对上游产物做完整性校验与处理。
 - 输入摘要：Patch 级 `RCSDNode/RCSDRoad` + `Road`（t05 产物）+ `intersection_l`（t04 产物）。
 - 输出摘要：最终交付层 `Node/Road/intersection_l`。
-- 状态：当前仅冻结契约与目录骨架；实现逻辑后续由子 Agent 推进。
+- 状态：已退役；保留现有目录、实现痕迹与文档，仅作历史参考。
 
 ---
 
@@ -322,7 +323,7 @@ modules/
 - 工作区约束：项目必须放在 Windows E: 盘（WSL 下通常 `/mnt/<drive>/...`）；外传文本只要求可粘贴（体积可控）
 
 ### 12.1 整 Patch 端到端验证计划（当前冻结）
-- 当前阶段先按单 Patch、分模块顺序执行：`t06_patch_preprocess -> t04_rc_sw_anchor -> t05_topology_between_rc_v2 -> t07_patch_postprocess`。
+- 当前活跃链路按单 Patch、分模块顺序执行：`t06_patch_preprocess -> t04_rc_sw_anchor -> t05_topology_between_rc_v2`。
 - 待单 Patch 路径稳定后，再新增批处理编排模块（本任务不创建该模块）。
 
 ---
@@ -371,7 +372,7 @@ modules:
       interval_min_len: 10.0
 
   t02_ground_seg_qc:
-    enabled: true
+    enabled: false   # retired historical module
     params:
       z_diff_threshold: 0.20
 
@@ -390,6 +391,6 @@ modules:
       drivezone_path: "<path or Vector/DriveZone.geojson>"
 
   t07_patch_postprocess:
-    enabled: false
+    enabled: false   # retired historical module
     params:
       topo_ruleset: "L2_default"

@@ -2,27 +2,24 @@
 
 ## 状态
 
-- 草案状态：Round 1 目标拓扑草案，已由 Round 2A 决策对齐补充修正
-- 来源依据：
-  - `docs/codebase-research.md`
-  - `docs/doc-governance/current-doc-inventory.md`
-  - `specs/001-doc-governance-round1/plan.md`
-  - `specs/002-doc-governance-decision-alignment/spec.md`
+- 当前状态：已吸收 Round 2A、Round 2B、Round 2C 与 Round 3A 的治理结论
+- 核心原则：同一套目标结构同时要支持活跃模块、退役模块与历史参考模块，但不同生命周期对象承担的文档面不同
 
 ## 分层职责
 
 | 层级 | 主要目的 | 目标位置 | 应放内容 | 不应放内容 |
 |---|---|---|---|---|
-| 项目级源事实 | 项目级长期架构与上下文 | `docs/architecture/` | 目标、约束、上下文、方案策略、横切概念、质量、风险、术语 | 单次变更计划、模块级操作步骤 |
-| 模块级源事实 | 模块级长期架构与语义真相 | `modules/<module>/architecture/` + `INTERFACE_CONTRACT.md` | 模块目标、范围、约束、构件、质量、风险、术语、契约细节 | 项目级治理规则、临时阶段说明 |
+| 项目级源事实 | 项目级长期架构、范围、生命周期与上下文 | `SPEC.md`、`docs/architecture/`、`docs/doc-governance/module-lifecycle.md` | 目标、约束、上下文、方案策略、生命周期状态、质量、风险、术语 | 单次变更计划、模块级执行步骤 |
+| 模块级源事实 | 模块级长期架构与契约真相 | `modules/<module>/architecture/` + `INTERFACE_CONTRACT.md` | 模块目标、范围、约束、构件、质量、风险、术语、契约细节 | 项目级治理规则、临时阶段说明 |
 | 持久规则 | 稳定操作与协作规则 | repo root `AGENTS.md`、`modules/<module>/AGENTS.md` | 执行姿态、协作规则、文档指针 | 完整业务定义 |
-| 可复用工作流 | 可重复执行的操作流程 | `modules/<module>/SKILL.md`、少量流程型说明 | 操作步骤、可复用运行流程、排障检查点 | 完整模块真相 |
+| 可复用工作流 | 可重复执行的流程 | `modules/<module>/SKILL.md`、少量 runbook / 流程说明 | 执行步骤、检查点、常见排障 | 完整模块真相 |
 | 变更专用规格 | 单次变更的推理与执行计划 | `specs/<change-id>/` | `spec`、`plan`、`tasks`、研究与审核指南 | 长期架构真相 |
-| 历史证据 | 保留的验收、审计与阶段历史 | 现有历史位置 | 审计报告、阶段说明、验收记录 | 活跃源事实身份 |
+| 历史证据 | 审计、阶段说明、运行记录 | 现有历史位置 | 审计报告、阶段说明、验收记录 | 当前活跃源事实身份 |
 
 ## 项目级目标树
 
 ```text
+SPEC.md
 docs/
 +-- architecture/
 |   +-- 01-introduction-and-goals.md
@@ -36,16 +33,17 @@ docs/
 |   +-- 11-risks-and-technical-debt.md
 |   +-- 12-glossary.md
 +-- doc-governance/
+    +-- module-lifecycle.md
     +-- current-doc-inventory.md
     +-- current-module-inventory.md
     +-- migration-map.md
     +-- module-doc-status.csv
     +-- review-priority.md
-    +-- round1-exec-report.md
-    +-- round2a-decision-alignment-report.md
 ```
 
-## 模块级目标树
+## 生命周期驱动的模块目标结构
+
+### Active 模块
 
 ```text
 modules/<module_id>/
@@ -65,10 +63,41 @@ modules/<module_id>/
 +-- review-summary.md
 ```
 
+### Historical Reference 模块
+
+```text
+modules/<module_id>/
++-- AGENTS.md                # 开头补“历史参考”指针
++-- INTERFACE_CONTRACT.md    # 保留历史契约
++-- SKILL.md                 # 保留历史流程
++-- 其他历史审计 / 历史说明
+```
+
+### Retired 模块
+
+```text
+modules/<module_id>/
++-- AGENTS.md                # 开头补“已退役”指针
++-- INTERFACE_CONTRACT.md    # 保留历史契约
++-- SKILL.md                 # 保留历史流程
++-- 既有历史文档 / 实现痕迹
+```
+
+### 仓库保留支撑 / 测试模块
+
+```text
+modules/<module_id>/
++-- AGENTS.md
++-- SKILL.md
++-- INTERFACE_CONTRACT.md
+```
+
+这些模块保留现状，不进入当前活跃正式模块集合，也不在本轮按退役模块处理。
+
 ## 文件命名规则
 
 - 项目级架构文档使用有序数字前缀。
-- 模块级架构文档沿用同样顺序，并在最前面增加 `00-current-state-research.md`。
+- 活跃模块的架构文档沿用同样顺序，并在最前面增加 `00-current-state-research.md`。
 - 治理映射文档统一放在 `docs/doc-governance/`，文件名直接表明用途。
 - 单次变更文件只放在 `specs/<change-id>/` 下。
 
@@ -81,6 +110,7 @@ modules/<module_id>/
 - 持久操作规则
 - 模块边界
 - 指向源事实文档的链接
+- 生命周期状态指针（仅历史参考 / 退役模块需要）
 
 ### `SKILL.md`
 
@@ -103,17 +133,18 @@ modules/<module_id>/
 
 ### 历史文档
 
-历史审计和阶段文档继续保留原位；后续轮次可补充源事实指针或归档说明，但不再以其承担活跃源事实职责。
+历史审计和阶段文档继续保留原位；对于退役模块和历史参考模块，只补短指针，不升级为新的正式文档面。
 
 ## T05 规则
 
 - `t05_topology_between_rc_v2` 为当前正式 T05 模块。
-- 物理路径保持 `modules/t05_topology_between_rc_v2/`，本轮不改名。
+- 物理路径保持 `modules/t05_topology_between_rc_v2/`，不改名。
 - `t05_topology_between_rc` 为 legacy 历史参考模块。
-- 二者不再要求 family 连续治理；后续文档迁移以 V2 作为正式 T05 语义主体。
-- legacy T05 的资料继续保留，供未来择优提炼，但不再要求建立 family 级总览文档作为前置条件。
+- 二者不再要求 family 连续治理；后续文档迁移与主线治理都以 V2 作为正式 T05 语义主体。
 
-## 退役模块口径
+## 生命周期规则
 
-- `t03_marking_entity`：已退役，不再占用当前活跃 taxonomy 槽位；仅在历史记录中保留可见性。
-- `t10`：已退役历史模块；保留现有文档与实现痕迹，但不再进入当前正式 taxonomy 或活跃治理主线。
+- `Active` 模块维持完整正式文档面。
+- `Historical Reference` 模块只保留历史资料与指向当前正式模块的指针。
+- `Retired` 模块只保留历史资料与退役状态说明。
+- 不得默认“所有模块最终都会 formalize”；生命周期不同，目标结构也不同。
