@@ -1,4 +1,6 @@
-# T05 v2 Real-Run Acceptance
+# T05-V2 运行验收说明
+
+> 本文件是运行验收与操作者清单。长期源事实以 `architecture/*` 与 `INTERFACE_CONTRACT.md` 为准；如本文件与长期源事实表述不一致，以后者为准。
 
 ## 目标
 当前阶段的目标不是继续修改 `Step2`，而是在冻结的 `Step2` baseline 上，把简单真实 patch 做成稳定、可解释、可验收的完整闭环。
@@ -136,7 +138,7 @@ outputs/_work/t05_topology_between_rc_v2/$RUN_ID/patches/$PATCH_ID/
 - 如果 `slot_src_status / slot_dst_status = unresolved`
   先不要判断最终几何，说明卡在 slot 层。
 
-- 如果 `corridor` 与 `slot` 都 resolved，但 `road_count = 0` 或该段无最终 Road`
+- 如果 `corridor` 与 `slot` 都 resolved，但 `road_count = 0` 或该段无最终 `Road`
   重点看 `reason_trace.json` 里的 `road_results`：
   - `candidate_attempts`
   - `chosen_shape_ref_mode`
@@ -158,13 +160,13 @@ outputs/_work/t05_topology_between_rc_v2/$RUN_ID/patches/$PATCH_ID/
   说明当前已经完整闭环。
 
 - `failure_classification = unresolved_corridor`
-  说明当前证据不足，不应强造 Road。
+  说明当前证据不足，不应强造 `Road`。
 
 - `failure_classification = slot_mapping_failed`
   说明 corridor 可能成立，但端点区间还不稳定。
 
 - `failure_classification = final_geometry_invalid`
-  说明 corridor 和 slot 成立，但最终几何不满足 `DriveZone / DivStrip` 约束。
+  说明 corridor 和 `slot` 成立，但最终几何不满足 `DriveZone / DivStrip` 约束。
 
 - `failure_classification = should_be_no_geometry_candidate`
   说明当前更适合直接归入 `no_geometry_candidate`，而不是继续强行出线。
@@ -238,4 +240,4 @@ outputs/_work/t05_topology_between_rc_v2/$RUN_ID/patches/$PATCH_ID/
 - branch identity 仍未完整实现
 - `STEP2_SAME_PAIR_TOPK=1` 对真实 same-pair 多路共存仍可能偏保守
 - 复杂 patch 上，`prior_based / unresolved` 的比例可能仍偏高
-- 当前版本优先保证“先有可解释的 Road”，而不是“先有最平滑的几何”
+- 当前版本优先保证“先有可解释的 `Road`”，而不是“先有最平滑的几何”

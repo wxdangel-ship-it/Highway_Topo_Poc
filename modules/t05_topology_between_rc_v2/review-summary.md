@@ -1,40 +1,51 @@
-# T05-V2 审核摘要
+# T05-V2 治理摘要
 
-## 当前模块目标
+## 当前正式定位
 
-T05-V2 通过显式的阶段链路 `Segment -> CorridorWitness -> CorridorIdentity -> Slot -> FinalRoad` 生成最终有向 `Road` 输出。
+- 当前正式 T05 模块：`modules/t05_topology_between_rc_v2`
+- 物理路径保持：`modules/t05_topology_between_rc_v2`
+- legacy `modules/t05_topology_between_rc`：仅保留为历史参考模块，不再按家族连续治理
 
-## 当前输入 / 输出
+## 当前最小正式文档面
 
-- 输入：`intersection_l`、`DriveZone`、轨迹数据，以及可选的 `DivStrip`、`LaneBoundary`、既有 road 向量
-- 输出：`Road.geojson`、`metrics.json`、`gate.json`、`summary.txt`，以及较丰富的阶段性 debug 输出
+- 稳定模块真相：`architecture/*`
+- 稳定契约面：`INTERFACE_CONTRACT.md`
+- 稳定工作规则：`AGENTS.md`
+- 可复用流程：`SKILL.md`
+- 运行验收与操作者清单：`REAL_RUN_ACCEPTANCE.md`
+- 当前治理摘要：`review-summary.md`
 
-## 硬约束
+## 模块业务主链
+
+T05-V2 以 `Segment -> CorridorWitness -> CorridorIdentity -> Slot -> FinalRoad` 为长期业务主链，在 RC 语义边界之间生成最终有向 `Road`，并对成路或失败提供可解释证据。
+
+## 本轮正式化后已完成的收束
+
+- 稳定业务真相已从 `AGENTS.md` 收回到 `architecture/*` 与 `INTERFACE_CONTRACT.md`。
+- `AGENTS.md` 现在只保留开工前阅读顺序、允许改动范围、验证要求、禁做事项与 legacy 处理原则。
+- 专用 `SKILL.md` 已建立，负责 T05-V2 文档治理和验收类任务的标准流程。
+- `REAL_RUN_ACCEPTANCE.md` 已被明确标注为运行验收文档，长期源事实另有位置。
+
+## 当前稳定输入 / 输出摘要
+
+- 输入：`intersection_l`、`DriveZone`、轨迹数据，以及可选的 `DivStripZone`、`LaneBoundary`、既有 road 先验
+- 主输出：`Road.geojson`、`metrics.json`、`gate.json`、`summary.txt`
+- 关键诊断输出：`debug/corridor_identity.json`、`debug/slot_src_dst.geojson`、`debug/shape_ref_line.geojson`、`debug/road_final.geojson`、`debug/reason_trace.json`
+
+## 当前硬约束摘要
 
 - `DriveZone` 缺失或为空时必须硬失败
-- `DivStrip` 是硬屏障
-- 输出规范到 `EPSG:3857`
+- 输出统一到 `EPSG:3857`
+- `DivStrip` 作为 final road 的硬障碍
+- 当前标准运行基线仍采用冻结的 Step2 baseline
 
-## 当前混杂问题
+## 后续仍待处理、但不阻塞当前正式化的问题
 
-- 模块身份和业务链路仍出现在 `AGENTS.md`
-- 稳定 contract 目前较简且独立存在
-- `REAL_RUN_ACCEPTANCE.md` 承载了高价值 runbook 知识，但并不是长期架构文档
-- 当前没有 `SKILL.md`
+- 复杂 patch 上 `prior_based / unresolved` 仍可能偏高，后续仍需在算法轮次或更细文档轮次中继续解释和收敛。
+- `REAL_RUN_ACCEPTANCE.md` 仍承载大量操作者知识，后续需持续保持与源事实同步。
+- legacy T05 历史材料仍在仓库中，后续如再做清理，应以“历史参考”而不是家族连续治理为前提。
 
-## 推荐的新文档落位
+## 后续人工审核重点
 
-- 稳定模块真相：`modules/t05_topology_between_rc_v2/architecture/*`
-- 契约文档面：`modules/t05_topology_between_rc_v2/INTERFACE_CONTRACT.md`
-- 持久执行规则：`modules/t05_topology_between_rc_v2/AGENTS.md`
-- runbook / 验收流程：继续保留 `REAL_RUN_ACCEPTANCE.md` 作为工作流 / 参考文档
-
-## 已确认定位
-
-- 当前正式 T05 模块：`t05_topology_between_rc_v2`
-- 物理路径保持：`modules/t05_topology_between_rc_v2`
-- legacy `t05_topology_between_rc` 仅作为历史参考模块保留
-
-## 需要人工确认的问题
-
-- 后续是否需要为 T05-V2 单独补一份 `SKILL.md`？
+- 审核 `architecture/05-building-block-view.md` 是否已足够支撑后续模块迁移。
+- 审核 `INTERFACE_CONTRACT.md` 的参数边界是否既稳定又不过度下沉到实现细节。

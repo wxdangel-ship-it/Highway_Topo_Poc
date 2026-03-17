@@ -1,5 +1,11 @@
 # t05_topology_between_rc - AGENTS
 
+## 历史参考说明
+
+- 当前正式 T05 模块文档面位于 `modules/t05_topology_between_rc_v2/`。
+- 本目录仅保留 legacy 历史参考，不再按 T05 家族连续治理。
+- 如需当前正式口径，请优先读取 `modules/t05_topology_between_rc_v2/architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、`SKILL.md`。
+
 ## Contract Delta
 - Same-pair multi-road is a valid T05 output mode.
 - Final same-pair roads must be emitted with stable channel identity and must remain non-crossing.
