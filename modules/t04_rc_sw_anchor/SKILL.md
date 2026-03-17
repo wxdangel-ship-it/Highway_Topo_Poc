@@ -1,37 +1,51 @@
-# t04_rc_sw_anchor - SKILL
+# T04 文档与运行复核技能
 
-## 1. Seed 与 Kind
-- 仅处理 merge/diverge：
-  - `diverge = (kind & 16) != 0`
-  - `merge = (kind & 8) != 0`
-- 字段读取必须经归一化层（`normalize_props + get_first_int/get_first_raw`）。
+## 适用任务
 
-## 2. DriveZone-first + Between-Branches
-- 触发主证据：`SEG(s) ∩ DriveZone` 的片段数变化。
-- `SEG(s)` 仅在两分支之间构造（B 口径）。
-- `divstrip` 仅可选强证据，不得驱动远距离扫描。
-- stop 范围内无 split 直接 fail，不允许跨路口漂移补答案。
+- T04 模块文档治理、正式化、口径对齐
+- T04 的 `architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、`review-summary.md`、`README.md` 维护
+- T04 批处理入口、patch 自动发现入口与主 contract 的边界复核
+- 需要在源事实、稳定工作规则与操作者材料之间做分层检查的任务
 
-## 3. stop 策略
-- 仅 hard stop：拓扑联通可达 + `degree>=3`。
-- 找不到时 `stop_reason=next_intersection_not_found_deg3`，扫描到 `scan_max_limit_m`。
-- 禁止几何 fallback（`disable_geometric_stop_fallback=true`）。
+## 先读哪些源事实文档
 
-## 4. CRS 与 fail-closed
-- `node/road/divstrip/drivezone/traj/pointcloud` 统一到 `dst_crs` 计算。
-- DriveZone CRS 无法识别：`DRIVEZONE_CRS_UNKNOWN`（hard）。
-- PointCloud CRS 无法识别：`POINTCLOUD_CRS_UNKNOWN_UNUSABLE`（soft）。
+1. `architecture/01-introduction-and-goals.md`
+2. `architecture/04-solution-strategy.md`
+3. `architecture/05-building-block-view.md`
+4. `architecture/10-quality-requirements.md`
+5. `INTERFACE_CONTRACT.md`
+6. `review-summary.md`
 
-## 5. 输出诊断重点
-- `found_split/status/anchor_found`（状态机一致性）
-- `pieces_count/piece_lens_m/gap_len_m/seg_len_m`
-- `branch_a_id/branch_b_id/branch_axis_id`
-- `stop_reason/next_intersection_nodeid`
-- `layer_crs`（summary）
+只有在需要运行入口或操作者步骤时，再读：
 
-## 6. 常见失败模式（Top-5）
-- `DRIVEZONE_SPLIT_NOT_FOUND`
-- `NEXT_INTERSECTION_NOT_FOUND_DEG3`
-- `DRIVEZONE_CRS_UNKNOWN`
-- `MULTI_BRANCH_TODO`
-- `DRIVEZONE_CLIP_MULTIPIECE`
+7. `README.md`
+8. `modules/t04_rc_sw_anchor/scripts/run_t04_batch_wsl.sh`
+9. `scripts/run_t04_patch_auto_nodes.sh`
+
+## 标准执行步骤
+
+1. 先确认任务是否只涉及 T04 文档，不触发实现改动。
+2. 先核对当前源事实与 contract，再决定 README、AGENTS、SKILL 需要同步到什么程度。
+3. 若需引用实现事实，优先回看 `cli.py`、`runner.py`、`metrics_breakpoints.py` 和相关测试，不凭空补业务结论。
+4. 若涉及复杂规则族，优先在 `architecture/*` 中收口，再决定 contract 是否需要同步补充。
+5. 若涉及批处理或 patch 自动发现入口，只说明它们的操作者角色，不把脚本本身写成长期真相。
+
+## 关键检查点
+
+- `AGENTS.md` 是否仍然足够短，只保留稳定工作规则。
+- `SKILL.md` 是否只承载流程，不复制完整模块真相。
+- `architecture/05-building-block-view.md` 是否已清楚解释 T04 的稳定构件结构。
+- `INTERFACE_CONTRACT.md` 是否仍聚焦输入、输出、参数、breakpoint 与验收。
+- `README.md` 是否已明确自己是操作者总览，而不是长期源事实。
+
+## 常见失败点与回退方式
+
+- 如果稳定真相又回流到 `AGENTS.md`、`SKILL.md` 或 README，回退到 `architecture/*` 与 `INTERFACE_CONTRACT.md` 重整边界。
+- 如果操作者材料与源事实不一致，优先修正源事实，再在 README 中同步指针或说明。
+- 如果任务要求修改算法、批处理脚本、patch 自动发现脚本或下游模块接口，停止当前技能流程，改走独立任务。
+
+## 输出与验证要求
+
+- 输出应落在 T04 模块文档面：`architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、`SKILL.md`、`review-summary.md`、必要时 `README.md`。
+- 如任务涉及报告，应明确区分源事实、稳定工作规则、复用流程和操作者材料。
+- 提交前至少执行 `git diff --check` 并复核与 repo 级治理口径的一致性。

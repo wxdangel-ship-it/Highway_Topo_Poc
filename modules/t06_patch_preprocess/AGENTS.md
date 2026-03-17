@@ -1,34 +1,31 @@
-# t06_patch_preprocess — 子GPT Agent 约束（AGENTS）
+# t06_patch_preprocess - AGENTS
 
-## 1. 模块定位（冻结版）
-t06 是 Patch 预处理模块，负责修复“Road 端点引用缺失”的问题：
+## 开工前先读
 
-- 输入：已筛选后的 RCSDNode / RCSDRoad + DriveZone
-- 识别：RCSDRoad 中 snodeid/enodeid 不在 RCSDNode.id 中的 Road（按 id 引用缺失判定）
-- 处理：对这些 Road 用 DriveZone(union) 做面内裁剪打断，仅保留面内部分
-- 产出：在打断处新增虚拟 Node（Kind=bit16=65536），并更新 Road 的 snodeid/enodeid
-- 输出统一为 EPSG:3857
+- 先读 `architecture/01-introduction-and-goals.md`、`architecture/04-solution-strategy.md`、`architecture/10-quality-requirements.md`。
+- 再读 `INTERFACE_CONTRACT.md`，确认稳定输入、输出、参数类别和验收标准。
+- 做治理口径或模块总览时，再读 `review-summary.md`。
 
-## 2. 明确不做（Non-Goals）
-- 不做基于 Patch 的 RCSDRoad/RCSDNode 过滤（输入已是筛选成果）
-- 不对“端点引用齐全”的正常 Road 做任何几何裁剪
-- 不做缓冲（margin=0）
-- 不拆分成多条 Road（intersection 多段时只保留一段）
-- 不修改其它模块的 INTERFACE_CONTRACT
-- 不回写 data/<PatchID>/ 下任何文件
+## 允许改动范围
 
-## 3. 输出约束
-- 仅写 outputs/_work/t06_patch_preprocess/<run_id>/...
-- 必含：Vector/RCSDNode.geojson、Vector/RCSDRoad.geojson（均 EPSG:3857）
-- 必含：report/metrics.json（诊断与验收支撑）
-- 可选：report/fixed_roads.json（增强可解释性）
+- 默认只改本目录下文档：`architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、`SKILL.md`、`review-summary.md`。
+- 若无明确任务，不修改 `src/`、`tests/`、`outputs/`、`data/`。
+- 不跨模块改动其它 `INTERFACE_CONTRACT.md`。
 
-## 4. 质量闸门（冻结）
-- 输出 CRS=EPSG:3857
-- 引用闭包：所有输出 Road 的 snodeid/enodeid 都能在输出 Node.id 中找到
-- 新增虚拟 Node 的 Kind 必为 65536
-- 虚拟 Node.id 不与既有 Node.id 冲突，且稳定可复现（哈希规则固定）
-- 被修复 Road 的几何必须为 DriveZone union 的面内裁剪结果；面内为空则 Road 必须被删除
+## 必做验证
 
-## 5. 沟通与日志
-- 诊断优先输出 metrics + 少量索引化清单，避免超长 raw dump
+- 改文档前后对照 repo root `AGENTS.md`、`SPEC.md` 与项目级 `docs/architecture/*`，避免口径冲突。
+- 修改 contract 时，必须回看 `run.py`、`pipeline.py`、`io.py`、`report.py` 和 `tests/test_t06_patch_preprocess.py`，确认入口、输出、`drivezone_clip_buffer_m` 与质量门槛没有写错。
+- 提交前至少执行 `git diff --check`。
+
+## 禁做事项
+
+- 不把 `AGENTS.md` 写成模块真相主表面。
+- 不继续沿用“固定零缓冲”这类已与实现漂移的旧口径。
+- 不在没有明确任务书的情况下修改 T06 算法、测试、CLI 行为或输出结构。
+- 不为了文档统一而额外伪造 runbook 或长期源事实。
+
+## 相邻模块关系
+
+- T06 为 patch 级预处理模块，向下游模块提供端点引用更稳定的 `RCSDNode/RCSDRoad`。
+- 与相邻模块交互时，以本模块 contract 和项目级源事实为准；如发现口径冲突，先停止并汇报。

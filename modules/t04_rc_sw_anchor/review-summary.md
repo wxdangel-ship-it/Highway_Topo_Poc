@@ -1,35 +1,47 @@
-﻿# T04 审核摘要
+# T04 治理摘要
 
-## 当前模块目标
+## 当前正式定位
 
-T04 采用 DriveZone-first、fail-closed 策略，为 merge/diverge 与 K16 形态生成锚点和 `intersection_l_opt` 输出。
+- 当前模块：`modules/t04_rc_sw_anchor`
+- 当前角色：核心锚点识别模块，面向 merge / diverge 与 K16 形态输出 `intersection_l_opt` 及诊断结果
+- 当前文档分层：`architecture/*` 承担长期真相，`INTERFACE_CONTRACT.md` 承担稳定契约，`AGENTS.md` / `SKILL.md` 分别承担规则与流程，`README.md` 承担操作者总览
 
-## 当前输入 / 输出
+## 当前最小正式文档面
 
-- 输入：patch/global focus 输入，node/road/divstrip/drivezone/traj/pointcloud 图层
-- 输出：anchor geojson/json、`intersection_l_opt`、metrics、breakpoints、summary、config snapshot
+- 稳定模块真相：`architecture/*`
+- 稳定契约面：`INTERFACE_CONTRACT.md`
+- 稳定工作规则：`AGENTS.md`
+- 可复用流程：`SKILL.md`
+- 操作者总览：`README.md`
+- 当前治理摘要：`review-summary.md`
 
-## 硬约束
+## 模块业务主链
 
-- CRS 规范到 `EPSG:3857`
-- 以 DriveZone 证据优先
-- hard-stop 逻辑
-- 不允许通过跨路口漂移去制造答案
+T04 以 DriveZone-first、Between-Branches、hard-stop 与 fail-closed 为长期约束，在 merge / diverge 与 K16 等形态上输出锚点和 `intersection_l_opt`，并保留足够的断点与诊断结果供人工复核。
 
-## 当前混杂问题
+## 本轮正式化后已完成的收束
 
-- `INTERFACE_CONTRACT.md` 承载了最重的业务真相
-- `AGENTS.md` 与 `SKILL.md` 仍包含稳定行为规则
-- `README.md` 与未来架构叙事有重叠
+- 稳定业务真相已从 `AGENTS.md`、`SKILL.md` 和 README 收回到 `architecture/*` 与 `INTERFACE_CONTRACT.md`。
+- `AGENTS.md` 现在只保留阅读顺序、允许改动范围、验证要求和禁做事项。
+- `SKILL.md` 现在只保留 T04 专用复用流程。
+- README 被重新界定为操作者入口，而不是模块真相主表面。
 
-## 推荐的新文档落位
+## 当前稳定输入 / 输出摘要
 
-- 稳定模块真相：`modules/t04_rc_sw_anchor/architecture/*`
-- 契约细节：`modules/t04_rc_sw_anchor/INTERFACE_CONTRACT.md`
-- 持久执行规则：`modules/t04_rc_sw_anchor/AGENTS.md`
-- 可复用操作流程：`modules/t04_rc_sw_anchor/SKILL.md`
+- 输入模式：`global_focus` / `patch`
+- 核心输入：node、road、drivezone，以及可选的 divstrip、traj、pointcloud
+- 核心输出：`intersection_l_opt*.geojson`、`intersection_l_multi.geojson`、`anchors.json`、`metrics.json`、`breakpoints.json`、`summary.txt`
 
-## 需要人工确认的问题
+## 当前硬约束摘要
 
-- 当 architecture 稳定后，README 是否仍保留为简洁的操作者总览？
-- T04 哪些策略家族值得在后续形成 ADR 风格决策？
+- 输入统一规整到 `EPSG:3857`
+- DriveZone-first
+- hard-stop + fail-closed
+- 不允许跨路口漂移补答案
+- fail 不允许被后续状态覆盖
+
+## 后续仍待处理、但不阻塞当前正式化的问题
+
+- contract 仍较长，后续可能需要把部分复杂规则家族拆成更细的决策记录。
+- README 仍保留较多操作者语境，后续需持续与源事实同步。
+- continuous chain、multibranch、reverse tip、K16 的未来扩张会继续提高文档维护成本，但不阻塞当前正式化。

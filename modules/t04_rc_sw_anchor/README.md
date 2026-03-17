@@ -1,109 +1,77 @@
 # t04_rc_sw_anchor
 
-## 1. 业务目标（vNext）
+> 本文件是 T04 的操作者总览与运行入口说明。长期源事实以 `architecture/*` 与 `INTERFACE_CONTRACT.md` 为准；如本文件与长期源事实表述不一致，以后者为准。
+
+## 1. 模块定位
+
 - 面向 `merge/diverge` 与 `K16(kind&65536!=0)` 节点，输出锚点与最终横截线 `intersection_l_opt`。
-- 采用 `DriveZone-first`：主触发证据来自 `SEG(s) ∩ DriveZone` 的连通片段数变化。
-- 采用 `Between-Branches(B)`：每一步只在两分支之间构造 `SEG(s)=PA->PB`，避免扫到无关道路。
-- stop 仅 `hard-stop`：沿 RCSDRoad 拓扑联通可达，且 `degree>=3`。
-- 在 stop 范围内找不到 split 时直接 `FAIL`，不允许跨路口追远处导流带补答案。
+- 采用 `DriveZone-first` 作为主触发证据链。
+- 采用 `Between-Branches(B)` 作为常规扫描口径。
+- 在 stop 范围内找不到可信 split 时直接 `FAIL`，不允许跨路口追远处导流带补答案。
 
-## 2. 关键流程
-1. 输入解析：`global_focus` / `patch`，`focus_node_ids` 优先级 `CLI > file > config_json`。
-2. 字段归一化：`field_norm.normalize_props` + `get_first_int/get_first_raw`。
-3. CRS 归一化：`node/road/divstrip/drivezone/traj/pointcloud` 全部归一化到 `dst_crs`（默认 `EPSG:3857`）。
-4. 分支选择：
-   - `N<=2`：按基线路径处理，分支对用“最大夹角对”。
-   - `N>2`：启用多分支流程（仅统计 `direction=2/3` 的有效分支，`direction=0/1` 不参与）。
-   - 横截方向仍由“最大夹角对”确定，扫描线改为所有有效分支匹配点形成的 span，并两端外扩 `multibranch_span_extra_m`（默认 10m）。
-5. 扫描与 stop：非连续链节点沿 `scan_axis_road` 扫描到 `next_intersection_connected_deg3` 或 `scan_max_limit_m`；连续链节点使用链级 stop 上界（组件内节点默认 stop 距离的最大值，且不超过 `scan_max_limit_m`）。
-6. split 判定：`SEG(s)` 与 DriveZone 的交段数 `>=2` 的最早 `s*` 触发。
-7. 输出构造：检测用 `SEG(s)`，输出用同方向“长横截线”与 DriveZone 截断后两条 LineString（`piece_idx=0/1`）；anchor 用 gap 中点，失败时回退横截线中点并写断点。
-8. divstrip 优先：有导流带参考时优先在其邻域选择 `s*`；无导流带时回退到 DriveZone 最早 split，不允许跨路口漂移。
-9. 连续分合流顺序化（v1）：识别 `<50m` 连续链（仅 `direction=2/3`，跳过 `degree=2` 过路点），链内按原始拓扑顺序约束 `abs_s` 相对顺序，必要时节点级 fail（`SEQUENTIAL_ORDER_VIOLATION`）。
-10. 连续链合并：仅相邻 `diverge->merge`（先分后合）允许共用一条横截线；满足几何相交或近邻时触发合并，`abs_s` 差值仅保留诊断，不作为阻断门槛。
-11. 异常分支（reverse tip/ref_s）：在默认方向缺参考、`s≈0` 命中不可信 divstrip、或 `divstrip_first_hit` 且无 drivezone split 时触发，反向最多 10m 查找；窗口按场景区分：常规（非 reverse）取“靠近节点 1m”（且不跨过 node），异常 reverse 取“远离节点 1m”。若反向无 split 且仍与 divstrip 相交，则继续向远离节点方向搜索到 `reverse_tip_max_m`；仍无非相交候选则硬失败。连续后继节点若出现 `tip_projection + no_split` 且 near-zero，会启用扩展搜索，避免复用上一处物理分割。
-12. 多分支异常双向选择（N>2）：默认主结果为正向最早事件；若正反两侧均有事件，则按方案X选择反向最远事件（`s` 最负）；若仅反向有事件则反向兜底。
-13. K16 节点（`kind&65536!=0`）独立流程：
-   - 仅接受唯一关联 road，且 `direction in {2,3}`。
-   - 根据有效方向判定 `forward/reverse`（起点正向、终点反向）。
-   - 固定搜索范围 `10m`，步长 `k16_step_m`（默认 `0.5m`），命中条件为 `CROSS(s) ∩ DriveZone != empty`。
-   - 命中后继续沿搜索方向前探 `k16_refine_ahead_m`（默认 `5.0m`），选择更稳定宽度候选（优先线长更大），并使用长输出横截线（`output_cross_half_len_m`）在当前路面 piece 上几何重建到边界，不依赖距离阈值补偿。
-   - 10m 内未命中则硬失败 `K16_DRIVEZONE_NOT_REACHED`。
+## 2. 运行入口
 
-## 3. 运行入口
+CLI 入口：
+
 ```bash
 python -m highway_topo_poc.modules.t04_rc_sw_anchor --help
 ```
 
-## 4. CLI 示例（global_focus）
-```bash
-python -m highway_topo_poc.modules.t04_rc_sw_anchor \
-  --mode global_focus \
-  --patch_dir /mnt/d/TestData/highway_topo_poc_data/normal/2855795596723843 \
-  --out_root outputs/_work/t04_rc_sw_anchor \
-  --focus_node_ids "5278670377721456,5278670377721468" \
-  --global_node_path /mnt/d/TestData/.../RCSDNode.geojson \
-  --global_road_path /mnt/d/TestData/.../RCSDRoad.geojson \
-  --divstrip_path /mnt/d/TestData/.../DivStripZone.geojson \
-  --drivezone_path /mnt/d/TestData/.../DriveZone.geojson \
-  --pointcloud_path /mnt/d/TestData/.../merged_cleaned_classified_3857.laz \
-  --traj_glob "/mnt/d/TestData/.../Traj/*/raw_dat_pose.geojson" \
-  --dst_crs EPSG:3857 \
-  --drivezone_src_crs auto \
-  --min_piece_len_m 1.0 \
-  --next_intersection_degree_min 3 \
-  --disable_geometric_stop_fallback true
+## 3. 常见运行方式
+
+### `global_focus`
+
+- 适用于已知 patch 与 focus 节点集合的单次或批量运行。
+- 需要 `patch_dir`、`global_node_path`、`global_road_path` 与 `focus_node_ids`。
+
+### `patch`
+
+- 适用于从 patch 目录解析局部输入的运行方式。
+- 具体参数仍以 `INTERFACE_CONTRACT.md` 和 CLI 为准。
+
+### patch 自动发现节点
+
+- 入口：`scripts/run_t04_patch_auto_nodes.sh`
+- 作用：从 patch 下节点图层自动解析可处理节点，再复用既有主链路。
+- 说明：它只改变“入口与节点来源”，不改变模块核心算法链路。
+
+### 批处理
+
+- 入口：`modules/t04_rc_sw_anchor/scripts/run_t04_batch_wsl.sh`
+- 作用：按 cases manifest 批量运行 `global_focus`。
+- 说明：它是操作者脚本，不替代模块契约和长期源事实。
+
+## 4. 输出总览
+
+输出根目录：
+
+```text
+outputs/_work/t04_rc_sw_anchor/<run_id>/
 ```
 
-## 5. Patch-only 入口（WSL）
-仅传 `PATCH_DIR`，自动从 `Patch/Vector/RCSDNode.geojson` 发现节点并调用现有 `global_focus` 链路：
-```bash
-bash scripts/run_t04_patch_auto_nodes.sh /mnt/d/TestData/highway_topo_poc_data/normal/<PATCH_ID>
-```
+关键产物包括：
 
-可选 `KIND_MASK`（默认 `65560=8|16|65536`，支持十进制/十六进制）：
-```bash
-bash scripts/run_t04_patch_auto_nodes.sh /mnt/d/TestData/highway_topo_poc_data/normal/<PATCH_ID> 65560
-KIND_MASK=0x10018 bash scripts/run_t04_patch_auto_nodes.sh /mnt/d/TestData/highway_topo_poc_data/normal/<PATCH_ID>
-```
-
-脚本审计产物（`outputs/_work/t04_rc_sw_anchor/<run_id>/`）：
-- `focus_node_ids_resolved.txt`
-- `focus_node_ids_resolved.json`
-- `node_discovery_report.json`
-- `auto_nodes.meta.json`（包含 `auto_nodes=true/auto_nodes_count/kind_mask` 等）
-
-若过滤后节点为空，脚本会 fail-closed 退出（非 0），并保留 `node_discovery_report.json` 解释原因。
-
-## 6. 输出目录
-`outputs/_work/t04_rc_sw_anchor/<run_id>/`
-
-- `anchors_3857.geojson`
-- `intersection_l_opt_3857.geojson`
+- `intersection_l_opt*.geojson`
 - `intersection_l_multi.geojson`
-- `anchors_wgs84.geojson`
-- `intersection_l_opt_wgs84.geojson`
-- `anchors.geojson` / `intersection_l_opt.geojson`（兼容名）
 - `anchors.json`
 - `metrics.json`
 - `breakpoints.json`
 - `summary.txt`
 - `chosen_config.json`
 
-`intersection_l_opt*.geojson` 约定：
-- 默认每个 `nodeid` 输出 1 条连续 LineString（当前位置所在路面 piece 内扩边后结果）。
-- 若触发连续链 `diverge->merge` 合并，输出 1 条合并 feature，properties 含 `nodeids[]/kinds[]/roles[]`。
-- properties 必含 `nodeid/kind/kind_bits/anchor_type/scan_dist_m/stop_reason/evidence_source` 与关键诊断字段（K16 时含 `k16_*` 字段）。
+## 5. 操作者应优先关注的结果
 
-`intersection_l_multi.geojson` 约定：
-- 仅在 `N>2` 多分支节点输出事件线（可同时包含 `forward/reverse`）。
-- 每条 feature 对应一个 split-event，包含 `event_idx/event_s_m/event_dir/pieces_count_at_event/expected_events`。
-- `intersection_l_opt` 仍只输出主结果（单条）。
+- 先看 `summary.txt` 与 `breakpoints.json`，判断总体通过与失败原因。
+- 再看 `anchors.json`，理解触发来源、split、stop 与特殊规则诊断。
+- 最后看 `intersection_l_opt*.geojson` 与 `intersection_l_multi.geojson`，确认几何结果是否符合预期。
 
-## 7. 已知边界
-- `N<=2` 稳定保持基线行为不变。
-- `N>2` 已支持 split-events 提取与主结果选择，但方向基准仍复用“最大夹角对”。
-- `min_piece_len_m` 仅用于数值噪声抑制，不用于业务口径 auto-tune。
+## 6. 文档阅读顺序
 
-## 8. 配置模板
-`modules/t04_rc_sw_anchor/t04_config_template_global_focus.json`
+如果需要理解“模块是什么、为什么这样做”，按以下顺序：
+
+1. `architecture/01-introduction-and-goals.md`
+2. `architecture/04-solution-strategy.md`
+3. `architecture/05-building-block-view.md`
+4. `INTERFACE_CONTRACT.md`
+
+如果只需要运行模块，本文件与脚本说明通常已足够。

@@ -54,7 +54,8 @@
 当前阶段模块状态：
 - Frozen（不再演进）：`t00_synth_data`、`t01_fusion_qc`、`t02_ground_seg_qc`
 - Core（已通过测试数据验证，已上传基线版本）：`t04_rc_sw_anchor`、`t05_topology_between_rc_v2`
-- New（仅定义契约与目录骨架，暂不实现逻辑）：`t06_patch_preprocess`、`t07_patch_postprocess`
+- Active（已实现，当前处于文档正式化阶段）：`t06_patch_preprocess`
+- New（仅定义契约与目录骨架，暂不实现逻辑）：`t07_patch_postprocess`
 - Legacy（历史参考）：`t05_topology_between_rc`
 - Retired（已退役）：`t03_marking_entity`、`t10`
 
@@ -301,10 +302,10 @@ modules/
 - 回传必须包含：Road/Node 数量、smoothness/centered 分位数、断头率/孤立比例/自交计数、短辫折叠摘要
 
 ### 11.6 t06_patch_preprocess（新增）
-- 模块定位：Patch 预处理，先筛选当前 Patch 的 `RCSDNode/RCSDRoad`，再对 Patch 边缘 Road 做预处理并构建边缘虚拟 Node。
+- 模块定位：Patch 预处理，修复 `RCSDRoad` 中缺失端点引用的道路，并通过 DriveZone 裁剪与虚拟 Node 补点建立 patch 级端点闭包。
 - 输入摘要：`RCSDNode`、`RCSDRoad`、`DriveZone`（路径通过参数给定，命名口径与 `t04` 对齐）。
-- 输出摘要：Patch 级 `RCSDNode`（含边缘打断/虚拟 Node）与 Patch 级 `RCSDRoad`。
-- 状态：当前仅冻结契约与目录骨架；实现逻辑后续由子 Agent 推进。
+- 输出摘要：Patch 级 `RCSDNode`（含 virtual node）与 Patch 级 `RCSDRoad`，以及 `metrics.json`、`fixed_roads.json` 等诊断产物。
+- 状态：仓库已具备实现与测试；当前轮次仅继续完成文档正式化，不改运行逻辑。
 
 ### 11.7 t07_patch_postprocess（新增）
 - 模块定位：Patch 后处理，基于二层路网拓扑要求对上游产物做完整性校验与处理。

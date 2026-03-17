@@ -1,43 +1,54 @@
-# SKILL — t06_patch_preprocess（缺失端点修复 + DriveZone 打断）
+# T06 文档与契约复核技能
 
-## 1) What / Why
-在已筛选后的 Patch 数据中，RCSDRoad 可能引用了不存在于 RCSDNode 的端点（snodeid/enodeid 缺失）。
-t06 通过 DriveZone(union) 对这些 Road 做面内裁剪打断，并在打断点补充“Patch 间虚拟打断 Node”（Kind=65536），从而保证下游模块读取时端点引用闭包成立。
+## 适用任务
 
-## 2) Inputs（冻结）
-- Vector/RCSDNode.geojson（Point）
-  - properties: Kind(int32 bit flags), mainid(int64), id（类型以输入为准）
-- Vector/RCSDRoad.geojson（LineString/MultiLineString）
-  - properties: direction(int8 0/1/2/3), snodeid(与Node.id同类型), enodeid(与Node.id同类型)
-- DriveZone（Polygon/MultiPolygon）
-  - 路径由参数给定（参考 t04 入参方式）
+- T06 模块文档治理、正式化、口径对齐
+- T06 的 `architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、`review-summary.md` 维护
+- T06 真实实现与契约之间的一致性复核
+- 需要在源事实、稳定工作规则与复用流程之间做边界检查的任务
 
-## 3) Outputs（冻结，统一 EPSG:3857）
-- Vector/RCSDNode.geojson
-  - 完整复制原 Node，并新增虚拟 Node（Kind=65536）
-- Vector/RCSDRoad.geojson
-  - 完整复制原 Road；对“端点引用缺失”的 Road：
-    - 用 DriveZone union 裁剪，仅保留面内段
-    - 多段结果只保留“连接到已存在端点 Node”的那一段
-    - 按几何判断更新 snodeid/enodeid
-    - 若面内为空则删除该 Road
-- report/metrics.json（必须）
-- report/fixed_roads.json（建议）
+## 先读哪些源事实文档
 
-## 4) Core Steps（冻结）
-1. 读取 RCSDNode/RCSDRoad/DriveZone，统一投影到 EPSG:3857
-2. 找出端点引用缺失的 Road（按 id 引用缺失）
-3. 对这些 Road 做 Road ∩ DriveZone_union，仅保留面内部分
-4. 若 intersection 为多段，仅保留“连接到已存在端点 Node”的那一段（无法判定时按固定降级策略处理并记录）
-5. 在打断点新增虚拟 Node（Kind=65536；id=hash 且不冲突，类型与输入一致）
-6. 按几何判断：哪一端被裁剪改变了，就改该端 snodeid/enodeid
-7. 输出（EPSG:3857）+ metrics
+1. `architecture/01-introduction-and-goals.md`
+2. `architecture/04-solution-strategy.md`
+3. `architecture/05-building-block-view.md`
+4. `architecture/10-quality-requirements.md`
+5. `INTERFACE_CONTRACT.md`
+6. `review-summary.md`
 
-## 5) Gates（冻结）
-- CRS=EPSG:3857
-- 引用闭包：所有输出 Road 的 snodeid/enodeid 都存在于输出 Node.id
-- 虚拟 Node：Kind=65536 且 id 稳定不冲突
-- 被修复 Road：几何为 DriveZone 面内裁剪结果；面内为空则 Road 删除
+只有在需要引用实现事实时，再读：
 
-## 6) Non-Goals
-- 不做 Patch 筛选、不做缓冲、不拆 Road、多段只取一段
+7. `src/highway_topo_poc/modules/t06_patch_preprocess/run.py`
+8. `src/highway_topo_poc/modules/t06_patch_preprocess/pipeline.py`
+9. `src/highway_topo_poc/modules/t06_patch_preprocess/io.py`
+10. `src/highway_topo_poc/modules/t06_patch_preprocess/report.py`
+11. `tests/test_t06_patch_preprocess.py`
+
+## 标准执行步骤
+
+1. 先确认任务只涉及 T06 文档，不触发实现改动。
+2. 先核对 `architecture/*` 与 `INTERFACE_CONTRACT.md`，再决定 `AGENTS.md`、`SKILL.md`、`review-summary.md` 需要同步到什么程度。
+3. 如需引用实现事实，优先以 `run.py`、`pipeline.py`、`io.py` 和测试为证据，不凭空补结论。
+4. 若发现旧文档仍写着“零缓冲”或“仅骨架模块”等陈旧口径，应回到源事实文档纠正，而不是在 `AGENTS.md` 中打补丁。
+5. 若任务涉及运行方式，只说明入口、产物与边界，不额外捏造独立 runbook。
+
+## 关键检查点
+
+- `AGENTS.md` 是否仍然足够短，只保留稳定工作规则。
+- `SKILL.md` 是否只承载流程，不复制完整模块真相。
+- `architecture/05-building-block-view.md` 是否清楚表达了 T06 的稳定阶段链。
+- `INTERFACE_CONTRACT.md` 是否与当前实现和测试一致，尤其是 `drivezone_clip_buffer_m=5.0` 的默认语义。
+- `review-summary.md` 是否已升级为当前模块治理摘要，而不是 Round 1 审核记录。
+
+## 常见失败点与回退方式
+
+- 如果稳定真相又回流到 `AGENTS.md` 或 `SKILL.md`，回退到 `architecture/*` 与 `INTERFACE_CONTRACT.md` 重整边界。
+- 如果 contract 与实现证据冲突，优先修正文档，不修改代码。
+- 如果有人要求把 T06 扩写成更广义的 patch 过滤或拓扑修复模块，停止当前技能流程，改走独立任务。
+- 如果运行方式说明开始膨胀成新的长期真相文档，回退到“入口说明 + 指向源事实”的最小边界。
+
+## 输出与验证要求
+
+- 输出应落在 T06 模块文档面：`architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、`SKILL.md`、`review-summary.md`。
+- 如任务涉及报告，应明确区分源事实、稳定工作规则和复用流程。
+- 提交前至少执行 `git diff --check`，并复核与 repo root `AGENTS.md`、`SPEC.md`、项目级 `docs/architecture/*` 的一致性。

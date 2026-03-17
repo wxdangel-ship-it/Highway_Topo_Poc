@@ -2,28 +2,36 @@
 
 ## 状态
 
-- 草案状态：Round 1 最小可信草案，已由 Round 2A 决策对齐补充修正
-- 来源依据：`INTERFACE_CONTRACT.md`、`README.md`、当前 `src/` 与 `tests/`
+- 文档状态：Round 2C Phase A 最小正式稿
+- 来源依据：
+  - `modules/t04_rc_sw_anchor/INTERFACE_CONTRACT.md`
+  - `modules/t04_rc_sw_anchor/README.md`
+  - `src/highway_topo_poc/modules/t04_rc_sw_anchor/`
+  - `tests/t04_rc_sw_anchor/`
+
+## 上下文
+
+- T04 位于 patch / global focus 输入与下游路口间拓扑模块之间。
+- 上游提供 node、road、DriveZone、divstrip、traj、pointcloud 等图层或其子集。
+- 下游主要消费 `intersection_l_opt` 与相关锚点结果，用于后续拓扑与通路推断。
+- T04 同时面向单 patch 运行、批量处理和 patch 自动发现节点三类操作者场景。
 
 ## 当前范围
 
-- merge / diverge 锚点识别
-- K16 专用锚点流程
-- 锚点与 `intersection_l_opt` 输出生成
-- metrics、breakpoints、summary 与 config 输出
+- merge / diverge 锚点识别。
+- K16 专用处理路径。
+- continuous chain、multibranch、reverse tip 等复杂规则家族。
+- 结果输出、诊断落盘与门禁统计。
 
-## Round 1 非范围
+## 当前非范围
 
-- 修改 T04 运行时行为
-- 重定义 anchor 语义
-- 立即迁移所有 legacy 文档
+- 修改 T04 算法或几何策略。
+- 修改下游模块消费方式。
+- 清理或删除历史操作者文档。
+- 将所有细粒度规则拆成 ADR 或全仓决策记录。
 
-## 依赖关系
+## 相邻材料边界
 
-- 上游 patch / vector 输入
-- 下游当前正式 T05 拓扑模块（即 `t05_topology_between_rc_v2`）
-- 仓库统一的 CRS 与输出约定
-
-## 审核重点
-
-- 对照 T06、当前正式 T05 与 legacy T05 历史参考，确认当前模块边界是否清晰
+- `INTERFACE_CONTRACT.md` 负责稳定契约面。
+- `README.md` 负责操作者友好入口与脚本使用提示。
+- batch / auto-node 脚本负责执行入口，不承担模块真相定义。

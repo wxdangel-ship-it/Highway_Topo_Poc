@@ -1,128 +1,159 @@
-# INTERFACE_CONTRACT — t06_patch_preprocess
+# t06_patch_preprocess - INTERFACE_CONTRACT
 
-## 1) Inputs
-### MUST
-- Vector/RCSDNode.geojson
-  - Geometry: Point
-  - Properties:
-    - Kind (int32 bit flags)
-    - mainid (int64)
-    - id (类型以输入为准：常见为 int64；也可能为 string。t06 必须保持该 JSON 类型一致)
-- Vector/RCSDRoad.geojson
-  - Geometry: LineString or MultiLineString
-  - Properties:
-    - direction (int8; 0/1/2/3)
-    - snodeid (类型与 Node.id 一致)
-    - enodeid (类型与 Node.id 一致)
-  - 其它属性：t06 透传复制，不做语义修改
-- DriveZone（路径由参数提供；参考 t04 入参方式）
-  - Geometry: Polygon/MultiPolygon
+## 定位
 
-### SHOULD / OPTIONAL
-- 无（冻结版）
+- 本文件是 T06 的稳定契约面。
+- 高层模块目标、上下游边界、构件关系与风险说明以 `architecture/*` 为准。
+- `AGENTS.md` 与 `SKILL.md` 不替代长期源事实。
 
-### Assumptions（冻结）
-- 输入的 RCSDNode/RCSDRoad 已是筛选后的成果；t06 不做 Patch 级筛选。
-- 缺失端点判定按“id 引用缺失”：snodeid/enodeid 不在 Node.id 集合内。
+## 1. Inputs
 
-## 2) Outputs
-### MUST（统一 EPSG:3857）
-- outputs/_work/t06_patch_preprocess/<run_id>/Vector/RCSDNode.geojson
-  - 完整复制输入 Node
-  - 新增虚拟 Node：
-    - Kind = 65536（bit16 = 1<<16）
-    - id：哈希生成且与既有 Node.id 不冲突；JSON 类型与输入 Node.id 保持一致
-    - mainid：实现侧可固定为 -1（不影响验收）；也可保留为空但建议写 -1
-- outputs/_work/t06_patch_preprocess/<run_id>/Vector/RCSDRoad.geojson
-  - 完整复制输入 Road
-  - 仅对“端点引用缺失”的 Road 做修复：
-    - geometry = Road ∩ DriveZone_union（仅保留面内部分）
-    - 多段结果：只保留“连接到已存在端点 Node”的那一段
-    - 端点更新：按几何判断，哪一端被裁剪改变了，就改该端 snodeid/enodeid 指向新虚拟 Node
-    - 若 intersection 为空，该 Road 必须从输出中删除
-- outputs/_work/t06_patch_preprocess/<run_id>/report/metrics.json
-  - 最小字段集合（必须）：
-    - node_in_count, road_in_count
-    - missing_endpoint_road_count
-    - clipped_road_count
-    - dropped_road_empty_count
-    - new_virtual_node_count
-    - updated_snodeid_count, updated_enodeid_count
-    - output_node_count, output_road_count
-    - target_epsg: 3857
-    - ok: true/false
+### 1.1 MUST
 
-### SHOULD（建议，增强可解释性）
-- outputs/_work/t06_patch_preprocess/<run_id>/report/fixed_roads.json
-  - 记录被修复 Road 的标识/索引、裁剪前后端点变化、新增 Node.id、降级策略触发情况等
+- `Vector/RCSDNode.geojson`
+  - Geometry：`Point`
+  - 关键属性：
+    - `id`
+    - `Kind` 或兼容别名
+    - `mainid` 或兼容别名
+- `Vector/RCSDRoad.geojson`
+  - Geometry：`LineString` 或 `MultiLineString`
+  - 关键属性：
+    - `snodeid`
+    - `enodeid`
+    - `direction`
+  - 其他属性默认透传，不做语义改写
+- `DriveZone`
+  - Geometry：`Polygon` / `MultiPolygon`
+  - 默认读取 patch 下 `Vector/DriveZone.geojson`
+  - 允许通过 `--drivezone` 覆盖路径
 
-### MUST NOT
-- 不得回写 data/<PatchID>/ 下任何文件
+### 1.2 兼容性输入行为
 
-## 3) EntryPoints
-> 本阶段仅冻结契约；实现入口会在“正式启动模块开发任务书”中下达并与仓库统一 CLI 规范对齐。
+- 若 patch 目录缺少 `RCSDNode.geojson` 或 `RCSDRoad.geojson`，运行时允许回退到唯一可判定的 `global/RCSDNode.geojson` 与 `global/RCSDRoad.geojson`。
+- 若 DriveZone 缺少 CRS，且 node / road CRS 一致，允许回退使用该 CRS；否则必须失败。
 
-建议入口（占位）：
-- python -m highway_topo_poc.modules.t06_patch_preprocess.run \
-    --data_root <PATCH_DIR> \
-    --patch <PatchID|auto> \
-    --drivezone <PATH> \
-    --run_id <RUN_ID> \
-    --out_root <OUT_ROOT>
+### 1.3 稳定前提
 
-## 4) Params
-### MUST
-- drivezone: str
-  - DriveZone 输入路径（可为 Patch 内路径或外部路径）
+- 输入 node / road 应已是 patch 级结果；T06 不负责更上游的 patch 过滤。
+- 缺失端点道路的识别规则固定为“`snodeid/enodeid` 不在 `Node.id` 集合中”。
 
-### FIXED（冻结）
-- target_epsg = 3857
-- margin_m = 0
-- missing_endpoint_detect_mode = "by_id_membership"
-- clip_mode = "intersection_keep_inside"
-- keep_segment_mode = "connect_existing_endpoint"
-- virtual_node_kind = 65536
+## 2. Outputs
 
-### OPTIONAL（实现侧可提供；若实现了必须写入 metrics 或 fixed_roads.json）
-- endpoint_match_tol_m: float = 1.0
-  - 多段选择时，用于判定线段端点是否“连接到已存在端点 Node”的距离阈值（米）
-- hash_round_m: float = 0.01
-  - 哈希前对虚拟 Node 坐标做四舍五入（米），提升跨次运行稳定性
-- hash_salt_max_tries: int = 8
-  - 哈希冲突时追加 salt 重试的最大次数
+输出目录：
 
-### Hash ID 规则（冻结）
-- 对每个虚拟 Node（位于裁剪后线段端点），构造 key：
-  - key = f"{patch_id}|{round(x,hash_round_m)}|{round(y,hash_round_m)}|{virtual_node_kind}|salt"
-- 取确定性 hash64(key) 映射到可表达范围：
-  - 若 Node.id 为整数类型：输出 id 为 int（建议取 abs(hash64) 并保留 int64 范围）
-  - 若 Node.id 为 string 类型：输出 id 为字符串（建议以十六进制或十进制字符串表示）
-- 若与既有 Node.id 冲突则 salt++ 重试，直到不冲突或超过 max_tries（超过则 fail 并 ok=false）。
+```text
+outputs/_work/t06_patch_preprocess/<run_id>/
+```
 
-## 5) Examples
-假设：
-- PATCH_DIR = data/patches/2855xxxxxx
-- RUN_ID = 20260305_090000_t06_2855xxxxxx
-- OUT_ROOT = outputs/_work/t06_patch_preprocess
+### 2.1 MUST
 
-输出：
-- outputs/_work/t06_patch_preprocess/20260305_090000_t06_2855xxxxxx/Vector/RCSDNode.geojson
-- outputs/_work/t06_patch_preprocess/20260305_090000_t06_2855xxxxxx/Vector/RCSDRoad.geojson
-- outputs/_work/t06_patch_preprocess/20260305_090000_t06_2855xxxxxx/report/metrics.json
-- （可选）outputs/_work/t06_patch_preprocess/20260305_090000_t06_2855xxxxxx/report/fixed_roads.json
+- `Vector/RCSDNode.geojson`
+  - 包含输入 node 的复制结果
+  - 包含新建虚拟节点：
+    - `Kind=65536`
+    - `id` 与既有 `Node.id` 不冲突
+    - `id` 的 JSON 类型与输入 `Node.id` 类型一致
+- `Vector/RCSDRoad.geojson`
+  - 包含未受影响道路的复制结果
+  - 对缺失端点道路执行裁剪和端点修复
+- `report/metrics.json`
+  - 至少包含：
+    - `node_in_count`
+    - `road_in_count`
+    - `missing_endpoint_road_count`
+    - `clipped_road_count`
+    - `dropped_road_empty_count`
+    - `new_virtual_node_count`
+    - `updated_snodeid_count`
+    - `updated_enodeid_count`
+    - `output_node_count`
+    - `output_road_count`
+    - `drivezone_clip_buffer_m`
+    - `target_epsg`
+    - `ok`
+- `report/t06_summary.json`
+- `report/t06_drop_reasons.json`
+- `logs/run.log`
 
-## 6) Acceptance（冻结）
-1. 输出文件存在且仅落在 outputs/_work/t06_patch_preprocess/<run_id>/...
-2. 输出 CRS 必为 EPSG:3857（Node/Road 几何均在 3857）
-3. 虚拟 Node：
-   - Kind 必为 65536
-   - id 不与既有 Node.id 冲突
-   - id 生成规则稳定：相同输入与参数多次运行产生相同 id（hash_round_m 后必须一致）
-4. 引用闭包：
-   - 输出 RCSDRoad 中每条 Road 的 snodeid 与 enodeid 都必须在输出 RCSDNode.id 中可找到
-5. 面内裁剪规则：
-   - 被修复的 Road（缺失端点引用的 Road）在输出中其 geometry 必为 DriveZone_union 面内部分（intersection 结果）
-   - 若 intersection 为空，该 Road 必须被删除
-6. 多段策略：
-   - 若 intersection 为多段，仅允许保留“连接到已存在端点 Node”的那一段（由 endpoint_match_tol_m 判定）
-   - 若无法判定，必须触发固定降级策略（默认：取最长段），并在 fixed_roads.json 或 metrics 中记录该事件
+### 2.2 SHOULD
+
+- `report/fixed_roads.json`
+  - 记录被修复道路的选段原因、端点变化、裁剪外长度或比例、降级策略等解释性信息
+
+### 2.3 MUST NOT
+
+- 不得回写 `data/<PatchID>/` 下的输入文件。
+
+## 3. EntryPoints
+
+CLI 入口：
+
+```bash
+python -m highway_topo_poc.modules.t06_patch_preprocess.run \
+  --data_root <PATCH_DIR_OR_ROOT> \
+  --patch <PatchID|auto> \
+  --run_id <RUN_ID|auto> \
+  --out_root <OUT_ROOT> \
+  --drivezone <PATH> \
+  --drivezone_clip_buffer_m <BUFFER_M>
+```
+
+## 4. Params
+
+### 4.1 MUST
+
+- `data_root`
+- `patch`
+- `run_id`
+- `out_root`
+- `overwrite`
+- `drivezone`
+- `drivezone_clip_buffer_m`
+
+### 4.2 稳定参数语义
+
+- `target_epsg = 3857`
+- `missing_endpoint_detect_mode = "by_id_membership"`
+- `clip_mode = "intersection_keep_inside"`
+- `keep_segment_mode = "connect_existing_endpoint"`
+- `virtual_node_kind = 65536`
+- `drivezone_clip_buffer_m`：当前默认值为 `5.0` 米
+
+### 4.3 说明
+
+- `drivezone_clip_buffer_m` 是显式参数，不再采用“固定零缓冲”的旧口径。
+- 虚拟节点 ID 由稳定哈希生成；整数型与字符串型输入 `Node.id` 都必须保持类型一致。
+
+## 5. Examples
+
+示例命令：
+
+```bash
+python -m highway_topo_poc.modules.t06_patch_preprocess.run \
+  --data_root data/patches \
+  --patch 2855xxxxxx \
+  --run_id 20260317_t06_patch \
+  --out_root outputs/_work/t06_patch_preprocess \
+  --drivezone_clip_buffer_m 5.0
+```
+
+示例输出：
+
+- `outputs/_work/t06_patch_preprocess/20260317_t06_patch/Vector/RCSDNode.geojson`
+- `outputs/_work/t06_patch_preprocess/20260317_t06_patch/Vector/RCSDRoad.geojson`
+- `outputs/_work/t06_patch_preprocess/20260317_t06_patch/report/metrics.json`
+- `outputs/_work/t06_patch_preprocess/20260317_t06_patch/report/fixed_roads.json`
+
+## 6. Acceptance
+
+1. 输出文件存在，且仅落在 `outputs/_work/t06_patch_preprocess/<run_id>/` 下。
+2. 输出 `RCSDNode` 与 `RCSDRoad` 的 CRS 必须为 `EPSG:3857`。
+3. 所有输出道路的 `snodeid/enodeid` 都必须能在输出 `Node.id` 中找到。
+4. 新建虚拟节点必须满足：
+   - `Kind=65536`
+   - `id` 不与既有 `Node.id` 冲突
+   - `id` 类型与输入 `Node.id` 类型一致
+5. 被修复道路的几何必须来自 DriveZone 裁剪结果；裁剪后为空的道路必须删除并记录原因。
+6. 当裁剪结果为多段且无法按既有端点稳定判定时，允许走固定降级策略，但必须在 `fixed_roads.json` 或 summary 中留下解释性记录。
+7. `metrics.json` 中必须能看出本次运行使用的 `drivezone_clip_buffer_m` 和最终 `ok` 结果。

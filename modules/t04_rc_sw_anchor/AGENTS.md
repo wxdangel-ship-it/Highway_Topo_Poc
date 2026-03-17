@@ -1,45 +1,32 @@
 # t04_rc_sw_anchor - AGENTS
 
-## 职责
-- 处理 merge/diverge 锚点与最终横截线。
-- 采用 `DriveZone-first + Between-Branches(B)`。
-- stop 规则：仅联通可达且 `degree>=3` 的 hard stop。
-- CRS 全链路归一化到 `dst_crs`（默认 `EPSG:3857`）。
+## 开工前先读
 
-## 代码与文档边界
-- 文档契约：`modules/t04_rc_sw_anchor/`
-- 实现代码：`src/highway_topo_poc/modules/t04_rc_sw_anchor/`
-- 测试：`tests/t04_rc_sw_anchor/`
-- 不修改其它模块 `INTERFACE_CONTRACT.md`
+- 先读 `architecture/01-introduction-and-goals.md`、`architecture/04-solution-strategy.md`、`architecture/10-quality-requirements.md`。
+- 再读 `INTERFACE_CONTRACT.md`，确认输入模式、输出、参数类别和验收要求。
+- 处理批量运行或 patch 自动发现入口时，再读 `README.md` 与相关脚本说明。
+- 做治理口径或模块总览时，再读 `review-summary.md`。
 
-## 输入口径
-- `patch_id` 仅来自 `patch_dir` basename。
-- `focus_node_ids` 仅来自 CLI/file/config。
-- `global_focus` 下必须提供 `global_node_path` 与 `global_road_path`。
-- `DriveZone` 默认启用：`Vector/DriveZone.geojson`（主证据）。
-- 输入图层均需走 `*_src_crs + auto` 归一化。
+## 允许改动范围
 
-## 输出口径
-固定目录：`outputs/_work/t04_rc_sw_anchor/<run_id>/`
-- `anchors_3857.geojson`
-- `intersection_l_opt_3857.geojson`
-- `anchors_wgs84.geojson`
-- `intersection_l_opt_wgs84.geojson`
-- `anchors.geojson` / `intersection_l_opt.geojson`（兼容）
-- `anchors.json`
-- `metrics.json`
-- `breakpoints.json`
-- `summary.txt`
-- `chosen_config.json`
+- 默认只改本目录下文档：`architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、`SKILL.md`、`review-summary.md`、`README.md`。
+- 如无明确任务，不修改 `src/`、`tests/`、`scripts/`、`outputs/`、`data/`。
+- 不跨模块改动其它 `INTERFACE_CONTRACT.md`。
 
-`intersection_l_opt` 约定：
-- 单 node 输出两条 LineString（`piece_idx=0/1`）。
-- feature properties 必含 `nodeid/kind/kind_bits/anchor_type/scan_dist_m/stop_reason/evidence_source`。
+## 必做验证
 
-## 禁止事项
-- 不依赖远处 divstrip 触发答案；无 split 宁可 fail。
-- 不允许跨路口漂移补答案。
-- 不允许 fail 状态被后续 suspect 覆盖。
-- 不在 stdout 输出长坐标数组或大 GeoJSON。
-- 不回写 `data/` 原始目录。
-- 不改其它模块契约。
+- 改文档前后对照 repo root `AGENTS.md`、`SPEC.md` 与项目级 `docs/architecture/*`，避免口径冲突。
+- 修改 contract 或 README 时，要回看 `cli.py`、`runner.py`、`metrics_breakpoints.py` 和关键测试，确认模式、输出、breakpoint 与 gate 没写错。
+- 提交前至少执行 `git diff --check`。
+
+## 禁做事项
+
+- 不把 `AGENTS.md` 写成模块真相主表面。
+- 不在没有明确任务书的情况下修改 T04 算法、测试、批处理脚本或 patch 自动发现脚本。
+- 不把 README 扩写成新的长期源事实文档。
+- 不为了提高通过率而在文档中弱化 fail-closed、hard-stop 或 DriveZone-first 约束。
+
+## 相邻模块关系
+
+- T04 面向下游拓扑模块提供锚点与 `intersection_l_opt` 结果。
+- 与相邻模块交互时，以本模块 contract 和项目级源事实为准；如发现口径冲突，先停止并汇报。
