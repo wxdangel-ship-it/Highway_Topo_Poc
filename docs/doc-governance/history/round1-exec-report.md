@@ -3,7 +3,7 @@
 ## 本轮信息
 
 - 轮次：项目文档结构整改 Round 1
-- 变更工作区：`specs/001-doc-governance-round1/`
+- 变更工作区：`specs/archive/001-doc-governance-round1/`
 - Git 分支：`codex/doc-governance-round1`
 - 范围类型：仅限 brownfield 文档治理
 - 运行时影响：无
@@ -16,9 +16,9 @@ Round 1 报告原本保留了若干治理未决项。后续人工审核已在 Ro
 
 ### Spec-Kit 产物
 
-- `specs/001-doc-governance-round1/spec.md`
-- `specs/001-doc-governance-round1/plan.md`
-- `specs/001-doc-governance-round1/tasks.md`
+- `specs/archive/001-doc-governance-round1/spec.md`
+- `specs/archive/001-doc-governance-round1/plan.md`
+- `specs/archive/001-doc-governance-round1/tasks.md`
 - `analyze` 摘要记录在本报告中
 
 ### 研究产物

@@ -17,7 +17,7 @@
 
 ## Analyze 摘要
 
-对 `specs/002-doc-governance-decision-alignment/spec.md`、`plan.md`、`tasks.md` 的交叉复核结果如下：
+对 `specs/archive/002-doc-governance-decision-alignment/spec.md`、`plan.md`、`tasks.md` 的交叉复核结果如下：
 
 - 三份产物的范围一致：都聚焦于 decision alignment，而不是深迁移或算法改动。
 - `spec.md` 定义的 4 条决策，在 `plan.md` 中都有对应文档面，在 `tasks.md` 中都有文件级任务落点。
@@ -27,7 +27,7 @@
 ### 残留旧口径检查
 
 - 当前活跃治理文档：未发现仍需继续沿用的旧未决口径。
-- 历史变更记录：`specs/001-doc-governance-round1/*` 仍保留 Round 1 当时的未决表述，作为历史记录存在，不再代表当前治理结论。
+- 历史变更记录：`specs/archive/001-doc-governance-round1/*` 仍保留 Round 1 当时的未决表述，作为历史记录存在，不再代表当前治理结论。
 
 ### 新的 unresolved item
 
@@ -35,9 +35,9 @@
 
 ## 更新文件
 
-- `specs/002-doc-governance-decision-alignment/spec.md`
-- `specs/002-doc-governance-decision-alignment/plan.md`
-- `specs/002-doc-governance-decision-alignment/tasks.md`
+- `specs/archive/002-doc-governance-decision-alignment/spec.md`
+- `specs/archive/002-doc-governance-decision-alignment/plan.md`
+- `specs/archive/002-doc-governance-decision-alignment/tasks.md`
 - `SPEC.md`
 - `docs/PROJECT_BRIEF.md`
 - `docs/codebase-research.md`
@@ -54,7 +54,7 @@
 - `docs/doc-governance/migration-map.md`
 - `docs/doc-governance/module-doc-status.csv`
 - `docs/doc-governance/review-priority.md`
-- `docs/doc-governance/round1-exec-report.md`
+- `docs/doc-governance/history/round1-exec-report.md`
 - `docs/doc-governance/target-structure.md`
 - `modules/t04_rc_sw_anchor/architecture/00-current-state-research.md`
 - `modules/t04_rc_sw_anchor/architecture/02-constraints.md`

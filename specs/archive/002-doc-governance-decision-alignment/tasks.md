@@ -1,8 +1,8 @@
 # 任务拆解：Round 2A 人工决策对齐整改
 
-**输入**：来自 `/specs/002-doc-governance-decision-alignment/` 的设计文档  
-**前置依赖**：`plan.md`（必需）、`spec.md`（必需）  
-**测试说明**：本轮不新增算法或运行测试；验证依赖于文档一致性复核、残留口径扫描和 `git diff --check`。  
+**输入**：来自 `/specs/archive/002-doc-governance-decision-alignment/` 的设计文档
+**前置依赖**：`plan.md`（必需）、`spec.md`（必需）
+**测试说明**：本轮不新增算法或运行测试；验证依赖于文档一致性复核、残留口径扫描和 `git diff --check`。
 **组织方式**：任务按“口径对齐 -> 文档更新 -> root AGENTS -> 执行报告 -> 提交推送”拆解。
 
 ## 格式：`[ID] [P?] [Story] 说明`
@@ -15,7 +15,7 @@
 
 **目的**：锁定 Round 2A 的变更范围和被 supersede 的旧口径。
 
-- [ ] T001 维护 `specs/002-doc-governance-decision-alignment/spec.md`、`plan.md`、`tasks.md`，写入 Round 2A 的范围、澄清结论和完成标准
+- [ ] T001 维护 `specs/archive/002-doc-governance-decision-alignment/spec.md`、`plan.md`、`tasks.md`，写入 Round 2A 的范围、澄清结论和完成标准
 - [ ] T002 扫描 `docs/`、`modules/`、`SPEC.md`、`docs/PROJECT_BRIEF.md` 中与 T05/T05-V2、`t03`、`t10`、root `AGENTS` 相关的旧口径
 - [ ] T003 形成 Round 2A 的 `analyze` 检查清单：旧口径是否已替换、是否引入新的 unresolved item、是否破坏 Round 1 目标结构
 
@@ -29,7 +29,7 @@
 
 ### 用户故事 1 的实现任务
 
-- [ ] T004 [US1] 更新 `docs/doc-governance/round1-exec-report.md`，把 Round 1 的相关未决项改写为“已由 Round 2A 人工决策覆盖”
+- [ ] T004 [US1] 更新 `docs/doc-governance/history/round1-exec-report.md`，把 Round 1 的相关未决项改写为“已由 Round 2A 人工决策覆盖”
 - [ ] T005 [P] [US1] 更新 `docs/doc-governance/review-priority.md` 与 `docs/doc-governance/module-doc-status.csv`，移除 T05 family / `t03` / `t10` 的旧优先级口径
 - [ ] T006 [P] [US1] 更新 `docs/doc-governance/target-structure.md` 与 `docs/doc-governance/migration-map.md`，写入正式 T05、legacy T05、`t03` 退役、`t10` 退役的结构规则
 - [ ] T007 [P] [US1] 更新 `docs/doc-governance/current-module-inventory.md` 与 `docs/doc-governance/current-doc-inventory.md`，把模块与文档状态改成已确认口径
@@ -60,8 +60,8 @@
 
 ### 用户故事 3 的实现任务
 
-- [ ] T013 [US3] 创建 `docs/doc-governance/round2a-decision-alignment-report.md`，回答任务书要求的 8 个问题
-- [ ] T014 [US3] 在 `docs/doc-governance/round2a-decision-alignment-report.md` 中写入 `analyze` 摘要，说明 `spec/plan/tasks` 是否一致、是否仍有残留旧口径、是否引入新的 unresolved item
+- [ ] T013 [US3] 创建 `docs/doc-governance/history/round2a-decision-alignment-report.md`，回答任务书要求的 8 个问题
+- [ ] T014 [US3] 在 `docs/doc-governance/history/round2a-decision-alignment-report.md` 中写入 `analyze` 摘要，说明 `spec/plan/tasks` 是否一致、是否仍有残留旧口径、是否引入新的 unresolved item
 
 ---
 

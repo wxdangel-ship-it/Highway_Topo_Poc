@@ -1,7 +1,7 @@
 # 实施计划：Round 2B T05-V2 模块文档正式化
 
-**分支**: `003-t05v2-doc-formalization` | **日期**: 2026-03-17 | **规格**: [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/003-t05v2-doc-formalization/spec.md)  
-**输入**: 来自 `/specs/003-t05v2-doc-formalization/spec.md` 的功能规格
+**分支**: `003-t05v2-doc-formalization` | **日期**: 2026-03-17 | **规格**: [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/archive/003-t05v2-doc-formalization/spec.md)
+**输入**: 来自 `/specs/archive/003-t05v2-doc-formalization/spec.md` 的功能规格
 
 **说明**：当前实际 Git 分支为 `codex/003-t05v2-doc-formalization`；`003-t05v2-doc-formalization` 是 spec-kit 使用的 feature identifier，用来兼容仓库的分支命名规则。
 
@@ -11,14 +11,14 @@
 
 ## 技术上下文
 
-**语言/版本**：Markdown 为主；仓库代码基于 Python 3.10，spec-kit CLI 0.3.0 运行在 WSL 的 Python 3.11 下  
-**主要依赖**：T05-V2 现有 `architecture/*`、`AGENTS.md`、`INTERFACE_CONTRACT.md`、`REAL_RUN_ACCEPTANCE.md`、`review-summary.md`，以及 `src/highway_topo_poc/modules/t05_topology_between_rc_v2/`、`tests/test_t05v2_pipeline.py`、`scripts/t05v2_*.sh`  
-**存储**：受 Git 跟踪的 Markdown 文件；不引入数据库  
-**验证方式**：文档分层复核、`git diff --check`、与 root `AGENTS.md` / `SPEC.md` / `docs/architecture/*` 的一致性检查  
-**目标平台**：Windows 工作区下的仓库文档体系  
-**项目类型**：单模块 brownfield 文档深迁移  
-**性能目标**：在不触碰代码和目录结构的前提下，形成当前正式 T05 模块可持续维护的最小正式文档面  
-**约束**：不改算法、不改运行逻辑、不改脚本、不改目录、不删 legacy 文档、不回退到家族连续治理口径  
+**语言/版本**：Markdown 为主；仓库代码基于 Python 3.10，spec-kit CLI 0.3.0 运行在 WSL 的 Python 3.11 下
+**主要依赖**：T05-V2 现有 `architecture/*`、`AGENTS.md`、`INTERFACE_CONTRACT.md`、`REAL_RUN_ACCEPTANCE.md`、`review-summary.md`，以及 `src/highway_topo_poc/modules/t05_topology_between_rc_v2/`、`tests/test_t05v2_pipeline.py`、`scripts/t05v2_*.sh`
+**存储**：受 Git 跟踪的 Markdown 文件；不引入数据库
+**验证方式**：文档分层复核、`git diff --check`、与 root `AGENTS.md` / `SPEC.md` / `docs/architecture/*` 的一致性检查
+**目标平台**：Windows 工作区下的仓库文档体系
+**项目类型**：单模块 brownfield 文档深迁移
+**性能目标**：在不触碰代码和目录结构的前提下，形成当前正式 T05 模块可持续维护的最小正式文档面
+**约束**：不改算法、不改运行逻辑、不改脚本、不改目录、不删 legacy 文档、不回退到家族连续治理口径
 **规模/范围**：仅 `modules/t05_topology_between_rc_v2` 文档面、必要的 legacy pointer，以及本轮执行报告
 
 ## 宪章检查
@@ -39,7 +39,7 @@
 ### 文档产物（本次变更）
 
 ```text
-specs/003-t05v2-doc-formalization/
+specs/archive/003-t05v2-doc-formalization/
 +-- spec.md
 +-- plan.md
 +-- tasks.md

@@ -1,8 +1,8 @@
 # 任务拆解：Round 2C T04 + T06 模块文档正式化
 
-**输入**：来自 `/specs/004-t04-t06-doc-formalization/` 的设计文档  
-**前置依赖**：`plan.md`（必需）、`spec.md`（必需）  
-**测试说明**：本轮不新增算法或运行测试；验证依赖于文档一致性复核、阶段门控判断与 `git diff --check`。  
+**输入**：来自 `/specs/archive/004-t04-t06-doc-formalization/` 的设计文档
+**前置依赖**：`plan.md`（必需）、`spec.md`（必需）
+**测试说明**：本轮不新增算法或运行测试；验证依赖于文档一致性复核、阶段门控判断与 `git diff --check`。
 **组织方式**：任务按“T04 先行 -> 阶段结论检查 -> T06 继续 -> 报告与推送”拆解。
 
 ## 格式：`[ID] [P?] [Story] 说明`
@@ -15,7 +15,7 @@
 
 **目的**：锁定 T04/T06 的正式化范围、证据来源和阶段门控条件。
 
-- [ ] T001 维护 `specs/004-t04-t06-doc-formalization/spec.md`、`plan.md`、`tasks.md`，写入 Round 2C 的范围、澄清结论和完成标准
+- [ ] T001 维护 `specs/archive/004-t04-t06-doc-formalization/spec.md`、`plan.md`、`tasks.md`，写入 Round 2C 的范围、澄清结论和完成标准
 - [ ] T002 复核 `modules/t04_rc_sw_anchor/` 下当前 `architecture/*`、`AGENTS.md`、`SKILL.md`、`INTERFACE_CONTRACT.md`、`review-summary.md`、`README.md`
 - [ ] T003 复核 `src/highway_topo_poc/modules/t04_rc_sw_anchor/`、`tests/t04_rc_sw_anchor/`、`modules/t04_rc_sw_anchor/scripts/`，提取稳定真相与操作者材料边界
 - [ ] T004 复核 `modules/t06_patch_preprocess/` 下当前 `architecture/*`、`AGENTS.md`、`SKILL.md`、`INTERFACE_CONTRACT.md`、`review-summary.md`
@@ -76,7 +76,7 @@
 
 ### 报告任务
 
-- [ ] T025 [US3] 创建 `docs/doc-governance/round2c-t04-t06-formalization-report.md`
+- [ ] T025 [US3] 创建 `docs/doc-governance/history/round2c-t04-t06-formalization-report.md`
 - [ ] T026 [US3] 在报告中写入 `analyze` 摘要，回答 T04/T06 文档面、AGENTS 残留真相、缺失源事实和 repo 级冲突检查结果
 
 ---

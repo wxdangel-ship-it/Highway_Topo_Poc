@@ -1,7 +1,7 @@
 # 实施计划：Round 2C T04 + T06 模块文档正式化
 
-**分支**: `004-t04-t06-doc-formalization` | **日期**: 2026-03-17 | **规格**: [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/004-t04-t06-doc-formalization/spec.md)  
-**输入**: 来自 `/specs/004-t04-t06-doc-formalization/spec.md` 的功能规格
+**分支**: `004-t04-t06-doc-formalization` | **日期**: 2026-03-17 | **规格**: [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/archive/004-t04-t06-doc-formalization/spec.md)
+**输入**: 来自 `/specs/archive/004-t04-t06-doc-formalization/spec.md` 的功能规格
 
 **说明**：当前实际 Git 分支为 `codex/004-t04-t06-doc-formalization`；`004-t04-t06-doc-formalization` 是 spec-kit 使用的 feature identifier，用来兼容仓库的分支命名规则。
 
@@ -9,18 +9,18 @@
 
 本次变更只处理 `modules/t04_rc_sw_anchor` 与 `modules/t06_patch_preprocess`。目标是把两个模块从“已有 architecture 草案 + review-summary + contract/辅助文档混杂”推进到“最小可信正式文档面”，同时收缩各自 `AGENTS.md`、重建或更新各自 `SKILL.md`，并明确操作者文档与长期源事实的边界。实施采用双阶段：
 
-1. Phase A：先正式化 T04  
+1. Phase A：先正式化 T04
 2. Phase B：仅在 T04 未暴露阻塞性治理冲突时，继续正式化 T06
 
 ## 技术上下文
 
-**语言/版本**：Markdown 为主；仓库代码基于 Python 3.10，spec-kit CLI 0.3.0 运行在 WSL 的 Python 3.11 下  
-**主要依赖**：T04/T06 当前 `architecture/*`、`AGENTS.md`、`SKILL.md`、`INTERFACE_CONTRACT.md`、`review-summary.md`，以及对应 `src/`、`tests/`、T04 `README.md` / `scripts/`  
-**存储**：受 Git 跟踪的 Markdown 文件；不引入数据库  
-**验证方式**：文档分层复核、T04 阶段门控判断、`git diff --check`、与 repo root `AGENTS.md` / `SPEC.md` / `docs/architecture/*` 的一致性检查  
-**目标平台**：Windows 工作区下的仓库文档体系  
-**项目类型**：双模块 brownfield 文档深迁移  
-**约束**：不改算法、不改运行逻辑、不改脚本、不改目录、不删历史文档、不把 `AGENTS.md` / `SKILL.md` 再写成源事实  
+**语言/版本**：Markdown 为主；仓库代码基于 Python 3.10，spec-kit CLI 0.3.0 运行在 WSL 的 Python 3.11 下
+**主要依赖**：T04/T06 当前 `architecture/*`、`AGENTS.md`、`SKILL.md`、`INTERFACE_CONTRACT.md`、`review-summary.md`，以及对应 `src/`、`tests/`、T04 `README.md` / `scripts/`
+**存储**：受 Git 跟踪的 Markdown 文件；不引入数据库
+**验证方式**：文档分层复核、T04 阶段门控判断、`git diff --check`、与 repo root `AGENTS.md` / `SPEC.md` / `docs/architecture/*` 的一致性检查
+**目标平台**：Windows 工作区下的仓库文档体系
+**项目类型**：双模块 brownfield 文档深迁移
+**约束**：不改算法、不改运行逻辑、不改脚本、不改目录、不删历史文档、不把 `AGENTS.md` / `SKILL.md` 再写成源事实
 **规模/范围**：仅 T04、T06 模块文档面、本轮执行报告，以及必要时用于解除 T06 硬冲突的最小项目级源事实修正
 
 ## 宪章检查
@@ -41,7 +41,7 @@
 ### 文档产物（本次变更）
 
 ```text
-specs/004-t04-t06-doc-formalization/
+specs/archive/004-t04-t06-doc-formalization/
 +-- spec.md
 +-- plan.md
 +-- tasks.md
@@ -145,9 +145,9 @@ modules/t06_patch_preprocess/
 
 只有在以下条件全部满足时，才进入 Phase B：
 
-1. T04 能形成可信最小正式文档面。  
-2. 未发现与 repo root `AGENTS.md`、`SPEC.md`、项目级 `docs/architecture/*` 冲突的硬口径。  
-3. 未发现“当前 contract 无法被可信校准”的阻塞性缺口。  
+1. T04 能形成可信最小正式文档面。
+2. 未发现与 repo root `AGENTS.md`、`SPEC.md`、项目级 `docs/architecture/*` 冲突的硬口径。
+3. 未发现“当前 contract 无法被可信校准”的阻塞性缺口。
 
 若不满足，则停在 T04，更新执行报告并停止，不继续 T06。
 
@@ -160,24 +160,24 @@ modules/t06_patch_preprocess/
 
 Round 2C 的 analyze 重点回答：
 
-1. T04 是否已形成最小正式文档面？  
-2. T06 是否已形成最小正式文档面？  
-3. 两个模块的 `AGENTS.md` 是否仍残留大量稳定业务真相？  
-4. 两个模块是否仍缺少关键源事实内容？  
-5. 是否引入与 repo 级治理结构冲突的新问题？  
+1. T04 是否已形成最小正式文档面？
+2. T06 是否已形成最小正式文档面？
+3. 两个模块的 `AGENTS.md` 是否仍残留大量稳定业务真相？
+4. 两个模块是否仍缺少关键源事实内容？
+5. 是否引入与 repo 级治理结构冲突的新问题？
 
 ## 实施策略
 
 ### 工作顺序
 
-1. 复核 T04/T06 当前文档、实现、脚本和测试证据。  
-2. 先完成 `spec`、`plan`、`tasks`。  
-3. 进入 Phase A，正式化 T04。  
-4. 做 T04 阶段结论检查。  
-5. 若通过门控，再进入 Phase B，正式化 T06。  
-6. 若 Phase B 发现项目级旧口径阻塞，则先做最小项目级源事实修正，再完成 T06 文档面。  
-7. 输出 Round 2C 执行报告。  
-8. 做 `analyze` 摘要、校验、提交和推送。  
+1. 复核 T04/T06 当前文档、实现、脚本和测试证据。
+2. 先完成 `spec`、`plan`、`tasks`。
+3. 进入 Phase A，正式化 T04。
+4. 做 T04 阶段结论检查。
+5. 若通过门控，再进入 Phase B，正式化 T06。
+6. 若 Phase B 发现项目级旧口径阻塞，则先做最小项目级源事实修正，再完成 T06 文档面。
+7. 输出 Round 2C 执行报告。
+8. 做 `analyze` 摘要、校验、提交和推送。
 
 ### 本计划强制执行的非目标
 

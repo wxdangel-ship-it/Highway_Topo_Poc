@@ -1,8 +1,8 @@
 # 任务拆解：Round 3A 活跃模块收口 + 退役模块归档治理
 
-**输入**：来自 `/specs/005-module-lifecycle-retirement-governance/` 的设计文档  
-**前置依赖**：`plan.md`（必需）、`spec.md`（必需）  
-**测试说明**：本轮不新增算法或运行测试；验证依赖于项目级口径一致性检查、入口指针检查与 `git diff --check`。  
+**输入**：来自 `/specs/archive/005-module-lifecycle-retirement-governance/` 的设计文档
+**前置依赖**：`plan.md`（必需）、`spec.md`（必需）
+**测试说明**：本轮不新增算法或运行测试；验证依赖于项目级口径一致性检查、入口指针检查与 `git diff --check`。
 **组织方式**：任务按“生命周期定义 -> 项目级收口 -> 最小指针 -> 报告与推送”拆解。
 
 ## 格式：`[ID] [P?] [Story] 说明`
@@ -12,7 +12,7 @@
 
 ## Phase 1：现状复核与 spec-kit 产物
 
-- [ ] T001 维护 `specs/005-module-lifecycle-retirement-governance/spec.md`、`plan.md`、`tasks.md`
+- [ ] T001 维护 `specs/archive/005-module-lifecycle-retirement-governance/spec.md`、`plan.md`、`tasks.md`
 - [ ] T002 复核 `SPEC.md`、`docs/PROJECT_BRIEF.md`、`docs/architecture/01-introduction-and-goals.md`、`03-context-and-scope.md` 的旧生命周期口径
 - [ ] T003 复核 `docs/doc-governance/current-module-inventory.md`、`current-doc-inventory.md`、`review-priority.md`、`migration-map.md`、`target-structure.md`、`module-doc-status.csv`
 - [ ] T004 复核 `modules/t02_ground_seg_qc/`、`modules/t07_patch_postprocess/`、`modules/t10/`、`modules/t05_topology_between_rc/` 的入口文档可用性
@@ -46,13 +46,13 @@
 - [ ] T017 [P] [US3] 更新 `docs/doc-governance/migration-map.md`
 - [ ] T018 [P] [US3] 更新 `docs/doc-governance/target-structure.md`
 - [ ] T019 [US3] 更新 `docs/doc-governance/module-doc-status.csv`
-- [ ] T020 [US3] 若仍有旧口径残留，更新 `docs/doc-governance/round1-exec-report.md`
+- [ ] T020 [US3] 若仍有旧口径残留，更新 `docs/doc-governance/history/round1-exec-report.md`
 
 ---
 
 ## Phase 5：报告、Analyze、提交与推送
 
-- [ ] T021 创建 `docs/doc-governance/round3a-lifecycle-retirement-governance-report.md`
+- [ ] T021 创建 `docs/doc-governance/history/round3a-lifecycle-retirement-governance-report.md`
 - [ ] T022 在报告中写入 `analyze` 摘要，回答生命周期统一、旧口径残留、legacy T05 误读与 repo 级冲突问题
 - [ ] T023 执行 `git diff --check`
 - [ ] T024 执行提交：`docs: govern module lifecycle and retire inactive modules`

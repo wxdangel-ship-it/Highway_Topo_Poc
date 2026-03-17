@@ -1,8 +1,8 @@
-﻿# 规格质量检查表：Round 1 项目文档结构整改
+# 规格质量检查表：Round 1 项目文档结构整改
 
 **用途**：在进入 `plan` 之前验证规格的完整性与质量  
 **创建日期**：2026-03-17  
-**规格**: [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/001-doc-governance-round1/spec.md)
+**规格**: [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/archive/001-doc-governance-round1/spec.md)
 
 ## 内容质量
 

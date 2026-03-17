@@ -11,7 +11,7 @@
 ### 会话 2026-03-17
 
 - Q: 本轮必须更新哪些文件？  
-  A: 至少更新 `docs/doc-governance/round1-exec-report.md`、`review-priority.md`、`target-structure.md`、`migration-map.md`、`current-module-inventory.md`、`current-doc-inventory.md`、`SPEC.md`、`modules/t05_topology_between_rc_v2/review-summary.md`，并按实际残留口径补充更新 `docs/PROJECT_BRIEF.md`、`docs/architecture/*`、`docs/codebase-research.md`、`docs/doc-governance/module-doc-status.csv` 等受影响文档。
+  A: 至少更新 `docs/doc-governance/history/round1-exec-report.md`、`review-priority.md`、`target-structure.md`、`migration-map.md`、`current-module-inventory.md`、`current-doc-inventory.md`、`SPEC.md`、`modules/t05_topology_between_rc_v2/review-summary.md`，并按实际残留口径补充更新 `docs/PROJECT_BRIEF.md`、`docs/architecture/*`、`docs/codebase-research.md`、`docs/doc-governance/module-doc-status.csv` 等受影响文档。
 - Q: 哪些旧表述必须删除或替换？  
   A: 必须移除 “T05 family 未定 / t03 缺失成员待决策 / T10 taxonomy pending / root AGENTS pending” 等旧表述，并改为正式决策口径。
 - Q: root `AGENTS.md` 只承载哪些内容？  
@@ -65,7 +65,7 @@
 
 **为什么是这个优先级**：Round 2A 的价值在于“把已定结论固化下来”；没有执行报告，外部审阅者仍需自行比对大量文档差异。
 
-**独立验证方式**：只阅读 `docs/doc-governance/round2a-decision-alignment-report.md`，即可回答本轮采用的基线、4 条决策、更新文件范围、root `AGENTS` 规则摘要和残留问题。
+**独立验证方式**：只阅读 `docs/doc-governance/history/round2a-decision-alignment-report.md`，即可回答本轮采用的基线、4 条决策、更新文件范围、root `AGENTS` 规则摘要和残留问题。
 
 **验收场景**：
 
@@ -94,7 +94,7 @@
 - **FR-003**：本轮必须更新 Round 1 仍保留旧口径的核心治理文档和必要的项目级文档。
 - **FR-004**：本轮必须在 `modules/t05_topology_between_rc_v2/review-summary.md` 中将模块身份从“待定建议”改为“已确认定位”。
 - **FR-005**：本轮必须创建 repo root `AGENTS.md`，且只承载 repo 级 durable guidance。
-- **FR-006**：本轮必须创建 `docs/doc-governance/round2a-decision-alignment-report.md`，回答任务书要求的 8 个问题。
+- **FR-006**：本轮必须创建 `docs/doc-governance/history/round2a-decision-alignment-report.md`，回答任务书要求的 8 个问题。
 - **FR-007**：本轮不得改物理目录名，不得删除 legacy 文档，不得进入模块深迁移，不得修改算法或运行逻辑。
 - **FR-008**：本轮新增或改写的自然语言正文必须继续遵循“默认中文”的文档规则。
 

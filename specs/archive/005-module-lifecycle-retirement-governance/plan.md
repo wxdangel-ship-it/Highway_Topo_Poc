@@ -1,7 +1,7 @@
 # 实施计划：Round 3A 活跃模块收口 + 退役模块归档治理
 
-**分支**: `005-module-lifecycle-retirement-governance` | **日期**: 2026-03-17 | **规格**: [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/005-module-lifecycle-retirement-governance/spec.md)  
-**输入**: 来自 `/specs/005-module-lifecycle-retirement-governance/spec.md` 的功能规格
+**分支**: `005-module-lifecycle-retirement-governance` | **日期**: 2026-03-17 | **规格**: [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/archive/005-module-lifecycle-retirement-governance/spec.md)
+**输入**: 来自 `/specs/archive/005-module-lifecycle-retirement-governance/spec.md` 的功能规格
 
 **说明**：当前实际 Git 分支为 `codex/005-module-lifecycle-retirement-governance`；`005-module-lifecycle-retirement-governance` 是 spec-kit 使用的 feature identifier，用来兼容仓库的分支命名规则。
 
@@ -16,13 +16,13 @@
 
 ## 技术上下文
 
-**语言/版本**：Markdown 与 CSV；仓库代码基于 Python 3.10，spec-kit CLI 0.3.0 运行在 WSL 的 Python 3.11 下  
-**主要依赖**：`SPEC.md`、`docs/PROJECT_BRIEF.md`、`docs/architecture/*`、`docs/doc-governance/*`、各模块入口文档  
-**存储**：受 Git 跟踪的 Markdown / CSV 文件；不引入数据库  
-**验证方式**：项目级口径一致性检查、入口指针检查、`git diff --check`  
-**目标平台**：Windows 工作区下的仓库文档体系  
-**项目类型**：项目级生命周期治理与最小归档指针治理  
-**约束**：不改算法、不改运行逻辑、不改脚本、不改目录、不删历史文档、不为退役模块补新正式文档面  
+**语言/版本**：Markdown 与 CSV；仓库代码基于 Python 3.10，spec-kit CLI 0.3.0 运行在 WSL 的 Python 3.11 下
+**主要依赖**：`SPEC.md`、`docs/PROJECT_BRIEF.md`、`docs/architecture/*`、`docs/doc-governance/*`、各模块入口文档
+**存储**：受 Git 跟踪的 Markdown / CSV 文件；不引入数据库
+**验证方式**：项目级口径一致性检查、入口指针检查、`git diff --check`
+**目标平台**：Windows 工作区下的仓库文档体系
+**项目类型**：项目级生命周期治理与最小归档指针治理
+**约束**：不改算法、不改运行逻辑、不改脚本、不改目录、不删历史文档、不为退役模块补新正式文档面
 **规模/范围**：项目级生命周期文档、治理映射、状态表，以及退役 / 历史参考模块入口文档的最小补充
 
 ## 宪章检查
@@ -42,7 +42,7 @@
 ### 新增治理产物
 
 ```text
-specs/005-module-lifecycle-retirement-governance/
+specs/archive/005-module-lifecycle-retirement-governance/
 +-- spec.md
 +-- plan.md
 +-- tasks.md
@@ -65,7 +65,7 @@ docs/doc-governance/review-priority.md
 docs/doc-governance/migration-map.md
 docs/doc-governance/target-structure.md
 docs/doc-governance/module-doc-status.csv
-docs/doc-governance/round1-exec-report.md
+docs/doc-governance/history/round1-exec-report.md
 ```
 
 ### 本轮会检查并最小补充的模块入口文档
@@ -124,22 +124,22 @@ modules/t05_topology_between_rc/AGENTS.md
 
 Round 3A 的 analyze 重点回答：
 
-1. 项目级 `Active / Retired / Historical Reference` 口径是否已统一？  
-2. 是否仍有文档把 `T02/T03/T07/T10` 当活跃治理对象？  
-3. 是否仍有文档把 legacy T05 当正式模块或 family 主线？  
-4. 是否引入与 repo 级治理结构冲突的新问题？  
+1. 项目级 `Active / Retired / Historical Reference` 口径是否已统一？
+2. 是否仍有文档把 `T02/T03/T07/T10` 当活跃治理对象？
+3. 是否仍有文档把 legacy T05 当正式模块或 family 主线？
+4. 是否引入与 repo 级治理结构冲突的新问题？
 
 ## 实施策略
 
 ### 工作顺序
 
-1. 盘点项目级旧生命周期口径与模块入口文件。  
-2. 完成 `spec / plan / tasks`。  
-3. 创建 `module-lifecycle.md`。  
-4. 更新项目级治理文档和状态表。  
-5. 给退役 / 历史参考模块补最小指针。  
-6. 输出 Round 3A 执行报告。  
-7. 做 `analyze` 摘要、校验、提交和推送。  
+1. 盘点项目级旧生命周期口径与模块入口文件。
+2. 完成 `spec / plan / tasks`。
+3. 创建 `module-lifecycle.md`。
+4. 更新项目级治理文档和状态表。
+5. 给退役 / 历史参考模块补最小指针。
+6. 输出 Round 3A 执行报告。
+7. 做 `analyze` 摘要、校验、提交和推送。
 
 ### 本计划强制执行的非目标
 

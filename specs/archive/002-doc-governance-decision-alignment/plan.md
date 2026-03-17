@@ -1,7 +1,7 @@
 # 实施计划：Round 2A 人工决策对齐整改
 
-**分支**: `002-doc-governance-decision-alignment` | **日期**: 2026-03-17 | **规格**: [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/002-doc-governance-decision-alignment/spec.md)  
-**输入**: 来自 `/specs/002-doc-governance-decision-alignment/spec.md` 的功能规格
+**分支**: `002-doc-governance-decision-alignment` | **日期**: 2026-03-17 | **规格**: [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/archive/002-doc-governance-decision-alignment/spec.md)
+**输入**: 来自 `/specs/archive/002-doc-governance-decision-alignment/spec.md` 的功能规格
 
 **说明**：当前实际 Git 分支为 `codex/002-doc-governance-decision-alignment`；`002-doc-governance-decision-alignment` 是 spec-kit 使用的 feature identifier，用来兼容仓库的分支命名规则。
 
@@ -11,14 +11,14 @@
 
 ## 技术上下文
 
-**语言/版本**：Markdown、CSV 与仓库治理元数据；仓库代码基于 Python 3.10，spec-kit CLI 0.3.0 运行在 WSL 的 Python 3.11 下  
-**主要依赖**：Round 1 产物、`SPEC.md`、`docs/PROJECT_BRIEF.md`、`docs/doc-governance/*.md`、`docs/architecture/*`、模块级审核摘要、Git  
-**存储**：受 Git 跟踪的 Markdown / CSV 文件；不引入数据库  
-**验证方式**：`spec/plan/tasks` 一致性复核、残留旧口径扫描、`git diff --check`、Git 状态检查  
-**目标平台**：Windows 工作区下的仓库文档体系，辅以 WSL 工具链  
-**项目类型**：面向 Python 仓库的 brownfield 文档治理补丁轮  
-**性能目标**：在当前分支上快速固化人工决策，并保持后续可审阅、可继续迁移的治理底座  
-**约束**：不改算法、不改目录、不删 legacy 文档、保持中文文档约定、不进入 Round 2B  
+**语言/版本**：Markdown、CSV 与仓库治理元数据；仓库代码基于 Python 3.10，spec-kit CLI 0.3.0 运行在 WSL 的 Python 3.11 下
+**主要依赖**：Round 1 产物、`SPEC.md`、`docs/PROJECT_BRIEF.md`、`docs/doc-governance/*.md`、`docs/architecture/*`、模块级审核摘要、Git
+**存储**：受 Git 跟踪的 Markdown / CSV 文件；不引入数据库
+**验证方式**：`spec/plan/tasks` 一致性复核、残留旧口径扫描、`git diff --check`、Git 状态检查
+**目标平台**：Windows 工作区下的仓库文档体系，辅以 WSL 工具链
+**项目类型**：面向 Python 仓库的 brownfield 文档治理补丁轮
+**性能目标**：在当前分支上快速固化人工决策，并保持后续可审阅、可继续迁移的治理底座
+**约束**：不改算法、不改目录、不删 legacy 文档、保持中文文档约定、不进入 Round 2B
 **规模/范围**：更新项目级源事实、治理文档、若干项目级架构草案、T05-V2/T06/T04 的少量模块级文档，以及新增 root `AGENTS.md` 与 Round 2A 报告
 
 ## 宪章检查
@@ -39,7 +39,7 @@
 ### 文档产物（本次变更）
 
 ```text
-specs/002-doc-governance-decision-alignment/
+specs/archive/002-doc-governance-decision-alignment/
 +-- spec.md
 +-- plan.md
 +-- tasks.md
@@ -99,7 +99,7 @@ modules/
 
 ### 治理文档
 
-- `docs/doc-governance/round1-exec-report.md`
+- `docs/doc-governance/history/round1-exec-report.md`
 - `docs/doc-governance/review-priority.md`
 - `docs/doc-governance/target-structure.md`
 - `docs/doc-governance/migration-map.md`
@@ -119,7 +119,7 @@ modules/
 ### 新增文档
 
 - `AGENTS.md`
-- `docs/doc-governance/round2a-decision-alignment-report.md`
+- `docs/doc-governance/history/round2a-decision-alignment-report.md`
 
 ## 写回策略
 

@@ -1,7 +1,7 @@
-﻿# 实施计划：Round 1 项目文档结构整改
+# 实施计划：Round 1 项目文档结构整改
 
-**分支**: `001-doc-governance-round1` | **日期**: 2026-03-17 | **规格**: [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/001-doc-governance-round1/spec.md)  
-**输入**: 来自 `/specs/001-doc-governance-round1/spec.md` 的功能规格
+**分支**: `001-doc-governance-round1` | **日期**: 2026-03-17 | **规格**: [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/archive/001-doc-governance-round1/spec.md)
+**输入**: 来自 `/specs/archive/001-doc-governance-round1/spec.md` 的功能规格
 
 **说明**：当前实际 Git 分支为 `codex/doc-governance-round1`；`001-doc-governance-round1` 是 spec-kit 使用的 feature identifier，用来兼容仓库的分支命名规则。
 
@@ -11,14 +11,14 @@
 
 ## 技术上下文
 
-**语言/版本**：以 Markdown、CSV 和仓库元数据为主；仓库代码基于 Python 3.10，spec-kit CLI 0.3.0 在 WSL 的 Python 3.11 下运行  
-**主要依赖**：`docs/` 与 `modules/` 下现有文档、spec-kit 工作流、Git、PowerShell、WSL shell  
-**存储**：受 Git 跟踪的 Markdown、JSON、CSV；不引入数据库  
-**验证方式**：产物存在性检查、跨文档一致性复核、spec-kit analyze；本轮不新增运行时算法测试  
-**目标平台**：Windows 工作区下的仓库文档体系，辅以 WSL 工具链  
-**项目类型**：面向 Python CLI 仓库的 brownfield 文档治理变更  
-**性能目标**：在一轮内建立可审核的文档治理基线，同时不影响运行时行为  
-**约束**：不改算法、不做破坏性迁移、不做大规模重命名、不删除旧文档，仅对 T04/T05-V2/T06 做深度审核  
+**语言/版本**：以 Markdown、CSV 和仓库元数据为主；仓库代码基于 Python 3.10，spec-kit CLI 0.3.0 在 WSL 的 Python 3.11 下运行
+**主要依赖**：`docs/` 与 `modules/` 下现有文档、spec-kit 工作流、Git、PowerShell、WSL shell
+**存储**：受 Git 跟踪的 Markdown、JSON、CSV；不引入数据库
+**验证方式**：产物存在性检查、跨文档一致性复核、spec-kit analyze；本轮不新增运行时算法测试
+**目标平台**：Windows 工作区下的仓库文档体系，辅以 WSL 工具链
+**项目类型**：面向 Python CLI 仓库的 brownfield 文档治理变更
+**性能目标**：在一轮内建立可审核的文档治理基线，同时不影响运行时行为
+**约束**：不改算法、不做破坏性迁移、不做大规模重命名、不删除旧文档，仅对 T04/T05-V2/T06 做深度审核
 **规模/范围**：覆盖 `modules/` 下全部现存模块目录、主要项目级文档、完整治理骨架，以及三个重点审核模块包
 
 ## 宪章检查
@@ -39,7 +39,7 @@
 ### 文档产物（本次变更）
 
 ```text
-specs/001-doc-governance-round1/
+specs/archive/001-doc-governance-round1/
 +-- spec.md
 +-- plan.md
 +-- research.md
@@ -87,7 +87,7 @@ tests/
 scripts/
 ```
 
-**结构决策**：保持现有实现布局不变；项目级架构和治理文档统一落到 `docs/` 下；模块级架构草案只在三个重点模块下创建；`specs/001-doc-governance-round1/` 作为本轮的临时 change workspace。
+**结构决策**：保持现有实现布局不变；项目级架构和治理文档统一落到 `docs/` 下；模块级架构草案只在三个重点模块下创建；`specs/archive/001-doc-governance-round1/` 作为本轮的临时 change workspace。
 
 ## 文档边界
 
@@ -151,7 +151,7 @@ scripts/
 
 ## Phase 0：研究结论
 
-详细研究记录见 [research.md](/mnt/e/Work/Highway_Topo_Poc/specs/001-doc-governance-round1/research.md)。
+详细研究记录见 [research.md](/mnt/e/Work/Highway_Topo_Poc/specs/archive/001-doc-governance-round1/research.md)。
 
 关键结论：
 
@@ -166,7 +166,7 @@ scripts/
 
 ### 数据模型
 
-文档治理相关数据模型记录在 [data-model.md](/mnt/e/Work/Highway_Topo_Poc/specs/001-doc-governance-round1/data-model.md)。
+文档治理相关数据模型记录在 [data-model.md](/mnt/e/Work/Highway_Topo_Poc/specs/archive/001-doc-governance-round1/data-model.md)。
 
 ### 契约说明
 
@@ -174,7 +174,7 @@ scripts/
 
 ### 快速阅读指南
 
-审核者阅读顺序与检查要点记录在 [quickstart.md](/mnt/e/Work/Highway_Topo_Poc/specs/001-doc-governance-round1/quickstart.md)。
+审核者阅读顺序与检查要点记录在 [quickstart.md](/mnt/e/Work/Highway_Topo_Poc/specs/archive/001-doc-governance-round1/quickstart.md)。
 
 ### Agent 上下文更新
 
@@ -194,7 +194,7 @@ scripts/
 - `docs/doc-governance/migration-map.md`
 - `docs/doc-governance/review-priority.md`
 - `docs/doc-governance/module-doc-status.csv`
-- `docs/doc-governance/round1-exec-report.md`
+- `docs/doc-governance/history/round1-exec-report.md`
 
 ### 必须产出的项目级骨架
 

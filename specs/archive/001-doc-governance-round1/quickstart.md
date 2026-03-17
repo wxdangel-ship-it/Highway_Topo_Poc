@@ -1,4 +1,4 @@
-﻿# 快速阅读指南：Round 1 文档治理产物阅读顺序
+# 快速阅读指南：Round 1 文档治理产物阅读顺序
 
 ## 用途
 
@@ -8,9 +8,9 @@
 
 按以下顺序阅读：
 
-1. [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/001-doc-governance-round1/spec.md)
-2. [plan.md](/mnt/e/Work/Highway_Topo_Poc/specs/001-doc-governance-round1/plan.md)
-3. [tasks.md](/mnt/e/Work/Highway_Topo_Poc/specs/001-doc-governance-round1/tasks.md)
+1. [spec.md](/mnt/e/Work/Highway_Topo_Poc/specs/archive/001-doc-governance-round1/spec.md)
+2. [plan.md](/mnt/e/Work/Highway_Topo_Poc/specs/archive/001-doc-governance-round1/plan.md)
+3. [tasks.md](/mnt/e/Work/Highway_Topo_Poc/specs/archive/001-doc-governance-round1/tasks.md)
 
 审核目标：
 
@@ -65,7 +65,7 @@
 
 阅读：
 
-- `docs/doc-governance/round1-exec-report.md`
+- `docs/doc-governance/history/round1-exec-report.md`
 
 审核目标：
 

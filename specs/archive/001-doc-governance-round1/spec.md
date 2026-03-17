@@ -1,4 +1,4 @@
-﻿# 功能规格：Round 1 项目文档结构整改
+# 功能规格：Round 1 项目文档结构整改
 
 **功能分支**: `001-doc-governance-round1`  
 **创建日期**: 2026-03-17  
@@ -105,7 +105,7 @@
 - **FR-010**：本轮必须保留既有 legacy 文档与历史审计材料；不得删除旧文档或进行破坏性迁移。
 - **FR-011**：本轮必须完整使用 spec-kit 工作流产物，包括 `constitution`、`spec`、澄清结论、`plan`、`tasks` 和 `analyze` 摘要。
 - **FR-012**：本轮必须显式记录未决问题，尤其是 taxonomy 不一致和 T05-V2 定位问题，不允许静默归一化。
-- **FR-013**：本轮必须以 `docs/doc-governance/round1-exec-report.md` 收尾，回答任务书要求的 8 个问题。
+- **FR-013**：本轮必须以 `docs/doc-governance/history/round1-exec-report.md` 收尾，回答任务书要求的 8 个问题。
 
 ### 关键实体
 

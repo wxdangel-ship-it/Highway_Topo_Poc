@@ -9,6 +9,12 @@
 - 单次变更：`specs/<change-id>/`
 - 历史证据：审计、验收、阶段说明与运行留档
 
+## 治理入口
+
+- 当前治理主入口优先看 `docs/doc-governance/README.md`
+- `docs/doc-governance/history/` 只存放历史治理过程文档，不替代当前源事实
+- `specs/archive/` 只存放历史变更工件，当前 active 变更只看未归档的 `specs/<change-id>/`
+
 ## 源事实优先级
 
 - 不得用 `AGENTS.md` 或 `SKILL.md` 替代项目级、模块级源事实文档。

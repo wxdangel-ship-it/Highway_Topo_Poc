@@ -41,7 +41,7 @@
 - `docs/doc-governance/migration-map.md`
 - `docs/doc-governance/target-structure.md`
 - `docs/doc-governance/module-doc-status.csv`
-- `docs/doc-governance/round1-exec-report.md`
+- `docs/doc-governance/history/round1-exec-report.md`
 - `docs/doc-governance/module-lifecycle.md`
 
 ## 4. 哪些退役模块 / 历史参考模块被补充了最小指针
@@ -79,7 +79,7 @@
 - `docs/doc-governance/migration-map.md`
 - `docs/doc-governance/target-structure.md`
 - `docs/doc-governance/module-doc-status.csv`
-- `docs/doc-governance/round1-exec-report.md`
+- `docs/doc-governance/history/round1-exec-report.md`
 
 当前未发现仍把 `T02/T03/T07/T10` 写成活跃治理对象的项目级文档残留。
 

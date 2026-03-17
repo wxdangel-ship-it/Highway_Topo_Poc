@@ -1,6 +1,6 @@
-﻿# 任务拆解：Round 1 项目文档结构整改
+# 任务拆解：Round 1 项目文档结构整改
 
-**输入**：来自 `/specs/001-doc-governance-round1/` 的设计文档  
+**输入**：来自 `/specs/archive/001-doc-governance-round1/` 的设计文档
 **前置依赖**：`plan.md`（必需）、`spec.md`（必需）、`research.md`、`data-model.md`、`quickstart.md`
 
 **测试说明**：本轮不新增运行时或算法测试。验证依赖于产物存在性、跨文档一致性和可审核性。
@@ -17,7 +17,7 @@
 
 **目的**：在开始产出 Round 1 文档前，锁定 change workspace 和文档治理词汇表。
 
-- [ ] T001 确认并维护 Round 1 的 spec-kit 工作空间：`specs/001-doc-governance-round1/spec.md`、`plan.md`、`research.md`、`data-model.md`、`quickstart.md`
+- [ ] T001 确认并维护 Round 1 的 spec-kit 工作空间：`specs/archive/001-doc-governance-round1/spec.md`、`plan.md`、`research.md`、`data-model.md`、`quickstart.md`
 - [ ] T002 在 `.specify/memory/constitution.md` 中固化并对齐 Round 1 的治理原则、范围和非目标
 - [ ] T003 为 `docs/codebase-research.md`、`docs/doc-governance/current-doc-inventory.md`、`docs/doc-governance/current-module-inventory.md` 和 `docs/doc-governance/module-doc-status.csv` 统一文档分类词汇与模块盘点词汇
 
@@ -98,8 +98,8 @@
 
 **目的**：以一致性检查、执行报告和非目标说明收尾。
 
-- [ ] T025 在 `docs/doc-governance/round1-exec-report.md` 中记录 spec-kit analyze 摘要与未决问题
-- [ ] T026 [P] 更新 `docs/doc-governance/round1-exec-report.md`，回答任务书要求的 8 个问题
+- [ ] T025 在 `docs/doc-governance/history/round1-exec-report.md` 中记录 spec-kit analyze 摘要与未决问题
+- [ ] T026 [P] 更新 `docs/doc-governance/history/round1-exec-report.md`，回答任务书要求的 8 个问题
 - [ ] T027 [P] 交叉核对所有 Round 1 必须交付物是否存在，且未引入破坏性迁移或算法改动
 - [ ] T028 为所有新建的架构草案和审核摘要补充来源依据、草案标记和审核重点
 

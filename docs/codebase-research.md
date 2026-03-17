@@ -33,8 +33,8 @@
 - Round 1 引入的项目级架构骨架：
   - `docs/architecture/`
 - Round 1 与 Round 2A 的变更工作区：
-  - `specs/001-doc-governance-round1/`
-  - `specs/002-doc-governance-decision-alignment/`
+  - `specs/archive/001-doc-governance-round1/`
+  - `specs/archive/002-doc-governance-decision-alignment/`
 
 ### 当前模块目录
 

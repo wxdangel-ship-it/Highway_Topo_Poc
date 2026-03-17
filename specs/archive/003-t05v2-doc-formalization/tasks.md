@@ -1,8 +1,8 @@
 # 任务拆解：Round 2B T05-V2 模块文档正式化
 
-**输入**：来自 `/specs/003-t05v2-doc-formalization/` 的设计文档  
-**前置依赖**：`plan.md`（必需）、`spec.md`（必需）  
-**测试说明**：本轮不新增算法或运行测试；验证依赖于文档一致性复核、源事实边界检查和 `git diff --check`。  
+**输入**：来自 `/specs/archive/003-t05v2-doc-formalization/` 的设计文档
+**前置依赖**：`plan.md`（必需）、`spec.md`（必需）
+**测试说明**：本轮不新增算法或运行测试；验证依赖于文档一致性复核、源事实边界检查和 `git diff --check`。
 **组织方式**：任务按“T05-V2 现状复核 -> architecture 正式化 -> AGENTS 收缩 / SKILL 新建 -> legacy pointer / 报告 -> 提交推送”拆解。
 
 ## 格式：`[ID] [P?] [Story] 说明`
@@ -15,7 +15,7 @@
 
 **目的**：锁定 T05-V2 的正式化范围、证据来源和旧文档边界。
 
-- [ ] T001 维护 `specs/003-t05v2-doc-formalization/spec.md`、`plan.md`、`tasks.md`，写入 Round 2B 的范围、澄清结论和完成标准
+- [ ] T001 维护 `specs/archive/003-t05v2-doc-formalization/spec.md`、`plan.md`、`tasks.md`，写入 Round 2B 的范围、澄清结论和完成标准
 - [ ] T002 复核 `modules/t05_topology_between_rc_v2/` 下当前 `architecture/*`、`AGENTS.md`、`INTERFACE_CONTRACT.md`、`REAL_RUN_ACCEPTANCE.md`、`review-summary.md`
 - [ ] T003 复核 `src/highway_topo_poc/modules/t05_topology_between_rc_v2/`、`tests/test_t05v2_pipeline.py`、`scripts/t05v2_*.sh`，提取稳定真相与运行流程证据
 
@@ -61,7 +61,7 @@
 ### 用户故事 3 的实现任务
 
 - [ ] T013 [US3] 在 `modules/t05_topology_between_rc/` 的最小必要位置补充 pointer，明确当前正式 T05 在 `modules/t05_topology_between_rc_v2/`
-- [ ] T014 [US3] 创建 `docs/doc-governance/round2b-t05v2-formalization-report.md`，回答任务书要求的 8 个问题
+- [ ] T014 [US3] 创建 `docs/doc-governance/history/round2b-t05v2-formalization-report.md`，回答任务书要求的 8 个问题
 - [ ] T015 [US3] 在 Round 2B 报告中写入 `analyze` 摘要，说明正式化结果、AGENTS 残留真相、缺失源事实和结构冲突检查结果
 
 ---
