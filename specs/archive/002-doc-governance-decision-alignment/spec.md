@@ -11,7 +11,7 @@
 ### 会话 2026-03-17
 
 - Q: 本轮必须更新哪些文件？  
-  A: 至少更新 `docs/doc-governance/history/round1-exec-report.md`、`review-priority.md`、`target-structure.md`、`migration-map.md`、`current-module-inventory.md`、`current-doc-inventory.md`、`SPEC.md`、`modules/t05_topology_between_rc_v2/review-summary.md`，并按实际残留口径补充更新 `docs/PROJECT_BRIEF.md`、`docs/architecture/*`、`docs/codebase-research.md`、`docs/doc-governance/module-doc-status.csv` 等受影响文档。
+  A: 至少更新 `docs/doc-governance/history/round1-exec-report.md`、`review-priority.md`、`target-structure.md`、`migration-map.md`、`current-module-inventory.md`、`current-doc-inventory.md`、`SPEC.md`、`modules/t05_topology_between_rc_v2/review-summary.md`，并按实际残留口径补充更新 `docs/PROJECT_BRIEF.md`、`docs/architecture/*`、`docs/archive/nonstandard/codebase-research.md`、`docs/doc-governance/module-doc-status.csv` 等受影响文档。
 - Q: 哪些旧表述必须删除或替换？  
   A: 必须移除 “T05 family 未定 / t03 缺失成员待决策 / T10 taxonomy pending / root AGENTS pending” 等旧表述，并改为正式决策口径。
 - Q: root `AGENTS.md` 只承载哪些内容？  

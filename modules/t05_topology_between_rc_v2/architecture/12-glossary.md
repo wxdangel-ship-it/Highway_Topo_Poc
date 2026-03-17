@@ -10,5 +10,5 @@
 - **shape reference**：在最终成路阶段为几何生成提供趋势或参考的线性依据。
 - **no geometry candidate**：当前不适合继续强行出线、应保留为无几何候选的段。
 - **step_state.json**：每个阶段的状态文件，用于记录阶段是否完成并支撑 `resume`。
-- **运行验收文档**：面向操作者的运行与验收说明；在本模块中主要对应 `REAL_RUN_ACCEPTANCE.md`。
+- **运行验收文档**：面向操作者的运行与验收说明；在本模块中主要对应 `history/REAL_RUN_ACCEPTANCE.md`。
 - **legacy T05**：`modules/t05_topology_between_rc/`，当前仅保留为历史参考模块，不再承担正式 T05 文档主体职责。

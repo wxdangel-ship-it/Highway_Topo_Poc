@@ -12,8 +12,8 @@
 - 稳定契约面：`INTERFACE_CONTRACT.md`
 - 稳定工作规则：`AGENTS.md`
 - 可复用流程：`SKILL.md`
-- 运行验收与操作者清单：`REAL_RUN_ACCEPTANCE.md`
 - 当前治理摘要：`review-summary.md`
+- 历史运行验收说明：`history/REAL_RUN_ACCEPTANCE.md`
 
 ## 模块业务主链
 
@@ -24,7 +24,7 @@ T05-V2 以 `Segment -> CorridorWitness -> CorridorIdentity -> Slot -> FinalRoad`
 - 稳定业务真相已从 `AGENTS.md` 收回到 `architecture/*` 与 `INTERFACE_CONTRACT.md`。
 - `AGENTS.md` 现在只保留开工前阅读顺序、允许改动范围、验证要求、禁做事项与 legacy 处理原则。
 - 专用 `SKILL.md` 已建立，负责 T05-V2 文档治理和验收类任务的标准流程。
-- `REAL_RUN_ACCEPTANCE.md` 已被明确标注为运行验收文档，长期源事实另有位置。
+- `history/REAL_RUN_ACCEPTANCE.md` 已被明确标注为历史运行验收文档，长期源事实另有位置。
 
 ## 当前稳定输入 / 输出摘要
 
@@ -42,10 +42,10 @@ T05-V2 以 `Segment -> CorridorWitness -> CorridorIdentity -> Slot -> FinalRoad`
 ## 后续仍待处理、但不阻塞当前正式化的问题
 
 - 复杂 patch 上 `prior_based / unresolved` 仍可能偏高，后续仍需在算法轮次或更细文档轮次中继续解释和收敛。
-- `REAL_RUN_ACCEPTANCE.md` 仍承载大量操作者知识，后续需持续保持与源事实同步。
+- `history/REAL_RUN_ACCEPTANCE.md` 仍承载历史操作者知识，后续如继续保留，需持续保持与源事实同步。
 - legacy T05 历史材料仍在仓库中，后续如再做清理，应以“历史参考”而不是家族连续治理为前提。
 
-## 后续人工审核重点
+## 当前人工审核重点
 
 - 审核 `architecture/05-building-block-view.md` 是否已足够支撑后续模块迁移。
 - 审核 `INTERFACE_CONTRACT.md` 的参数边界是否既稳定又不过度下沉到实现细节。

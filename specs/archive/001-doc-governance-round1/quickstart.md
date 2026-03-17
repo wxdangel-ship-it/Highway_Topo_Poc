@@ -22,7 +22,7 @@
 
 阅读：
 
-1. [codebase-research.md](/mnt/e/Work/Highway_Topo_Poc/docs/codebase-research.md)
+1. [codebase-research.md](/mnt/e/Work/Highway_Topo_Poc/docs/archive/nonstandard/codebase-research.md)
 2. [current-doc-inventory.md](/mnt/e/Work/Highway_Topo_Poc/docs/doc-governance/current-doc-inventory.md)
 3. [current-module-inventory.md](/mnt/e/Work/Highway_Topo_Poc/docs/doc-governance/current-module-inventory.md)
 
@@ -37,9 +37,9 @@
 阅读：
 
 1. `docs/architecture/*`
-2. `docs/doc-governance/target-structure.md`
-3. `docs/doc-governance/migration-map.md`
-4. `docs/doc-governance/review-priority.md`
+2. `docs/archive/nonstandard/target-structure.md`
+3. `docs/archive/nonstandard/migration-map.md`
+4. `docs/archive/nonstandard/review-priority.md`
 5. `docs/doc-governance/module-doc-status.csv`
 
 审核目标：

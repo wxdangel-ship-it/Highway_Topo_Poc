@@ -1,13 +1,13 @@
-﻿# 08 横切概念
+# 08 横切概念
 
 ## 状态
 
-- 草案状态：Round 1 最小可信草案
+- 当前状态：项目级横切概念说明
 - 来源依据：
   - `SPEC.md`
   - `docs/ARTIFACT_PROTOCOL.md`
-  - `docs/CODEX_GUARDRAILS.md`
-  - `docs/AGENT_PLAYBOOK.md`
+  - `docs/archive/nonstandard/CODEX_GUARDRAILS.md`
+  - `docs/archive/nonstandard/AGENT_PLAYBOOK.md`
 - 审核重点：
   - 确认哪些概念应长期保留在项目级
 

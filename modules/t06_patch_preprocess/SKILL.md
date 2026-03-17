@@ -38,7 +38,7 @@
 - `SKILL.md` 是否只承载流程，不复制完整模块真相。
 - `architecture/05-building-block-view.md` 是否清楚表达了 T06 的稳定阶段链。
 - `INTERFACE_CONTRACT.md` 是否与当前实现和测试一致，尤其是 `drivezone_clip_buffer_m=5.0` 的默认语义。
-- `review-summary.md` 是否已升级为当前模块治理摘要，而不是 Round 1 审核记录。
+- `review-summary.md` 是否已升级为当前模块治理摘要，而不是历史审核记录。
 
 ## 常见失败点与回退方式
 

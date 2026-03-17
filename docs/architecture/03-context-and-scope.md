@@ -2,10 +2,10 @@
 
 ## 状态
 
-- 草案状态：Round 1 最小可信草案，已由 Round 2A 决策对齐补充修正
+- 当前状态：项目级上下文与范围说明
 - 来源依据：
   - `SPEC.md`
-  - `docs/codebase-research.md`
+  - `docs/archive/nonstandard/codebase-research.md`
   - 当前 `modules/`、`src/` 与 `tests/` 布局
 - 审核重点：
   - 确认正式模块主线与历史参考边界
@@ -65,4 +65,4 @@
 
 ## 当前无待确认项
 
-本文件涉及的模块身份和 taxonomy 口径已由 Round 2A 写回。
+本文件涉及的模块身份和 taxonomy 口径已写回项目级文档。

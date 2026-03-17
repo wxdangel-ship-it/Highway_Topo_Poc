@@ -2,11 +2,11 @@
 
 ## 状态
 
-- 文档状态：Round 2B 最小正式稿
+- 当前状态：正式 T05 模块级架构说明
 - 当前正式定位：`modules/t05_topology_between_rc_v2` 是当前正式 T05 模块
 - 来源依据：
   - `modules/t05_topology_between_rc_v2/INTERFACE_CONTRACT.md`
-  - `modules/t05_topology_between_rc_v2/REAL_RUN_ACCEPTANCE.md`
+  - `modules/t05_topology_between_rc_v2/history/REAL_RUN_ACCEPTANCE.md`
   - `modules/t05_topology_between_rc_v2/review-summary.md`
   - `src/highway_topo_poc/modules/t05_topology_between_rc_v2/`
   - `tests/test_t05v2_pipeline.py`
@@ -41,9 +41,9 @@
 - `INTERFACE_CONTRACT.md` 承担稳定契约面，包括输入、输出、入口、参数类别、示例和验收标准。
 - `AGENTS.md` 只保留稳定工作规则，不再承担模块真相主表面。
 - `SKILL.md` 承担 T05-V2 的可复用工作流。
-- `REAL_RUN_ACCEPTANCE.md` 继续保留为运行验收与操作者清单，不再承担长期源事实职责。
+- `history/REAL_RUN_ACCEPTANCE.md` 继续保留为运行验收与操作者清单，不再承担长期源事实职责。
 
-## 后续人工审核重点
+## 当前人工审核重点
 
 - 核对 `architecture/*` 中对阶段链的描述是否足够支撑后续模块级迁移。
 - 核对 `INTERFACE_CONTRACT.md` 的参数分组是否已覆盖当前稳定运行基线，而没有把高层架构叙事重新带回契约文档。

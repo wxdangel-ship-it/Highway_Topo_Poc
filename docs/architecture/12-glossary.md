@@ -2,7 +2,7 @@
 
 ## 状态
 
-- 草案状态：Round 1 最小可信草案
+- 当前状态：项目级术语表
 - 来源依据：
   - `SPEC.md`
   - `docs/ARTIFACT_PROTOCOL.md`

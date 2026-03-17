@@ -39,8 +39,8 @@ docs/doc-governance/README.md
 docs/doc-governance/module-lifecycle.md
 docs/doc-governance/current-module-inventory.md
 docs/doc-governance/current-doc-inventory.md
-docs/doc-governance/target-structure.md
-docs/doc-governance/review-priority.md
+docs/archive/nonstandard/target-structure.md
+docs/archive/nonstandard/review-priority.md
 docs/doc-governance/module-doc-status.csv
 ```
 

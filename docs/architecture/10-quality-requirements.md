@@ -2,11 +2,11 @@
 
 ## 状态
 
-- 草案状态：Round 1 最小可信草案，已由 Round 2A 决策对齐补充修正
+- 当前状态：项目级质量要求说明
 - 来源依据：
   - `SPEC.md`
   - `docs/ARTIFACT_PROTOCOL.md`
-  - `docs/codebase-research.md`
+  - `docs/archive/nonstandard/codebase-research.md`
 - 审核重点：
   - 确认项目级质量表述可衡量，且不会对单个模块过拟合
 

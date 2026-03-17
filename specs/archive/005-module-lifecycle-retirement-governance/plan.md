@@ -61,9 +61,9 @@ docs/architecture/01-introduction-and-goals.md
 docs/architecture/03-context-and-scope.md
 docs/doc-governance/current-module-inventory.md
 docs/doc-governance/current-doc-inventory.md
-docs/doc-governance/review-priority.md
-docs/doc-governance/migration-map.md
-docs/doc-governance/target-structure.md
+docs/archive/nonstandard/review-priority.md
+docs/archive/nonstandard/migration-map.md
+docs/archive/nonstandard/target-structure.md
 docs/doc-governance/module-doc-status.csv
 docs/doc-governance/history/round1-exec-report.md
 ```

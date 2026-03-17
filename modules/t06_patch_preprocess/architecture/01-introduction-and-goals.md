@@ -2,7 +2,7 @@
 
 ## 状态
 
-- 文档状态：Round 2C Phase B 最小正式稿
+- 当前状态：T06 模块级架构说明
 - 来源依据：
   - `src/highway_topo_poc/modules/t06_patch_preprocess/run.py`
   - `src/highway_topo_poc/modules/t06_patch_preprocess/pipeline.py`

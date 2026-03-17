@@ -4,7 +4,7 @@
 
 - 本文件是当前正式 T05 模块的稳定契约面。
 - 高层业务目标、阶段构件关系和风险说明以 `architecture/*` 为准。
-- 运行验收操作细节以 `REAL_RUN_ACCEPTANCE.md` 为准。
+- 运行验收操作细节以 `history/REAL_RUN_ACCEPTANCE.md` 为准。
 
 ## 输入
 
@@ -141,4 +141,4 @@ bash scripts/t05v2_resume.sh --data_root "$DATA_ROOT" --patch_id "$PATCH_ID" --r
 ### 边界说明
 
 - 本文件描述稳定契约，不替代 `architecture/*` 的高层业务解释。
-- 真实运行的 patch 选择、操作顺序与人工判读清单，请读取 `REAL_RUN_ACCEPTANCE.md`。
+- 真实运行的 patch 选择、操作顺序与人工判读清单，请读取 `history/REAL_RUN_ACCEPTANCE.md`。

@@ -30,12 +30,12 @@
 ### 用户故事 1 的实现任务
 
 - [ ] T004 [US1] 更新 `docs/doc-governance/history/round1-exec-report.md`，把 Round 1 的相关未决项改写为“已由 Round 2A 人工决策覆盖”
-- [ ] T005 [P] [US1] 更新 `docs/doc-governance/review-priority.md` 与 `docs/doc-governance/module-doc-status.csv`，移除 T05 family / `t03` / `t10` 的旧优先级口径
-- [ ] T006 [P] [US1] 更新 `docs/doc-governance/target-structure.md` 与 `docs/doc-governance/migration-map.md`，写入正式 T05、legacy T05、`t03` 退役、`t10` 退役的结构规则
+- [ ] T005 [P] [US1] 更新 `docs/archive/nonstandard/review-priority.md` 与 `docs/doc-governance/module-doc-status.csv`，移除 T05 family / `t03` / `t10` 的旧优先级口径
+- [ ] T006 [P] [US1] 更新 `docs/archive/nonstandard/target-structure.md` 与 `docs/archive/nonstandard/migration-map.md`，写入正式 T05、legacy T05、`t03` 退役、`t10` 退役的结构规则
 - [ ] T007 [P] [US1] 更新 `docs/doc-governance/current-module-inventory.md` 与 `docs/doc-governance/current-doc-inventory.md`，把模块与文档状态改成已确认口径
 - [ ] T008 [US1] 更新 `SPEC.md` 与 `docs/PROJECT_BRIEF.md` 的必要段落，使项目级 taxonomy 与模块状态口径对齐
 - [ ] T009 [US1] 更新 `modules/t05_topology_between_rc_v2/review-summary.md`，把模块定位改为“当前正式 T05 模块，物理路径保持 V2”
-- [ ] T010 [US1] 修正仍残留旧口径的同类文档：`docs/codebase-research.md`、`docs/architecture/01-introduction-and-goals.md`、`docs/architecture/02-constraints.md`、`docs/architecture/03-context-and-scope.md`、`docs/architecture/04-solution-strategy.md`、`docs/architecture/09-decisions/README.md`、`docs/architecture/10-quality-requirements.md`、`docs/architecture/11-risks-and-technical-debt.md`、`modules/t04_rc_sw_anchor/architecture/03-context-and-scope.md`、`modules/t05_topology_between_rc_v2/architecture/*.md`、`modules/t06_patch_preprocess/architecture/*.md`
+- [ ] T010 [US1] 修正仍残留旧口径的同类文档：`docs/archive/nonstandard/codebase-research.md`、`docs/architecture/01-introduction-and-goals.md`、`docs/architecture/02-constraints.md`、`docs/architecture/03-context-and-scope.md`、`docs/architecture/04-solution-strategy.md`、`docs/architecture/09-decisions/README.md`、`docs/architecture/10-quality-requirements.md`、`docs/architecture/11-risks-and-technical-debt.md`、`modules/t04_rc_sw_anchor/architecture/03-context-and-scope.md`、`modules/t05_topology_between_rc_v2/architecture/*.md`、`modules/t06_patch_preprocess/architecture/*.md`
 
 ---
 

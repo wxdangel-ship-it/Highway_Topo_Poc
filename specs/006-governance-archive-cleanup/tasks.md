@@ -34,14 +34,14 @@
 
 - [ ] T017 更新 `docs/doc-governance/current-doc-inventory.md`
 - [ ] T018 按需更新 `docs/doc-governance/current-module-inventory.md`
-- [ ] T019 按需更新 `docs/doc-governance/review-priority.md`
-- [ ] T020 按需更新 `docs/doc-governance/target-structure.md`
+- [ ] T019 按需更新 `docs/archive/nonstandard/review-priority.md`
+- [ ] T020 按需更新 `docs/archive/nonstandard/target-structure.md`
 - [ ] T021 按需更新 `docs/doc-governance/module-doc-status.csv`
 - [ ] T022 修正历史报告、归档 specs 与其他 active 文档中的失效引用
 
 ## Phase 5：tag、报告、提交与分支清理
 
-- [ ] T023 创建 `docs/doc-governance/round3b-governance-archive-cleanup-report.md`
+- [ ] T023 创建 `docs/doc-governance/history/round3b-governance-archive-cleanup-report.md`
 - [ ] T024 在报告中写入 analyze 摘要
 - [ ] T025 执行 `git diff --check`
 - [ ] T026 提交：`docs: archive governance history and clean obsolete branches`

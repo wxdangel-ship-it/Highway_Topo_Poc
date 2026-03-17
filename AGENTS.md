@@ -1,43 +1,9 @@
 # 仓库级执行规则
 
-## 文档分层
-
-- 项目级源事实：`SPEC.md` 与 `docs/architecture/*`
-- 模块级源事实：`modules/<module>/architecture/*` 与 `INTERFACE_CONTRACT.md`
-- 执行规则：`AGENTS.md`
-- 可复用流程：`SKILL.md`
-- 单次变更：`specs/<change-id>/`
-- 历史证据：审计、验收、阶段说明与运行留档
-
-## 治理入口
-
-- 当前治理主入口优先看 `docs/doc-governance/README.md`
-- `docs/doc-governance/history/` 只存放历史治理过程文档，不替代当前源事实
-- `specs/archive/` 只存放历史变更工件，当前 active 变更只看未归档的 `specs/<change-id>/`
-
-## 源事实优先级
-
-- 不得用 `AGENTS.md` 或 `SKILL.md` 替代项目级、模块级源事实文档。
-- 不得把 `specs/<change-id>/` 中的单次变更规格当作长期真相。
-- 当项目级源事实与模块级源事实冲突时，必须显式列出冲突点并请求确认，不得静默裁决。
-
-## 分支与 spec-kit
-
-- 中等及以上的结构化治理变更，优先使用 spec-kit 工作流。
-- 每轮独立变更使用独立分支，不在 `main` 上直接做结构化治理变更。
-- 默认在 repo root 执行命令；不要把 `outputs/`、`runs/`、`data/` 当作工作目录，也不要将它们提交到 Git。
-
-## 文档语言
-
-- 项目内文档默认使用中文撰写。
-- 参数、代码、命令、路径、模块标识、配置键、接口字段等技术符号可保留英文。
-
-## 冲突处理
-
-- 若任务书与 `AGENTS.md`、`SPEC.md`、`docs/architecture/*` 或模块级源事实冲突，必须停止并请求确认。
-- 遇到硬冲突时，先报告冲突点，再继续执行。
-
-## 范围保护
-
-- 无明确任务时，不修改算法、测试基线、运行逻辑或数据契约。
-- 文档治理轮次不得顺手扩大为代码改造或目录重构。
+- 主入口：先读 `docs/doc-governance/README.md`；需要理解当前仓库结构时，再读 `docs/repository-metadata/README.md`。
+- 源事实优先级：项目级源事实以 `SPEC.md`、`docs/PROJECT_BRIEF.md`、`docs/architecture/*`、`docs/doc-governance/module-lifecycle.md` 为准；模块级源事实以 `modules/<module>/architecture/*` 与 `INTERFACE_CONTRACT.md` 为准。
+- 边界：`AGENTS.md` 只放 durable guidance，`SKILL.md` 只放可复用流程，`specs/<change-id>/` 只放单次变更工件。
+- 文档语言：项目内文档默认中文；参数、代码、命令、路径、模块标识、配置键、接口字段可保留英文。
+- 冲突处理：若任务书与源事实文档冲突，必须列出冲突点并停止，请求确认。
+- 分支与 spec-kit：中等及以上结构化治理变更优先使用 spec-kit；每轮使用独立分支；不在 `main` 上直接做结构化治理变更。
+- 范围保护：无明确任务时，不修改算法、测试、运行逻辑、数据契约；文档治理轮次不得顺手扩大为代码改造或目录重构。

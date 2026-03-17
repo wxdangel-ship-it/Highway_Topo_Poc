@@ -40,7 +40,7 @@
 - `specs/archive/002-doc-governance-decision-alignment/tasks.md`
 - `SPEC.md`
 - `docs/PROJECT_BRIEF.md`
-- `docs/codebase-research.md`
+- `docs/archive/nonstandard/codebase-research.md`
 - `docs/architecture/01-introduction-and-goals.md`
 - `docs/architecture/02-constraints.md`
 - `docs/architecture/03-context-and-scope.md`
@@ -51,11 +51,11 @@
 - `docs/architecture/11-risks-and-technical-debt.md`
 - `docs/doc-governance/current-doc-inventory.md`
 - `docs/doc-governance/current-module-inventory.md`
-- `docs/doc-governance/migration-map.md`
+- `docs/archive/nonstandard/migration-map.md`
 - `docs/doc-governance/module-doc-status.csv`
-- `docs/doc-governance/review-priority.md`
+- `docs/archive/nonstandard/review-priority.md`
 - `docs/doc-governance/history/round1-exec-report.md`
-- `docs/doc-governance/target-structure.md`
+- `docs/archive/nonstandard/target-structure.md`
 - `modules/t04_rc_sw_anchor/architecture/00-current-state-research.md`
 - `modules/t04_rc_sw_anchor/architecture/02-constraints.md`
 - `modules/t04_rc_sw_anchor/architecture/03-context-and-scope.md`

@@ -2,10 +2,10 @@
 
 ## 状态
 
-- 文档状态：Round 2B 最小正式稿
+- 当前状态：正式 T05 模块级架构说明
 - 来源依据：
   - `tests/test_t05v2_pipeline.py`
-  - `modules/t05_topology_between_rc_v2/REAL_RUN_ACCEPTANCE.md`
+  - `modules/t05_topology_between_rc_v2/history/REAL_RUN_ACCEPTANCE.md`
   - `src/highway_topo_poc/modules/t05_topology_between_rc_v2/io.py`
   - `src/highway_topo_poc/modules/t05_topology_between_rc_v2/pipeline.py`
 
@@ -54,10 +54,10 @@
 
 ## 当前验收边界
 
-- `REAL_RUN_ACCEPTANCE.md` 继续定义操作者如何运行、先看哪些 patch、如何看输出顺序。
+- `history/REAL_RUN_ACCEPTANCE.md` 继续定义操作者如何运行、先看哪些 patch、如何看输出顺序。
 - 本文件只定义长期质量目标与最小验收要求，不承载具体 patch 名单和详细操作清单。
 
-## 后续人工审核重点
+## 当前人工审核重点
 
 - 核对本文件中的“最小验收要求”是否已覆盖当前正式模块最重要的通过 / 失败判据。
 - 核对运行验收文档中的操作性判断是否都能回溯到这里描述的长期质量目标。

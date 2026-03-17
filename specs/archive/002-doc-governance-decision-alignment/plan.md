@@ -100,9 +100,9 @@ modules/
 ### 治理文档
 
 - `docs/doc-governance/history/round1-exec-report.md`
-- `docs/doc-governance/review-priority.md`
-- `docs/doc-governance/target-structure.md`
-- `docs/doc-governance/migration-map.md`
+- `docs/archive/nonstandard/review-priority.md`
+- `docs/archive/nonstandard/target-structure.md`
+- `docs/archive/nonstandard/migration-map.md`
 - `docs/doc-governance/current-module-inventory.md`
 - `docs/doc-governance/current-doc-inventory.md`
 - `docs/doc-governance/module-doc-status.csv`
@@ -111,7 +111,7 @@ modules/
 
 - `SPEC.md`
 - `docs/PROJECT_BRIEF.md`
-- `docs/codebase-research.md`
+- `docs/archive/nonstandard/codebase-research.md`
 - 受影响的 `docs/architecture/*`
 - `modules/t05_topology_between_rc_v2/review-summary.md`
 - 少量仍保留旧口径的模块级 `architecture/*.md`

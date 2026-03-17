@@ -2,7 +2,7 @@
 
 ## 状态
 
-- 文档状态：Round 2B 最小正式稿
+- 当前状态：正式 T05 模块级架构说明
 - 来源依据：
   - `src/highway_topo_poc/modules/t05_topology_between_rc_v2/`
   - `scripts/t05v2_*.sh`
@@ -19,7 +19,7 @@
 ## 本轮范围
 
 - 正式化 T05-V2 的 `architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、`SKILL.md`、`review-summary.md`。
-- 明确 `REAL_RUN_ACCEPTANCE.md` 的运行验收边界。
+- 明确 `history/REAL_RUN_ACCEPTANCE.md` 的运行验收边界。
 - 在 legacy T05 中补最小历史参考指针，避免误把 legacy 文档当成当前正式 T05。
 
 ## 模块稳定范围
@@ -36,7 +36,7 @@
 - 对 legacy T05 做大规模迁移、删改或目录重整。
 - 为所有 patch 定义统一的长期业务结论；本轮只固化当前正式模块的最小可信文档面。
 
-## 后续人工审核重点
+## 当前人工审核重点
 
 - 核对本文件的“稳定范围”是否已足以支撑后续模块级迁移，而不会把全仓治理话题带回本轮。
 - 核对“非范围”约束是否足以保护本轮不滑向算法整改。

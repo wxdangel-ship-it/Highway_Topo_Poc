@@ -23,16 +23,16 @@ Round 1 报告原本保留了若干治理未决项。后续人工审核已在 Ro
 
 ### 研究产物
 
-- `docs/codebase-research.md`
+- `docs/archive/nonstandard/codebase-research.md`
 - `docs/doc-governance/current-doc-inventory.md`
 - `docs/doc-governance/current-module-inventory.md`
 
 ### 治理与目标结构
 
 - `docs/architecture/*`
-- `docs/doc-governance/target-structure.md`
-- `docs/doc-governance/migration-map.md`
-- `docs/doc-governance/review-priority.md`
+- `docs/archive/nonstandard/target-structure.md`
+- `docs/archive/nonstandard/migration-map.md`
+- `docs/archive/nonstandard/review-priority.md`
 - `docs/doc-governance/module-doc-status.csv`
 
 ### 重点模块审核包
@@ -114,8 +114,8 @@ Round 1 报告原本保留了若干治理未决项。后续人工审核已在 Ro
   - `.codex/prompts/speckit.*.md`
 - 历史遗留候选 / 临时文档：
   - `docs/PROJECT_BRIEF.md`
-  - `docs/t05_business_logic_summary.md`
-  - `docs/t05_business_audit_for_gpt_20260305.md`
+  - `docs/archive/nonstandard/t05_business_logic_summary.md`
+  - `docs/archive/nonstandard/t05_business_audit_for_gpt_20260305.md`
   - T05 审计运行文档
   - T10 阶段说明文档
   - `REAL_RUN_ACCEPTANCE.md` 一类运行验收说明

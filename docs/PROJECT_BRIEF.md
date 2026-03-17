@@ -11,8 +11,8 @@
 - t03：标线实体化聚合（已退役，仅保留历史技术点引用）
 - t04：RC/SW 路口锚点识别（细节放子 Agent）
 - t05：RC 路口间拓扑生产（当前正式模块为 `t05_topology_between_rc_v2`；legacy `t05_topology_between_rc` 仅作历史参考）
-- t00：合成/模拟测试数据生成（modules/t00_synth_data/；用于外网回归与 CI）
-- t06：Patch 预处理（仓库已实现，当前轮次继续做模块文档正式化）
+- t00：合成/模拟测试数据生成（`modules/t00_synth_data/`；用于外网回归与 CI）
+- t06：Patch 预处理（仓库已有实现与正式文档面）
 - t07：Patch 后处理（已退役；保留历史实现与文档）
 
 ## 2.1 Patch Vector 标准（摘要）
@@ -39,20 +39,19 @@
 
 ## 4. 成功标准（MVP）
 - 工程可跑：至少 1–2 个 patch（含失败与正确对照）全链路可跑（或分模块可跑）
-- 可诊断：外网仅凭内网回传的「文本粘贴包」可定位问题类型与大致发生位置（建议用 bin 区间/Top-K 摘要等紧凑表达）
+- 可诊断：外网仅凭内网回传的「文本粘贴包」可定位问题类型与大致发生位置
 - 可回归：外网侧有合成数据与测试，保证迭代不回退
 
 ## 5. 非目标（本阶段不做）
 - 不冻结生产级阈值与参数（但必须配置化记录）
-- 不在全局文档冻结子模块接口契约（INTERFACE_CONTRACT 在子 Agent 阶段完成）
+- 不在全局文档冻结子模块接口契约（`INTERFACE_CONTRACT` 在子 Agent 阶段完成）
 
-## 5.1 当前阶段推进策略
+## 5.1 当前模块与执行摘要
 - 当前活跃模块：`t04_rc_sw_anchor`、`t05_topology_between_rc_v2`、`t06_patch_preprocess`
 - 历史参考模块：`t05_topology_between_rc`
 - 已退役模块：`t02_ground_seg_qc`、`t03_marking_entity`、`t07_patch_postprocess`、`t10`
 - 仓库保留的支撑 / 测试模块：`t00_synth_data`、`t01_fusion_qc`
-- 即将开展：活跃链路的整 Patch E2E 验证先走逐 Patch 模式，执行顺序为 `t06 -> t04 -> t05`；批处理编排模块后续再建
-
+- 当前单 Patch E2E 验证链路顺序：`t06 -> t04 -> t05`
 
 ## 6. 模块目录（概览）
 ```text

@@ -15,7 +15,7 @@
 | `docs/doc-governance/module-lifecycle.md` | `source_of_truth` | 生命周期专用真相面 | 新增并固定当前状态定义 | 后续所有模块状态调整都必须写回这里 |
 | `docs/PROJECT_BRIEF.md` | `legacy_candidate` | 项目级摘要 / digest 层 | 保留原位并同步项目级正式口径 | 继续保持摘要定位 |
 | `docs/ARTIFACT_PROTOCOL.md` | `source_of_truth` | 继续保留在 `docs/` | 保留原位 | 与项目级架构文档交叉引用 |
-| `docs/AGENT_PLAYBOOK.md` / `docs/CODEX_*` / `docs/WORKSPACE_SETUP.md` | `durable_guidance` | 继续作为规则面 | 保留原位 | 不承担业务生命周期真相 |
+| `docs/archive/nonstandard/AGENT_PLAYBOOK.md` / `docs/CODEX_*` / `docs/archive/nonstandard/WORKSPACE_SETUP.md` | `durable_guidance` | 继续作为规则面 | 保留原位 | 不承担业务生命周期真相 |
 
 ## 生命周期驱动的模块映射
 

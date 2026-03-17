@@ -184,15 +184,15 @@ scripts/
 
 ### 必须产出的研究文档
 
-- `docs/codebase-research.md`
+- `docs/archive/nonstandard/codebase-research.md`
 - `docs/doc-governance/current-doc-inventory.md`
 - `docs/doc-governance/current-module-inventory.md`
 
 ### 必须产出的治理文档
 
-- `docs/doc-governance/target-structure.md`
-- `docs/doc-governance/migration-map.md`
-- `docs/doc-governance/review-priority.md`
+- `docs/archive/nonstandard/target-structure.md`
+- `docs/archive/nonstandard/migration-map.md`
+- `docs/archive/nonstandard/review-priority.md`
 - `docs/doc-governance/module-doc-status.csv`
 - `docs/doc-governance/history/round1-exec-report.md`
 

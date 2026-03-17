@@ -45,7 +45,7 @@
 
 本次 POC 聚焦 5 个关键技术点（t01–t05），并要求外网提供可回归的合成数据能力（t00）：
 - t01 点云标量融合质量（参差区间识别）
-- t02 地面点云分割质量（POC 自研，后续可 skill 化复用；覆盖地面点分类 + Traj 纵向/横截 QC）
+- t02 地面点云分割质量（保留历史实现与文档；覆盖地面点分类 + Traj 纵向/横截 QC）
 - t03 标线实体化聚合（已退役，仅保留历史技术点引用）
 - t04 RC 路口与 SW 路口锚定识别（细节接口契约放子 Agent）
 - t05 RC 路口间拓扑生产（当前正式模块为 `t05_topology_between_rc_v2`；legacy `t05_topology_between_rc` 仅作历史参考）
@@ -286,7 +286,7 @@ modules/
 - 边界/非目标：
   - t02 是质量检查与可解释输出，不是高精地图生产，也不替代模型训练/推理。
   - t02 不修改其它模块接口，不引入跨模块耦合。
-  - t02 对外接口与详细键值以 `modules/t02_ground_seg_qc/INTERFACE_CONTRACT.md` 为准，主文档仅描述范围与产物摘要。
+  - t02 对外接口与详细键值仅保留历史参考，见 `modules/t02_ground_seg_qc/history/INTERFACE_CONTRACT.md`；主文档仅描述范围与产物摘要。
   - 当前已退役；本节保留仅用于解释历史实现、历史文档与历史验收口径。
 
 ### 11.3 t03 标线实体化（导流带，已退役）
@@ -306,7 +306,7 @@ modules/
 - 模块定位：Patch 预处理，修复 `RCSDRoad` 中缺失端点引用的道路，并通过 DriveZone 裁剪与虚拟 Node 补点建立 patch 级端点闭包。
 - 输入摘要：`RCSDNode`、`RCSDRoad`、`DriveZone`（路径通过参数给定，命名口径与 `t04` 对齐）。
 - 输出摘要：Patch 级 `RCSDNode`（含 virtual node）与 Patch 级 `RCSDRoad`，以及 `metrics.json`、`fixed_roads.json` 等诊断产物。
-- 状态：仓库已具备实现与测试；当前轮次仅继续完成文档正式化，不改运行逻辑。
+- 状态：仓库已具备实现与正式文档面，不改运行逻辑。
 
 ### 11.7 t07_patch_postprocess（已退役）
 - 模块定位：Patch 后处理，基于二层路网拓扑要求对上游产物做完整性校验与处理。
@@ -324,7 +324,7 @@ modules/
 
 ### 12.1 整 Patch 端到端验证计划（当前冻结）
 - 当前活跃链路按单 Patch、分模块顺序执行：`t06_patch_preprocess -> t04_rc_sw_anchor -> t05_topology_between_rc_v2`。
-- 待单 Patch 路径稳定后，再新增批处理编排模块（本任务不创建该模块）。
+- 批处理编排模块当前不在本文件范围内。
 
 ---
 

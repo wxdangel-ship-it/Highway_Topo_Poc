@@ -2,7 +2,7 @@
 
 ## 状态
 
-- 文档状态：Round 2C Phase A 最小正式稿
+- 当前状态：T04 模块级架构说明
 - 来源依据：
   - `modules/t04_rc_sw_anchor/INTERFACE_CONTRACT.md`
   - `modules/t04_rc_sw_anchor/README.md`

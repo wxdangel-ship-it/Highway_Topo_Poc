@@ -2,9 +2,9 @@
 
 ## 状态
 
-- 草案状态：Round 1 最小可信草案，已由 Round 2A 决策对齐补充修正
+- 当前状态：项目级风险与技术债说明
 - 来源依据：
-  - `docs/codebase-research.md`
+  - `docs/archive/nonstandard/codebase-research.md`
   - `docs/doc-governance/current-doc-inventory.md`
   - `docs/doc-governance/current-module-inventory.md`
 - 审核重点：
@@ -32,4 +32,4 @@
 
 ## 当前无待确认项
 
-Round 2A 已覆盖模块身份相关的核心治理未决项；当前剩余的是迁移深度和排期问题。
+模块身份相关的核心治理未决项已关闭；当前剩余的是迁移深度和排期问题。

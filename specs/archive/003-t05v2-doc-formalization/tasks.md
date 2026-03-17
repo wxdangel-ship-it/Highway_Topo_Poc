@@ -48,7 +48,7 @@
 
 - [ ] T010 [US2] 收缩 `modules/t05_topology_between_rc_v2/AGENTS.md`，只保留稳定工作规则
 - [ ] T011 [US2] 创建 `modules/t05_topology_between_rc_v2/SKILL.md`，固化 T05-V2 的专用可复用流程
-- [ ] T012 [US2] 更新 `modules/t05_topology_between_rc_v2/REAL_RUN_ACCEPTANCE.md`，明确其为运行 / 验收文档并补边界说明
+- [ ] T012 [US2] 更新 `modules/t05_topology_between_rc_v2/history/REAL_RUN_ACCEPTANCE.md`，明确其为运行 / 验收文档并补边界说明
 
 ---
 

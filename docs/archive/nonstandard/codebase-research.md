@@ -18,15 +18,15 @@
 
 - 全局需求与治理文档：
   - `SPEC.md`
-  - `docs/CODEX_START_HERE.md`
-  - `docs/CODEX_GUARDRAILS.md`
-  - `docs/AGENT_PLAYBOOK.md`
+  - `docs/archive/nonstandard/CODEX_START_HERE.md`
+  - `docs/archive/nonstandard/CODEX_GUARDRAILS.md`
+  - `docs/archive/nonstandard/AGENT_PLAYBOOK.md`
   - `docs/ARTIFACT_PROTOCOL.md`
   - `docs/PROJECT_BRIEF.md`
-  - `docs/WORKSPACE_SETUP.md`
+  - `docs/archive/nonstandard/WORKSPACE_SETUP.md`
 - 与 legacy T05 相关的业务 / 审计说明：
-  - `docs/t05_business_logic_summary.md`
-  - `docs/t05_business_audit_for_gpt_20260305.md`
+  - `docs/archive/nonstandard/t05_business_logic_summary.md`
+  - `docs/archive/nonstandard/t05_business_audit_for_gpt_20260305.md`
 - spec-kit 工作流资产：
   - `.specify/`
   - `.codex/prompts/`
@@ -93,8 +93,8 @@
 - 全局治理层已经比较完整：
   - `SPEC.md` 负责项目范围与约束
   - `docs/ARTIFACT_PROTOCOL.md` 负责内外网文本协议
-  - `docs/CODEX_GUARDRAILS.md` 与 `docs/CODEX_START_HERE.md` 负责执行纪律
-  - `docs/AGENT_PLAYBOOK.md` 负责协作分工
+  - `docs/archive/nonstandard/CODEX_GUARDRAILS.md` 与 `docs/archive/nonstandard/CODEX_START_HERE.md` 负责执行纪律
+  - `docs/archive/nonstandard/AGENT_PLAYBOOK.md` 负责协作分工
 - 大多数模块已经拥有预期的三件套：
   - `AGENTS.md`
   - `SKILL.md`
@@ -154,7 +154,7 @@
 - 模块文档：
   - `modules/t05_topology_between_rc_v2/AGENTS.md`
   - `modules/t05_topology_between_rc_v2/INTERFACE_CONTRACT.md`
-  - `modules/t05_topology_between_rc_v2/REAL_RUN_ACCEPTANCE.md`
+  - `modules/t05_topology_between_rc_v2/history/REAL_RUN_ACCEPTANCE.md`
 - 实现：
   - `src/highway_topo_poc/modules/t05_topology_between_rc_v2/`
 - 测试：

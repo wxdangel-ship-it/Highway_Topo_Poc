@@ -2,12 +2,12 @@
 
 ## 状态
 
-- 文档状态：Round 2B 最小正式稿
+- 当前状态：正式 T05 模块级架构说明
 - 来源依据：
   - `src/highway_topo_poc/modules/t05_topology_between_rc_v2/run.py`
   - `src/highway_topo_poc/modules/t05_topology_between_rc_v2/pipeline.py`
   - `modules/t05_topology_between_rc_v2/INTERFACE_CONTRACT.md`
-  - `modules/t05_topology_between_rc_v2/REAL_RUN_ACCEPTANCE.md`
+  - `modules/t05_topology_between_rc_v2/history/REAL_RUN_ACCEPTANCE.md`
 
 ## 模块使命
 
@@ -31,9 +31,9 @@ T05-V2 负责在 RC 语义边界之间生成当前正式 T05 的最终有向 `Ro
 - 先用本文件理解模块使命与目标。
 - 再读 `05-building-block-view.md` 理解阶段链如何映射到实现构件。
 - 再读 `INTERFACE_CONTRACT.md` 理解稳定入口、输入输出与验收标准。
-- 如需真实运行或操作清单，再读 `REAL_RUN_ACCEPTANCE.md`。
+- 如需真实运行或操作清单，再读 `history/REAL_RUN_ACCEPTANCE.md`。
 
-## 后续人工审核重点
+## 当前人工审核重点
 
 - 核对“当前正式 T05 = T05-V2”的表述是否已足够稳定。
 - 核对模块目标是否既能覆盖当前实现，又没有把运行验收细节误写成顶层长期目标。

@@ -42,9 +42,9 @@
 ## Phase 4：用户故事 3 - 稳定治理映射与优先级（优先级：P3）
 
 - [ ] T015 [US3] 更新 `docs/doc-governance/current-doc-inventory.md`
-- [ ] T016 [P] [US3] 更新 `docs/doc-governance/review-priority.md`
-- [ ] T017 [P] [US3] 更新 `docs/doc-governance/migration-map.md`
-- [ ] T018 [P] [US3] 更新 `docs/doc-governance/target-structure.md`
+- [ ] T016 [P] [US3] 更新 `docs/archive/nonstandard/review-priority.md`
+- [ ] T017 [P] [US3] 更新 `docs/archive/nonstandard/migration-map.md`
+- [ ] T018 [P] [US3] 更新 `docs/archive/nonstandard/target-structure.md`
 - [ ] T019 [US3] 更新 `docs/doc-governance/module-doc-status.csv`
 - [ ] T020 [US3] 若仍有旧口径残留，更新 `docs/doc-governance/history/round1-exec-report.md`
 

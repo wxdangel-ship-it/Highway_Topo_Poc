@@ -19,7 +19,7 @@
 
 - [ ] T001 确认并维护 Round 1 的 spec-kit 工作空间：`specs/archive/001-doc-governance-round1/spec.md`、`plan.md`、`research.md`、`data-model.md`、`quickstart.md`
 - [ ] T002 在 `.specify/memory/constitution.md` 中固化并对齐 Round 1 的治理原则、范围和非目标
-- [ ] T003 为 `docs/codebase-research.md`、`docs/doc-governance/current-doc-inventory.md`、`docs/doc-governance/current-module-inventory.md` 和 `docs/doc-governance/module-doc-status.csv` 统一文档分类词汇与模块盘点词汇
+- [ ] T003 为 `docs/archive/nonstandard/codebase-research.md`、`docs/doc-governance/current-doc-inventory.md`、`docs/doc-governance/current-module-inventory.md` 和 `docs/doc-governance/module-doc-status.csv` 统一文档分类词汇与模块盘点词汇
 
 ---
 
@@ -32,7 +32,7 @@
 - [ ] T004 收集 `modules/` 下所有现存模块目录的模块、文档、实现和测试证据
 - [ ] T005 [P] 将项目级关键文档和工作流脚手架分类写入 `docs/doc-governance/current-doc-inventory.md`
 - [ ] T006 [P] 将当前全部模块、taxonomy 不一致点和 Round 1 优先级写入 `docs/doc-governance/current-module-inventory.md`
-- [ ] T007 将仓库形态、命名漂移、taxonomy 缺口和重点模块发现汇总到 `docs/codebase-research.md`
+- [ ] T007 将仓库形态、命名漂移、taxonomy 缺口和重点模块发现汇总到 `docs/archive/nonstandard/codebase-research.md`
 
 **检查点**：现状基线可独立阅读，并能支撑后续治理设计。
 
@@ -46,7 +46,7 @@
 
 ### 用户故事 1 的实现任务
 
-- [ ] T008 [US1] 定稿 `docs/codebase-research.md`，包含模块拓扑、仓库形态分析与当前治理痛点
+- [ ] T008 [US1] 定稿 `docs/archive/nonstandard/codebase-research.md`，包含模块拓扑、仓库形态分析与当前治理痛点
 - [ ] T009 [US1] 定稿 `docs/doc-governance/current-doc-inventory.md`，记录源事实、持久规则、工作流、临时变更规格和历史遗留候选
 - [ ] T010 [US1] 定稿 `docs/doc-governance/current-module-inventory.md`，记录模块存在性、重点建议以及 `t03`、`t05_topology_between_rc_v2`、`t10` 的不一致说明
 
@@ -66,9 +66,9 @@
 - [ ] T012 [P] [US2] 起草 `docs/architecture/01-introduction-and-goals.md`、`02-constraints.md`、`03-context-and-scope.md`
 - [ ] T013 [P] [US2] 起草 `docs/architecture/04-solution-strategy.md`、`08-crosscutting-concepts.md`、`09-decisions/README.md`
 - [ ] T014 [P] [US2] 起草 `docs/architecture/10-quality-requirements.md`、`11-risks-and-technical-debt.md`、`12-glossary.md`
-- [ ] T015 [US2] 创建 `docs/doc-governance/target-structure.md`，定义目标分层拓扑、命名规则和文档边界
-- [ ] T016 [US2] 创建 `docs/doc-governance/migration-map.md`，把当前关键文档与文档家族映射到未来职责和落位
-- [ ] T017 [US2] 创建 `docs/doc-governance/review-priority.md`，说明为何 T04、T05-V2、T06 是本轮重点审核对象，以及后续轮次应如何排序
+- [ ] T015 [US2] 创建 `docs/archive/nonstandard/target-structure.md`，定义目标分层拓扑、命名规则和文档边界
+- [ ] T016 [US2] 创建 `docs/archive/nonstandard/migration-map.md`，把当前关键文档与文档家族映射到未来职责和落位
+- [ ] T017 [US2] 创建 `docs/archive/nonstandard/review-priority.md`，说明为何 T04、T05-V2、T06 是本轮重点审核对象，以及后续轮次应如何排序
 - [ ] T018 [US2] 创建 `docs/doc-governance/module-doc-status.csv`，覆盖所有现存模块的状态、优先级与 Round 1 动作
 
 **检查点**：用户故事 2 完成后，应能在不改算法、不删旧文档的情况下清楚描述目标治理结构。
