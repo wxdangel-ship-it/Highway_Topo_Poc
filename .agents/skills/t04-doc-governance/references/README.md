@@ -1,4 +1,4 @@
-# T04 文档治理 Skill 详细说明
+# T04 分歧合流路口锚定 Skill 详细说明
 
 本文档承接 T04 标准 Skill 的详细 SOP、检查点与回退说明。
 它是流程扩展材料，不替代 `architecture/*`、`INTERFACE_CONTRACT.md` 或 `AGENTS.md`。

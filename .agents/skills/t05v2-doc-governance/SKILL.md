@@ -3,7 +3,7 @@ name: t05v2-doc-governance
 description: 用于正式 T05-V2 的文档治理、验收说明边界复核、模块级口径对齐与标准文档面维护。仅在任务需要更新或审查 `modules/t05_topology_between_rc_v2` 的 architecture、contract、review summary、历史运行验收说明或模块级规则时触发；不要在算法调整、脚本迁移、legacy T05 深迁移或跨模块实现任务中使用。
 ---
 
-# T05-V2 文档治理 Skill
+# T05-V2 高速路段构建 Skill
 
 ## 适用任务
 
