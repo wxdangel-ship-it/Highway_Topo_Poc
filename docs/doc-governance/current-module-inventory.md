@@ -30,9 +30,9 @@
 | `t01_fusion_qc` | `modules/t01_fusion_qc` | Support Retained | 仓库保留的支撑 / 测试模块 | 保留既有模块文档面 | 后续单独做支撑模块整理 | 不属于当前活跃模块集合 |
 | `t02_ground_seg_qc` | `modules/t02_ground_seg_qc` | Retired | 退役历史模块 | 根目录仅保留最小状态入口；历史契约与流程文档下沉到 `history/` | 只保留退役状态与历史可见性 | 不进入后续正式化队列 |
 | `t03_marking_entity` | `modules/t03_marking_entity` | Retired | 已退役，当前无目录 | 无当前模块入口文档 | 仅保留项目级退役记录 | 不创建替代目录 |
-| `t04_rc_sw_anchor` | `modules/t04_rc_sw_anchor` | Active | 当前正式活跃模块 | 已具备 `architecture/*` + `INTERFACE_CONTRACT.md` + `AGENTS.md` + `SKILL.md` + `review-summary.md` + `README.md` | 维持正式文档面并按需增量维护 | 当前主线模块之一 |
+| `t04_rc_sw_anchor` | `modules/t04_rc_sw_anchor` | Active | 当前正式活跃模块 | 已具备 `architecture/*` + `INTERFACE_CONTRACT.md` + `AGENTS.md` + `.agents/skills/t04-doc-governance/SKILL.md` + `review-summary.md` + `README.md`；模块根 `SKILL.md` 仅保留最小指针 | 维持正式文档面并按需增量维护 | 当前主线模块之一 |
 | legacy `t05_topology_between_rc` | `modules/t05_topology_between_rc` | Historical Reference | legacy T05 历史参考模块 | 根目录仅保留最小状态入口；历史契约、审计和流程文档下沉到 `history/` | 仅保留历史参考指针与历史资料 | 不再参与 family 连续治理 |
-| `t05_topology_between_rc_v2` | `modules/t05_topology_between_rc_v2` | Active | 当前正式 T05 模块 | 已具备 `architecture/*` + `INTERFACE_CONTRACT.md` + `AGENTS.md` + `SKILL.md` + `review-summary.md`；运行验收说明下沉到 `history/` | 维持正式文档面并按需增量维护 | 物理路径保持 V2 |
+| `t05_topology_between_rc_v2` | `modules/t05_topology_between_rc_v2` | Active | 当前正式 T05 模块 | 已具备 `architecture/*` + `INTERFACE_CONTRACT.md` + `AGENTS.md` + `.agents/skills/t05v2-doc-governance/SKILL.md` + `review-summary.md`；模块根 `SKILL.md` 仅保留最小指针；运行验收说明下沉到 `history/` | 维持正式文档面并按需增量维护 | 物理路径保持 V2 |
 | `t06_patch_preprocess` | `modules/t06_patch_preprocess` | Active | 当前正式活跃模块 | 已具备 `architecture/*` + `INTERFACE_CONTRACT.md` + `AGENTS.md` + `SKILL.md` + `review-summary.md` | 维持正式文档面并按需增量维护 | 当前主线模块之一 |
 | `t07_patch_postprocess` | `modules/t07_patch_postprocess` | Retired | 退役历史模块 | 根目录仅保留最小状态入口；历史契约与流程文档下沉到 `history/` | 只保留退役状态与历史可见性 | 不再作为活跃治理对象 |
 | `t10` | `modules/t10` | Retired | 退役历史模块 | 根目录仅保留最小状态入口；阶段性说明、历史契约和流程文档下沉到 `history/` | 只保留退役状态与历史资料 | 不再作为当前治理对象 |

@@ -8,7 +8,7 @@
   - `modules/t04_rc_sw_anchor/INTERFACE_CONTRACT.md`
   - `modules/t04_rc_sw_anchor/README.md`
   - `modules/t04_rc_sw_anchor/AGENTS.md`
-  - `modules/t04_rc_sw_anchor/SKILL.md`
+  - `.agents/skills/t04-doc-governance/SKILL.md`
   - `src/highway_topo_poc/modules/t04_rc_sw_anchor/`
   - `tests/t04_rc_sw_anchor/`
   - `modules/t04_rc_sw_anchor/scripts/run_t04_batch_wsl.sh`
@@ -18,7 +18,7 @@
 
 - T04 负责 merge / diverge 与 K16 相关节点的锚点识别，并输出 `intersection_l_opt` 及相关诊断结果。
 - 当前模块具备独立实现、独立测试、独立输出根目录和独立操作者材料，已形成成熟模块单元。
-- 当前 contract、README、AGENTS、SKILL 之间存在重复描述，稳定业务真相尚未完全收回到 `architecture/*`。
+- 当前 contract、README、AGENTS 与旧模块根 `SKILL.md` 之间曾存在重复描述，稳定业务真相此前没有完全收回到 `architecture/*`。
 - 当前运行入口已经明确存在于 `python -m highway_topo_poc.modules.t04_rc_sw_anchor`、批量脚本和 patch 自动发现脚本中。
 
 ## 代码与测试证据摘要
@@ -42,9 +42,9 @@
 - `architecture/*` 应承担模块目标、上下文、约束、方案结构、质量要求、风险与术语。
 - `INTERFACE_CONTRACT.md` 应承担稳定输入、输出、入口、参数类别、breakpoint 与验收标准。
 - `AGENTS.md` 只保留稳定工作规则。
-- `SKILL.md` 只保留模块专用复用流程。
+- repo root 标准 Skill 包只保留模块专用复用流程；模块根 `SKILL.md` 仅保留最小指针。
 - `README.md` 与脚本说明保留为操作者材料，不再承担完整模块真相。
 
 ## Phase A 门控判断依据
 
-当前尚未发现 repo 级硬冲突。T04 的 formalization 重点不是“有没有契约面”，而是“如何把过重的稳定真相从 `AGENTS.md`、`SKILL.md`、`README.md` 收回到 `architecture/*` 与 `INTERFACE_CONTRACT.md`”。
+当前尚未发现 repo 级硬冲突。T04 的 formalization 重点不是“有没有契约面”，而是“如何把过重的稳定真相从 `AGENTS.md`、旧模块根 `SKILL.md`、`README.md` 收回到 `architecture/*` 与 `INTERFACE_CONTRACT.md`，并把复用流程迁到标准 Skill 包”。

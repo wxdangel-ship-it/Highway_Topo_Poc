@@ -12,10 +12,10 @@
 
 ## 当前文档风险
 
-- 源事实仍分散在 contract、`AGENTS`、`SKILL`、`README` 和临时说明中。
+- 源事实仍分散在 contract、`AGENTS`、标准 Skill 包、`README` 和临时说明中。
 - legacy T05 的历史材料很有价值，但容易被误当成当前正式 T05 的真相。
 - 已退役模块 `t03`、`t10` 的历史痕迹仍可能被误读为当前活跃治理对象。
-- 许多模块的 `AGENTS.md` 与 `SKILL.md` 仍然体量偏大。
+- 仍有部分模块尚未完成标准 Skill 包迁移，`AGENTS.md` 与模块根 `SKILL.md` 仍可能偏大。
 
 ## 当前刻意保留的技术债
 

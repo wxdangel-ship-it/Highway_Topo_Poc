@@ -147,7 +147,7 @@
 - configs/（示例 pipeline 配置、patch 清单样例）
 - scripts/（一键运行脚本/命令）
 - tests/（单测 + 合成数据回归 + golden 文本输出对比）
-- 文档：README、每模块 AGENTS.md / SKILL.md
+- 文档：README、每模块 AGENTS.md / INTERFACE_CONTRACT.md、repo root 标准 Skill 包（已迁移模块）
 - 合成数据生成能力（归属 modules/t00_synth_data/；用于外网回归与 CI）
 
 ### 6.2 内网每次运行（本地产物 + 外传文本）
@@ -238,7 +238,7 @@
 - 每个技术点/流程阶段一个模块目录（当前 `t00–t07`）
 - 子模块的接口契约（INTERFACE_CONTRACT.md）放在各自模块目录中，由子 Agent 阶段产出
 - 模块实现代码放在 `src/highway_topo_poc/modules/<module_id>/`，`modules/<module_id>/` 仅承载模块文档与接口契约
-- 模块文档最小集合：`AGENTS.md` / `SKILL.md` / `INTERFACE_CONTRACT.md`（README 非必需）
+- 模块文档最小集合：`AGENTS.md` / `INTERFACE_CONTRACT.md` / 标准 Skill 包（位于 repo root `.agents/skills/...`；已迁移模块以此为准，未迁移模块的模块根 `SKILL.md` 仅作过渡形态，README 非必需）
 - `INTERFACE_CONTRACT.md` 章节顺序统一：`Inputs` / `Outputs` / `EntryPoints` / `Params` / `Examples` / `Acceptance`
 - `modules/<module_id>/` 不放 `.py` 实现；实现由 `src/highway_topo_poc/modules/<module_id>/` 承载
 - common/schemas/configs/scripts/tests 保持清晰分层

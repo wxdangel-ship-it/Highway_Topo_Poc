@@ -8,5 +8,5 @@
 - `../architecture/*`
 - `../INTERFACE_CONTRACT.md`
 - `../AGENTS.md`
-- `../SKILL.md`
+- `../../../.agents/skills/t05v2-doc-governance/SKILL.md`
 - `../review-summary.md`

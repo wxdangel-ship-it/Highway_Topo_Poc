@@ -29,7 +29,7 @@
 - `docs/architecture/` 成为项目级长期架构文档面。
 - `modules/<module>/architecture/` 成为模块级长期架构文档面。
 - `AGENTS.md` 只保留持久执行规则。
-- `SKILL.md` 只保留可复用操作流程。
+- 标准 Skill 包中的 `SKILL.md` 只保留可复用操作流程。
 - `specs/<change-id>/` 承载变更专用推理与执行计划。
 
 ## 聚焦策略

@@ -42,7 +42,7 @@
 - 模块级架构文档
 - `INTERFACE_CONTRACT.md`
 - `AGENTS.md`
-- `SKILL.md`
+- repo root `.agents/skills/<skill-name>/SKILL.md`
 - 变更专用 `specs/`
 
 ## 当前质量目标

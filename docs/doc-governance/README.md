@@ -13,6 +13,7 @@
 7. `docs/doc-governance/current-doc-inventory.md`
 8. `docs/doc-governance/module-doc-status.csv`
 9. 活跃模块正式文档面
+10. 如需标准可复用流程，再读 repo root `.agents/skills/...` 中对应 Skill 包
 
 ## 当前 active governance / source-of-truth
 

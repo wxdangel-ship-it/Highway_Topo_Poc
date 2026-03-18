@@ -6,10 +6,14 @@
 - 再读 `INTERFACE_CONTRACT.md`，确认稳定输入、输出、入口、参数类别与验收标准。
 - 处理治理口径或现状总结时，再读 `review-summary.md`。
 - 只有在真实运行、验收或排查阶段产物时，才读 `history/REAL_RUN_ACCEPTANCE.md`。
+- 需要复用流程、回退策略或验收类 SOP 时，再读 repo root `.agents/skills/t05v2-doc-governance/SKILL.md`。
 
 ## 允许改动范围
 
-- 默认只改本目录下的标准文档：`architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、`SKILL.md`、`review-summary.md`。
+- 默认只改本目录下的标准文档：`architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、`review-summary.md`。
+- 如任务涉及标准可复用流程，可同时修改 repo root `.agents/skills/t05v2-doc-governance/SKILL.md`。
+- 模块根 `SKILL.md` 如仍存在，只作为最小指针，不再承载正文流程。
+- 如需修正模块根 `SKILL.md`，仅允许做最小指针类修改。
 - 只有任务明确涉及运行验收历史资料时，才改 `history/REAL_RUN_ACCEPTANCE.md`。
 - 如果任务明确要求补充历史参考指针，可最小化修改 `modules/t05_topology_between_rc/` 的文档说明。
 - 若任务没有明确要求，不修改 `src/`、`tests/`、`scripts/`、`outputs/`、`data/`。

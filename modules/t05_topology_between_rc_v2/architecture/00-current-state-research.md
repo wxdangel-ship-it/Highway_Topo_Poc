@@ -40,7 +40,7 @@
 - `architecture/*` 承担稳定模块真相，包括目标、上下文、约束、构件关系、质量要求和风险。
 - `INTERFACE_CONTRACT.md` 承担稳定契约面，包括输入、输出、入口、参数类别、示例和验收标准。
 - `AGENTS.md` 只保留稳定工作规则，不再承担模块真相主表面。
-- `SKILL.md` 承担 T05-V2 的可复用工作流。
+- repo root `.agents/skills/t05v2-doc-governance/SKILL.md` 承担 T05-V2 的可复用工作流；模块根 `SKILL.md` 仅保留最小指针。
 - `history/REAL_RUN_ACCEPTANCE.md` 继续保留为运行验收与操作者清单，不再承担长期源事实职责。
 
 ## 当前人工审核重点

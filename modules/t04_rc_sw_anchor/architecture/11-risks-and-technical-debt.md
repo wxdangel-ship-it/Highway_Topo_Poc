@@ -10,9 +10,9 @@
 
 ## 本轮已修复的文档债
 
-- 稳定模块真相不再主要依赖 `AGENTS.md`、`SKILL.md` 与 `README.md` 解释。
+- 稳定模块真相不再主要依赖 `AGENTS.md`、旧模块根 `SKILL.md` 与 `README.md` 解释。
 - `architecture/*` 现在承担了 T04 的长期模块叙事与构件结构。
-- `AGENTS.md` 与 `SKILL.md` 将被收缩为规则和流程文档。
+- `AGENTS.md` 与标准 Skill 包已经被收缩为规则和流程文档；模块根 `SKILL.md` 仅保留最小指针。
 
 ## 当前仍存在的风险
 

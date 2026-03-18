@@ -12,6 +12,12 @@
 - 放仓库级 durable guidance 和最高层项目规格
 - 当前标准文档：`AGENTS.md`、`SPEC.md`
 
+### `.agents/skills/`
+
+- 放 repo root 级标准 Skill 包
+- 用来承载可复用流程，不承载长期模块真相或 repo 级 durable guidance
+- 当前已迁移的标准 Skill 包包括 T04 与正式 T05-V2 的文档治理 Skill
+
 ### `docs/`
 
 - 放项目级文档
@@ -79,6 +85,17 @@
 
 - `AGENTS.md`
 - `SPEC.md`
+- `.agents/skills/`
+
+### `.agents/skills/`
+
+允许：
+
+- `<skill-name>/SKILL.md`
+- `<skill-name>/references/`
+- `<skill-name>/scripts/`
+- `<skill-name>/assets/`
+- `<skill-name>/agents/openai.yaml`
 
 ### `docs/`
 
@@ -147,12 +164,12 @@
 允许：
 
 - `AGENTS.md`
-- `SKILL.md`
 - `INTERFACE_CONTRACT.md`
 - `review-summary.md`
 - `README.md`（仅当该模块需要操作者总览）
 - `architecture/`
 - `history/`
+- `SKILL.md`（仅在未完成标准 Skill 包迁移时承载流程正文，或在已迁移后保留最小指针）
 
 ### `modules/<support-module>/`
 
@@ -199,6 +216,7 @@
 8. `docs/doc-governance/current-module-inventory.md`
 9. `docs/doc-governance/current-doc-inventory.md`
 10. 进入活跃模块正式文档面
+11. 如需模块级可复用流程，再读 repo root `.agents/skills/...` 中对应标准 Skill 包
 
 ## 7. 当前模块状态简表
 
