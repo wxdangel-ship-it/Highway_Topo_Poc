@@ -10,7 +10,7 @@
 
 ## 本轮已修复的文档债
 
-- 历史上缺少 T05-V2 专用标准 Skill 包，导致执行流程知识只能散落在 `AGENTS.md` 和运行验收文档中；本轮已补齐 repo root `.agents/skills/t05v2-doc-governance/SKILL.md`。
+- 历史上缺少 T05-V2 专用标准 Skill 包，导致执行流程知识只能散落在 `AGENTS.md` 和运行验收文档中；本轮已补齐 repo root `.agents/skills/t05v2-doc-governance/`，并把详细 SOP 下沉到 `references/README.md`。
 - `AGENTS.md` 曾承担模块身份、阶段链路和输出说明等稳定业务真相；本轮已把这些内容收回 `architecture/*` 与 `INTERFACE_CONTRACT.md`。
 - legacy T05 与正式 T05 的关系曾容易混淆；本轮已把 legacy T05 限定为历史参考，并补了最小 pointer。
 

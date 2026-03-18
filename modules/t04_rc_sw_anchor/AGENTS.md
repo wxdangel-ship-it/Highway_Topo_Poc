@@ -6,14 +6,12 @@
 - 再读 `INTERFACE_CONTRACT.md`，确认输入模式、输出、参数类别和验收要求。
 - 处理批量运行或 patch 自动发现入口时，再读 `README.md` 与相关脚本说明。
 - 做治理口径或模块总览时，再读 `review-summary.md`。
-- 需要复用流程、回退策略或文档治理 SOP 时，再读 repo root `.agents/skills/t04-doc-governance/SKILL.md`。
+- 需要复用流程时，先读 repo root `.agents/skills/t04-doc-governance/SKILL.md`；需要详细检查点、失败点或回退方式时，再读 `.agents/skills/t04-doc-governance/references/README.md`。
 
 ## 允许改动范围
 
 - 默认只改本目录下文档：`architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、`review-summary.md`、`README.md`。
-- 如任务涉及标准可复用流程，可同时修改 repo root `.agents/skills/t04-doc-governance/SKILL.md`。
-- 模块根 `SKILL.md` 如仍存在，只作为最小指针，不再承载正文流程。
-- 如需修正模块根 `SKILL.md`，仅允许做最小指针类修改。
+- 如任务涉及标准可复用流程，可同时修改 repo root `.agents/skills/t04-doc-governance/SKILL.md` 与 `references/README.md`。
 - 如无明确任务，不修改 `src/`、`tests/`、`scripts/`、`outputs/`、`data/`。
 - 不跨模块改动其它 `INTERFACE_CONTRACT.md`。
 

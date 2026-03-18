@@ -15,7 +15,8 @@
 - `code-boundaries-and-entrypoints.md` 解释当前单文件体量约束与执行入口脚本治理
 - `code-size-audit.md` 给出当前超阈值源码 / 脚本文件清单
 - `entrypoint-registry.md` 给出当前执行入口注册表
-- 已标准化模块的可复用流程统一看 repo root `.agents/skills/<skill-name>/SKILL.md`；未迁移模块仍可能保留过渡型模块根 `SKILL.md`
+- 标准可复用流程统一看 repo root `.agents/skills/<skill-name>/SKILL.md`
+- 模块目录下如仍保留流程文档，只视为历史资料或待专项收口材料，不属于标准 Skill 入口
 - `docs/doc-governance/README.md` 解释当前治理入口
 - `docs/doc-governance/module-lifecycle.md` 解释模块状态，不解释目录布局
 

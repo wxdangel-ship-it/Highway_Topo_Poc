@@ -66,6 +66,7 @@
 
 - 放当前活跃模块的正式文档面
 - 允许同时保留 `history/` 目录存放运行验收和历史辅助资料
+- 标准可复用流程统一放在 repo root `.agents/skills/`；模块目录不再作为标准 Skill 正文入口
 
 ### `modules/<support-module>/`
 
@@ -169,7 +170,11 @@
 - `README.md`（仅当该模块需要操作者总览）
 - `architecture/`
 - `history/`
-- `SKILL.md`（仅在未完成标准 Skill 包迁移时承载流程正文，或在已迁移后保留最小指针）
+
+说明：
+
+- 标准 Skill 包位于 repo root `.agents/skills/<skill-name>/`
+- 模块目录下如仍存在流程型 `SKILL.md`，应视为待整改或历史材料，而不是标准入口
 
 ### `modules/<support-module>/`
 
@@ -216,7 +221,7 @@
 8. `docs/doc-governance/current-module-inventory.md`
 9. `docs/doc-governance/current-doc-inventory.md`
 10. 进入活跃模块正式文档面
-11. 如需模块级可复用流程，再读 repo root `.agents/skills/...` 中对应标准 Skill 包
+11. 如需模块级可复用流程，优先读 repo root `.agents/skills/...` 中对应标准 Skill 包
 
 ## 7. 当前模块状态简表
 

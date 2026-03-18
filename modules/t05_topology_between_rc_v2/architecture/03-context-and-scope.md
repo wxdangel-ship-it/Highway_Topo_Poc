@@ -18,7 +18,7 @@
 
 ## 本轮范围
 
-- 正式化 T05-V2 的 `architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、`SKILL.md`、`review-summary.md`。
+- 正式化 T05-V2 的 `architecture/*`、`INTERFACE_CONTRACT.md`、`AGENTS.md`、repo root 标准 Skill 包与 `review-summary.md`。
 - 明确 `history/REAL_RUN_ACCEPTANCE.md` 的运行验收边界。
 - 在 legacy T05 中补最小历史参考指针，避免误把 legacy 文档当成当前正式 T05。
 

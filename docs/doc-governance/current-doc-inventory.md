@@ -33,14 +33,14 @@
 | `modules/t04_rc_sw_anchor/architecture/*` | T04 长期模块真相 | `source_of_truth` | 当前正式模块文档面 |
 | `modules/t04_rc_sw_anchor/INTERFACE_CONTRACT.md` | T04 稳定契约面 | `source_of_truth` | 当前正式模块文档面 |
 | `modules/t04_rc_sw_anchor/AGENTS.md` | T04 durable guidance | `durable_guidance` | 当前正式模块文档面 |
-| `.agents/skills/t04-doc-governance/SKILL.md` | T04 标准 Skill 包 | `workflow` | 当前标准可复用流程入口 |
-| `modules/t04_rc_sw_anchor/SKILL.md` | T04 模块根 Skill 指针 | `durable_guidance` | 仅保留跳转到 `.agents/skills/t04-doc-governance/SKILL.md` |
+| `.agents/skills/t04-doc-governance/SKILL.md` | T04 标准 Skill 包 | `workflow` | 当前标准可复用流程高层入口 |
+| `.agents/skills/t04-doc-governance/references/README.md` | T04 标准 Skill 详细说明 | `workflow` | 承接详细检查点、失败点和回退方式 |
 | `modules/t04_rc_sw_anchor/review-summary.md` | T04 治理摘要 | `durable_guidance` | 当前正式模块文档面 |
 | `modules/t05_topology_between_rc_v2/architecture/*` | 正式 T05 长期模块真相 | `source_of_truth` | 当前正式模块文档面 |
 | `modules/t05_topology_between_rc_v2/INTERFACE_CONTRACT.md` | 正式 T05 稳定契约面 | `source_of_truth` | 当前正式模块文档面 |
 | `modules/t05_topology_between_rc_v2/AGENTS.md` | 正式 T05 durable guidance | `durable_guidance` | 当前正式模块文档面 |
-| `.agents/skills/t05v2-doc-governance/SKILL.md` | 正式 T05 标准 Skill 包 | `workflow` | 当前标准可复用流程入口 |
-| `modules/t05_topology_between_rc_v2/SKILL.md` | 正式 T05 模块根 Skill 指针 | `durable_guidance` | 仅保留跳转到 `.agents/skills/t05v2-doc-governance/SKILL.md` |
+| `.agents/skills/t05v2-doc-governance/SKILL.md` | 正式 T05 标准 Skill 包 | `workflow` | 当前标准可复用流程高层入口 |
+| `.agents/skills/t05v2-doc-governance/references/README.md` | 正式 T05 标准 Skill 详细说明 | `workflow` | 承接详细检查点、失败点和回退方式 |
 | `modules/t05_topology_between_rc_v2/review-summary.md` | 正式 T05 治理摘要 | `durable_guidance` | 当前正式模块文档面 |
 | `modules/t05_topology_between_rc_v2/history/REAL_RUN_ACCEPTANCE.md` | 正式 T05 历史运行验收说明 | `temporary_spec` / `legacy_candidate` | 运行验收与操作者清单已退出主阅读路径 |
 | `modules/t06_patch_preprocess/architecture/*` | T06 长期模块真相 | `source_of_truth` | 当前正式模块文档面 |

@@ -9,4 +9,7 @@
 - `../INTERFACE_CONTRACT.md`
 - `../AGENTS.md`
 - `../../../.agents/skills/t05v2-doc-governance/SKILL.md`
+- `../../../.agents/skills/t05v2-doc-governance/references/README.md`
 - `../review-summary.md`
+
+本目录中的 `SKILL.legacy.md` 仅保留历史痕迹，不再作为 active Skill 入口。

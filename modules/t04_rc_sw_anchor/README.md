@@ -73,6 +73,6 @@ outputs/_work/t04_rc_sw_anchor/<run_id>/
 2. `architecture/04-solution-strategy.md`
 3. `architecture/05-building-block-view.md`
 4. `INTERFACE_CONTRACT.md`
-5. 如需复用流程或治理 SOP，再读 repo root `.agents/skills/t04-doc-governance/SKILL.md`
+5. 如需复用流程或治理 SOP，先读 repo root `.agents/skills/t04-doc-governance/SKILL.md`，详细检查点再读对应 `references/README.md`
 
 如果只需要运行模块，本文件与脚本说明通常已足够。

@@ -12,7 +12,7 @@
 - 稳定契约面：`INTERFACE_CONTRACT.md`
 - 稳定工作规则：`AGENTS.md`
 - 标准可复用流程：`.agents/skills/t05v2-doc-governance/SKILL.md`
-- 模块根 `SKILL.md`：最小指针，不再承载正文流程
+- 标准 Skill 详细说明：`.agents/skills/t05v2-doc-governance/references/README.md`
 - 当前治理摘要：`review-summary.md`
 - 历史运行验收说明：`history/REAL_RUN_ACCEPTANCE.md`
 
@@ -24,7 +24,8 @@ T05-V2 以 `Segment -> CorridorWitness -> CorridorIdentity -> Slot -> FinalRoad`
 
 - 稳定业务真相已从 `AGENTS.md` 收回到 `architecture/*` 与 `INTERFACE_CONTRACT.md`。
 - `AGENTS.md` 现在只保留开工前阅读顺序、允许改动范围、验证要求、禁做事项与 legacy 处理原则。
-- 标准 Skill 包 `.agents/skills/t05v2-doc-governance/SKILL.md` 已建立，负责 T05-V2 文档治理和验收类任务的标准流程。
+- 标准 Skill 包 `.agents/skills/t05v2-doc-governance/` 已建立，负责 T05-V2 文档治理和验收类任务的标准流程；其中详细 SOP 已下沉到 `references/README.md`。
+- 旧模块根 `SKILL.md` 已移入 `history/SKILL.legacy.md`，不再作为 active 入口。
 - `history/REAL_RUN_ACCEPTANCE.md` 已被明确标注为历史运行验收文档，长期源事实另有位置。
 
 ## 当前稳定输入 / 输出摘要

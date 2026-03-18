@@ -42,9 +42,9 @@
 - `architecture/*` 应承担模块目标、上下文、约束、方案结构、质量要求、风险与术语。
 - `INTERFACE_CONTRACT.md` 应承担稳定输入、输出、入口、参数类别、breakpoint 与验收标准。
 - `AGENTS.md` 只保留稳定工作规则。
-- repo root 标准 Skill 包只保留模块专用复用流程；模块根 `SKILL.md` 仅保留最小指针。
+- repo root 标准 Skill 包只保留模块专用复用流程；旧模块根 `SKILL.md` 已转入 `history/SKILL.legacy.md`。
 - `README.md` 与脚本说明保留为操作者材料，不再承担完整模块真相。
 
 ## Phase A 门控判断依据
 
-当前尚未发现 repo 级硬冲突。T04 的 formalization 重点不是“有没有契约面”，而是“如何把过重的稳定真相从 `AGENTS.md`、旧模块根 `SKILL.md`、`README.md` 收回到 `architecture/*` 与 `INTERFACE_CONTRACT.md`，并把复用流程迁到标准 Skill 包”。
+当前尚未发现 repo 级硬冲突。T04 的 formalization 重点不是“有没有契约面”，而是“如何把过重的稳定真相从 `AGENTS.md`、旧模块根 `SKILL.md`、`README.md` 收回到 `architecture/*` 与 `INTERFACE_CONTRACT.md`，并把复用流程收口到标准 Skill 包及其 `references/README.md`”。

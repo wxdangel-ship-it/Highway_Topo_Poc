@@ -32,7 +32,7 @@
 
 - 当前正式 T05 模块是 `modules/t05_topology_between_rc_v2/`；legacy `modules/t05_topology_between_rc/` 仅为历史参考。
 - `architecture/*` 与 `INTERFACE_CONTRACT.md` 才是当前模块的长期源事实。
-- `AGENTS.md` 只保留稳定工作规则，`SKILL.md` 只保留复用流程，二者都不能替代源事实文档。
+- `AGENTS.md` 只保留稳定工作规则，repo root 标准 Skill 包只保留复用流程，二者都不能替代源事实文档。
 - `history/REAL_RUN_ACCEPTANCE.md` 是历史运行验收文档，不承担长期架构真相职责。
 - 文档默认使用中文撰写；参数、命令、路径、模块标识、配置键与字段名可保留英文。
 
